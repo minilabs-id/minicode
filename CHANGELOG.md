@@ -1,5 +1,72 @@
 # Changelog
 
+## [0.25.0] - 2026-11-14
+
+Rilis ini menyatukan pekerjaan setelah 0.24.0: penyeragaman permukaan popup TUI,
+pelengkapan Fase 7 prompt caching, dan konsolidasi dokumentasi.
+
+### Added
+- **Navigasi daftar pada approval tool.** Opsi approval kini bisa dipilih dengan
+  `↑`/`↓`/`Home`/`End` + `Enter`, bukan hanya diketik. `Esc`/`Ctrl+C` = deny.
+  Ketik-cepat `y`/`a`/`n` beserta sinonim dwibahasa (`ya`/`selalu`/`s`/
+  `tidak`/`t`) tetap berlaku agar operator berpengalaman tidak dipaksa dua
+  langkah. Satu pembaca modal (`readModalInput`) melayani mode teks dan pilihan.
+- **Sudut kotak popup melengkung (`╭ ╮ ╰ ╯`) sebagai default.** Kill-switch:
+  `MINICODE_BOX=square` (lancip `┌┐└┘`), `MINICODE_BOX=ascii` atau
+  `MINICODE_ASCII=1` (ASCII `+-|`). Glyph dibaca lazy tiap render.
+- **Backdrop popup tiga tingkat (`scrimMode`).** `bg` = dim + latar gelap netral
+  `48;5;236` (terminal ≥256 warna), `faint` = `\x1b[2m` saja (16 warna), `none` =
+  nol byte (mono/non-TTY/`TERM=dumb`). `MINICODE_SCRIM=none` memaksa `faint`.
+  Level warna kini juga memakai `process.stdout.getColorDepth()` sesudah env,
+  sehingga Windows Terminal/ConPTY yang tidak mengisi `TERM` tetap mendapat
+  256 warna. Perilaku non-TTY tidak berubah: 0 warna, 0 scrim, 0 byte.
+- **Dukungan prompt caching dibaca dari metadata endpoint (Fase 7.1).**
+  `prompt_caching`/`supports_cache`/`cache_control` dan alias lain di `/models`
+  menentukan `enablePromptCaching` per provider. Endpoint yang tidak
+  menyebutkannya tetap memakai default (aktif) — cache yang sudah jalan tidak
+  hilang diam-diam.
+
+### Changed
+- **Lebar kotak popup diskalakan, bukan angka tetap.** `popupBoxWidth(cols)` =
+  `min(max(40, min(88, floor(cols*0.6))), cols-4)`, dihitung saat mount lalu
+  dibekukan agar geometri stabil. Menggantikan konstanta tetap 64 di picker,
+  `/model`, `/providers`, form, dan kotak approval. Margin 4 kolom selalu menang
+  atas lantai lebar, sehingga terminal sempit tidak lagi overflow.
+- `diagnostic`/`doctor` dan pesan galat memakai `override` modifier eksplisit.
+  `tsconfig` menambahkan `noFallthroughCasesInSwitch`.
+- **Dokumentasi dikonsolidasikan 38 → 30 halaman**, tanpa duplikasi:
+  glosarium masuk `concepts.md`; quickstart masuk `getting-started.md`; preset
+  provider masuk `config.md`; model ancaman masuk `security.md`; Open Work masuk
+  `autonomous-scheduler.md`. `plan-context-window.md` dan `changelog.md` dihapus
+  (plan selesai; changelog hanya menautkan berkas root). `terminal.md` dihapus —
+  ringkasannya sudah ada di `TERMINAL_CONTRACT.md` yang FROZEN.
+- `package.json` memakai `"docs"` sebagai entri `files`, sehingga halaman baru
+  tidak lagi memblokir `gate:pack`.
+- `docs/TERMINAL_CONTRACT.md` naik ke v7.14: I20 (geometri popup) diperbarui dan
+  I25 ditegakkan untuk approval.
+
+### Fixed
+- Kotak approval tidak lagi selebar layar (melanggar I20).
+- Bold pada teks redup tidak lagi mematikan backdrop; `\x1b[22m` memulihkan
+  scrim alih-alih meninggalkan teks normal.
+- Jawaban bernomor (`1`..`n`) pada `ask_user` dipetakan ke teks opsi, tidak lagi
+  mengirim angka mentah ke model.
+- `paintRegion` memotong baris ke lebar layar, mencegah auto-wrap yang menggeser
+  seluruh wilayah popup.
+- Pemotongan opsi panjang tidak lagi membelah pasangan surrogate (emoji/CJK
+  astral) menjadi `U+FFFD`.
+- `cwd` pada tool todo/plan menjadi parameter wajib; `process.cwd()` tidak lagi
+  dipakai sebagai default pada tool berkas.
+
+### Removed
+- Dead code terverifikasi tanpa pemakai: alias tabel (`renderTableGrid`,
+  `renderGrid`, `parsePipeTable`, `parseMarkdownPipeTable`), `statusGlyph`,
+  `supportsHalfBlocks`, `renderLogoLineCount`, `EMPTY_CELLS`,
+  `resolveMaxOutputTokens`, `TOOL_CONTRACT_NAMES`, `isSideEffectingTool`,
+  `supersedeMemoryByIds`, `__testing`, `resetOwnerTokenCounterForTests`,
+  `MAX_ACCEPTANCE`, `MAX_PARENT`, dan `dialogFrame` (pemakainya hanya test).
+  Ekspor subsistem daemon sengaja dipertahankan sebagai permukaan API.
+
 ## [0.24.0] - 2026-11-14
 
 ### Added
