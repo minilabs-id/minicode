@@ -76,7 +76,21 @@ export const codeRunTool: Tool = {
     const settled = await runSandboxed()
     ctx.signal.throwIfAborted()
     const text = capMarked(scrubSecrets(settled.output), LIMITS.BASH_OUTPUT_MAX_CHARS).trim()
-    if (settled.code !== 0) return `exit ${settled.code ?? "unknown"}\n${text}`
+    // code=null dari runner berarti proses tidak pernah melaporkan exit sendiri:
+    // timeout (dan abort sudah dilempar di atas). Dulu hasil ini tampil sebagai
+    // `exit unknown` tanpa menyebut timeout sama sekali — model tak bisa tahu
+    // efeknya ambiguous. Sekarang dikembalikan dengan tag outcome yang sama
+    // bentuknya dengan jalur bash, bukan sebagai error tak terduga.
+    if (settled.code === null) {
+      return (
+        `[TOOL_OUTCOME state=UNKNOWN reason=TIMEOUT side_effect_tier=LOCAL_ENV_MUTATION ` +
+        `timeout_ms=${timeoutMs}]\n` +
+        `Sandboxed run was cut off by the ${timeoutMs} ms timeout. Its side effects are UNKNOWN ` +
+        `(the snippet may have partially run). Do NOT re-run before inspecting workspace state.\n` +
+        (text ? `--- partial output ---\n${text}` : "--- partial output ---\n(none)")
+      )
+    }
+    if (settled.code !== 0) return `exit ${settled.code}\n${text}`
     return text
   },
 }

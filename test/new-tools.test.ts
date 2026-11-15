@@ -139,15 +139,16 @@ test("code_run: timeout membunuh loop tak berujung (tanpa hang)", async () => {
     { lang: "node", code: "while(true){}", timeout: 500 },
     ctx(),
   )) as string
-  // harus kembali (bukan hang): timeout 500ms + tree-kill, toleransi CI lambat.
-  // Ambang 15 dtk terlalu dekat dengan waktu nyata di runner CI berbagi-pakai
-  // (terukur 508 ms lokal, bisa 20x lipat saat runner jenuh) sehingga rilis
-  // gagal karena flake timing, bukan karena loop benar-benar hang. Kontrak
-  // yang diuji adalah "kembali, bukan menggantung", jadi batas atasnya
-  // dinaikkan jauh di atas waktu wall-clock normal namun tetap jauh di bawah
-  // hang tanpa akhir.
+  // Kontrak yang diuji: kembali (bukan menggantung) DAN beri tahu model bahwa
+  // efeknya ambiguous. Batas atas wall-clock sengaja longgar (60 dtk) karena
+  // ini bukan uji performa — runner CI berbagi-pakai bisa 20x lebih lambat dari
+  // 508 ms lokal, dan ambang ketat hanya menghasilkan flake, bukan sinyal bug.
   expect(Date.now() - t0).toBeLessThan(60_000)
   expect(typeof r).toBe("string")
+  // Dulu timeout keluar sebagai reject tak tertangkap (tes gagal di Linux CI);
+  // kini hasilnya dilaporkan dengan tag outcome yang bisa diparse model.
+  expect(r).toContain("state=UNKNOWN reason=TIMEOUT")
+  expect(r).toContain("timeout_ms=500")
 })
 
 test("code_run: substitusi shell $(...) tidak dieksekusi (tanpa shell)", async () => {

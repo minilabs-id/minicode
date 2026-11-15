@@ -23,7 +23,7 @@ test("OS sandbox preserves the default AbortError", async () => {
 })
 
 test.skipIf(!osSandboxAvailable())(
-  "native abort kills descendants and timeout reports unknown outcome",
+  "native abort kills descendants and reports timeout as a resolved result",
   async () => {
     const cwd = mkdtempSync(join(process.cwd(), "os-abort-test-"))
     const controller = new AbortController()
@@ -55,9 +55,13 @@ test.skipIf(!osSandboxAvailable())(
       const stopped = readFileSync(heartbeat, "utf8")
       await delay(150)
       expect(readFileSync(heartbeat, "utf8")).toBe(stopped)
-      await expect(runInOsSandbox("sleep 10", cwd, { timeoutMs: 100 })).rejects.toThrow(
-        "state=UNKNOWN reason=TIMEOUT",
-      )
+      // Timeout = hasil proses yang dilaporkan (resolve), bukan reject: abort
+      // sudah resolve untuk alasan yang sama, dan `code_run` tidak menangkap
+      // reject sehingga timeout bocor sebagai error tak terduga di CI.
+      const timedOut = await runInOsSandbox("sleep 10", cwd, { timeoutMs: 100 })
+      expect(timedOut.code).toBeNull()
+      expect(timedOut.output).toContain("timed out after 100ms")
+      expect(timedOut.output).toContain("UNKNOWN")
     } finally {
       controller.abort(reason)
       await running

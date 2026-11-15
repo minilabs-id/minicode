@@ -25,6 +25,7 @@
 - Ctrl+C tetap membatalkan ringkasan kompaksi LLM pada percobaan retry ke-2 dan seterusnya; sebelumnya abort user hanya efektif pada percobaan pertama.
 - Anggaran pemulihan kompaksi LLM kini benar-benar memakai jam berjalan (sebelumnya `nowMs` dibekukan sehingga pagar waktu tidak pernah tercapai).
 - Sumber `contextWindowSources` ikut dipertahankan saat `saveProvider` menulis entri tanpa `contextWindows`, sehingga label `user` tidak hilang dan nilai operator tidak ditimpa pada `sync` berikutnya.
+- Timeout `code_run` di sandbox OS kini dilaporkan sebagai hasil dengan tag `TOOL_OUTCOME state=UNKNOWN reason=TIMEOUT`, bukan reject tak tertangkap: `runInOsSandbox` memakai satu kontrak (resolve) untuk abort maupun timeout, sama seperti runner Docker. Sebelumnya test timeout `code_run` gagal di CI Linux walau lolos di Windows (yang melewati test itu karena tak punya sandbox OS).
 
 ### Added
 - Jendela konteks manual per model untuk provider yang tidak melaporkan kapasitas: `minicode config context-window <provider> <model> <128k|200k|1m|1024x1024|auto>`. Nilai tersimpan berlabel `user` sehingga `minicode sync` tidak menimpanya; `auto` mengembalikan model itu ke deteksi otomatis. Pilihan preset mengikuti ukuran nyata model produksi, termasuk tiga varian 1M yang berbeda (1.000.000 / 1.048.576 / 1.050.000).

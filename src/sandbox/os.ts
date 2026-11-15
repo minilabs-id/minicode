@@ -234,11 +234,16 @@ function runSpawn(
       const marker = truncated ? "\n… [output truncated]" : ""
       const output = (out + (err ? `\n[stderr]\n${err}` : "")).trim() + marker
       if (timedOut) {
-        reject(
-          new Error(
-            `[TOOL_OUTCOME state=UNKNOWN reason=TIMEOUT timeout_ms=${timeoutMs}]\nOS sandbox command timed out; inspect effects before retrying.\n${output}`,
-          ),
-        )
+        // Kontrak lapisan ini adalah RESOLVE (bukan reject): runner hanya
+        // melaporkan hasil proses (code/output), dan pemanggil yang memutuskan
+        // arti code=null. Dulu di sini `reject` untuk timeout, sementara abort
+        // `resolve` — kontraknya campur, sehingga `code_run` (yang tidak menangkap
+        // reject) meneruskan timeout sebagai error tak terduga. Docker runner
+        // sudah resolve untuk timeout; disamakan di sini.
+        resolveResult({
+          code: null,
+          output: `[os-sandbox] timed out after ${timeoutMs}ms; effects are UNKNOWN, inspect before retrying${marker ? `\n${marker}` : ""}${output ? `\n${output}` : ""}`,
+        })
         return
       }
       resolveResult({ code, output })
