@@ -1,4 +1,29 @@
-# Kontrak Terminal MiniCode (TUI fullscreen — v7.14, 2026-11-14)
+# Kontrak Terminal MiniCode (TUI fullscreen — v7.15, unreleased)
+
+Perubahan v7.15 (remediasi audit): CSI/SS3 malformed dibuang sampai byte
+independen berikutnya; Ctrl+C/Ctrl+D tetap dapat didekode. Prefix kontrol
+tertahan dibatasi 64 byte. Sequence lengkap yang tidak didukung (termasuk
+Ctrl+panah) menghasilkan `ignore`, bukan Escape; Escape tunggal tetap memakai
+flush timer yang ada. Peta proteksi: `test/input-recovery.test.ts` dan
+`test/prompt-engine.test.ts`. Cache proyeksi transkrip memakai ID baris stabil;
+eviction hanya menghapus cache ID yang hilang, dengan geometri/output tetap.
+Peta proteksi: `test/transcript-retention-cache.test.ts`.
+Panel aktivitas tetap menghitung semua tool, tetapi error/deny/cancel/interrupted
+juga tampil langsung sebagai ledger dengan nama tool dan alasan yang tersedia.
+Hitungan denied/cancelled/interrupted dipisahkan dari failed dan tidak disembunyikan.
+Peta proteksi: `test/activity-panel.test.ts`, `test/activity-fold.test.ts`.
+Warning perbedaan kapasitas katalog/metadata menyatakan angka dan sumber yang dipakai;
+metadata model eksak mengalahkan tebakan keluarga katalog, setelah override endpoint/operator.
+Prinsip **satu baris per kejadian** (v7.15): satu turn menghasilkan satu baris
+ringkasan thinking (angka baris diakumulasi lintas segmen, diperbarui di tempat —
+bukan satu baris per segmen reasoning) dan satu baris ringkasan aktivitas tool;
+panel aktivitas hidup tidak boleh meninggalkan salinan permanen 10 baris di
+belakang setiap turn. Tinggi tata letak TUI tidak bergantung pada status
+(indicators mengalah ke baris footer), sehingga transkrip tidak bergeser saat
+thinking/tool berjalan. Alasan kegagalan ringkasan kompaksi dipendekkan ke
+sebabnya (status + kode + pesan) tanpa payload JSON gateway.
+Peta proteksi: `test/tui-render-regressions.test.ts`.
+
 
 Perubahan v7.14: **geometri & dekorasi popup diseragamkan** (audit Surface
 Popup, `AUD-001..AUD-011`). Empat perubahan tampak-pengguna:
@@ -267,6 +292,12 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
   state.json `lang` > locale OS (`LANG`/`LC_ALL` awalan `id`) > en. Semua
   string user-visible TUI lewat `t()` — literal Indonesia hardcode di luar
   dict dilarang (test anti-regresi). Getter runtime, bukan const beku.
+  Bahasa balasan model (progres, pertanyaan, jawaban akhir) mengikuti bahasa
+  pesan pengguna atau permintaan bahasa eksplisit, termasuk saat berganti bahasa;
+  pesan pendek mengikuti bahasa percakapan yang sudah terbentuk. Locale UI/OS
+  dan `/lang` hanya mengatur label UI, bukan bahasa balasan. Kutipan, kode, log,
+  serta hasil tool bukan penentu bahasa pengguna. Peta proteksi prompt:
+  `test/context-audit.test.ts`; kepatuhan model perlu diuji dengan provider nyata.
 - **Keybinding konsisten** (kontrak I25): `Esc` dua-tahap di semua input
   teks; `backspace`/`delete` selalu edit teks (aksi hapus-data via `d`/
   `Del` + confirm dalam popup, tercatat); navigasi daftar = `↑↓` + `pgup/

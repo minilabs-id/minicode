@@ -58,6 +58,20 @@ describe("groupActivities", () => {
     expect(groups.get("execute")).toMatchObject({ count: 2, ok: 0, failed: 1, running: 1 })
   })
 
+  test("non-success states are counted separately and visibly", () => {
+    const groups = groupActivities([
+      act({ status: "denied" }),
+      act({ status: "cancelled" }),
+      act({ status: "interrupted" }),
+    ])
+    const group = groups.get("explore")!
+    expect(group).toMatchObject({ count: 3, failed: 0, denied: 1, cancelled: 1, interrupted: 1 })
+    const line = stripAnsi(groupLine(group))
+    expect(line).toContain("1 denied")
+    expect(line).toContain("1 cancelled")
+    expect(line).toContain("1 interrupted")
+  })
+
   test("nama tool unik (maks 3)", () => {
     const groups = groupActivities([
       act({ name: "grep" }),
@@ -186,6 +200,26 @@ describe("panel aktivitas di Transcript (TUI)", () => {
     emit({ type: "turn.completed", seq: 3, turnId: 1 })
     // Setelah: tetap SATU (live dikosongkan, fold di-commit) — bukan dua.
     expect(groupLines(t)).toHaveLength(1)
+  })
+
+  test("panel ON: failed tool and reason remain visible before and after completion", () => {
+    const { t, emit } = setupTui(true)
+    emit({ type: "turn.started", seq: 1, turnId: 1 })
+    emit({
+      type: "tool.failed",
+      seq: 2,
+      turnId: 1,
+      toolCallId: "bad",
+      name: "bash_output",
+      status: "failed",
+      message: "unknown job id",
+    })
+    const visible = () => t.view(120, 20, 0).map(stripAnsi).join("\n")
+    expect(visible()).toContain("bash_output failed: unknown job id")
+    expect(visible()).toContain("1 failed")
+    emit({ type: "turn.completed", seq: 3, turnId: 1 })
+    expect(visible()).toContain("bash_output failed: unknown job id")
+    expect(visible().match(/unknown job id/g)).toHaveLength(1)
   })
 
   test("panel OFF: ledger per-tool tetap tampil (tanpa grup)", () => {

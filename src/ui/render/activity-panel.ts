@@ -21,6 +21,8 @@ export interface ActivityGroupView {
   failed: number
   running: number
   denied: number
+  cancelled: number
+  interrupted: number
   /** Nama tool pertama (indikator; sudah tersanitasi & terpotong). */
   names: string[]
   /** Total nama tool unik (sebelum dibatasi 3) untuk penanda `+N`. */
@@ -41,7 +43,18 @@ export function groupActivities(
     const kind = activityGroup(a.name)
     let g = groups.get(kind)
     if (!g) {
-      g = { kind, count: 0, ok: 0, failed: 0, running: 0, denied: 0, names: [], nameTotal: 0 }
+      g = {
+        kind,
+        count: 0,
+        ok: 0,
+        failed: 0,
+        running: 0,
+        denied: 0,
+        cancelled: 0,
+        interrupted: 0,
+        names: [],
+        nameTotal: 0,
+      }
       groups.set(kind, g)
       uniqueNames.set(kind, new Set())
     }
@@ -51,6 +64,8 @@ export function groupActivities(
     else if (status === "failed") g.failed++
     else if (status === "running") g.running++
     else if (status === "denied") g.denied++
+    else if (status === "cancelled") g.cancelled++
+    else if (status === "interrupted") g.interrupted++
     // Nama tool dari model/provider = input tak-terpercaya: buang SEMUA ANSI
     // (termasuk SGR) saat masuk — styling ditambahkan renderer sendiri.
     const cleanName = stripSgr(sanitizeAnsiLine(a.name))
@@ -65,7 +80,7 @@ export function groupActivities(
 /** Warna grup: gagal → merah, ditolak → kuning, sisanya → redup (tenang). */
 function groupPaint(g: ActivityGroupView): (s: string) => string {
   if (g.failed > 0) return c.error
-  if (g.denied > 0) return c.warning
+  if (g.denied > 0 || g.cancelled > 0 || g.interrupted > 0) return c.warning
   return c.muted
 }
 
@@ -84,6 +99,9 @@ export function groupLine(g: ActivityGroupView): string {
   if (g.ok > 0) parts.push(t("panel.ok", { n: g.ok }))
   if (g.failed > 0) parts.push(t("panel.failed", { n: g.failed }))
   if (g.running > 0) parts.push(t("panel.running", { n: g.running }))
+  if (g.denied > 0) parts.push(t("panel.denied", { n: g.denied }))
+  if (g.cancelled > 0) parts.push(t("panel.cancelled", { n: g.cancelled }))
+  if (g.interrupted > 0) parts.push(t("panel.interrupted", { n: g.interrupted }))
   const names = g.names.map((n) => sanitizeAnsiLine(n)).join(", ")
   const more = Math.max(0, g.nameTotal - g.names.length)
   if (names)

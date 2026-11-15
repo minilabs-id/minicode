@@ -21,7 +21,19 @@ Di mana pengaturan dan data Minicode tinggal, bagaimana file lokal yang tak tepe
 ```
 
 - `providers` — bisa juga diisi lewat wizard/`minicode config add`/`/provider`; lihat daftar preset di bawah.
-- `providers[].contextWindows` — batas konteks dalam token per model; exact model ID menang, lalu key `"*"` menjadi fallback provider. Nilai harus integer positif. Karena gateway memakai alias model, MiniCode memakai **default konservatif 128K** untuk alias generik (`auto`/`best`/...) dan **32K** untuk model tak dikenal lainnya; jendela eksak tersedia lewat katalog built-in (keluarga umum), overlay `minicode pricing sync` (models.dev), dan **tokenizer presisi on-demand** dari HuggingFace untuk model open. `--context-window` mengalahkan nilai config selama sesi itu.
+- `providers[].contextWindows` — batas konteks dalam token per model; exact model ID menang, lalu key `"*"` menjadi fallback provider. Nilai boleh **angka** (`128000`) atau **string preset** (`"128k"`, `"1m"`, `"1024x1024"`, `"auto"`); `"auto"` berarti hapus nilai dan kembali ke deteksi otomatis. Karena gateway memakai alias model, MiniCode memakai **default konservatif 128K** untuk alias generik (`auto`/`best`/...) dan **32K** untuk model tak dikenal lainnya; jendela eksak tersedia lewat katalog built-in (keluarga umum), overlay `minicode pricing sync` (models.dev), dan **tokenizer presisi on-demand** dari HuggingFace untuk model open. `--context-window` mengalahkan nilai config selama sesi itu.
+
+  **Provider yang tidak melaporkan kapasitas** (gateway lokal, endpoint kompatibel, alias): setel manual — nilai tersimpan berlabel `user` sehingga `minicode sync` **tidak** menimpanya:
+
+  ```bash
+  minicode config context-window                        # daftar semua nilai eksplisit
+  minicode config context-window <provider>             # nilai satu provider
+  minicode config context-window <provider> <model> 128k
+  minicode config context-window <provider> <model> 1024x1024
+  minicode config context-window <provider> <model> auto   # kembali deteksi otomatis
+  ```
+
+  Pilihan yang diterima mengikuti ukuran yang benar-benar dipakai model produksi: `16K`, `32K`, `64K`, `128K`, `200K`, `256K`, `400K`, `500K`, `1M`, `1M (1024²)`, `1.05M`, `2M`, `4M`, `10M`, ditambah angka eksak. **Tiga varian 1M** disengaja karena memang berbeda: `1000000` (Anthropic/DeepSeek/Qwen), `1048576` (Google/Gemini, Kimi, GLM), `1050000` (OpenAI) — selisihnya sampai ~50K token.
 - `mcpServers` — dua bentuk: stdio (`command`+`args`) dan HTTP (`url`+opsional `headers`). Detail transport di [MCP & LSP](mcp-lsp.md).
 - `verifyCommand` — dipakai `--verify` bila auto-detect tidak menemukan (urutan deteksi: `typecheck` → `test` → `tsconfig`).
 - `bashAllowlist` — pola koma/pola glob perintah bash yang dianggap aman (mode `allowlist`).

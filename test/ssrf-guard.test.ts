@@ -1,13 +1,16 @@
 import { afterEach, expect, test } from "bun:test"
 import { isPrivateHost } from "../src/lib/net.ts"
+import { publicHttp } from "../src/lib/public-http.ts"
 import { webFetchTool } from "../src/tools/web_fetch.ts"
 import { webSearchTool } from "../src/tools/web_search.ts"
 
 const ctx = { signal: new AbortController().signal } as never
 
 const originalFetch = globalThis.fetch
+const originalPublicFetch = publicHttp.fetch
 afterEach(() => {
   globalThis.fetch = originalFetch
+  publicHttp.fetch = originalPublicFetch
 })
 
 function htmlResponse(status: number, headers: Record<string, string>, bodyChunks: string[]) {
@@ -113,7 +116,7 @@ test("blocks direct private host without fetching", async () => {
 })
 
 test("blocks SSRF via open redirect to private host", async () => {
-  globalThis.fetch = (async () =>
+  publicHttp.fetch = (async () =>
     htmlResponse(
       302,
       { location: "http://169.254.169.254/latest/meta-data/" },
@@ -125,7 +128,7 @@ test("blocks SSRF via open redirect to private host", async () => {
 })
 
 test("blocks redirect to disallowed protocol", async () => {
-  globalThis.fetch = (async () =>
+  publicHttp.fetch = (async () =>
     htmlResponse(302, { location: "file:///etc/passwd" }, [])) as unknown as typeof fetch
   await expect(
     webFetchTool.execute({ url: "https://public.example.com/redir" }, ctx),
@@ -133,7 +136,7 @@ test("blocks redirect to disallowed protocol", async () => {
 })
 
 test("rejects redirect loops beyond MAX_REDIRECTS", async () => {
-  globalThis.fetch = (async (_input?: unknown, init?: unknown) => {
+  publicHttp.fetch = (async (_input?: unknown, init?: unknown) => {
     void init
     return htmlResponse(302, { location: "/next" }, [])
   }) as unknown as typeof fetch
@@ -144,7 +147,7 @@ test("rejects redirect loops beyond MAX_REDIRECTS", async () => {
 
 test("follows safe redirects and returns content", async () => {
   let hops = 0
-  globalThis.fetch = (async (input: unknown) => {
+  publicHttp.fetch = (async (input: unknown) => {
     const u = String(input)
     if (u.includes("/hop1")) {
       hops++
@@ -164,7 +167,7 @@ test("follows safe redirects and returns content", async () => {
 
 test("body hard-cap aborts oversized responses before OOM", async () => {
   const bigChunk = "x".repeat(500_000)
-  globalThis.fetch = (async () =>
+  publicHttp.fetch = (async () =>
     htmlResponse(
       200,
       { "content-type": "text/plain" },
@@ -180,7 +183,7 @@ test("body hard-cap aborts oversized responses before OOM", async () => {
 })
 
 test("header tak menggema userinfo/query kredensial (bug-hunt F4)", async () => {
-  globalThis.fetch = (async () =>
+  publicHttp.fetch = (async () =>
     htmlResponse(200, { "content-type": "text/html" }, ["hi"])) as unknown as typeof fetch
   const out1 = String(
     await webFetchTool.execute({ url: "https://user:pass@public.example.com/" }, ctx),

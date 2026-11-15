@@ -217,7 +217,10 @@ test("delegate: budget/timeout/cwd/journal plumbing", async () => {
       ctxFor(dir, "auto"),
     )
     const spec = seen[0]!
-    expect(spec.maxSteps).toBe(LIMITS.DEFAULT_MAX_STEPS) // cap, bukan 100
+    // [T-008] Cap sub-agent memakai konstanta SENDIRI (50). Permintaan 100
+    // di-clamp ke cap delegasi, BUKAN ke DEFAULT_MAX_STEPS sesi utama (200) —
+    // memakai default sesi utama berarti memperluas kewenangan delegasi.
+    expect(spec.maxSteps).toBe(LIMITS.SUB_AGENT_MAX_STEPS)
     expect(spec.timeoutMs).toBe(LIMITS.SUB_AGENT_TIMEOUT_MS)
     expect(spec.cwd).toBe(dir) // cwd parent diwariskan
     expect(spec.permissionMode).toBe("auto") // SELALU auto, bukan parent

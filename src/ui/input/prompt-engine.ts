@@ -403,11 +403,16 @@ export interface DecodedKey {
 export interface DecoderState {
   /** Byte yang belum lengkap jadi satu key (tail dari chunk sebelumnya). */
   pending: number[]
+  /** Overlong sequences retain only their termination rule, never their payload. */
+  discard?: "csi" | "sgr"
 }
 
 export function createDecoderState(): DecoderState {
   return { pending: [] }
 }
+
+// Bound incomplete control sequences independently of bracketed paste payloads.
+const MAX_CONTROL_SEQUENCE_BYTES = 64
 
 function isCsiParam(b: number): boolean {
   return b >= 0x30 && b <= 0x3f
@@ -480,6 +485,17 @@ export function decodeKeysStream(chunk: Uint8Array, state: DecoderState): Decode
   let i = 0
   while (i < buf.length) {
     const b = buf[i]!
+    if (state.discard) {
+      if (b < 0x20 || b >= 0x7f) {
+        // Recover at an independent byte without consuming it (including ESC).
+        state.discard = undefined
+      } else {
+        const final = state.discard === "sgr" ? b === 0x4d || b === 0x6d : isCsiFinal(b)
+        if (final) state.discard = undefined
+        i++
+        continue
+      }
+    }
     if (b === 0x1b) {
       const n1 = buf[i + 1]
       // ESC di ujung chunk = awal sekuens yang terbelah (panah ESC[A jadi
@@ -531,13 +547,26 @@ export function decodeKeysStream(chunk: Uint8Array, state: DecoderState): Decode
       }
       if (n1 === 0x5b && buf[i + 2] === 0x3c) {
         let j = i + 3
-        while (j < buf.length && buf[j] !== 0x4d && buf[j] !== 0x6d) j++
-        if (j >= buf.length) {
-          if (buf.length - i <= MAX_MOUSE_REPORT_BYTES) break
-          out.push({ key: { type: "ignore" }, width: MAX_MOUSE_REPORT_BYTES })
-          i += MAX_MOUSE_REPORT_BYTES
+        while (
+          j < buf.length &&
+          j - i < MAX_CONTROL_SEQUENCE_BYTES &&
+          buf[j]! >= 0x20 &&
+          buf[j]! < 0x7f &&
+          buf[j] !== 0x4d &&
+          buf[j] !== 0x6d
+        ) {
+          j++
+        }
+        if (
+          j - i >= MAX_CONTROL_SEQUENCE_BYTES ||
+          (j < buf.length && (buf[j]! < 0x20 || buf[j]! >= 0x7f))
+        ) {
+          if (j - i >= MAX_CONTROL_SEQUENCE_BYTES) state.discard = "sgr"
+          out.push({ key: { type: "ignore" }, width: j - i })
+          i = j
           continue
         }
+        if (j >= buf.length) break
         const first = buf.indexOf(0x3b, i + 3)
         const second = first >= 0 ? buf.indexOf(0x3b, first + 1) : -1
         const valid =
@@ -561,10 +590,17 @@ export function decodeKeysStream(chunk: Uint8Array, state: DecoderState): Decode
         let j = i + 2
         while (
           j < buf.length &&
+          j - i < MAX_CONTROL_SEQUENCE_BYTES &&
           !isCsiFinal(buf[j]!) &&
           (isCsiParam(buf[j]!) || (buf[j]! >= 0x20 && buf[j]! <= 0x2f))
         ) {
           j++
+        }
+        if (j - i >= MAX_CONTROL_SEQUENCE_BYTES) {
+          state.discard = "csi"
+          out.push({ key: { type: "ignore" }, width: j - i })
+          i = j
+          continue
         }
         if (j < buf.length && isCsiFinal(buf[j]!)) {
           const seq = String.fromCharCode(...buf.slice(i, j + 1))
@@ -573,14 +609,12 @@ export function decodeKeysStream(chunk: Uint8Array, state: DecoderState): Decode
           i = j + 1
           continue
         }
-        if (j === i + 2) {
-          // "ESC["/"ESC O" di ujung chunk = CSI belum lengkap (final di chunk
-          // berikut), BUKAN Esc biasa. Tahan agar panah split tak jadi esc.
-          // (ESC[ yang benar-benar lengkap selalu punya byte final dan sudah
-          // ditangani di atas.)
-          break
-        }
-        break // ada parameter tapi belum ada byte final — tahan
+        if (j === buf.length) break // Valid incomplete prefix: wait for the next chunk.
+        // Drop only the malformed prefix; decode the independent byte next
+        // (especially Ctrl+C, Enter, or ESC starting a fresh sequence).
+        out.push({ key: { type: "ignore" }, width: j - i })
+        i = j
+        continue
       }
       // ESC + byte lain: ESC tunggal (lengkap, tidak menunggu apa pun).
       out.push({ key: { type: "esc" }, width: 0 })
@@ -734,8 +768,6 @@ function parseDecimalBytes(bytes: number[], from: number, to: number): number | 
   return value
 }
 
-const MAX_MOUSE_REPORT_BYTES = 64
-
 export function decodeKey(s: string, i: number): DecodedKey | null {
   const c = s[i]!
   const code = c.charCodeAt(0)
@@ -796,7 +828,7 @@ export function decodeKey(s: string, i: number): DecodedKey | null {
       // Dua varian sah: polos ESC[5~ (4 byte) dan bermodifier ESC[5;<m>~
       // (modifier bisa multi-digit: 2=shift, 5=ctrl, 3=alt, kombinasi >9
       // seperti 23). HANYA terminator '~' yang dianggap PgUp/PgDn — response
-      // DSR kursor (ESC[5;34R) dsb. harus jatuh ke catch-all esc di bawah;
+      // DSR kursor (ESC[5;34R) dsb. harus jatuh ke catch-all ignore di bawah;
       // tanpa guard ini, response DSR baris-5/6 dibajak jadi pageup + residu
       // char bocor ke prompt (bug ditemukan audit typing, probe ESC[5;34R).
       // Width dihitung dari posisi terminator — width tetap 5 membuat sisa
@@ -816,14 +848,14 @@ export function decodeKey(s: string, i: number): DecodedKey | null {
             return { key: { type, modifier: mod }, width: j + 1 - i }
           }
         }
-        // selain itu (ESC[5;34R, ESC[5x, …) → catch-all esc di bawah
+        // selain itu (ESC[5;34R, ESC[5x, …) → catch-all ignore di bawah
       }
       // Shift+Tab (backtab) ESC [ Z — dipakai TUI untuk toggle permission mode.
       // Tanpa cabang eksplisit ini ia jatuh ke catch-all "esc" di bawah,
       // sehingga tipe "shift-tab" tidak pernah dihasilkan decodeKeys.
       if (kind === "Z") return { key: { type: "shift-tab" }, width: 3 }
       // ESC [ … lainnya -> konsumsi saja
-      return { key: { type: "esc" }, width: Math.max(3, scanCsi(s, i)) }
+      return { key: { type: "ignore" }, width: scanCsi(s, i) }
     }
     return { key: { type: "esc" }, width: 1 }
   }
@@ -858,8 +890,8 @@ export function decodeKey(s: string, i: number): DecodedKey | null {
 }
 
 function scanCsi(s: string, i: number): number {
-  // konsumsi sampai huruf final (mis. ESC [ 1 ; 5 A)
+  // CSI finals include punctuation such as '~', not only letters.
   let j = i + 2
-  while (j < s.length && !/[a-zA-Z]/.test(s[j]!)) j++
-  return j - i + 1
+  while (j < s.length && !isCsiFinal(s.charCodeAt(j))) j++
+  return Math.min(j + 1, s.length) - i
 }

@@ -1737,22 +1737,31 @@ export class TuiApp {
     // dan baris lebih lebar dari `cols` membungkus sendiri → frame jadi
     // `rows+1`, alt-screen scroll, seluruh diff CUP meleset (audit 2026-11-12,
     // HIGH-3).
-    const indicator: string[] = []
-    if (busy && this.abortHintOn)
-      indicator.push(c.warning(truncateToWidth(t("app.abortHint"), width)))
-    else if (newCount > 0)
-      indicator.push(c.muted(truncateToWidth(t("app.newBelow", { n: newCount }), width)))
+    // Indikator status (abort hint / "N baris di bawah") TIDAK memakai baris
+    // frame sendiri: ia MENGGANTIKAN isi baris footer selama aktif (lihat
+    // `frame` di bawah). Dua alasan:
+    //   (a) tinggi frame tidak bergantung status. Dulu baris indikator
+    //       menambah/mengurangi satu baris, dan karena `viewH` memilih jendela
+    //       transkrip, seluruh isi layar bergeser di antara frame — gejala
+    //       "teks naik-turun";
+    //   (b) tidak memakan satu baris transkrip permanen demi pesan sementara.
+    const indicatorLine =
+      busy && this.abortHintOn
+        ? c.warning(truncateToWidth(t("app.abortHint"), width))
+        : newCount > 0
+          ? c.muted(truncateToWidth(t("app.newBelow", { n: newCount }), width))
+          : ""
 
     const allMenu = this.menuRows(height, width, busy)
     const allComposer = this.composerRows(width, snap, busy, now)
-    const contentBudget = Math.max(1, height - 3 - indicator.length)
+    const contentBudget = Math.max(1, height - 3)
     let menu = allMenu
     let composerH = Math.min(MAX_INPUT_ROWS, Math.max(1, allComposer.length))
     if (menu.length + composerH > contentBudget) {
       menu = menu.slice(0, Math.max(0, contentBudget - 1))
       composerH = Math.max(1, contentBudget - menu.length)
     }
-    const viewH = Math.max(1, height - 2 - composerH - menu.length - indicator.length)
+    const viewH = Math.max(1, height - 2 - composerH - menu.length)
     let viewport = this.transcript.viewport(width, viewH, this.scrollBack)
     const curWrapped = viewport.totalRows
     if (this.scrollBack > 0 && this.lastWrapped > 0) {
@@ -1790,11 +1799,11 @@ export class TuiApp {
       const winStart = Math.max(0, Math.min(allComposer.length - composerH, cursor.visIdx))
       composerOffset = winStart
       shownComposer = allComposer.slice(winStart, winStart + composerH)
-      cursorRow = viewH + menu.length + indicator.length + (cursor.visIdx - winStart) + 1
+      cursorRow = viewH + menu.length + (cursor.visIdx - winStart) + 1
       cursorCol = cursor.col
     } else {
       shownComposer = allComposer.slice(0, composerH)
-      cursorRow = viewH + menu.length + indicator.length + 1
+      cursorRow = viewH + menu.length + 1
       // Kursor parkir tepat setelah prompt saat idle (bukan kolom 1) supaya
       // caret terlihat di tempat user akan mengetik.
       if (!busy) cursorCol = displayWidth(PROMPT_FIRST) + 1
@@ -1822,7 +1831,13 @@ export class TuiApp {
         },
         width,
       )[0] ?? ""
-    const frame = [...body, ...menu, ...indicator, ...shownComposer, "", footer]
+    const frame = [
+      ...body,
+      ...menu,
+      ...shownComposer,
+      "",
+      indicatorLine ? truncateToWidth(indicatorLine, width) : footer,
+    ]
     const rawLength = frame.length
     const crop = Math.max(0, rawLength - height)
     const topPad = Math.max(0, height - rawLength)
@@ -1836,7 +1851,7 @@ export class TuiApp {
       },
       transcriptRows: bodyRows,
       transcriptTop: topPad - crop,
-      composerTop: topPad - crop + body.length + menu.length + indicator.length,
+      composerTop: topPad - crop + body.length + menu.length,
       composerLines: allComposer,
       composerOffset,
     }

@@ -56,7 +56,10 @@ export function findContextWindowFromCatalog(model: string): number | undefined 
   const m = normalizeModelId(model)
   let best: ContextWindowCatalogEntry | undefined
   for (const entry of CONTEXT_WINDOW_CATALOG) {
-    if (m.includes(entry.family) && (!best || entry.family.length > best.family.length)) {
+    const leaf = m.split(/[/:]/).at(-1) ?? m
+    const suffix = leaf.slice(entry.family.length)
+    const matches = leaf.startsWith(entry.family) && (suffix === "" || /^[._-]/.test(suffix))
+    if (matches && (!best || entry.family.length > best.family.length)) {
       best = entry
     }
   }

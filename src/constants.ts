@@ -133,12 +133,25 @@ export const LIMITS = {
   /** F-15: cap output git saat streaming (git_diff/log di repo raksasa). */
   GIT_OUTPUT_MAX_CHARS: 500_000,
   /** Executor & sub-agents — tuned for 4-core laptop (6/1) vs 8/2 server */
-  DEFAULT_MAX_STEPS: 50,
+  /** [T-008 OBSERVATION.md] Batas langkah = backstop, bukan anggaran kerja.
+   * 50 terlalu kecil untuk kerja nyata (4 dari 5 `turn.failed` pada sesi
+   * 17b6a5ff adalah `exceeded 50 steps`). Default kini 200 dan NAIK satu tangga
+   * otomatis saat sesi terbukti mentok — lihat `src/policy/step-escalation.ts`.
+   * Sub-agent tetap 50 default (berjalan paralel, biaya runaway berlipat), juga
+   * dengan eskalasi adaptif. */
+  DEFAULT_MAX_STEPS: 200,
   EXECUTOR_CONCURRENCY: 6,
   EXECUTOR_WRITE_CONCURRENCY: 1,
   SUB_AGENT_POOL_SIZE: 3,
   SUB_AGENT_BUDGET_EXPLORE: 5,
   SUB_AGENT_BUDGET_PLAN: 15,
+  /** [T-008] Cap langkah eksplisit untuk sub-agent tetap 50 walau default sesi
+   * utama naik ke 200. Alasan: sub-agent berjalan PARALEL
+   * (`SUB_AGENT_POOL_SIZE`) dan tiap langkah = panggilan model sendiri; naiknya
+   * biaya runaway berlipat dengan jumlah sub-agent, sedangkan tugas sub-agent
+   * lebih sempit. Terpisah dari `DEFAULT_MAX_STEPS` supaya perubahan default
+   * sesi utama tidak diam-diam memperluas kewenangan delegasi. */
+  SUB_AGENT_MAX_STEPS: 50,
   SUB_AGENT_TIMEOUT_MS: 120_000,
   /** Network / providers */
   RETRY_AFTER_MAX_MS: 30_000,

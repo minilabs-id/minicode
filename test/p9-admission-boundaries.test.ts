@@ -389,7 +389,9 @@ test("B2 delegate cap eksplisit TIDAK diklamp mode (≠ M7), clamp hard-cap 50",
     expect(wide.maxSteps).toBe(40)
     expect(wide.maxSteps).not.toBe(LIMITS.SUB_AGENT_BUDGET_EXPLORE)
     const over = await delegate(tmpRoot(), { prompt: "x", mode: "plan", maxSteps: 999 })
-    expect(over.maxSteps).toBe(LIMITS.DEFAULT_MAX_STEPS)
+    // [T-008] clamp memakai cap delegasi SENDIRI (50), bukan default sesi utama
+    // (200). Kewenangan delegasi tidak ikut naik saat default sesi utama naik.
+    expect(over.maxSteps).toBe(LIMITS.SUB_AGENT_MAX_STEPS)
   } finally {
     restore()
   }

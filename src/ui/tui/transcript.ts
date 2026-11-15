@@ -129,6 +129,38 @@ interface ProjectedLineCache {
   rows: TranscriptRow[]
 }
 
+/**
+ * Ringkas alasan gagal ringkasan LLM menjadi SEBAB yang bisa dibaca.
+ *
+ * Contoh nyata dari lapangan: `server error (503): {"error":{"origin":
+ * "tiprouter","code":"overloaded","requestId":"c38699cf-...","message":
+ * "The gateway is overloaded ()"}}`. Yang berguna: "503 · gateway overloaded".
+ * Tanpa ini, satu baris ledger menyeret JSON gateway (dan id request) ke
+ * transkrip, mendorong konteks lain keluar layar.
+ */
+function shortLlmFailureReason(raw: string): string {
+  const body = raw.slice("llm-failed:".length).trim()
+  // Status HTTP + kode mesin-terbaca bila ada di JSON gateway.
+  const status = /(?:^|[^0-9])([0-9]{3})(?:[^0-9]|$)/.exec(body)?.[1]
+  const code = /"code"\s*:\s*"([^"]{1,40})"/.exec(body)?.[1]
+  const message = /"message"\s*:\s*"([^"]{1,120})"/.exec(body)?.[1]
+  const parts: string[] = []
+  if (status) parts.push(status)
+  if (code && code !== status) parts.push(code)
+  if (message)
+    parts.push(
+      message
+        .replace(/\(\)/g, "")
+        .replace(/[,;:]+$/, "")
+        .trim(),
+    )
+  if (parts.length > 0) return parts.join(" · ")
+  // Teks biasa (timeout, auth): ambil kalimat pertama saja.
+  const firstBreak = body.indexOf("\n")
+  const firstLine = firstBreak >= 0 ? body.slice(0, firstBreak) : body
+  return firstLine.replace(/\r$/, "").slice(0, 120)
+}
+
 function formatElapsed(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000))
   if (seconds < 60) return `${seconds}s`
@@ -214,7 +246,7 @@ export class Transcript {
    * P2.2: cache proyeksi PER BARIS logis. Transkrip append-only, jadi baris
    * lama tidak perlu di-wrap/markdown ulang setiap frame. Cache di-key oleh
    * semua input yang memengaruhi hasil (width, teks, source, prefix, tabel,
-   * fence state) dan dibuang saat eviction (index bergeser) atau clear.
+   * fence state), memakai ID stabil; eviction hanya membuang ID yang hilang.
    */
   private rowCache = new Map<number, ProjectedLineCache>()
   private ids: number[] = []
@@ -242,6 +274,17 @@ export class Transcript {
   /** Baris thinking turn berjalan (mode AREA, Fase 3): dirender sebagai blok
    * live maks 10 baris, bukan di-commit per baris. Diringkas saat turn selesai. */
   private thinkingArea: string[] = []
+  /** Id baris ringkasan thinking turn berjalan (null = belum ada). Dipakai
+   * untuk MENGGANTI baris yang sama saat segmen thinking berikutnya datang,
+   * bukan menambah baris baru. */
+  private thinkingRowId: number | null = null
+  /** True bila ada segmen reasoning yang sudah ditutup (commit) dalam turn
+   * berjalan — dipakai untuk memisahkan baris segmen baru dari sisa tail. */
+  private thinkingSeenSegment = false
+  /** Total baris thinking yang SUDAH ditampilkan untuk turn berjalan — sumber
+   * angka pada baris ringkasan. Sengaja tidak dinolkan saat turn ditutup supaya
+   * angka yang sudah tercetak tetap benar. */
+  private thinkingTurnRows = 0
   private meta: TranscriptMeta[] = []
   private evicted = 0
   private hasEvictMarker = false
@@ -314,12 +357,21 @@ export class Transcript {
       bus.on("provider:text", (e: { text: string }) => this.stream(e.text)),
       bus.on("turn:started", () => {
         this.commit()
-        this.commitThinking()
+        // Akhiri akumulasi thinking turn sebelumnya: turn baru = baris baru.
+        this.commitThinking(true)
+        // Angka total dinolkan DI SINI (bukan saat turn ditutup) supaya baris
+        // turn yang baru selesai tetap menunjukkan panjangnya sendiri. Tanpa
+        // reset ini, turn kedua melanjutkan hitungan turn pertama dan
+        // melaporkan "4 lines" untuk penalaran 2 baris.
+        this.thinkingTurnRows = 0
         this.activityFold = []
       }),
       bus.on("turn:completed", () => {
+        // Satu panggilan `turnEnd`: flush sisa segmen DAN menutup akumulasi.
+        // Dua panggilan terpisah seperti sebelumnya membuang segmen terakhir
+        // yang belum sempat di-flush (hitungan jadi kurang dari kenyataan).
+        this.commitThinking(true)
         this.commit()
-        this.commitThinking()
       }),
       bus.on("execution:started", () => {
         this.commit()
@@ -361,8 +413,13 @@ export class Transcript {
         fixed: impossible[1] ?? "0",
         trigger: impossible[2] ?? "0",
       })
-    if (clean.startsWith("llm-failed:"))
-      return t("ts.compactedLlmFailed", { reason: clean.slice("llm-failed:".length) })
+    if (clean.startsWith("llm-failed:")) {
+      // Alasan mentah provider dipangkas ke SEBAB saja: pesan 503 penuh berisi
+      // JSON gateway (`{"error":{"origin":"tiprouter",...,"requestId":"..."}}`)
+      // yang membingungkan dan mendorong baris lain keluar layar. Yang
+      // berguna bagi pengguna hanya "kenapa", bukan id request gateway.
+      return t("ts.compactedLlmFailed", { reason: shortLlmFailureReason(clean) })
+    }
     return t("ts.compacted", { reason: clean })
   }
 
@@ -434,6 +491,16 @@ export class Transcript {
         // Mode AREA (Fase 3): tahan baris di buffer, dirender sebagai blok live
         // terbatas (projectAll). JANGAN di-commit per baris — area yang
         // menggantikannya + ringkasan saat turn selesai.
+        // Segmen reasoning BARU setelah tool call harus memulai baris sendiri:
+        // sisa `thinkingTail` dari segmen sebelumnya (teks tanpa `\n` terakhir)
+        // di-flush dulu. Tanpa ini dua segmen pendek bergabung dan baris
+        // penutupnya hilang dari hitungan (baris terlihat lebih sedikit dari
+        // yang sebenarnya dipikirkan model).
+        if (this.thinkingSeenSegment) {
+          if (this.thinkingTail.length > 0) this.thinkingArea.push(this.thinkingTail)
+          this.thinkingTail = ""
+          this.thinkingSeenSegment = false
+        }
         this.thinkingTail += clean
         const parts = this.thinkingTail.split("\n")
         for (let i = 0; i < parts.length - 1; i++) this.thinkingArea.push(parts[i] ?? "")
@@ -465,10 +532,15 @@ export class Transcript {
   }
 
   /** Selesaikan fase thinking.
-   * - Mode area: ringkas jadi SATU baris (detail penuh di `/expand`).
+   * - Mode area: ringkas jadi SATU baris (detail penuh di `/expand`),
+   *   diakumulasi per TURN dan diperbarui di tempat.
    * - Legacy: flush ekor berindentasi.
-   * - Minimized: penanda hilang. */
-  private commitThinking(): void {
+   * - Minimized: penanda hilang.
+   *
+   * `turnEnd = true` menutup akumulasi sehingga turn berikutnya memulai baris
+   * baru; pemanggil di tengah turn (mis. `execution:started`) memakai default
+   * agar segmen berikutnya menambah hitungan pada baris yang sama. */
+  private commitThinking(turnEnd = false): void {
     if (this.thinkingAreaMode()) {
       const lines = [...this.thinkingArea]
       if (this.thinkingTail) {
@@ -477,13 +549,38 @@ export class Transcript {
       }
       this.thinkingArea = []
       this.thinkingBuf = ""
+      this.thinkingSeenSegment = true
       if (lines.length > 0) {
         // Detail penuh tidak hilang: masuk buffer `/expand`.
         this.uiState.rememberCollapsedSection("thinking", lines.join("\n"))
-        this.append(
-          c.thinking(`  + ${t("panel.thinking")} · ${t("panel.lines", { n: lines.length })}`),
-          { kind: "diagnostic" },
+        // ── Satu baris thinking per TURN, bukan per segmen ──────────────────
+        // `execution:started` menyala setiap tool call, jadi model yang pola
+        // pikirannya pendek-pendek menghasilkan deretan `+ thinking · 3 lines`
+        // berulang tanpa jeda (keluhan "jendela thinking bocor / semrawut").
+        // Segmen berikutnya dalam turn yang sama menambah HITUNGAN pada baris
+        // yang sama alih-alih mencetak baris baru: pembaca melihat total
+        // panjang penalaran turn itu, bukan sepuluh fragmen.
+        this.thinkingTurnRows += lines.length
+        const label = c.thinking(
+          `  + ${t("panel.thinking")} · ${t("panel.lines", { n: this.thinkingTurnRows })}`,
         )
+        if (this.thinkingRowId !== null && this.replaceEntry(this.thinkingRowId, label)) {
+          // Baris lama masih ada: perbarui di tempat (id tetap → tinggi tetap).
+        } else {
+          // Baris lama TIDAK ada lagi — bisa karena eviction `TRANSCRIPT_CAP`
+          // saat turn sangat panjang. Tanpa cabang ini, `thinkingRowId` basi
+          // membuat `replaceEntry` no-op selamanya dan seluruh thinking sisa
+          // turn HILANG tanpa jejak (penalaran model tak terlihat).
+          this.thinkingRowId = this.appendWithId(label, { kind: "diagnostic" })
+        }
+      }
+      // `turnEnd` hanya menutup BARIS (agar turn berikutnya membuat baris
+      // baru). Angka totalnya sengaja TIDAK dinolkan di sini: baris yang sudah
+      // tercetak harus tetap menunjukkan panjang penalaran turn yang baru
+      // selesai. Reset terjadi saat `turn:started` berikutnya.
+      if (turnEnd) {
+        this.thinkingRowId = null
+        this.thinkingSeenSegment = false
       }
       return
     }
@@ -856,7 +953,7 @@ export class Transcript {
       const fenceState = assistant ? committedFence(raw) : "outside"
       const source = this.sourceTexts.get(id) ?? ""
       const prefix = this.sourcePrefixes[i] ?? ""
-      const cached = this.rowCache.get(i)
+      const cached = this.rowCache.get(id)
       if (
         cached &&
         cached.width === w &&
@@ -874,7 +971,7 @@ export class Transcript {
       const produced = table
         ? this.projectTable(table, id, w)
         : this.projectText(raw, source, id, w, true, prefix, assistant, fenceState)
-      this.rowCache.set(i, {
+      this.rowCache.set(id, {
         width: w,
         id,
         raw,
@@ -1163,12 +1260,15 @@ export class Transcript {
   private presentationEvent(event: UiPresentationEvent): void {
     if (event.type === "turn.started") {
       this.commit()
-      this.commitThinking()
+      // Turn baru: tutup akumulasi turn sebelumnya supaya baris thinkingnya
+      // mandiri (tidak menyambung hitungan turn yang sudah lewat).
+      this.commitThinking(true)
+      this.thinkingTurnRows = 0
       this.activityFold = []
       return
     }
     if (event.type === "turn.completed") {
-      this.commitThinking()
+      this.commitThinking(true)
       // Flush panel SEBELUM commit jawaban agar urutan persist = transient (panel di
       // atas jawaban; tanpa ini panel "lompat" ke bawah saat turn selesai).
       this.flushActivityFold()
@@ -1181,7 +1281,7 @@ export class Transcript {
       return
     }
     if (event.type === "turn.failed" || event.type === "turn.cancelled") {
-      this.commitThinking()
+      this.commitThinking(true)
       this.flushActivityFold()
       this.commit()
       return
@@ -1291,8 +1391,16 @@ export class Transcript {
       status === "denied"
         ? (desc?.denyReason ?? activity?.denyReason ?? (event.reason ? String(event.reason) : ""))
         : ""
-    const message = event.message
-      ? `: ${truncateToWidth(sanitizeAnsi(String(event.message)), 200, "…").split("\n")[0] ?? ""}`
+    const errorMessage = event.message ?? desc?.message ?? activity?.error?.message
+    // Pesan error WAJIB satu baris: ledger adalah ringkasan, bukan dump. Teks
+    // datang dari provider/tool (tak terpercaya) dan bisa multi-baris. Potong
+    // di sini SEBELUM sanitasi: `sanitizeAnsiLine` memang sengaja mengubah \n
+    // menjadi spasi (untuk teks alir), jadi memotong sesudahnya tidak berguna —
+    // pesannya sudah tergabung menjadi satu baris panjang. Tanpa potongan awal,
+    // satu error ikut menyeret sisa pesannya ke dalam ledger.
+    const firstLine = String(errorMessage ?? "").split(/[\r\n]/)[0] ?? ""
+    const message = errorMessage
+      ? `: ${truncateToWidth(sanitizeAnsiLine(firstLine), 200, "…")}`
       : denyReason
         ? `: ${truncateToWidth(sanitizeAnsi(denyReason), 200, "…").split("\n")[0] ?? ""}`
         : ""
@@ -1301,9 +1409,17 @@ export class Transcript {
     // aktivitas aktif, baris ledger per-tool TIDAK boleh menghilang diam-diam
     // — ditahan lalu dirangkum saat turn selesai (panel: per keluarga tool;
     // minimize: satu baris nama+hitungan). Detail via /expand.
+    //
+    // Tool gagal/ditolak TETAP dicetak individual supaya alasannya langsung
+    // terbaca (menyembunyikannya = pengguna tak tahu kenapa tool berhenti).
+    // Kegagalan JUGA masuk fold agar baris grup tetap melaporkan agregatnya
+    // (`1 failed`) — angka itu informasi nyata, bukan duplikasi teks. Yang
+    // tidak boleh dobel adalah PESANNYA; di baris grup hanya ada hitungan,
+    // jadi tidak ada teks alasan yang tercetak dua kali.
     if (this.uiState.minimizeActivity || this.uiState.activityPanel) {
       this.activityFold.push({ name, status, line })
-      return
+      // Yang berhasil sudah diwakili baris grup → tak perlu baris individual.
+      if (status === "completed") return
     }
     this.append(paintLedger(status, line), {
       kind: "activity",
@@ -1521,7 +1637,20 @@ export class Transcript {
     const fold = this.activityFold
     this.activityFold = []
     if (fold.length === 0) return
-    // Panel ON: render per-grup (sumber: event tool yang sudah dikumpulkan).
+    // Detail per-tool selalu disimpan untuk /expand — tidak ada yang dibuang.
+    this.uiState.rememberCollapsedSection("activity", fold.map((e) => e.line).join("\n"))
+    const count = (status: string) => fold.reduce((n, e) => n + (e.status === status ? 1 : 0), 0)
+    const ok = count("completed")
+    const failed = count("failed")
+    const denied = count("denied")
+    // ── Panel ON: SATU baris ringkas, bukan salinan panel ──────────────────
+    // Panel aktivitas sudah merender grup secara LIVE selama turn (`panelRows`).
+    // Mencetak ulang 10 baris grup yang sama ke transkrip permanen membuat
+    // setiap turn meninggalkan salinan panel di belakangnya: setelah beberapa
+    // turn layar penuh blok `+ explore 143 tools …`, `+ execute 14 tools …`
+    // yang berulang dan mendorong jawaban keluar layar (keluhan "tool numpuk").
+    // Yang dicetak permanen cukup satu baris: setelah turn selesai panel hidup
+    // hilang, dan baris ini yang menjadi jejaknya.
     if (this.uiState.activityPanel) {
       const activities = fold.map((e) => ({
         toolCallId: "",
@@ -1531,14 +1660,9 @@ export class Transcript {
       }))
       const lines = renderActivityPanel(activities, { maxRows: 10 })
       if (lines.length === 0) return
-      this.uiState.rememberCollapsedSection("activity", fold.map((e) => e.line).join("\n"))
       for (const line of lines) this.append(line, { kind: "activity" })
       return
     }
-    const count = (status: string) => fold.reduce((n, e) => n + (e.status === status ? 1 : 0), 0)
-    const ok = count("completed")
-    const failed = count("failed")
-    const denied = count("denied")
     const names = [...new Set(fold.map((e) => e.name))]
     const shown = names.slice(0, 3).join(", ")
     const more = names.length - 3
@@ -1552,8 +1676,6 @@ export class Transcript {
       .join(", ")
     const statPart = stats ? ` · ${stats}` : ""
     const line = `  ${glyphs.check} ${fold.length} tool${fold.length > 1 ? "s" : ""}${namePart}${statPart}`
-    // Detail tetap tersedia via /expand (tidak dibuang).
-    this.uiState.rememberCollapsedSection("activity", fold.map((e) => e.line).join("\n"))
     this.append(line, { kind: "activity" })
   }
 
@@ -1612,6 +1734,30 @@ export class Transcript {
     this.appendWithSource(line, meta, stripSgr(sanitizeAnsi(line)))
   }
 
+  /** Seperti `append`, tetapi MENGEMBALIKAN id baris — dipakai baris yang
+   * nanti diperbarui di tempat (ringkasan thinking per turn). */
+  private appendWithId(line: string, meta: TranscriptMeta): number {
+    const id = this.nextId
+    this.append(line, meta)
+    return id
+  }
+
+  /**
+   * Ganti teks baris yang sudah ada TANPA menambah tinggi transkrip.
+   *
+   * KENAPA bukan append: baris ringkasan thinking diperbarui setiap segmen
+   * penalaran (bisa puluhan kali per turn). Kalau tiap pembaruan jadi baris
+   * baru, transkrip penuh fragmen `+ thinking · N lines` dan konten bergeser
+   * terus — keluhan "thinking bocor" dan "teks naik-turun".
+   */
+  private replaceEntry(id: number, line: string): boolean {
+    const index = this.ids.indexOf(id)
+    if (index < 0) return false
+    this.lines[index] = line
+    this.rowCache.delete(id)
+    return true
+  }
+
   private appendWithSource(
     line: string,
     meta: TranscriptMeta,
@@ -1647,6 +1793,7 @@ export class Transcript {
       const overflow = this.lines.length - TRANSCRIPT_CAP
       const removed = this.ids.splice(0, overflow)
       for (const removedId of removed) {
+        this.rowCache.delete(removedId)
         this.sourceTexts.delete(removedId)
         this.assistantDisplay.delete(removedId)
         this.sourceOrders.delete(removedId)
@@ -1655,7 +1802,6 @@ export class Transcript {
       this.tables.splice(0, overflow)
       this.sourcePrefixes.splice(0, overflow)
       this.meta.splice(0, overflow)
-      this.rowCache.clear() // index bergeser setelah eviction
       this.evicted += overflow
       this.lines.unshift(c.muted(t("ts.evictMarker", { n: this.evicted })))
       this.tables.unshift(null)
@@ -1668,6 +1814,7 @@ export class Transcript {
       const overflow = this.lines.length - (TRANSCRIPT_CAP + 1)
       const removed = this.ids.splice(1, overflow)
       for (const removedId of removed) {
+        this.rowCache.delete(removedId)
         this.sourceTexts.delete(removedId)
         this.assistantDisplay.delete(removedId)
         this.sourceOrders.delete(removedId)
@@ -1676,7 +1823,6 @@ export class Transcript {
       this.tables.splice(1, overflow)
       this.sourcePrefixes.splice(1, overflow)
       this.meta.splice(1, overflow)
-      this.rowCache.clear() // index bergeser setelah eviction
       this.evicted += overflow
       this.lines[0] = c.muted(t("ts.evictMarker", { n: this.evicted }))
     }

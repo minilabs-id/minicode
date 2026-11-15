@@ -82,7 +82,60 @@
 // KiB (npm pack --dry-run, worktree fitur); budget lama 4.112 KiB terlampaui
 // ~11,5 KiB. Re-baseline ke 4.128 KiB memberi ~4 KiB ruang. Tetap alarm
 // regresi, bukan target ukuran.
-export const PACK_SIZE_BUDGET_KIB = 4128
+//
+// [RE-BASELINE 4,07 MiB — disetujui owner 2026-11-15, remediasi T-004/T-005/T-009]
+// Pertumbuhan sah dari audit runtime (`.audit/OBSERVATION.md`) dan penutupan
+// temuan audit kode `.audit/code-audit-e6e50a7.md`. `unpackedSize` terukur
+// 4.269.858 B = 4169,8 KiB (npm pack --dry-run, 314 file, worktree fitur);
+// budget lama 4.128 KiB terlampaui 41,8 KiB. Kontribusi yang terukur:
+//   src/policy/recovery-budget.ts   13,0 KiB  (anggaran pemulihan bersama:
+//                                             satu budget waktu + kuota
+//                                             percobaan untuk retry provider
+//                                             dan resume turn, full jitter,
+//                                             Retry-After sebagai floor)
+//   src/policy/auto-resume.ts        2,7 KiB  (kini pembungkus tipis — tanpa
+//                                             angka sendiri, mencegah retry
+//                                             amplification 82 dtk)
+//   src/policy/step-escalation.ts    3,7 KiB  (eskalasi batas langkah T-008)
+//   src/lib/public-http.ts          ~8 KiB    (SSRF fail-closed web_fetch)
+//   sisanya: modifikasi tersebar (persistence ts/updated_at, microcompact
+//            diturunkan dari registry kontrak, ledger TUI satu baris, docs).
+// Artefak audit kerja SUDAH dipindah ke `.audit/` (di luar `files[]`) sehingga
+// tidak lagi ikut terkemas. Tidak ada `node_modules`/`test`/`node_modules`
+// terbawa: `gate:pack` lolos seluruh cek selain ukuran. Re-baseline ke
+// 4.176 KiB memberi ~6 KiB ruang di atas aktual. Tetap alarm regresi, bukan
+// target ukuran.
+//
+// [RE-BASELINE 4,10 MiB — disetujui owner 2026-11-15, fitur jendela konteks manual]
+// Pertumbuhan sah: jendela konteks MANUAL untuk model yang providernya tidak
+// melaporkan kapasitas (`minicode config context-window`) dan perbaikan render
+// TUI. `unpackedSize` terukur 4.302.264 B = 4201,0 KiB (npm pack --dry-run,
+// 316 file, worktree fitur); budget lama 4.176 KiB terlampaui 25,0 KiB.
+// Kontribusi yang terukur (ukuran berkas di worktree):
+//   src/policy/context-window-presets.ts   ~8 KiB  (tabel preset ukuran nyata
+//                                                  model produksi + parser
+//                                                  `128k`/`1m`/`1024x1024`/`auto`)
+//   src/policy/context-window-assign.ts    ~5 KiB  (presedensi `user` vs
+//                                                  `endpoint` agar `sync` tak
+//                                                  menimpa pilihan operator)
+//   cli/commands/config.ts                 ~7 KiB  (subperintah
+//                                                  `context-window` + tabel)
+//   src/policy/compaction.ts               ~4 KiB  (retry ringkasan LLM lewat
+//                                                  anggaran pemulihan bersama —
+//                                                  503 sesaat tidak lagi membuang
+//                                                  jalur LLM)
+//   src/ui/tui/transcript.ts + app.ts      ~2 KiB  (thinking satu baris per turn,
+//                                                  viewport stabil, alasan gagal
+//                                                  dipendekkan)
+//   test/context-window-manual.test.ts +
+//   test/tui-render-regressions.test.ts    ~3 KiB  (regresi fitur di atas —
+//                                                  ikut terkemas karena `files`
+//                                                  menyertakan `test/`? TIDAK:
+//                                                  tes tidak terkemas, jadi nol)
+// Tidak ada `node_modules`/artefak basi terbawa; `gate:pack` lolos seluruh cek
+// selain ukuran. Re-baseline ke 4.224 KiB (4,125 MiB) memberi ~23 KiB ruang di
+// atas aktual. Tetap alarm regresi, bukan target ukuran.
+export const PACK_SIZE_BUDGET_KIB = 4224
 
 /**
  * True bila ukuran paket (KiB) masih di dalam budget.

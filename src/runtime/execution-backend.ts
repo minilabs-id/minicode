@@ -163,6 +163,7 @@ export interface BackendHandle {
 }
 
 export interface BackendExecRequest {
+  readonly signal?: AbortSignal
   readonly cmd: string
   readonly cwd?: string
   readonly timeoutMs?: number
@@ -604,6 +605,7 @@ export function createBwrapBackend(): ExecutionBackend {
     "bwrap unavailable on this platform",
     (req) =>
       runInOsSandbox(req.cmd, req.cwd ?? process.cwd(), {
+        ...(req.signal ? { signal: req.signal } : {}),
         ...(req.timeoutMs !== undefined ? { timeoutMs: req.timeoutMs } : {}),
         ...(req.env ? { env: req.env } : {}),
       }),
@@ -617,6 +619,7 @@ export function createSeatbeltBackend(): ExecutionBackend {
     "seatbelt unavailable on this platform",
     (req) =>
       runInOsSandbox(req.cmd, req.cwd ?? process.cwd(), {
+        ...(req.signal ? { signal: req.signal } : {}),
         ...(req.timeoutMs !== undefined ? { timeoutMs: req.timeoutMs } : {}),
         ...(req.env ? { env: req.env } : {}),
       }),

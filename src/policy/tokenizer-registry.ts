@@ -72,6 +72,7 @@ export function getCachedTokenizer(modelId: string): BpeTokenizer | null {
  * + fire-and-forget: gagal jaringan = null (fallback estimator densitas/usage).
  */
 export async function loadTokenizer(modelId: string): Promise<BpeTokenizer | null> {
+  if (!tokenizersEnabled()) return null
   const cached = getCachedTokenizer(modelId)
   if (cached) return cached
   const repo = findTokenizerRepo(modelId)

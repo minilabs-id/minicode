@@ -176,6 +176,19 @@ function patchBlocks(patches: unknown): [string, string] {
   return [list.map((p) => p.search ?? "").join("\n"), list.map((p) => p.replace ?? "").join("\n")]
 }
 
+/** Tool yang baris `execution:completed`-nya sudah mencetak chevron + nama +
+ * target dengan bentuk sama seperti baris `execution:started`. Baris start
+ * dilewati untuk tool ini agar tidak tercetak duplikat.
+ *
+ * Sengaja daftar EKSPLISIT, bukan "semua tool": tool yang baris hasilnya tidak
+ * berbentuk chevron+nama+target tetap butuh baris start sebagai satu-satunya
+ * penanda "sedang berjalan". */
+function toolPrintsOwnCompletionLine(name: string, args: Record<string, unknown>): boolean {
+  if (name === "read_file" || name === "write_file") return typeof args.path === "string"
+  if (name === "edit_file" || name === "multi_edit_file") return typeof args.path === "string"
+  return false
+}
+
 export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => void {
   // Shadow module-level wOut/wErr: saat quiet, paint ditekan tapi SEMUA state
   // (rememberTurn, rememberCollapsedSection, pendingError, sanitizer) tetap jalan.
@@ -385,8 +398,22 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
       emitAnswer(`${rendered}\n`)
     }
   }
-  const flushTableStream = (): void => {
-    consumeTableEvents(tableStream.flush())
+  /**
+   * Selesaikan teks yang tertahan.
+   *
+   * `includePartial = false` dipakai saat menyisipkan baris ledger di TENGAH
+   * stream. `tableStream.flush()` mengeluarkan `lineBuffer` parsial sebagai
+   * baris utuh, sehingga satu baris markdown terpotong di titik event datang
+   * dan tiap potongan dibungkus ulang sendiri ("export const" / "multiply =" /
+   * "(a: number)" = gejala output pipa terfragmentasi).
+   * Tanpa itu, baris parsial tetap tertahan di `tableStream` sampai `
+`
+   * berikutnya tiba — urutan teks akhir tidak berubah.
+   * Default `true` untuk batas turn/teardown, di mana sisa parsial memang
+   * harus dicetak agar tidak hilang diam-diam.
+   */
+  const flushTableStream = (includePartial = true): void => {
+    if (includePartial) consumeTableEvents(tableStream.flush())
     if (plainLineBuffer) {
       flushLine(plainLineBuffer)
       plainLineBuffer = ""
@@ -442,9 +469,25 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
     if (provenance === "replay" || provenance === "reconstructed") parts.push(provenance)
     return parts.length > 0 ? ` ${c.muted(`[${parts.join(" · ")}]`)}` : ""
   }
+  /** Tulis satu baris ledger (status/verifikasi/cutoff) di tengah stream teks.
+   * `flushTableStream(false)` memaksa baris yang sudah lengkap keluar lebih
+   * dulu agar urutan baris benar, TANPA memotong baris yang belum selesai. */
+  const emitLedger = (line: string): void => {
+    // `false`: jangan keluarkan baris teks yang belum selesai.
+    flushTableStream(false)
+    wErr(line)
+  }
+
   const writePresentationTerminal = (event: UiPresentationEvent): void => {
     if (!presentationEnabled) return
-    flushTableStream()
+    // JANGAN flush di sini. `flushTableStream()` mengeluarkan `lineBuffer`
+    // parsial sebagai baris UTUH; dipanggil pada setiap presentation event
+    // (status task, clock, verifikasi, consequence) yang datang di tengah
+    // stream teks, ia memecah satu baris markdown menjadi potongan-potongan
+    // dan masing-masing dibungkus ulang sendiri — gejala "output pipa
+    // terfragmentasi" (satu baris kode jadi 3-4 baris acak).
+    // Flush hanya perlu tepat SEBELUM sebuah baris ledger ditulis, jadi
+    // ditangani oleh `ledgerLine` di bawah.
     // F-TASK-1: status task kanonik juga punya baris ledger di jalur linear
     // (scrollback non-TTY). Sebelum ini event hanya hidup di TUI + machine
     // envelope — pengguna `minicode exec`/pipe tak pernah melihatnya.
@@ -476,7 +519,7 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
             : raw === "COMPLETED"
               ? c.success(line)
               : c.muted(line)
-      wErr(`${paint}\n`)
+      emitLedger(`${paint}\n`)
       return
     }
     // Observasi verifikasi punya baris sendiri (dedup per invocation):
@@ -496,7 +539,7 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
         verification.verdict === "present"
           ? `  ${glyphs.arrow} ${name}${targetText} verified`
           : `  ? ${name}${targetText} unverified (${verification.verdict})`
-      wErr(`${verification.verdict === "present" ? c.success(line) : c.muted(line)}\n`)
+      emitLedger(`${verification.verdict === "present" ? c.success(line) : c.muted(line)}\n`)
       return
     }
     // P1.5: consequence/context diagnostics juga tampil di scrollback linear.
@@ -516,12 +559,12 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
           : verdict === "PASS"
             ? c.success(line)
             : c.warning(line)
-      wErr(`${paint}\n`)
+      emitLedger(`${paint}\n`)
       return
     }
     if (event.type === "context.cutoff") {
       const reason = event.reason ? `: ${sanitizeAnsiLine(String(event.reason))}` : ""
-      wErr(`${c.warning(`  ${glyphs.bullet} context cutoff${reason}`)}\n`)
+      emitLedger(`${c.warning(`  ${glyphs.bullet} context cutoff${reason}`)}\n`)
       return
     }
     if (event.type === "context.window") {
@@ -532,7 +575,7 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
         used != null
           ? ` ${used.toLocaleString()}${window ? `/${window.toLocaleString()}` : ""} tokens`
           : ""
-      wErr(`${c.muted(`  ${glyphs.bullet} context window${tokens}${pct}`)}\n`)
+      emitLedger(`${c.muted(`  ${glyphs.bullet} context window${tokens}${pct}`)}\n`)
       return
     }
     if (
@@ -563,7 +606,7 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
     const marker = runMarker(activity)
     const prefix = isChild ? `    ↳ ${marker ? `${marker} ` : ""}` : `  ${glyphs.arrow} `
     const line = `${prefix}${name}${targetText}${linearSuffix(activity)}${detail}`
-    wErr(paintLedger(status, `${line}\n`))
+    emitLedger(paintLedger(status, `${line}\n`))
   }
 
   const offs: (() => void)[] = []
@@ -812,10 +855,18 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
       }
       // Expanded: user melihat tool apa yang mulai berjalan SEBELUM hasilnya,
       // inline di aliran output — transparansi ala shell (`set -x`).
+      //
+      // KECUALI tool yang `execution:completed`-nya sudah mencetak baris dengan
+      // bentuk sama (chevron + nama + target). Dulu keduanya aktif bersamaan,
+      // sehingga satu `read_file` tampil dua kali berturut-turut persis sama.
+      // Baris hasil lebih kaya (membawa suffix durasi/status), jadi yang
+      // dibuang adalah baris start.
+      const startName = e.execution.call.name
       const args = (e.execution.call.args ?? {}) as Record<string, unknown>
+      if (toolPrintsOwnCompletionLine(startName, args)) return
       wErr(
         c.muted(
-          `  ${glyphs.arrow} ${sanitizeAnsiLine(e.execution.call.name)} ${sanitizeAnsiLine(formatArgsPreview(args))}\n`,
+          `  ${glyphs.arrow} ${sanitizeAnsiLine(startName)} ${sanitizeAnsiLine(formatArgsPreview(args))}\n`,
         ),
       )
     }),

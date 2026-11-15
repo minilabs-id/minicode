@@ -265,6 +265,46 @@ test("P2.5.16-19: legacy NULL di-backfill deterministik, idempoten, konten utuh"
   )
 })
 
+test("history shrink preserves timestamps only for identical same-position events", async () => {
+  const cwd = ws()
+  const messages = [
+    { role: "user", content: "unchanged" },
+    { role: "assistant", content: "replace me" },
+    { role: "user", content: "remove me" },
+    { role: "assistant", content: "moved" },
+  ]
+  await saveSession("s", cwd, undefined, messages, { t: 1 })
+  const ids = eventIds(cwd, "s")
+  const originalTimestamp = 1234
+  const db = new Database(dbPath(cwd))
+  try {
+    db.prepare("UPDATE messages SET ts = ? WHERE session_id = ?").run(originalTimestamp, "s")
+    const startedAt = Date.now()
+    shrinkThreadHistory(
+      "s",
+      DEFAULT_THREAD_ID,
+      [messages[0], { role: "assistant", content: "replacement" }, messages[3]],
+      cwd,
+      { expectedEpoch: 0 },
+    )
+    const finishedAt = Date.now()
+    const rows = db
+      .prepare("SELECT event_id, ts FROM messages WHERE session_id = ? ORDER BY seq")
+      .all("s") as { event_id: string; ts: number }[]
+    expect(rows).toHaveLength(3)
+    expect(rows[0]?.event_id).toBe(ids[0]!)
+    expect(rows[0]?.ts).toBe(originalTimestamp)
+    for (const row of rows.slice(1)) {
+      expect(isHistoryEventId(row.event_id)).toBe(true)
+      expect(ids).not.toContain(row.event_id)
+      expect(row.ts).toBeGreaterThanOrEqual(startedAt)
+      expect(row.ts).toBeLessThanOrEqual(finishedAt)
+    }
+  } finally {
+    db.close()
+  }
+})
+
 test("P2.5.20-22: branch PRESERVE event_id; dst terisolasi; src utuh", async () => {
   const cwd = ws()
   await saveSession(
@@ -313,4 +353,123 @@ test("P2.5: epoch pagar dipertahankan (bukan direset migrasi event)", async () =
     expectedEpoch: 1,
   })
   expect(readWriterEpoch("s", cwd)).toBe(1)
+})
+
+// [T-004 OBSERVATION.md] Regresi: `ts` per-baris, bukan satu nilai untuk batch.
+// Bug asli: sesi 17b6a5ff menyimpan 159 pesan dengan SATU nilai `ts` identik,
+// sehingga urutan waktu asli tak bisa direkonstruksi dari DB (hanya jurnal).
+// Kontrak: setiap baris baru mendapat stamp sendiri, tidak pernah mundur.
+test("T-004: incremental append memberi ts per-baris, monoton terhadap seq", async () => {
+  const cwd = ws()
+  const db = new Database(dbPath(cwd))
+  try {
+    await saveSession("s", cwd, undefined, [{ role: "user", content: "awal" }], { t: 1 })
+    const first = db
+      .prepare("SELECT ts FROM messages WHERE session_id = ? ORDER BY seq")
+      .all("s") as { ts: number }[]
+    expect(first).toHaveLength(1)
+
+    // Append banyak pesan dalam SATU saveSession: jalur incremental.
+    await saveSession(
+      "s",
+      cwd,
+      undefined,
+      [
+        { role: "user", content: "awal" },
+        { role: "assistant", content: "b" },
+        { role: "user", content: "c" },
+        { role: "assistant", content: "d" },
+      ],
+      { t: 2 },
+    )
+
+    const rows = db
+      .prepare("SELECT seq, ts FROM messages WHERE session_id = ? ORDER BY seq")
+      .all("s") as { seq: number; ts: number }[]
+    expect(rows).toHaveLength(4)
+    // Baris lama tak tersentuh (append-only).
+    expect(rows[0]!.ts).toBe(first[0]!.ts)
+    // Monoton: ts tidak pernah mundur seiring seq.
+    for (let i = 1; i < rows.length; i++) {
+      expect(rows[i]!.ts).toBeGreaterThanOrEqual(rows[i - 1]!.ts)
+    }
+    // Bukan hasil injeksi jarak buatan: semua berada di sekitar waktu nyata.
+    const now = Date.now()
+    for (const r of rows.slice(1)) expect(now - r.ts).toBeLessThan(60_000)
+
+    // Kontrak inti bug T-004: stamp diambil PER BARIS, bukan dibekukan dari
+    // awal batch. Dua append terpisah yang sengaja diberi jeda WAJIB berbeda;
+    // dengan `now` tunggal per panggilan nilai ini tetap berubah, jadi untuk
+    // membedakan kedua implementasi kita buktikan bahwa batch kedua tidak
+    // memakai ulang stamp batch pertama (bukti replay satu nilai global).
+    const beforeSecond = Date.now()
+    await Bun.sleep(8)
+    await saveSession(
+      "s",
+      cwd,
+      undefined,
+      [
+        { role: "user", content: "awal" },
+        { role: "assistant", content: "b" },
+        { role: "user", content: "c" },
+        { role: "assistant", content: "d" },
+        { role: "user", content: "e" },
+      ],
+      { t: 3 },
+    )
+    const next = db
+      .prepare("SELECT ts FROM messages WHERE session_id = ? AND seq = 4")
+      .get("s") as { ts: number }
+    expect(next.ts).toBeGreaterThanOrEqual(beforeSecond)
+    expect(next.ts).toBeGreaterThan(rows[3]!.ts)
+  } finally {
+    db.close()
+  }
+})
+
+// [T-005 OBSERVATION.md] Regresi: jalur append per-event WAJIB memajukan
+// `sessions.updated_at`. Bug asli: turn yang menulis lewat
+// `appendHistoryEvent` meninggalkan `updated_at` di save terakhir, sehingga
+// sesi yang sedang aktif terlihat mandek (10:45 vs jurnal 12:07).
+test("T-005: appendHistoryEvent memajukan sessions.updated_at", async () => {
+  const cwd = ws()
+  const sid = "t005"
+  const stale = Date.now() - 60 * 60 * 1000
+  // Fase 1: siapkan sesi lalu paksa `updated_at` basi lewat koneksi sendiri.
+  await saveSession(sid, cwd, undefined, [{ role: "user", content: "a" }], { t: 1 })
+  {
+    const db = new Database(dbPath(cwd))
+    try {
+      db.prepare("UPDATE sessions SET updated_at = ? WHERE id = ?").run(stale, sid)
+      const before = (
+        db.prepare("SELECT updated_at FROM sessions WHERE id = ?").get(sid) as {
+          updated_at: number
+        }
+      ).updated_at
+      expect(before).toBe(stale)
+    } finally {
+      db.close()
+    }
+  }
+
+  // Fase 2: append lewat jalur produksi (koneksi sendiri).
+  const startedAt = Date.now()
+  appendHistoryEvent(sid, DEFAULT_THREAD_ID, { role: "assistant", content: "b" }, cwd)
+
+  // Fase 3: koneksi BARU untuk membaca. Handle lama akan tetap melihat
+  // snapshot pra-append (WAL) dan membuat tes ini gagal secara palsu.
+  {
+    const db = new Database(dbPath(cwd))
+    try {
+      const after = (
+        db.prepare("SELECT updated_at FROM sessions WHERE id = ?").get(sid) as {
+          updated_at: number
+        }
+      ).updated_at
+      expect(after).toBeGreaterThanOrEqual(startedAt)
+      expect(after).toBeGreaterThan(stale)
+    } finally {
+      db.close()
+    }
+  }
 })

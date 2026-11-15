@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { publicHttp } from "../src/lib/public-http.ts"
 import { gitDiffTool } from "../src/tools/git.ts"
 import { webFetchTool } from "../src/tools/web_fetch.ts"
 
@@ -24,8 +25,8 @@ test("F-15: error body 200KB hanya jadi snippet ≤ ~1k, tanpa buffer penuh", as
   const chunk = "x".repeat(10_000)
   let n = 0
   let cancelled = false
-  const origFetch = globalThis.fetch
-  globalThis.fetch = (async () =>
+  const origFetch = publicHttp.fetch
+  publicHttp.fetch = (async () =>
     new Response(
       new ReadableStream({
         pull(controller) {
@@ -49,7 +50,7 @@ test("F-15: error body 200KB hanya jadi snippet ≤ ~1k, tanpa buffer penuh", as
     expect(msg.length).toBeLessThan(2000)
     expect(cancelled).toBe(true)
   } finally {
-    globalThis.fetch = origFetch
+    publicHttp.fetch = origFetch
   }
 })
 

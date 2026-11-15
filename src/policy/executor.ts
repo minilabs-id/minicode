@@ -74,7 +74,12 @@ function makeWaiter(
 }
 
 export function parallelExecutor(
-  opts: { concurrency?: number; writeConcurrency?: number; maxToolsPerBatch?: number } = {},
+  opts: {
+    concurrency?: number
+    writeConcurrency?: number
+    maxToolsPerBatch?: number
+    getAuthorizationVersion?: () => number
+  } = {},
 ): ToolExecutor {
   const concurrency = opts.concurrency ?? LIMITS.EXECUTOR_CONCURRENCY
   const writeConcurrency = opts.writeConcurrency ?? LIMITS.EXECUTOR_WRITE_CONCURRENCY
@@ -84,6 +89,33 @@ export function parallelExecutor(
   // Mencegah eksekusi berlebih dalam satu batch (Live Test: model mengirim
   // puluhan tool call sekaligus yang membakar budget tanpa hasil berguna).
   const maxToolsPerBatch = opts.maxToolsPerBatch ?? 0
+
+  // Wrap only the per-call registry lookup; keep the live session tool array intact.
+  function invoke(call: ToolCall, deps: ExecutorDeps) {
+    const version = opts.getAuthorizationVersion?.()
+    return runCall(call, {
+      ...deps,
+      registry: {
+        list: () => deps.registry.list(),
+        get: (name) => {
+          const tool = deps.registry.get(name)
+          if (!tool) return undefined
+          return {
+            ...tool,
+            execute(args, ctx) {
+              ctx.signal.throwIfAborted()
+              if (version !== opts.getAuthorizationVersion?.()) {
+                throw new Error(
+                  "authorization changed before tool execution; request fresh approval",
+                )
+              }
+              return tool.execute(args, ctx)
+            },
+          }
+        },
+      },
+    })
+  }
 
   async function runBatch(
     calls: readonly ToolCall[],
@@ -138,7 +170,7 @@ export function parallelExecutor(
       for (let i = 0; i < calls.length; i++) {
         if (deps.signal.aborted) throw abortError(deps.signal)
         const c = calls[i]!
-        results[i] = await runCall(c, depsFor(c))
+        results[i] = await invoke(c, depsFor(c))
       }
       return results as ToolResult[]
     }
@@ -155,27 +187,10 @@ export function parallelExecutor(
     // abort datang, tanpa menunggu tool selesai.
     const anyUnkeyedWrite = calls.some((c) => isWrite(c) && getLockPath(c, deps.cwd) === null)
     if (anyWrite && anyUnkeyedWrite) {
-      const signal = deps.signal
-      let onAbort: (() => void) | undefined
-      const aborted = new Promise<never>((_, reject) => {
-        onAbort = () => reject(abortError(signal))
-        if (signal.aborted) onAbort()
-        else signal.addEventListener("abort", onAbort, { once: true })
-      })
-      try {
-        await Promise.race([
-          (async () => {
-            for (let i = 0; i < calls.length; i++) {
-              if (signal.aborted) throw abortError(signal)
-              const c = calls[i]!
-              results[i] = await runCall(c, depsFor(c))
-            }
-          })(),
-          aborted,
-        ])
-      } finally {
-        // lepas listener agar signal jangka panjang tidak menumpuk listener
-        if (onAbort) signal.removeEventListener("abort", onAbort)
+      for (let i = 0; i < calls.length; i++) {
+        if (deps.signal.aborted) throw abortError(deps.signal)
+        const call = calls[i]!
+        results[i] = await invoke(call, depsFor(call))
       }
       return results as ToolResult[]
     }
@@ -264,7 +279,7 @@ export function parallelExecutor(
                 throw e
               }
             }
-            const res = await runCall(call, depsFor(call))
+            const res = await invoke(call, depsFor(call))
             results[idx] = res
           } finally {
             if (held) {
@@ -274,8 +289,35 @@ export function parallelExecutor(
           }
         }
       })
-    await Promise.all(workers)
+    // Drain every worker before releasing the batch exclusion, including when
+    // queued workers abort while another tool is still ignoring cancellation.
+    const outcomes = await Promise.allSettled(workers)
+    const failed = outcomes.find((outcome) => outcome.status === "rejected")
+    if (failed?.status === "rejected") throw failed.reason
     return results as ToolResult[]
+  }
+
+  // A cancelled caller may return while an extension ignores its signal.
+  // Keep subsequent batches behind actual completion, retaining all locks.
+  let drained: Promise<void> = Promise.resolve()
+  async function dispatch(calls: readonly ToolCall[], deps: ExecutorDeps) {
+    if (deps.signal.aborted) throw abortError(deps.signal)
+    const running = drained.then(() => runBatch(calls, deps))
+    drained = running.then(
+      () => {},
+      () => {},
+    )
+    let onAbort!: () => void
+    const cancelled = new Promise<never>((_, reject) => {
+      onAbort = () => reject(abortError(deps.signal))
+      deps.signal.addEventListener("abort", onAbort, { once: true })
+      if (deps.signal.aborted) onAbort()
+    })
+    try {
+      return await Promise.race([running, cancelled])
+    } finally {
+      deps.signal.removeEventListener("abort", onAbort)
+    }
   }
 
   return {
@@ -285,7 +327,7 @@ export function parallelExecutor(
       if (maxToolsPerBatch > 0 && calls.length > maxToolsPerBatch) {
         const kept = calls.slice(0, maxToolsPerBatch)
         const results: (ToolResult | undefined)[] = new Array(calls.length)
-        const trimmed = await runBatch(kept, deps)
+        const trimmed = await dispatch(kept, deps)
         for (let i = 0; i < trimmed.length; i++) results[i] = trimmed[i]
         for (let i = maxToolsPerBatch; i < calls.length; i++) {
           results[i] = {
@@ -298,7 +340,7 @@ export function parallelExecutor(
         }
         return results as ToolResult[]
       }
-      return runBatch(calls, deps)
+      return dispatch(calls, deps)
     },
   }
 }

@@ -1212,9 +1212,18 @@ export async function saveSession(
       // P2.5: tiap baris baru mendapat event_id fresh SATU KALI di sini;
       // save ulang identik = no-op (prefixSame) sehingga id stabil.
       // P2.6: baris baru dicap run_id pemanggil (bila ada).
+      //
+      // [T-004 OBSERVATION] `ts` WAJIB per-baris, bukan satu `now` untuk seluruh
+      // batch. Dengan satu nilai, seluruh riwayat yang tersimpan lewat jalur ini
+      // berbagi timestamp identik (sesi 17b6a5ff: 159 pesan / 1 nilai) sehingga
+      // linimasa tidak bisa direkonstruksi dari DB sama sekali. Penjaga monotonic
+      // mempertahankan invariant yang selama ini tak sengaja berlaku: ts tidak
+      // pernah mundur terhadap seq (jam sistem bisa mundur/NTP koreksi).
+      let stamp = now
       for (let i = known; i < messages.length; i++) {
         const m = messages[i] as StoredMsg
         const w = normalizeMessageTupleForDedup(m)
+        stamp = Math.max(stamp, Date.now())
         ins.run(
           id,
           tid,
@@ -1226,7 +1235,7 @@ export async function saveSession(
           w[4],
           w[5],
           w[6],
-          now,
+          stamp,
           allocateHistoryEventId(),
           opts?.runId ?? null,
         )
@@ -2825,6 +2834,12 @@ export function appendHistoryEvent(
         opts?.runId ?? null,
       )
       recomputeThreadHeadInTxn(db, sessionId, threadId)
+      // [T-005 OBSERVATION] `updated_at` sesi ikut maju di sini. Sebelumnya
+      // hanya `saveSession` yang menyentuhnya, padahal turn berjalan pasca-
+      // kompaksi menulis lewat jalur per-event ini — akibatnya `updated_at`
+      // mandek di save terakhir (sesi 17b6a5ff: 10:45 vs jurnal 12:07) dan
+      // setiap konsumen yang memakainya sebagai "terakhir aktif" salah.
+      db.prepare("UPDATE sessions SET updated_at = ? WHERE id = ?").run(now, sessionId)
       // P2.6: event + kursor dalam SATU txn yang sama. Jalur append per-event
       // tak boleh jadi celah "event durable tapi kursor basi".
       if (opts?.runId !== undefined) {
@@ -3675,7 +3690,7 @@ export function shrinkThreadHistory(
       const oldHead = threadHeadInTxn(db, sessionId, threadId)
       const stored = db
         .prepare(
-          "SELECT seq, role, content, toolCalls, toolCallId, name, reasoning, is_error, event_id, run_id, migrated, migrated_compacted, projection_note FROM messages WHERE session_id = ? AND thread_id = ? ORDER BY seq",
+          "SELECT seq, role, content, toolCalls, toolCallId, name, reasoning, is_error, ts, event_id, run_id, migrated, migrated_compacted, projection_note FROM messages WHERE session_id = ? AND thread_id = ? ORDER BY seq",
         )
         .all(sessionId, threadId) as {
         seq: number
@@ -3686,6 +3701,7 @@ export function shrinkThreadHistory(
         name: string | null
         reasoning: string | null
         is_error: number | null
+        ts: number | null
         event_id: string | null
         run_id: string | null
         migrated: number
@@ -3726,7 +3742,7 @@ export function shrinkThreadHistory(
             w[4],
             w[5],
             w[6],
-            now,
+            got.ts,
             got.event_id ?? allocateHistoryEventId(),
             got.run_id,
             got.migrated,

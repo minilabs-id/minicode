@@ -10,6 +10,10 @@ import { sanitizeAnsiLine } from "../../src/ui/render/sanitize.ts"
 import { renderTable } from "../../src/ui/render/table.ts"
 import { c, glyphs } from "../../src/ui/render/theme.ts"
 
+// Akhiran baris untuk tabel yang dicetak bersama judul. Konstanta bernama
+// (bukan `"\n"` lepas) supaya tidak tertukar dengan escape di template literal.
+const NEWLINE = "\n"
+
 // Help kontekstual per subcommand. Sebelumnya ketiga cabang ini mencetak HELP
 // global 45 baris dan exit 0 — user tidak tahu apa yang salah dan skrip tidak
 // bisa mendeteksi kegagalan.
@@ -19,6 +23,10 @@ const CONFIG_HELP = `minicode config — provider, MCP, and LSP
   minicode config list
   minicode config remove <id> [--global|--local]
   minicode config detect --baseUrl <url> --apiKey <key>
+  minicode config context-window                          list all explicit windows
+  minicode config context-window <provider>               windows of one provider
+  minicode config context-window <provider> <model> <v>   set (128k, 200k, 1m, 1024x1024)
+  minicode config context-window <provider> <model> auto  back to auto-detection
   minicode config set-key <id> [--global|--local]      move API key to OS store (DPAPI on Windows)
   minicode config delete-key <id>                      forget stored key (provider stays disabled)
 
@@ -150,6 +158,121 @@ export async function handleConfig(
     console.log(
       `${c.green(glyphs.check)} Removed provider ${sanitizeAnsiLine(id)} (${!args.includes("--local") ? "global" : "local"})`,
     )
+    process.exit(0)
+  } else if (sub === "context-window") {
+    // Jendela konteks MANUAL untuk model yang providernya tidak melaporkan
+    // kapasitas. Tanpa ini satu-satunya jalan adalah mengedit JSON dan menebak
+    // angka; salah tebak ke atas = request ditolak 400 di tengah turn, ke bawah
+    // = kompaksi prematur.
+    //
+    // Bentuk:
+    //   minicode config context-window                     → daftar semua nilai
+    //   minicode config context-window <provider>          → nilai provider itu
+    //   minicode config context-window <provider> <model> <nilai>
+    //   minicode config context-window <provider> <model> auto   → kembali deteksi
+    const pid = positionalArg(args, 2)
+    const model = positionalArg(args, 3)
+    const value = positionalArg(args, 4)
+    const { assignContextWindow, summarizeContextWindows } = await import(
+      "../../src/policy/context-window-assign.ts"
+    )
+    const { describeContextWindow } = await import("../../src/policy/context-window-presets.ts")
+    const global = !args.includes("--local")
+    const cwdArg = getArg("--cwd")
+    // Config dimuat lokal untuk cabang ini: daftar/nilai harus mencerminkan
+    // berkas yang benar-benar akan ditulis (global vs lokal), sama seperti
+    // cabang `add`/`remove`.
+    const cfg = await loadConfig(cwdArg, { allowLocal: allowLocalHere(args) })
+
+    if (!pid) {
+      // Daftar ringkas seluruh provider: model mana yang punya nilai eksplisit.
+      const rows = cfg.providers.flatMap((p) =>
+        summarizeContextWindows(p).map((w) => ({
+          provider: p.id,
+          model: w.model === "*" ? c.dim("* (default)") : w.model,
+          window: describeContextWindow(w.tokens),
+          source: w.source === "user" ? c.cyan("manual") : c.dim(w.source),
+        })),
+      )
+      if (rows.length === 0) {
+        console.log(
+          `${c.dim("no explicit context windows — all models use automatic detection")}\n` +
+            `  ${c.dim("set one: minicode config context-window <provider> <model> 128k")}`,
+        )
+        process.exit(0)
+      }
+      console.log(
+        `
+${c.bold("Context windows")}
+` +
+          renderTable(
+            [
+              { header: "Provider", key: "provider", width: 18 },
+              { header: "Model", key: "model", width: 30 },
+              { header: "Window", key: "window", width: 10, align: "right" },
+              { header: "Origin", key: "source", width: 10 },
+            ],
+            rows,
+          ) +
+          NEWLINE,
+      )
+      process.exit(0)
+    }
+
+    const provider = cfg.providers.find((p) => p.id === pid)
+    if (!provider) {
+      console.error(`provider ${c.bold(sanitizeAnsiLine(pid))} not found — see: minicode providers`)
+      process.exit(1)
+    }
+
+    if (!model || !value) {
+      const rows = summarizeContextWindows(provider).map((w) => ({
+        model: w.model === "*" ? c.dim("* (default)") : sanitizeAnsiLine(w.model),
+        window: describeContextWindow(w.tokens),
+        source: w.source === "user" ? c.cyan("manual") : c.dim(w.source),
+      }))
+      if (rows.length === 0)
+        console.log(`${c.dim(`${provider.id}: no explicit windows (automatic detection)`)}`)
+      else
+        console.log(
+          `
+${c.bold(`Context windows — ${sanitizeAnsiLine(provider.id)}`)}
+` +
+            renderTable(
+              [
+                { header: "Model", key: "model", width: 34 },
+                { header: "Window", key: "window", width: 10, align: "right" },
+                { header: "Origin", key: "source", width: 10 },
+              ],
+              rows,
+            ) +
+            NEWLINE,
+        )
+      console.log(
+        `  ${c.dim(
+          `set: minicode config context-window ${sanitizeAnsiLine(provider.id)} <model> <128k|1m|1024x1024|auto>`,
+        )}`,
+      )
+      process.exit(0)
+    }
+
+    const outcome = assignContextWindow(provider, model, value)
+    if (!outcome.ok) {
+      console.error(`${c.red(glyphs.cross ?? "x")} ${outcome.error}`)
+      process.exit(1)
+    }
+    const { saveProvider } = await import("../../src/providers/provision.ts")
+    await saveProvider(outcome.provider, { global, ...(cwdArg ? { cwd: cwdArg } : {}) })
+    const shown = sanitizeAnsiLine(model)
+    const where = global ? "global" : "local"
+    if (outcome.tokens === null) {
+      console.log(`${c.green(glyphs.check)} ${shown}: back to automatic detection (${where})`)
+    } else {
+      console.log(
+        `${c.green(glyphs.check)} ${shown}: ${describeContextWindow(outcome.tokens)} ` +
+          `(${outcome.tokens.toLocaleString("en-US")} tokens) — ${where}`,
+      )
+    }
     process.exit(0)
   } else if (sub === "set-key" || sub === "delete-key") {
     // Pindahkan API key provider dari config plaintext ke penyimpanan OS

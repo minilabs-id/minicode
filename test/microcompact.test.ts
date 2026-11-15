@@ -178,3 +178,77 @@ describe("applyMicrocompact: gating tiga syarat", () => {
     expect(r.savedTokens).toBeGreaterThan(0)
   })
 })
+
+// Celah yang ditemukan saat remediasi OBSERVATION.md: sentinel selalu
+// menyuruh "jalankan ulang", padahal `bash` dapat memutasi workspace.
+// Mengulang perintah yang sudah dieksekusi bisa menduplikasi efek destructif.
+describe("applyMicrocompact: instruksi sentinel sadar-mutasi", () => {
+  test("tool baca tetap menyuruh menjalankan ulang (aman, idempoten)", () => {
+    const messages = buildTurns(12, { toolName: "read_file" })
+    const r = applyMicrocompact(messages, { estimateTokens: est, keepRecent: 5 })
+    const first = r.messages.filter((m) => m.role === "tool")[0]!
+    expect(String(first.content)).toMatch(/Jalankan ulang/)
+    expect(String(first.content)).not.toMatch(/JANGAN jalankan ulang/)
+  })
+
+  test("bash TIDAK menyuruh menjalankan ulang: verifikasi state lebih dulu", () => {
+    const messages = buildTurns(12, { toolName: "bash" })
+    const r = applyMicrocompact(messages, { estimateTokens: est, keepRecent: 5 })
+    expect(r.clearedCount).toBeGreaterThan(0)
+    const first = r.messages.filter((m) => m.role === "tool")[0]!
+    const text = String(first.content)
+    expect(text.startsWith(MICROCOMPACT_SENTINEL_PREFIX)).toBe(true)
+    expect(text).toMatch(/JANGAN jalankan ulang/)
+    expect(text).not.toMatch(/Jalankan ulang tool ini bila isinya masih dibutuhkan/)
+  })
+
+  test("bash yang gagal tetap memperingatkan duplikasi efek", () => {
+    const messages = buildTurns(12, { toolName: "bash" })
+    // Tandai semua hasil bash lama sebagai gagal.
+    for (const m of messages) {
+      if (m.role === "tool") (m as { isError?: boolean }).isError = true
+    }
+    const r = applyMicrocompact(messages, { estimateTokens: est, keepRecent: 5 })
+    const first = r.messages.filter((m) => m.role === "tool")[0]!
+    const text = String(first.content)
+    expect(text).toMatch(/gagal/)
+    expect(text).toMatch(/JANGAN jalankan ulang/)
+  })
+
+  test("tool baca yang terdaftar kontrak tetap aman diulang", () => {
+    // Hanya tool yang TERDAFTAR di registry kontrak dengan journalMutation=false
+    // yang dijamin idempoten. `list_dir` sengaja tidak diuji di sini: ia tidak
+    // ada di registry, jadi klasifikasinya `unknown` → fail-closed → dianggap
+    // bisa memutasi. Itu perilaku yang benar, bukan celah.
+    for (const name of ["grep", "glob", "read_file", "web_search"]) {
+      const messages = buildTurns(12, { toolName: name })
+      const r = applyMicrocompact(messages, { estimateTokens: est, keepRecent: 5 })
+      const first = r.messages.filter((m) => m.role === "tool")[0]!
+      expect(String(first.content)).toMatch(/Jalankan ulang/)
+    }
+  })
+
+  test("tool tak terdaftar di daftar recoverable tidak pernah dipangkas", () => {
+    // `list_dir`/`view_file` dulu ada di daftar manual sebagai tool FIKTIF
+    // (tidak pernah ada di registry). Sekarang daftar diturunkan dari kontrak,
+    // jadi nama asing tidak lagi dianggap dapat dipulihkan.
+    for (const name of ["list_dir", "view_file", "tidak_ada_tool"]) {
+      expect(MICROCOMPACT_RECOVERABLE_TOOLS.has(name)).toBe(false)
+      const messages = buildTurns(12, { toolName: name })
+      const r = applyMicrocompact(messages, { estimateTokens: est, keepRecent: 5 })
+      expect(r.clearedCount).toBe(0)
+      expect(r.skippedReason).toBe("no-candidates")
+    }
+  })
+
+  test("tool baca yang dulu hilang dari daftar kini ikut dipangkas", () => {
+    // `git_diff` bisa 500k karakter; sebelumnya tak pernah menyusut karena
+    // daftar manualnya tidak memuatnya.
+    for (const name of ["git_diff", "git_log", "git_status", "read_image"]) {
+      expect(MICROCOMPACT_RECOVERABLE_TOOLS.has(name)).toBe(true)
+      const messages = buildTurns(12, { toolName: name })
+      const r = applyMicrocompact(messages, { estimateTokens: est, keepRecent: 5 })
+      expect(r.clearedCount).toBeGreaterThan(0)
+    }
+  })
+})

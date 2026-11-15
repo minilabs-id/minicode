@@ -3,6 +3,10 @@ import { mkdir, readFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { atomicWriteText } from "./lib/atomic-write.ts"
 import { homeDir } from "./lib/db-path.ts"
+import {
+  isValidContextWindowValue,
+  parseContextWindowInput,
+} from "./policy/context-window-presets.ts"
 
 // In-process lock per path untuk mencegah lost-update saat Pool(3) sub-agent
 // menulis config yang sama secara paralel. Untuk lintas proses, atomicWriteText
@@ -216,14 +220,21 @@ export function normalizeConfig(raw: unknown): MinicodeConfig {
           const validContextWindows: Record<string, number> = {}
           if (source && typeof source === "object" && !Array.isArray(source)) {
             for (const [model, tokens] of Object.entries(source as Record<string, unknown>)) {
-              if (
-                (model === "*" || model.length > 0) &&
-                typeof tokens === "number" &&
-                Number.isSafeInteger(tokens) &&
-                tokens > 0 &&
-                tokens <= 20_000_000
-              ) {
-                validContextWindows[model] = tokens
+              if (model !== "*" && model.length === 0) continue
+              // Nilai boleh ANGKA atau STRING preset (`"128k"`, `"1M"`,
+              // `"1024x1024"`). String diterima karena itulah yang ditulis
+              // pengguna/perintah `minicode model context-window` untuk model
+              // yang providernya tidak melaporkan kapasitas; memaksa JSON
+              // berisi angka mentah membuat satu salah ketik menghasilkan
+              // jendela yang salah tanpa penjelasan. `"auto"` = hapus nilai.
+              if (typeof tokens === "number") {
+                if (isValidContextWindowValue(tokens)) validContextWindows[model] = tokens
+                continue
+              }
+              if (typeof tokens === "string") {
+                const parsed = parseContextWindowInput(tokens)
+                if (parsed !== undefined && isValidContextWindowValue(parsed))
+                  validContextWindows[model] = parsed
               }
             }
           }

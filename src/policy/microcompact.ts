@@ -1,4 +1,5 @@
 import type { Message } from "#minicore/core/types.ts"
+import { classifyContractTool, TOOL_CONTRACTS } from "./tool-contract.ts"
 
 /**
  * Microcompact — pangkas ISI hasil tool lama jadi sentinel pendek: tanpa
@@ -18,25 +19,78 @@ import type { Message } from "#minicore/core/types.ts"
  * mendominasi, (c) bukan di tengah batch tool yang belum selesai.
  */
 
-/** Tool yang hasilnya DAPAT dipulihkan (dibaca ulang kapan saja). Tool
- * kontrol-sesi (`todo`, `memory`) SENGAJA tidak masuk: isinya keadaan yang tak
- * bisa direkonstruksi dari filesystem — memangkasnya menghapus kebenaran. */
-export const MICROCOMPACT_RECOVERABLE_TOOLS: ReadonlySet<string> = new Set([
-  "read_file",
-  "grep",
-  "glob",
-  "bash",
-  "bash_output",
-  "code_run",
-  "web_fetch",
-  "web_search",
-  "list_dir",
-  "view_file",
+/**
+ * Tool yang isinya adalah KEBENARAN yang tak dapat direkonstruksi: hasilnya
+ * keadaan sesi (rencana, memori, hasil tugas), bukan observasi filesystem.
+ * Memangkasnya membuat model kehilangan fakta tanpa cara memulihkannya.
+ *
+ * Diletakkan SEBELUM daftar turunan di bawah: `const` bersifat TDZ, jadi
+ * membacanya dari initializer yang lebih awal akan melempar ReferenceError.
+ */
+const MICROCOMPACT_NEVER_TRIM: ReadonlySet<string> = new Set([
+  "todo_read",
+  "todo_write",
+  "write_memory",
+  "read_memory",
+  "forget_memory",
+  "submit_result",
+  "ask_user",
 ])
+
+/**
+ * Tool yang hasilnya boleh dipangkas meskipun TIDAK `PURE_READ`.
+ *
+ * KENAPA ada: `bash`/`code_run` bertier `LOCAL_ENV_MUTATION` (bisa menulis
+ * berkas), jadi tidak bisa dimasukkan lewat predikat baca-murni. Tetapi
+ * keduanya penyumbang token TERBESAR di lapangan; mengeluarkannya berarti
+ * konteks tak pernah menyusut justru di bagian yang paling gemuk. Mereka aman
+ * dipangkas karena sentinel-nya memakai varian "JANGAN jalankan ulang" — model
+ * diberi tahu untuk memverifikasi state, bukan mengulang efek sampingnya.
+ */
+const MICROCOMPACT_TRIMMABLE_MUTATORS: ReadonlySet<string> = new Set(["bash", "code_run"])
+
+/** Tool yang hasilnya DAPAT dipulihkan (dibaca ulang kapan saja). Tool
+ * bisa direkonstruksi dari filesystem — memangkasnya menghapus kebenaran.
+ *
+ * [Perbaikan microcompact] Daftar ini DITURUNKAN dari kontrak tool, bukan
+ * diketik manual. Daftar manual sebelumnya menyimpang dua arah sekaligus: memuat
+ * tool yang TIDAK PERNAH ADA (`list_dir`, `view_file`) dan melewatkan tool baca
+ * nyata yang outputnya besar (`git_diff` sampai 500k karakter, `git_log`,
+ * `read_image`, `lsp_diagnostics`). Itu berarti hasil terbesar di sesi tidak
+ * pernah bisa dipangkas; sekarang himpunan ini mengikuti registry yang sama
+ * dengan jurnal dan permission.
+ *
+ * Kriteria: tier `PURE_READ` ATAU baca jaringan yang `allowedInReadonly` ATAU
+ * pemutasi yang hasilnya dominan (`bash`, `code_run`), DAN BUKAN tool
+ * kontrol-sesi (yang keadaannya tak dapat direkonstruksi). */
+export const MICROCOMPACT_RECOVERABLE_TOOLS: ReadonlySet<string> = new Set(
+  TOOL_CONTRACTS.filter(
+    (c) =>
+      !MICROCOMPACT_NEVER_TRIM.has(c.name) &&
+      (MICROCOMPACT_TRIMMABLE_MUTATORS.has(c.name) ||
+        (c.journalMutation === false && (c.sideEffectTier === "PURE_READ" || c.allowedInReadonly))),
+  ).map((c) => c.name),
+)
 
 /** Awalan sentinel. Stabil supaya bisa dikenali ulang (idempoten) dan supaya
  * model tahu isinya dipangkas, bukan kosong. */
 export const MICROCOMPACT_SENTINEL_PREFIX = "[hasil tool lama dipangkas"
+
+/**
+ * Apakah mengulang tool ini berbahaya?
+ *
+ * KENAPA ini ada: sentinel menyuruh model "jalankan ulang tool ini", instruksi
+ * yang BENAR untuk tool baca (idempoten, hasilnya bisa dipulihkan) tetapi
+ * SALAH untuk tool yang memutasi. `bash` ada di daftar recoverable karena ia
+ * penyumbang token terbesar, padahal isinya bisa `rm`, migrasi, atau tulis file:
+ * mengulangnya menduplikasi efek samping. `unknown` diperlakukan sama dengan
+ * `mutation` (fail-closed) — tool yang lupa didaftarkan tidak boleh dianggap
+ * aman untuk diulang.
+ */
+function replayIsUnsafe(toolName: string | undefined): boolean {
+  if (toolName === undefined) return true
+  return classifyContractTool(toolName) !== "none"
+}
 
 export interface MicrocompactOptions {
   /** Hasil tool TERBARU yang dipertahankan utuh. Default 5. */
@@ -145,7 +199,14 @@ export function applyMicrocompact(
     const m = messages[idx] as Extract<Message, { role: "tool" }>
     const original = contentText(m.content)
     const wasError = m.isError === true
-    const sentinel = `${MICROCOMPACT_SENTINEL_PREFIX}: ${m.name} ${original.length} char${wasError ? ", gagal" : ""}. Jalankan ulang tool ini bila isinya masih dibutuhkan.]`
+    // Dua teks berbeda untuk dua situasi berbeda. Tool baca: aman diulang.
+    // Tool bermutasi: JANGAN diulang — verifikasi dulu, karena mengulang bisa
+    // menduplikasi efek (`rm`, tulis file, migrasi). Tanpa pemisahan ini model
+    // menerima instruksi berbahaya hanya karena hasilnya panjang.
+    const hint = replayIsUnsafe(m.name)
+      ? `JANGAN jalankan ulang${wasError ? " (panggilan ini sudah gagal)" : ""}: tool ini dapat mengubah state (berkas/lingkungan), mengulangnya bisa menduplikasi efek. Verifikasi state lebih dulu (mis. baca berkas/hasil) sebelum mengulang.`
+      : "Jalankan ulang tool ini bila isinya masih dibutuhkan."
+    const sentinel = `${MICROCOMPACT_SENTINEL_PREFIX}: ${m.name} ${original.length} char${wasError ? ", gagal" : ""}. ${hint}]`
     // Hemat = token asli - token sentinel (sentinel tetap memakan token).
     const saving = opts.estimateTokens(original) - opts.estimateTokens(sentinel)
     out[idx] = { ...m, content: sentinel }

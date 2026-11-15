@@ -8,7 +8,9 @@ import { createProviderLayer } from "../src/app/provider-layer.ts"
 import { createRagLayer } from "../src/app/rag-layer.ts"
 import {
   createMinicodeSession,
+  createRecoveryLedger,
   type PermissionControl,
+  type RecoveryLedger,
   type WorkModeControl,
 } from "../src/app/session.ts"
 import { setupToolLayer } from "../src/app/tool-layer.ts"
@@ -32,6 +34,11 @@ import { loadContextWindowOverlay, resolveContextWindow } from "../src/policy/co
 import type { NoProgressDetector } from "../src/policy/no-progress.ts"
 import type { PermissionAsk } from "../src/policy/permission.ts"
 import type { RateLimiter } from "../src/policy/ratelimit.ts"
+import {
+  type FailureSignal,
+  planRecovery,
+  type RecoveryDecision,
+} from "../src/policy/recovery-budget.ts"
 import {
   budgetExceededError,
   createUsageCollector,
@@ -1261,7 +1268,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       if (!warnedContextModels.has(key)) {
         warnedContextModels.add(key)
         startupWrite(
-          `${c.yellow(`[context] no configured window for ${sanitizeAnsi(key)}; using fallback ${resolved.tokens} tokens. Set provider.contextWindows or --context-window for the exact limit.\n`)}`,
+          `${c.yellow(`[context] no configured window for ${sanitizeAnsi(key)}; using fallback ${resolved.tokens} tokens. Set it with: minicode config context-window ${resolved.providerId ?? "<provider>"} ${resolved.model ?? "<model>"} 128k\n`)}`,
         )
       }
     }
@@ -1274,7 +1281,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       if (!warnedCatalogDrift.has(key)) {
         warnedCatalogDrift.add(key)
         startupWrite(
-          `${c.yellow(`[context] catalog window ${resolved.drift.catalogTokens} for ${sanitizeAnsi(key)} differs >2x from models.dev (${resolved.drift.overlayTokens}); catalog may be stale — run \`minicode pricing sync\` or set provider.contextWindows.\n`)}`,
+          `${c.yellow(`[context] catalog window ${resolved.drift.catalogTokens} for ${sanitizeAnsi(key)} differs >2x from models.dev (${resolved.drift.overlayTokens}); using ${resolved.tokens} tokens (${resolved.source}). Set provider.contextWindows for an endpoint-specific limit.\n`)}`,
         )
       }
     }
@@ -1968,17 +1975,14 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     const v = opts.writeConcurrency
     return typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : undefined
   })()
-  // Muat state.json.lang LEBIH AWAL (tui.ts memuatnya setelah sesi terbangun) agar
-  // direktif chat di system prompt ikut pilihan user; resolusi tetap currentLocale().
-  const { currentLocale, setConfigLocale } = await import("../src/ui/i18n/locale.ts")
+  // Muat bahasa label UI lebih awal; bahasa balasan mengikuti percakapan pengguna.
+  const { setConfigLocale } = await import("../src/ui/i18n/locale.ts")
   setConfigLocale((await loadLang().catch(() => undefined)) ?? null)
-  const sessionLang = currentLocale()
   const session = await startupPhase("kernel-session", () =>
     createMinicodeSession({
       provider: router,
       tools: sessionTools,
       cwd,
-      lang: sessionLang,
       permissionMode,
       restrictBash,
       allowLocalConfig,
@@ -2768,11 +2772,106 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
         : deadline.signal
       : signal
     try {
-      return await runPromptWithVerifyImpl(p, runSignal)
+      // [T-009 OBSERVATION.md] Resume otomatis untuk kegagalan TRANSIEN.
+      //
+      // KENAPA memakai LEDGER BERSAMA: retry provider (lapisan recovery) dan
+      // resume turn (di sini) adalah dua lapisan. Memberi masing-masing anggaran
+      // sendiri membuat biayanya BERKALI — pola *retry amplification* yang
+      // menahan user ~82 dtk untuk provider yang mati. Satu ledger per prompt
+      // berarti satu anggaran waktu dan satu kuota percobaan dipakai bersama,
+      // sehingga biaya total konstan berapa pun lapisannya.
+      const ledger = createRecoveryLedger()
+      for (;;) {
+        try {
+          return await runPromptWithVerifyImpl(p, runSignal)
+        } catch (error) {
+          const failure = classifyFailure(error, {
+            userAborted: signal?.aborted === true && deadline.signal?.aborted !== true,
+          })
+          const decision = decideTurnResume(failure, ledger, p.trim().length > 0)
+          if (decision.action !== "retry") throw error
+          const secs = (decision.delayMs / 1000).toFixed(1)
+          const left = Math.max(0, Math.round(decision.remainingMs / 1000))
+          process.stderr.write(
+            `[recovery] gangguan penyedia — melanjutkan turn otomatis ` +
+              `(percobaan ${decision.attempt}, jeda ${secs} dtk, sisa anggaran ${left} dtk)
+`,
+          )
+          await Bun.sleep(decision.delayMs)
+          // Pengguna menekan Ctrl+C saat menunggu: berhenti, jangan lanjut.
+          if (runSignal?.aborted) throw error
+        }
+      }
     } finally {
       deadline.cancel()
       if (activeAgentSessionId === sessionId) activeAgentSessionId = previous ?? null
     }
+  }
+
+  /**
+   * Terjemahkan error nyata menjadi `FailureSignal` murni untuk kebijakan.
+   * Kategori provider bisa berada di `cause` (adapter membungkusnya), jadi
+   * rantai cause ditelusuri berbatas — bukan while(true) pada objek asing.
+   */
+  function classifyFailure(error: unknown, opts: { userAborted: boolean }): FailureSignal {
+    let category: string | undefined
+    let kind: string | undefined
+    let retryAfterMs: number | undefined
+    let node: unknown = error
+    for (let depth = 0; depth < 5 && node !== null && node !== undefined; depth++) {
+      if (typeof node !== "object") break
+      const rec = node as {
+        category?: unknown
+        kind?: unknown
+        retryAfterMs?: unknown
+        cause?: unknown
+      }
+      if (typeof rec.category === "string" && category === undefined) category = rec.category
+      if (typeof rec.kind === "string" && kind === undefined) kind = rec.kind
+      if (typeof rec.retryAfterMs === "number" && retryAfterMs === undefined)
+        retryAfterMs = rec.retryAfterMs
+      node = rec.cause
+    }
+    return {
+      ...(category !== undefined ? { category } : {}),
+      ...(kind !== undefined ? { kind } : {}),
+      ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+      abortedByUser: opts.userAborted,
+    }
+  }
+
+  /**
+   * Keputusan resume turn, memakai anggaran bersama.
+   *
+   * Saklar `MINICODE_TURN_AUTO_RESUME=0` dipakai tes yang memang menguji jalur
+   * gagal cepat (provider lokal tak terjangkau) dan operator yang ingin
+   * kegagalan provider langsung terlihat tanpa jeda. Default tetap menyala.
+   */
+  function decideTurnResume(
+    failure: FailureSignal,
+    ledger: RecoveryLedger,
+    hasPrompt: boolean,
+  ): RecoveryDecision {
+    if (process.env.MINICODE_TURN_AUTO_RESUME === "0")
+      return { action: "stop", reason: "not-transient" }
+    const next = ledger.nextDelay(failure)
+    if (next !== null)
+      return {
+        action: "retry",
+        attempt: next.attempt,
+        delayMs: next.delayMs,
+        remainingMs: ledger.remainingMs(),
+      }
+    // Kuota/anggaran yang menahan: laporkan alasannya, bukan "not-transient".
+    return planRecovery(
+      failure,
+      {
+        startedAtMs: ledger.startedAtMs,
+        nowMs: Date.now(),
+        attemptsUsed: ledger.attemptsUsed(),
+      },
+      { hasPrompt },
+    )
   }
 
   async function runPromptWithVerifyImpl(p: string, signal?: AbortSignal): Promise<void> {

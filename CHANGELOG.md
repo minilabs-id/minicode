@@ -1,5 +1,37 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- Bahasa balasan chat mengikuti bahasa pengguna dan permintaan bahasa eksplisit, termasuk pergantian bahasa dalam sesi; locale Windows/UI tidak lagi memaksa bahasa balasan.
+- Izin tool tertunda dibatalkan ketika WorkMode/PermissionMode berubah selama persiapan efek.
+- Bash background mengikuti cwd workspace sesi; pembatalan diteruskan ke sandbox OS dan process group.
+- Semua jalur executor merespons abort; batch berikutnya menunggu operasi lama selesai sehingga efek tidak bertumpuk.
+- Decoder terminal pulih dari CSI/SS3 rusak dan mengabaikan sequence tak didukung tanpa memicu Escape.
+- Kompaksi mengecek target token akhir serta mempertahankan instruksi terbaru dan batch tool yang belum selesai.
+- Kompaksi berulang membawa tujuan awal, koreksi terbaru, status tugas, dan bukti terdahulu tanpa menyarangkan ringkasan mekanis. Temuan ringkasan LLM tetap tersedia saat fallback mekanis; proyeksi terverifikasi dikenali dari boundary pembuatannya.
+- Opt-out tokenizer menghentikan akses cache/jaringan; buffer konteks kontinu di sekitar 64k.
+- Web fetch mengikat alamat DNS tervalidasi ke socket, mempertahankan Host/SNI, dan menolak kegagalan DNS/protokol selain HTTP(S).
+- Metadata context-window model eksak mendahului tebakan keluarga; prompt harness melaporkan anggaran token aktif dan konteks OS/shell secara terpisah.
+- Ringkasan aktivitas tool tidak menggandakan jumlah sukses/gagal; pesan kegagalan tersedia pada grup dan detail.
+- Event yang identitasnya dipertahankan saat kompaksi juga mempertahankan timestamp asal.
+- Eviction transkrip mempertahankan cache proyeksi baris yang masih ada.
+- Ringkasan kompaksi LLM diulang saat penyedia membalas 503 sementara atau menggantung, memakai anggaran pemulihan yang sama dengan retry provider — gangguan sekejap tidak lagi menjatuhkan jalur LLM ke ringkasan mekanis.
+- Satu baris thinking per turn (bukan per segmen) dan tinggi tata letak TUI tidak lagi berubah saat indikator status muncul, sehingga transkrip tidak bergeser naik-turun.
+- Alasan gagal ringkasan LLM dipendekkan ke sebabnya (status + kode + pesan), tanpa JSON gateway mentah dan id request.
+- Baris thinking tidak lagi hilang setelah transkrip melewati batas 5000 baris; angka penalaran turn kedua tidak lagi melanjutkan hitungan turn pertama.
+- Output model di jalur linear/pipa tidak lagi terfragmentasi: event status di tengah stream tidak memotong satu baris markdown menjadi beberapa potongan yang dibungkus ulang sendiri.
+- Satu tool tidak lagi tercetak dua kali di jalur linear (baris `execution:started` dilewati untuk tool yang baris hasilnya sudah memuat chevron + nama + target yang sama).
+- Ctrl+C tetap membatalkan ringkasan kompaksi LLM pada percobaan retry ke-2 dan seterusnya; sebelumnya abort user hanya efektif pada percobaan pertama.
+- Anggaran pemulihan kompaksi LLM kini benar-benar memakai jam berjalan (sebelumnya `nowMs` dibekukan sehingga pagar waktu tidak pernah tercapai).
+- Sumber `contextWindowSources` ikut dipertahankan saat `saveProvider` menulis entri tanpa `contextWindows`, sehingga label `user` tidak hilang dan nilai operator tidak ditimpa pada `sync` berikutnya.
+
+### Added
+- Jendela konteks manual per model untuk provider yang tidak melaporkan kapasitas: `minicode config context-window <provider> <model> <128k|200k|1m|1024x1024|auto>`. Nilai tersimpan berlabel `user` sehingga `minicode sync` tidak menimpanya; `auto` mengembalikan model itu ke deteksi otomatis. Pilihan preset mengikuti ukuran nyata model produksi, termasuk tiga varian 1M yang berbeda (1.000.000 / 1.048.576 / 1.050.000).
+
+Rencana, batas verifikasi platform, dan migrasi lanjutan: `.audit/audit-remediation-plan.md`
+(artefak audit kerja, sengaja di luar `docs/` agar tidak ikut terkemas).
+
 ## [0.25.0] - 2026-11-14
 
 Rilis ini menyatukan pekerjaan setelah 0.24.0: penyeragaman permukaan popup TUI,

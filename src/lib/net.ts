@@ -1,12 +1,6 @@
-// Penjaga jaringan bersama: validasi host anti-SSRF + re-resolve DNS per cek.
-// Dipakai web_fetch (tool), web_search, dan transport HTTP MCP — server MCP
-// remote yang menunjuk ke metadata endpoint adalah jalur SSRF yang identik,
-// jadi semuanya memakai satu penjaga yang sama.
-// CATATAN audit F7: istilah "DNS pinning" DILARANG di sini — yang dilakukan
-// fungsi ini adalah resolve-lalu-cek (check-then-connect), BUKAN menanam IP ke
-// socket. Residualnya jujur didokumentasikan di web_fetch (cek dan connect
-// bisa melihat IP berbeda); yang ditutup di sini adalah cache basi (noCache)
-// dan kegagalan DNS (strict) — pilih per jalur sesuai risikonya.
+// Shared host validation. isPrivateHostWithDns performs resolve-and-check only;
+// web_fetch uses public-http.ts to bind validated addresses to socket lookup.
+// Other consumers still need their own connection-level policy.
 //
 // RESIDUAL anti-SSRF yang SENGAJA TIDAK ditutup (dokumentasi jujur, bukan
 // kelalaian): prefix IPv6 lain yang juga memuat alamat IPv4 tapi tidak
@@ -79,9 +73,8 @@ export function isPrivateHost(host: string): boolean {
   return isPrivateIPv4(h)
 }
 
-// DNS pinning untuk tutup DNS rebinding: resolve hostname → cek IP private
-// default timeout 400ms fail-open (web_fetch butuh availability); mode strict
-// fail-close untuk embedding/MCP (P1.4) agar DNS timeout tidak jadi SSRF bypass.
+// Resolve-and-check only; legacy default is 400ms fail-open, strict is 1000ms
+// fail-closed. Tool web_fetch uses the separate pinned public HTTP transport.
 const dnsCache = new Map<string, { addrs: string[]; at: number }>()
 export async function isPrivateHostWithDns(
   hostname: string,
@@ -111,9 +104,7 @@ export async function isPrivateHostWithDns(
     if (!opts.noCache) dnsCache.set(hostname, { addrs, at: Date.now() })
     for (const a of addrs) if (isPrivateHost(a) || isPrivateIPv4(a)) return true
   } catch {
-    // lookup gagal/timeout → strict fail-close (embedding/MCP), default fail-open
-    // agar web_fetch tidak block availability bila DNS lambat. Jangan cache
-    // `addrs: []` saat gagal supaya panggilan strict berikutnya tetap mengecek ulang.
+    // Strict consumers fail closed on DNS errors. Never cache a failed lookup.
     if (opts.strict) return true
   } finally {
     if (timer !== undefined) clearTimeout(timer)

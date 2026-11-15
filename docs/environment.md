@@ -94,6 +94,7 @@ Variabel yang paling menentukan perilaku (sisanya referensi di bawah):
 | `MINICODE_MINIMIZE_ACTIVITY` | ON secara default di TUI; `0` → transparan (baris per-tool). Lipat aktivitas tool per turn jadi satu ringkasan (detail via `/expand`) |
 | `MINICODE_ACTIVITY_PANEL` | `0` → matikan panel aktivitas (default AKTIF di TUI; `/fold` toggle); `1` → paksa aktif juga di jalur linear/one-shot |
 | `MINICODE_AUTORESUME_BG` | `0` → nonaktifkan auto-resume turn TUI saat job background selesai (default aktif; sekali per job, hanya bila tidak ada turn berjalan) |
+| `MINICODE_TURN_AUTO_RESUME` | `0` → nonaktifkan resume otomatis turn setelah kegagalan provider **transien** (`server`/`network`; default aktif). Retry provider dan resume turn berbagi **satu anggaran pemulihan** (`src/policy/recovery-budget.ts`): total 45 dtk dan kuota 6 percobaan untuk satu panggilan logis, dengan full jitter dan `Retry-After` sebagai floor. Berbagi satu anggaran mencegah *retry amplification* (angka terpisah per lapisan membuat biaya berkali: ≈82 dtk untuk provider mati). Kegagalan terminal tidak dipulihkan: `rate_limit` (429 permanen/spend-cap tidak pulih), `auth`, `invalid_request`, `context_length_exceeded`, `budget_exceeded`, `max_steps_exceeded`, dan abort user |
 | `MINICORE_THINKING` | `off` → kirim `enable_thinking:false` ke OpenAI-compat (DeepSeek). Alias lama `MINICODE_THINKING` masih dihormati |
 | `NO_COLOR` | Set apa pun selain `0` → matikan seluruh warna |
 

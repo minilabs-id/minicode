@@ -6,6 +6,7 @@
 import { describe, expect, test } from "bun:test"
 import {
   COMPACT_BUFFER_TOKENS,
+  compactBufferFor,
   contextBudgetFor,
   contextReclassifyThreshold,
   OUTPUT_RESERVE_MAX_TOKENS,
@@ -43,7 +44,10 @@ describe("outputReserveFor: reserve output proporsional", () => {
     // Jendela 8k tak bisa memenuhi keduanya (4096 lantai vs 3200 plafon 40%).
     // Lantai dimenangkan: reserve di bawah 4096 berarti model tak punya ruang
     // jawaban sama sekali — lebih buruk daripada jendela efektif yang sempit.
-    expect(outputReserveFor(8_000, 4_096)).toBe(OUTPUT_RESERVE_MIN_TOKENS)
+    for (const w of [1, 4_096, 8_000, 10_239, 10_240, 10_241]) {
+      expect(outputReserveFor(w, 65_536)).toBe(OUTPUT_RESERVE_MIN_TOKENS)
+      expect(outputReserveFor(w, 65_536)).toBeGreaterThanOrEqual(Math.floor(w * 0.4))
+    }
   })
 
   test("monotonik: jendela lebih besar tak pernah menghasilkan reserve lebih kecil", () => {
@@ -52,6 +56,29 @@ describe("outputReserveFor: reserve output proporsional", () => {
       const r = outputReserveFor(w, 65_536)
       expect(r).toBeGreaterThanOrEqual(prev)
       prev = r
+    }
+  })
+})
+
+describe("compactBufferFor: batas proporsional kontinu", () => {
+  test("buffer dan ambang kompaksi monotonik di sekitar 5k, 64k, dan 65k", () => {
+    for (const boundary of [5_000, 64_000, 65_000]) {
+      for (let w = boundary - 10; w <= boundary + 10; w++) {
+        const buffer = compactBufferFor(w)
+        const previous = compactBufferFor(w - 1)
+        expect(buffer).toBeGreaterThanOrEqual(previous)
+        expect(buffer - previous).toBeLessThanOrEqual(1)
+        for (const maxOutput of [2_048, 65_536, undefined]) {
+          expect(contextBudgetFor(w, maxOutput).compactTrigger).toBeGreaterThanOrEqual(
+            contextBudgetFor(w - 1, maxOutput).compactTrigger,
+          )
+        }
+      }
+    }
+    expect(compactBufferFor(5_000)).toBe(1_000)
+    expect(compactBufferFor(64_000)).toBe(12_800)
+    for (const w of [65_000, 131_072, 1_048_576, 2_097_152]) {
+      expect(compactBufferFor(w)).toBe(COMPACT_BUFFER_TOKENS)
     }
   })
 })
@@ -69,7 +96,7 @@ describe("contextBudgetFor: seluruh angka anggaran konsisten", () => {
   test("jendela kecil (< 64k) memakai buffer terskala, bukan 13k penuh", () => {
     const small = contextBudgetFor(32_000, 4_096)
     const large = contextBudgetFor(1_048_576, 65_536)
-    // Buffer besar penuh untuk jendela ≥ ambang.
+    // Buffer penuh tercapai mulai jendela 65k (20% = 13k).
     expect(large.effectiveWindow - large.compactTrigger).toBe(COMPACT_BUFFER_TOKENS)
     // Buffer kecil lebih kecil dari itu — 13k dari 32k akan menghabiskan 40%.
     expect(small.effectiveWindow - small.compactTrigger).toBeLessThan(COMPACT_BUFFER_TOKENS)

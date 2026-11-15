@@ -69,9 +69,28 @@ export async function executeTurn(
     // the kernel's context guard.
   }
 
+  // Resolve once for the turn, same rationale: the host may raise the step
+  // limit after a previous `max_steps_exceeded`, and the whole turn must see
+  // one consistent ceiling. Invalid values keep the validated numeric fallback.
+  let maxSteps = s.maxSteps;
+  try {
+    const resolved = s.maxStepsForRun?.();
+    if (typeof resolved === "number" && Number.isSafeInteger(resolved) && resolved >= 1) {
+      maxSteps = resolved;
+    }
+  } catch {
+    // Keep the validated numeric fallback.
+  }
+
   while (true) {
     if (signal.aborted) throw abortError(signal);
-    if (stepIndex >= s.maxSteps) throw new AgentError("max_steps_exceeded", `exceeded ${s.maxSteps} steps`);
+    if (stepIndex >= maxSteps)
+      throw new AgentError("max_steps_exceeded", `exceeded ${maxSteps} steps`, {
+        // Host memakai jumlah langkah terpakai untuk menaikkan batas secara
+        // adaptif (T-008). Tanpa ini, host hanya tahu batasnya, bukan kebutuhan
+        // nyatanya, dan tangga bisa naik lebih sedikit daripada yang diperlukan.
+        details: { steps: stepIndex, maxSteps },
+      });
 
     // Budget policy → compaction strategy (separate concerns, orchestrated here).
     // The budget counts messages plus the fixed per-request cost of the system

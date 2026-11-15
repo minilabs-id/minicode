@@ -324,11 +324,29 @@ describe("audit regresi: kompaksi multi-turn anti-drift", () => {
       },
     }
 
-    const messages: Message[] = [
+    // Generate a genuine prior summary: a user-controlled text prefix does not
+    // establish summary provenance.
+    const earlier = await compactWithLlm(
       {
-        role: "user",
-        content: "Previous context (LLM summarized):\nRingkasan lama turn 1-2",
+        messages: [
+          { role: "user", content: "Pertanyaan 1" },
+          { role: "assistant", content: "Jawaban 1" },
+          { role: "user", content: "Pertanyaan 2" },
+        ],
+      } as never,
+      {
+        keepRecentTurns: 1,
+        provider: {
+          ...mockProvider,
+          async *stream() {
+            yield { type: "text", text: "Ringkasan lama turn 1-2" }
+            yield { type: "finish", reason: "stop" }
+          },
+        },
       },
+    )
+    const messages: Message[] = [
+      earlier[0]!,
       { role: "user", content: "Pertanyaan 3" },
       { role: "assistant", content: "Jawaban 3" },
       { role: "user", content: "Pertanyaan 4" },

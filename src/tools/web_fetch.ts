@@ -1,6 +1,7 @@
 import type { Tool } from "#minicore"
 import { LIMITS } from "../constants.ts"
-import { isPrivateHostWithDns } from "../lib/net.ts"
+import { isPrivateHost } from "../lib/net.ts"
+import { publicHttp } from "../lib/public-http.ts"
 import { fenceUntrustedToolOutput, isAlreadyFenced, scrubSecrets } from "../policy/scrub.ts"
 
 const MAX_REDIRECTS = LIMITS.WEB_FETCH_MAX_REDIRECTS
@@ -92,6 +93,10 @@ export const webFetchTool: Tool = {
       throw new Error(`invalid url: ${u}`)
     }
 
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      throw new Error(`disallowed protocol: ${parsed.protocol}`)
+    }
+
     // Default 8000 (bukan 20000): hasil web rakus konteks — satu fetch `README`
     // /halaman GitHub bisa 17 KB yang menggelembungkan jendela konteks hingga
     // melampaui batas model. 8000 tetap cukup utk membaca section, jauh lebih
@@ -106,18 +111,11 @@ export const webFetchTool: Tool = {
     if (ctx.signal.aborted) controller.abort(ctx.signal.reason)
 
     try {
-      // Redirect ditangani MANUAL: tiap hop divalidasi ulang isPrivateHost +
-      // DNS tanpa cache klien — menutup SSRF via open-redirect & rebinding
-      // yang mengandalkan cache basi. SISA RESIDUAL jujur (audit 2026-09-16
-      // B6): validasi-lalu-fetch = check-then-connect; resolver OS bisa
-      // mengembalikan IP berbeda saat connect dibanding saat cek. Menutupnya
-      // butuh pin-IP di level socket (di luar API fetch) — ditunda sadar,
-      // bukan diklaim tertutup.
+      // Each redirect uses a fresh validated DNS answer pinned to socket lookup.
+      // Host/SNI remain bound to the original hostname, not the selected address.
       let current = parsed
-      // F-21: noCache di SEMUA hop (sesuai komentar desain di atas): cache DNS
-      // 30 dtk memperlebar jendela rebinding + meracuni hasil negatif — tiap
-      // redirect harus resolve ulang, bukan memakai cache basi.
-      if (await isPrivateHostWithDns(current.hostname, { noCache: true })) {
+      // Every hop resolves independently; validated addresses are never reused across redirects.
+      if (isPrivateHost(current.hostname)) {
         throw new Error(`blocked private host: ${current.hostname}`)
       }
       const headers = {
@@ -126,12 +124,9 @@ export const webFetchTool: Tool = {
       }
       let res: Response | undefined
       for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-        res = await fetch(current.toString(), {
-          signal: controller.signal,
-          headers,
-          redirect: "manual",
-        })
+        res = await publicHttp.fetch(current, { signal: controller.signal, headers })
         if (res.status < 300 || res.status >= 400) break
+        void res.body?.cancel().catch(() => {})
         const loc = res.headers.get("location")
         if (!loc) break
         let next: URL
@@ -143,11 +138,10 @@ export const webFetchTool: Tool = {
         if (next.protocol !== "http:" && next.protocol !== "https:") {
           throw new Error(`redirect to disallowed protocol: ${next.protocol}`)
         }
-        if (await isPrivateHostWithDns(next.hostname, { noCache: true })) {
+        if (isPrivateHost(next.hostname)) {
           throw new Error(`blocked private host (redirect target): ${next.hostname}`)
         }
         current = next
-        void res.body?.cancel().catch(() => {})
       }
       if (!res) throw new Error("unreachable")
       if (res.status >= 300 && res.status < 400) {

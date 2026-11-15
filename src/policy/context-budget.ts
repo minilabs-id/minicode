@@ -54,8 +54,9 @@ export function outputReserveFor(windowTokens: number, maxOutputTokens?: number)
   // Lantai 2% jendela: jendela raksasa (1M) tak boleh reserve lebih kecil dari
   // proporsi wajar; jendela kecil tak boleh reserve memakan seluruhnya.
   const floor = Math.floor(window * 0.02)
-  // Reserve tak pernah boleh melebihi 40% jendela — di atas itu tak ada lagi
-  // ruang berguna untuk input dan kompaksi menjadi mustahil.
+  // Reserve menargetkan paling banyak 40% jendela bila jendela cukup besar.
+  // Pada jendela sangat kecil, lantai 4.096 yang disengaja mengalahkan plafon
+  // proporsional agar request tetap memiliki ruang jawaban.
   const ceiling = Math.floor(window * 0.4)
   // Lantai 2% TIDAK BOLEH melewati plafon 20k: reserve lebih besar dari plafon
   // hanya mengurangi jendela berguna tanpa manfaat (p99.99 ringkasan muat di
@@ -68,12 +69,9 @@ export function outputReserveFor(windowTokens: number, maxOutputTokens?: number)
   )
 }
 
-/** Buffer kompaksi, diskalakan untuk jendela kecil. */
+/** Buffer kompaksi, diskalakan secara kontinu untuk semua ukuran jendela. */
 export function compactBufferFor(windowTokens: number): number {
   const window = Number.isFinite(windowTokens) && windowTokens > 0 ? windowTokens : 0
-  if (window >= SMALL_WINDOW_THRESHOLD_TOKENS) return COMPACT_BUFFER_TOKENS
-  // Jendela kecil: buffer proporsional (20% effective window), tak pernah lebih
-  // dari buffer penuh.
   return Math.min(COMPACT_BUFFER_TOKENS, Math.max(1_000, Math.floor(window * 0.2)))
 }
 

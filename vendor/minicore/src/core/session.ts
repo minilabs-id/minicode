@@ -64,6 +64,10 @@ export interface SessionConfig {
   /** Resolve a model-specific context limit for each run. Additive app seam;
    * the numeric option remains the fallback for existing library callers. */
   contextWindowTokensForModel?: (model?: string) => number;
+  /** Resolve the step limit for each run. Additive app seam (mirrors
+   * `contextWindowTokensForModel`): the host may raise the limit as the session
+   * proves it needs more steps, while `maxSteps` stays the validated fallback. */
+  maxStepsForRun?: () => number;
   /** Batas output model (`max_output_tokens`) bila endpoint melaporkannya.
    * Seam aditif: dipakai loop untuk menghitung reserve output proporsional —
    * tanpa ini kernel hanya bisa memakai reserve angka tetap, yang terlalu
@@ -158,6 +162,7 @@ export interface SessionInternal {
   readonly compaction: CompactionStrategy;
   readonly recovery: RecoveryPolicy;
   readonly maxSteps: number;
+  readonly maxStepsForRun?: () => number;
   readonly contextWindowTokens: number;
   readonly contextWindowTokensForModel?: (model?: string) => number;
   readonly maxOutputTokensForModel?: (model?: string) => number | undefined;
@@ -201,6 +206,7 @@ export function createSession(config: SessionConfig): Session {
     compaction: config.compaction ?? mechanicalCompaction,
     recovery: config.recovery ?? defaultRecoveryPolicy,
     maxSteps: config.maxSteps ?? DEFAULT_MAX_STEPS,
+    maxStepsForRun: config.maxStepsForRun,
     contextWindowTokens: config.contextWindowTokens ?? DEFAULT_CONTEXT_WINDOW_TOKENS,
     contextWindowTokensForModel: config.contextWindowTokensForModel,
     maxOutputTokensForModel: config.maxOutputTokensForModel,

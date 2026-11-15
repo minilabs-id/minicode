@@ -372,7 +372,7 @@ function makeBashTool(ownerSid: string | null): Tool {
             "background:true is not supported while --sandbox is active (the process must outlive the turn)",
           )
         }
-        const id = startBackground(cmd as string, resolvedCwd, ownerSid, relaxed)
+        const id = startBackground(cmd as string, effectiveCwd, ownerSid, relaxed)
         // F-07: echo perintah di-scrub seperti output foreground — command line
         // bisa membawa secret (`curl -H "Authorization: Bearer …"`), dan versi
         // lama menaruhnya mentah ke konteks model.
@@ -410,12 +410,13 @@ function makeBashTool(ownerSid: string | null): Tool {
       ) {
         if (osSandboxAvailable()) {
           const res = await runInOsSandbox(cmd as string, effectiveCwd, {
+            signal: ctx.signal,
             timeoutMs: timeout,
             env: sanitizeSpawnEnv(process.env, undefined, relaxed) as Record<string, string>,
           })
           const text = scrubSecrets(res.output)
-          if (res.code !== 0 && res.code !== null)
-            return `exit ${res.code}\n${capMarked(text, LIMITS.BASH_OUTPUT_MAX_CHARS)}`
+          if (res.code !== 0)
+            return `exit ${res.code ?? "unknown"}\n${capMarked(text, LIMITS.BASH_OUTPUT_MAX_CHARS)}`
           return capMarked(text, LIMITS.BASH_OUTPUT_MAX_CHARS)
         }
         if (sandboxStrict() || !sandboxExplicitFallbackAllowed()) {
@@ -443,7 +444,7 @@ function makeBashTool(ownerSid: string | null): Tool {
           // terhadap sessionRoot — eksekusi harus di direktori yang sama.
           cwd: effectiveCwd,
           env: sanitizeSpawnEnv(process.env, undefined, relaxed),
-          signal: ctx.signal,
+          // Cancellation is owned below and settles only after process close.
           // detached agar shell jadi group leader → killTree bisa bunuh
           // seluruh grup (POSIX kill(-pid)). Tanpa ini cucu yatim menahan pipe.
           detached: process.platform !== "win32",
@@ -466,6 +467,10 @@ function makeBashTool(ownerSid: string | null): Tool {
         p.on("error", reject)
         p.on("close", (code) => {
           const text = buf.text()
+          if (ctx.signal.aborted) {
+            reject(ctx.signal.reason)
+            return
+          }
           if (timedOut) {
             // Prefix deterministik (parsing oleh jurnal/recovery) + instruksi
             // eksplisit. `isError: true` dicapai dengan reject: kernel
@@ -507,13 +512,11 @@ function makeBashTool(ownerSid: string | null): Tool {
         const onAbort = () => {
           clearTimeout(t)
           if (killTimer) clearTimeout(killTimer)
-          if (process.platform === "win32") killTree(p)
-          else signalProcessGroupGraceful(p.pid, p)
-          killTimer = setTimeout(() => {
-            killTree(p)
-          }, 1000)
+          // Kill the group before close can release executor quarantine.
+          killTree(p)
         }
         ctx.signal.addEventListener("abort", onAbort, { once: true })
+        if (ctx.signal.aborted) onAbort()
         p.on("close", () => {
           ctx.signal.removeEventListener("abort", onAbort)
           clearTimeout(t)

@@ -7,6 +7,7 @@ import { describe, expect, test } from "bun:test"
 import { spawnSync } from "node:child_process"
 import { join } from "node:path"
 import { attachSimpleLogger } from "../src/ui/assistant/simple.ts"
+import type { UiPresentationEvent } from "../src/ui/contract.ts"
 import { cleanUntrusted, stripSgr } from "../src/ui/render/sanitize.ts"
 
 const ESC = "\x1b"
@@ -140,6 +141,99 @@ describe("F2: cabang TTY tidak over-strip", () => {
     }
   })
 })
+describe("jalur linear: presentation event tidak memecah baris teks", () => {
+  test("satu baris kode utuh walau event lain datang di tengah stream", () => {
+    // Regresi: `writePresentationTerminal` dulu memanggil `flushTableStream()`
+    // di awal setiap event, sehingga event status/clock yang datang di tengah
+    // stream memaksa buffer baris parsial keluar dan masing-masing potongan
+    // dibungkus ulang sendiri. Satu baris kode jadi 3-4 baris acak di pipa/CI.
+    const prevTTY = process.stdout.isTTY
+    const prevWrite = process.stdout.write
+    let out = ""
+    try {
+      Object.defineProperty(process.stdout, "isTTY", { value: false, configurable: true })
+      ;(process.stdout as unknown as { write: (s: string) => boolean }).write = (s: string) => {
+        out += s
+        return true
+      }
+      const bus = makeFakeBus()
+      // `presentationEnabled` butuh getSnapshot — tanpa ini event presentation
+      // diabaikan dan test akan lulus even bila bug-nya kembali.
+      // Presentation masuk lewat callback `onPresentationEvent`, BUKAN bus.
+      const sink: { emit?: (event: UiPresentationEvent) => void } = {}
+      const detach = attachSimpleLogger(bus as never, {
+        getSnapshot: () => ({ compaction: undefined }) as never,
+        onPresentationEvent: (handler: (event: UiPresentationEvent) => void) => {
+          sink.emit = handler
+          return () => {}
+        },
+      })
+      bus.fire("turn:started", { turn: 1 })
+      // Kirim satu baris kode dalam 4 potongan, dengan event presentation
+      // di antaranya — persis pola yang dulu memecah baris.
+      for (const [i, part] of [
+        "export const",
+        " multiply =",
+        " (a: number)",
+        " => a * b",
+      ].entries()) {
+        bus.fire("provider:text", { text: part })
+        // `task.status` adalah event presentation yang BENAR-BENAR menulis
+        // baris ledger — pemicu flush-saat-tulis yang sesungguhnya.
+        sink.emit?.({
+          type: "task.status",
+          taskId: `t${i}`,
+          taskStatus: "running",
+          revision: i,
+        })
+      }
+      bus.fire("provider:text", { text: "\n" })
+      bus.fire("turn:completed", {})
+      detach()
+      expect(out).toContain("export const multiply = (a: number) => a * b")
+    } finally {
+      ;(process.stdout as unknown as { write: (s: string) => boolean }).write = prevWrite
+      Object.defineProperty(process.stdout, "isTTY", { value: prevTTY, configurable: true })
+    }
+  })
+})
+
+describe("jalur linear: satu baris per tool", () => {
+  test("read_file tidak tercetak dua kali (start + hasil)", () => {
+    // Regresi: `execution:started` dan `execution:completed` sama-sama mencetak
+    // chevron + nama + target, sehingga satu read_file tampil dua kali identik.
+    const prevTTY = process.stdout.isTTY
+    const prevErr = process.stderr.write
+    let out = ""
+    try {
+      Object.defineProperty(process.stdout, "isTTY", { value: false, configurable: true })
+      // Baris ledger tool ditulis ke STDERR (wErr), bukan stdout.
+      ;(process.stderr as unknown as { write: (s: string) => boolean }).write = (s: string) => {
+        out += s
+        return true
+      }
+      const bus = makeFakeBus()
+      const detach = attachSimpleLogger(bus as never, {})
+      bus.fire("turn:started", { turn: 1 })
+      const call = { id: "c1", name: "read_file", args: { path: "package.json" } }
+      bus.fire("execution:started", { execution: { call } })
+      bus.fire("execution:completed", {
+        execution: {
+          call,
+          result: { role: "tool", toolCallId: "c1", name: "read_file", content: "{}" },
+        },
+      })
+      bus.fire("turn:completed", {})
+      detach()
+      const lines = out.split("\n").filter((l) => l.includes("read_file"))
+      expect(lines.length).toBe(1)
+    } finally {
+      ;(process.stderr as unknown as { write: (s: string) => boolean }).write = prevErr
+      Object.defineProperty(process.stdout, "isTTY", { value: prevTTY, configurable: true })
+    }
+  })
+})
+
 describe("F2: pipe nyata (proses anak, stdout bukan TTY)", () => {
   test("stdout anak tanpa ESC[ untuk teks model ber-SGR", () => {
     // Fixture memakai attachSimpleLogger asli lalu mencetak provider:text

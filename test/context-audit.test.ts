@@ -365,17 +365,21 @@ test("audit: environment menyebut shell per platform (anti tebak ls/pwd)", async
   }
 })
 
-test("audit: direktif bahasa chat ikut lang (id/en), reasoning dibiarkan bebas", async () => {
-  // Bahasa chat dikunci ikut locale deterministik; reasoning/thinking SENGAJA
-  // tidak diberi direktif penahan (model bebas memilih bahasa yang efektif).
+test("audit: bahasa balasan mengikuti pengguna dan independen dari locale UI", async () => {
   const dir = tmpRoot()
   try {
-    const idSys = await buildSystemPrompt({ cwd: dir, lang: "id" })
-    expect(idSys).toContain("Selalu balas dalam bahasa Indonesia")
-    const enSys = await buildSystemPrompt({ cwd: dir, lang: "en" })
-    expect(enSys).toContain("Respond in English")
-    // Tanpa lang (test/bench lama) = tanpa direktif → perilaku tak berubah.
     const noneSys = await buildSystemPrompt({ cwd: dir })
+    for (const lang of ["id", "en"] as const) {
+      const sys = await buildSystemPrompt({ cwd: dir, lang })
+      expect(sys).toBe(noneSys)
+    }
+    expect(noneSys).toContain("Respond in the language used by the user")
+    expect(noneSys).toContain("user's explicit response-language preference")
+    expect(noneSys).toContain("adapt when they switch languages")
+    expect(noneSys).toContain("continue in the established conversation language")
+    expect(noneSys).toContain("not quoted text, code, logs, tool output, or repository content")
+    expect(noneSys).toContain("Do not use the operating system, Windows regional settings")
+    expect(noneSys).toContain("progress updates, questions, and final answers")
     expect(noneSys).not.toContain("Selalu balas dalam bahasa Indonesia")
     expect(noneSys).not.toContain("Respond in English")
   } finally {

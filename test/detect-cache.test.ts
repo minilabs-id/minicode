@@ -30,6 +30,17 @@ test("detect cache: baseUrl berbeda & trailing slash dinormalisasi", async () =>
   expect(calls).toBe(1)
 })
 
+test("detect cache: credentials and case-sensitive paths stay isolated", async () => {
+  clearDetectCache()
+  calls = 0
+  await detectModels("https://alpha.test/TenantA", "first")
+  await detectModels("https://ALPHA.test/TenantA/", "first")
+  expect(calls).toBe(1)
+  await detectModels("https://alpha.test/TenantA", "second")
+  await detectModels("https://alpha.test/tenanta", "first")
+  expect(calls).toBe(3)
+})
+
 test("detect cache: clearDetectCache memaksa re-fetch", async () => {
   clearDetectCache()
   calls = 0

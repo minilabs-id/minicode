@@ -70,26 +70,11 @@ export const codeRunTool: Tool = {
                 `code_run: MINICODE_SANDBOX=${sandbox} but no OS sandbox is available`,
               )
             }
-            return runInOsSandbox(inner, root, { timeoutMs })
+            return runInOsSandbox(inner, root, { timeoutMs, signal: ctx.signal })
           }
-    const started = runSandboxed()
-    // Runner tak menerima signal: balapan agar pembatalan menolak menunggu.
-    // (Container/proses bisa hidup sampai timeout runner — lihat komentar atas.)
-    const onAbort = (): Promise<never> =>
-      Promise.reject(ctx.signal.reason instanceof Error ? ctx.signal.reason : new Error("aborted"))
-    const settled: { code: number | null; output: string } = ctx.signal.aborted
-      ? await onAbort()
-      : await Promise.race([
-          started,
-          new Promise<never>((_, rej) =>
-            ctx.signal.addEventListener(
-              "abort",
-              () =>
-                rej(ctx.signal.reason instanceof Error ? ctx.signal.reason : new Error("aborted")),
-              { once: true },
-            ),
-          ),
-        ])
+    // Both runners own cancellation and remove their abort listeners on completion.
+    const settled = await runSandboxed()
+    ctx.signal.throwIfAborted()
     const text = capMarked(scrubSecrets(settled.output), LIMITS.BASH_OUTPUT_MAX_CHARS).trim()
     if (settled.code !== 0) return `exit ${settled.code ?? "unknown"}\n${text}`
     return text

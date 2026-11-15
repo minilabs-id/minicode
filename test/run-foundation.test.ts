@@ -409,30 +409,39 @@ test("P2.6.31: legacy tanpa Run tetap valid (tanpa fabrikasi)", async () => {
 // Turn nyata: retry provider tak terjangkau memang lambat, jadi timeout test
 // longgar (bukan lotre pada durasi retry).
 test("P2.6: komposisi — turn gagal → Run FAILED saat close; resume menombak residu", async () => {
-  const cwd = ws(true)
-  const c1 = await createCliSession(baseOpts(cwd, { sessionId: "turn" }))
-  // Provider localhost:9 tak terjangkau → turn gagal cepat (tanpa model).
-  await expect(c1.runPromptWithVerify("halo")).rejects.toThrow()
-  await c1.persistCurrent({ totalTokens: 0 })
-  await c1.close()
-  const runs = listSessionRuns("turn", cwd)
-  expect(runs.length).toBe(1)
-  expect(runs[0]!.status).toBe("FAILED")
-  expect(runs[0]!.ended_at).not.toBeNull()
-  // Residu crash: RUNNING yang ditinggal (simulasi: tanpa close-terminal).
-  const c2 = await createCliSession(baseOpts(cwd, { sessionId: "crash" }))
-  await c2.persistCurrent({ totalTokens: 0 })
-  const crashRun = createRun("crash", DEFAULT_THREAD_ID, cwd)
-  transitionRun(crashRun.run_id, "RUNNING", cwd)
-  await c2.close()
-  // close() menandai live run miliknya (tak ada — currentRunId null di sini
-  // karena turn tak pernah jalan), residu manual tetap RUNNING.
-  expect(getRun(crashRun.run_id, cwd)!.status).toBe("RUNNING")
-  const c3 = await createCliSession(baseOpts(cwd, { resumeId: "crash" }))
-  await c3.close()
-  const t = getRun(crashRun.run_id, cwd)!
-  expect(t.status).toBe("INTERRUPTED")
-  expect(t.recovery_status).toBe("UNKNOWN")
+  // Fokus tes ini adalah KOMPOSISI run/close, bukan ketahanan jaringan. Resume
+  // otomatis (T-009) sengaja mematikan: provider `localhost:9` berkategori
+  // `network`, jadi tanpa saklar ini tes menunggu 3 dtk + 10 dtk per resume
+  // untuk perilaku yang tidak sedang diuji.
+  process.env.MINICODE_TURN_AUTO_RESUME = "0"
+  try {
+    const cwd = ws(true)
+    const c1 = await createCliSession(baseOpts(cwd, { sessionId: "turn" }))
+    // Provider localhost:9 tak terjangkau → turn gagal cepat (tanpa model).
+    await expect(c1.runPromptWithVerify("halo")).rejects.toThrow()
+    await c1.persistCurrent({ totalTokens: 0 })
+    await c1.close()
+    const runs = listSessionRuns("turn", cwd)
+    expect(runs.length).toBe(1)
+    expect(runs[0]!.status).toBe("FAILED")
+    expect(runs[0]!.ended_at).not.toBeNull()
+    // Residu crash: RUNNING yang ditinggal (simulasi: tanpa close-terminal).
+    const c2 = await createCliSession(baseOpts(cwd, { sessionId: "crash" }))
+    await c2.persistCurrent({ totalTokens: 0 })
+    const crashRun = createRun("crash", DEFAULT_THREAD_ID, cwd)
+    transitionRun(crashRun.run_id, "RUNNING", cwd)
+    await c2.close()
+    // close() menandai live run miliknya (tak ada — currentRunId null di sini
+    // karena turn tak pernah jalan), residu manual tetap RUNNING.
+    expect(getRun(crashRun.run_id, cwd)!.status).toBe("RUNNING")
+    const c3 = await createCliSession(baseOpts(cwd, { resumeId: "crash" }))
+    await c3.close()
+    const t = getRun(crashRun.run_id, cwd)!
+    expect(t.status).toBe("INTERRUPTED")
+    expect(t.recovery_status).toBe("UNKNOWN")
+  } finally {
+    delete process.env.MINICODE_TURN_AUTO_RESUME
+  }
 }, 60_000)
 
 test("P2.6: takeover_epoch ≤ session epoch, tercatat saat create", async () => {

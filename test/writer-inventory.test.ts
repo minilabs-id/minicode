@@ -142,7 +142,12 @@ const INVENTORY: Record<string, { max: number; owner: string }> = {
   // not absorbed, per the rule above.
   "cli/commands/acp.ts": { max: 4, owner: "machine" },
   "cli/commands/auth.ts": { max: 27, owner: "human-cmd" },
-  "cli/commands/config.ts": { max: 34, owner: "human-cmd" },
+  // 34 -> 37: subperintah `config context-window` (list semua / per provider /
+  // set / clear) menambah writer keluaran pengguna — satu `console.log` per
+  // hasil dan satu `console.error` per penolakan. Bukan writer terminal
+  // berisiko (tak menyentuh escape/alt-screen), hanya pesan CLI seperti cabang
+  // `add`/`remove` yang sudah ada.
+  "cli/commands/config.ts": { max: 37, owner: "human-cmd" },
   // [P2.12] 0 -> 6 for the daemon command's own writers: help, unknown-subcommand
   // diagnostic, dan emisi keluaran perintah. Sengaja menulis SEKALI per keluaran
   // (kumpulkan ke array, flush di akhir) — pola yang sama dengan yang dipakai

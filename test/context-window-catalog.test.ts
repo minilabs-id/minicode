@@ -37,6 +37,12 @@ describe("context window catalog", () => {
     expect(findContextWindowFromCatalog("some-unknown-model")).toBeUndefined()
   })
 
+  test("family matches require model boundaries and ignore namespaces", () => {
+    expect(findContextWindowFromCatalog("foo3-bar")).toBeUndefined()
+    expect(findContextWindowFromCatalog("gpt-5-proxy/unknown")).toBeUndefined()
+    expect(findContextWindowFromCatalog("openai/o3-mini")).toBe(200_000)
+  })
+
   test("longest-family menang: deepseek-v4 mengalahkan deepseek", () => {
     expect(findContextWindowFromCatalog("deepseek-v4-flash")).toBe(1_000_000)
   })
@@ -131,6 +137,25 @@ describe("models.dev overlay (context_length)", () => {
     expect(r.source).toBe("models-dev")
     expect(r.tokens).toBe(789_000)
     __resetContextWindowOverlay()
+  })
+
+  test("exact metadata beats family guesses while explicit limits still win", () => {
+    __setContextWindowOverlay({ "kimi-example": 1_000_000 })
+    try {
+      expect(resolveContextWindow(cfgEmpty, "kimi-example")).toMatchObject({
+        tokens: 1_000_000,
+        source: "models-dev",
+      })
+      expect(resolveContextWindow(cfgEmpty, "kimi-example", 64_000).tokens).toBe(64_000)
+      const configured = {
+        providers: [
+          { id: "p", models: ["kimi-example"], contextWindows: { "kimi-example": 256_000 } },
+        ],
+      } as unknown as MinicodeConfig
+      expect(resolveContextWindow(configured, "p::kimi-example").tokens).toBe(256_000)
+    } finally {
+      __resetContextWindowOverlay()
+    }
   })
 
   test("findContextWindowFromOverlay: exact & prefiks segmen", () => {

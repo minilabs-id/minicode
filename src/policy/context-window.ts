@@ -39,8 +39,7 @@ export interface ContextWindowResolution {
   readonly providerId?: string
   /** R9/T8 — hadir bila katalog built-in dan overlay models.dev saling beda
    * >2× (katalog mungkin ketinggalan zaman). Murni diagnostik: pemanggil boleh
-   * memperingatkan user; resolusi TETAP pakai katalog (over-estimate ditoleransi
-   * lewat jalur recovery). */
+   * memperingatkan user; metadata model eksak diutamakan atas tebakan keluarga. */
   readonly drift?: { catalogTokens: number; overlayTokens: number }
 }
 
@@ -162,9 +161,25 @@ export function resolveContextWindow(
       ...(providerId ? { providerId } : {}),
     }
   }
-  // Jaring pengaman built-in: kenali keluarga model umum (deepseek, gpt, claude,
-  // gemini, …) tanpa config, supaya model baru tak langsung jatuh ke 32k.
+  // Exact public metadata is more specific than a family-wide catalog guess.
+  // Explicit endpoint/operator limits above always retain precedence.
   if (modelId) {
+    const exactOverlay = contextWindowOverlay?.[modelId.toLowerCase()]
+    if (validWindow(exactOverlay)) {
+      const catalogTokens = findContextWindowFromCatalog(modelId)
+      const drift = validWindow(catalogTokens)
+        ? Math.max(exactOverlay / catalogTokens, catalogTokens / exactOverlay)
+        : 0
+      return {
+        tokens: exactOverlay,
+        source: "models-dev",
+        model: modelId,
+        ...(providerId ? { providerId } : {}),
+        ...(drift > 2
+          ? { drift: { catalogTokens: catalogTokens!, overlayTokens: exactOverlay } }
+          : {}),
+      }
+    }
     const catalogTokens = findContextWindowFromCatalog(modelId)
     if (validWindow(catalogTokens)) {
       // R9/T8 — katalog diutamakan (kurasi manual) tapi bisa basi. Bila overlay

@@ -294,9 +294,12 @@ export const delegateTaskTool: Tool = {
     // Jalur autonomous TIDAK memakai M7: mode-less (readonly tetap) + default 8
     // tak representable tanpa mengarang mode/grant. Kontrak dipin test
     // `test/p9-admission-boundaries.test.ts`; jangan menyeragamkan tanpa ADR.
+    // [T-008] Cap eksplisit sub-agent memakai konstanta SENDIRI (50), bukan
+    // `DEFAULT_MAX_STEPS` sesi utama (200). Menyamakannya = memperluas
+    // kewenangan delegasi diam-diam saat default sesi utama naik.
     const cap =
       Number.isFinite(requested) && requested > 0
-        ? Math.min(Math.floor(requested), LIMITS.DEFAULT_MAX_STEPS)
+        ? Math.min(Math.floor(requested), LIMITS.SUB_AGENT_MAX_STEPS)
         : m === "explore"
           ? LIMITS.SUB_AGENT_BUDGET_EXPLORE
           : LIMITS.SUB_AGENT_BUDGET_PLAN

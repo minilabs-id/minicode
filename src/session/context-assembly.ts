@@ -21,6 +21,7 @@
 // seq, run_id, thread_id, migrated, …) dan tidak pernah ditulis balik ke histori.
 
 import type { Message } from "#minicore/core/types.ts"
+import { registerCompactionSummary } from "../policy/compaction.ts"
 import {
   getProjection,
   getProjectionStatus,
@@ -67,12 +68,15 @@ export interface ContextView {
  * (role+content). Field persistence-only DILARANG di sini.
  */
 export function syntheticSummaryMessage(summary: string, coveredSeq: number): Message {
-  return {
-    role: "user",
-    // Penanda cakupan eksplisit supaya model (dan pembaca log) tahu ini
-    // ringkasan prefix [0,N), bukan pesan kanonik.
-    content: `Previous context [0,${coveredSeq}):\n${summary}`,
-  }
+  return registerCompactionSummary(
+    {
+      role: "user",
+      // Penanda cakupan eksplisit supaya model (dan pembaca log) tahu ini
+      // ringkasan prefix [0,N), bukan pesan kanonik.
+      content: `Previous context [0,${coveredSeq}):\n${summary}`,
+    },
+    summary,
+  )
 }
 
 /**
@@ -161,7 +165,7 @@ function assembleViewMessages(
     const combined: ContextOnlyArtifact = { role: "user", content: combinedContent }
     const rest = messages.slice(1) // buang synthetic lama (index 0)
     return {
-      messages: [combined as Message, ...rest],
+      messages: [registerCompactionSummary(combined as Message, summaryArtifact.content), ...rest],
       contextOnly: combined,
       runtimeHeader: { role: "user", content: headerText },
     }

@@ -59,6 +59,7 @@ export function osSandboxTypeName(): string {
 }
 
 export interface OsSandboxOptions {
+  signal?: AbortSignal
   env?: Record<string, string>
   timeoutMs?: number
   network?: "none" | "bridge"
@@ -71,6 +72,7 @@ export function runInOsSandbox(
   cwd: string,
   opts: OsSandboxOptions = {},
 ): Promise<{ code: number | null; output: string }> {
+  if (opts.signal?.aborted) return Promise.reject(opts.signal.reason)
   const { available, type } = detectOsSandbox()
   if (!available) {
     // Fail-closed seam: pemanggil (bash/code_run) wajib cek osSandboxAvailable
@@ -99,7 +101,7 @@ export function runInOsSandbox(
 `
     // Use sandbox-exec with inline profile via stdin? sandbox-exec needs file, write tmp
     const args = ["-p", profile, "sh", "-c", command]
-    return runSpawn("sandbox-exec", args, abs, sanitizedEnv, timeout)
+    return runSpawn("sandbox-exec", args, abs, sanitizedEnv, timeout, opts.signal)
   }
   if (type === "bwrap") {
     const args = [
@@ -139,7 +141,7 @@ export function runInOsSandbox(
       const idx = args.indexOf("--unshare-net")
       if (idx !== -1) args.splice(idx, 1)
     }
-    return runSpawn("bwrap", args, abs, sanitizedEnv, timeout)
+    return runSpawn("bwrap", args, abs, sanitizedEnv, timeout, opts.signal)
   }
   return Promise.resolve({ code: null, output: "[os-sandbox] unknown type" })
 }
@@ -150,8 +152,10 @@ function runSpawn(
   cwd: string,
   env: Record<string, string>,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<{ code: number | null; output: string }> {
-  return new Promise((resolveResult) => {
+  return new Promise((resolveResult, reject) => {
+    signal?.throwIfAborted()
     // F-23: bin di-resolve absolut dari PATH terpercaya di sini (satu titik
     // untuk seatbelt/bwrap) — spawn dengan cwd workspace di Windows bisa
     // mengeksekusi <bin>.bat repo bila hanya nama telanjang.
@@ -185,7 +189,10 @@ function runSpawn(
     }
     p.stdout.on("data", (d) => appendCapped("out", d))
     p.stderr.on("data", (d) => appendCapped("err", d))
-    const t = setTimeout(() => {
+    let aborted = false
+    let timedOut = false
+    let settled = false
+    const killGroup = (): void => {
       // SIGKILL ke seluruh process group (bwrap + child command). Fallback ke
       // kill tunggal bila pid tak tersedia (spawn gagal sinkron).
       try {
@@ -196,16 +203,48 @@ function runSpawn(
           p.kill("SIGKILL")
         } catch {}
       }
+    }
+    const onAbort = (): void => {
+      if (settled || aborted) return
+      aborted = true
+      clearTimeout(t)
+      killGroup()
+    }
+    const cleanup = (): void => {
+      settled = true
+      clearTimeout(t)
+      signal?.removeEventListener("abort", onAbort)
+    }
+    const t = setTimeout(() => {
+      timedOut = true
+      killGroup()
     }, timeoutMs)
-    p.on("error", (e) => {
-      clearTimeout(t)
-      resolveResult({ code: null, output: `[os-sandbox] ${e.message}` })
+    p.once("error", (e) => {
+      cleanup()
+      if (aborted) reject(signal?.reason)
+      else resolveResult({ code: null, output: `[os-sandbox] ${e.message}` })
     })
-    p.on("close", (code) => {
-      clearTimeout(t)
+    p.once("close", (code) => {
+      if (settled) return
+      cleanup()
+      if (aborted) {
+        reject(signal?.reason)
+        return
+      }
       const marker = truncated ? "\n… [output truncated]" : ""
       const output = (out + (err ? `\n[stderr]\n${err}` : "")).trim() + marker
+      if (timedOut) {
+        reject(
+          new Error(
+            `[TOOL_OUTCOME state=UNKNOWN reason=TIMEOUT timeout_ms=${timeoutMs}]\nOS sandbox command timed out; inspect effects before retrying.\n${output}`,
+          ),
+        )
+        return
+      }
       resolveResult({ code, output })
     })
+    signal?.addEventListener("abort", onAbort, { once: true })
+    // Close the race between the pre-spawn check and listener registration.
+    if (signal?.aborted) onAbort()
   })
 }

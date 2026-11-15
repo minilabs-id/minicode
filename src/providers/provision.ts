@@ -70,6 +70,14 @@ export async function saveProvider(
         ...(entry.contextWindows === undefined && previous.contextWindows
           ? { contextWindows: previous.contextWindows }
           : {}),
+        // Sumber harus ikut diselamatkan bersama nilainya. Tanpa ini, entri
+        // yang ditulis tanpa `contextWindows` (mis. hasil `sync`) kehilangan
+        // label `user` sementara angkanya dipertahankan — nilai operator lalu
+        // dianggap milik endpoint dan boleh ditimpa pada sync berikutnya,
+        // yaitu persis hal yang label itu ada untuk mencegahnya.
+        ...(entry.contextWindowSources === undefined && previous.contextWindowSources
+          ? { contextWindowSources: previous.contextWindowSources }
+          : {}),
       }
     } else cfg.providers.push(entry)
     await writeConfigAtomic(path, cfg)

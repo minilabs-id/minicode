@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import { LIMITS } from "../constants.ts"
 
 export interface DetectedModel {
@@ -32,9 +33,7 @@ export interface DetectResult {
   authFailed: boolean
 }
 
-// Cache in-memory per baseUrl (30 menit) — /sync yang sering dipanggil tidak
-// perlu re-deteksi network tiap kali. Key = url tanpa apiKey (secrets tidak
-// pernah disimpan atau di-log).
+// Scope cached metadata to endpoint and credential; never store plaintext keys.
 const cache = new Map<string, { at: number; result: DetectResult }>()
 const CACHE_TTL_MS = 30 * 60 * 1000
 
@@ -42,8 +41,14 @@ export function clearDetectCache(): void {
   cache.clear()
 }
 
-export function cacheKey(baseUrl: string): string {
-  return baseUrl.replace(/\/+$/, "").toLowerCase()
+export function cacheKey(baseUrl: string, apiKey = ""): string {
+  let normalized = baseUrl.replace(/\/+$/, "")
+  try {
+    normalized = new URL(normalized).href.replace(/\/+$/, "")
+  } catch {
+    // Invalid URLs are handled by the fetch path; preserve their case here.
+  }
+  return `${normalized}#${createHash("sha256").update(apiKey).digest("hex")}`
 }
 
 function hybridHeaders(apiKey: string): Record<string, string>[] {
@@ -225,12 +230,13 @@ export async function detectModels(
   signal?: AbortSignal,
 ): Promise<DetectResult> {
   // serve dari cache bila masih segar (anti request redundant dalam 30 menit)
-  const key = cacheKey(baseUrl)
+  const key = cacheKey(baseUrl, apiKey)
   const hit = cache.get(key)
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.result
 
   // CAP global — jangan pernah biarkan user menunggu lama pada gateway offline
-  const sig = signal ?? AbortSignal.timeout(LIMITS.DETECT_GLOBAL_TIMEOUT_MS)
+  const timeout = AbortSignal.timeout(LIMITS.DETECT_GLOBAL_TIMEOUT_MS)
+  const sig = signal ? AbortSignal.any([signal, timeout]) : timeout
   let everContacted = false
   let everAuthFailed = false
   for (const h of hybridHeaders(apiKey)) {

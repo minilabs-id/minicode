@@ -42,6 +42,12 @@ import {
   type PermissionAsk,
   type PermissionMode,
 } from "../policy/permission.ts"
+import {
+  planRecovery,
+  RECOVERY_ATTEMPT_QUOTA,
+  RECOVERY_BUDGET_MS,
+} from "../policy/recovery-budget.ts"
+import { DEFAULT_SESSION_MAX_STEPS, nextStepLimit } from "../policy/step-escalation.ts"
 import { getCachedTokenizer, loadTokenizer } from "../policy/tokenizer-registry.ts"
 import { contractForTool } from "../policy/tool-contract.ts"
 import { maxTurnsExceededError } from "../policy/usage.ts"
@@ -66,14 +72,119 @@ export const aggressiveBudgetPolicy: BudgetPolicy = {
 }
 
 // P2 cap wrapper: limit retryAfter to 30s without mutating original error.
-// F-12: sanitasi PENUH di satu titik sentral (mencakup adapter vendor yang
-// tak boleh disentuh): non-finite (Infinity/NaN) atau negatif → buang
-// (pakai backoff kernel); sangat besar → cap. Tanpa ini retryAfter=Infinity
-// menjadi setTimeout(Infinity) ≈ 1ms → hot fast-retry, bukan tunggu lama.
-// Diekspor agar teruji langsung (pola repo: pure/diekspor-untuk-test).
+//
+// [T-009 OBSERVATION.md] Anggaran pemulihan TIDAK lagi dinyatakan sebagai "berapa
+// kali retry" di sini. Versi pertama perbaikan memakai angka lokal
+// (5 percobaan) sementara resume turn punya angka lokal lain; karena keduanya
+// berada di lapisan berbeda, biayanya BERKALI — provider yang mati permanen
+// menahan user ~82 detik, padahal sebelumnya 7 detik. Sekarang retry provider
+// memakai SATU anggaran bersama dari `src/policy/recovery-budget.ts`: satu
+// anggaran waktu, satu kuota percobaan, jitter, dan `Retry-After` sebagai floor.
+// Konsekuensinya biaya total konstan, berapa pun lapisan yang mencoba.
+//
+// `onError` di bawah tetap sinkron karena kontrak `RecoveryPolicy` kernel
+// memintanya begitu. Status anggaran hidup di `RecoveryLedger` per panggilan
+// logis yang dibuat pemanggil (lihat `createRecoveryLedger`).
+
+/** Anggaran untuk 429: tetap 3 percobaan seperti kernel, TIDAK diperpanjang.
+ *
+ * KENAPA (riset 2026): 429 hampir selalu membawa `Retry-After`, dan `planRecovery`
+ * memperlakukannya sebagai floor. Backoff panjang justru salah — menunggu lebih
+ * lama daripada yang diminta hanya menambah jeda, sedangkan 429 permanen
+ * (spend cap Anthropic tanpa header, `credit_balance_exhausted` OpenAI) tidak
+ * pulih sama sekali. Kuota 3 membuat kegagalan itu cepat terlihat.
+ */
+export const RATE_LIMIT_RETRY_ATTEMPTS = 3
+
+/** Buku besar anggaran pemulihan untuk satu panggilan logis.
+ *
+ * Dipisah dari `cappedRecovery` karena kernel memanggil `onError` secara sinkron
+ * dengan `attempt` saja, sementara anggaran butuh JAM. Ledger memegang jam itu.
+ * Satu ledger = satu prompt user; retry provider dan resume turn memakai ledger
+ * yang sama supaya tidak ada perkalian biaya.
+ */
+export interface RecoveryLedger {
+  /** Waktu mulai (epoch ms). */
+  readonly startedAtMs: number
+  /** Percobaan yang sudah dipakai (retry provider + resume turn). */
+  attemptsUsed(): number
+  /** Catat satu percobaan terpakai. */
+  consume(): void
+  /** Jeda berikutnya menurut anggaran bersama, atau null bila harus berhenti. */
+  nextDelay(failure: { category?: string; kind?: string; retryAfterMs?: number }): {
+    delayMs: number
+    attempt: number
+  } | null
+  /** Sisa anggaran waktu (ms) pada saat dipanggil. */
+  remainingMs(): number
+}
+
+/** Buat ledger baru untuk satu panggilan logis. `now` di-inject untuk uji. */
+export function createRecoveryLedger(now: () => number = Date.now): RecoveryLedger {
+  const startedAtMs = now()
+  let used = 0
+  return {
+    startedAtMs,
+    attemptsUsed: () => used,
+    consume: () => {
+      used += 1
+    },
+    nextDelay(failure) {
+      const decision = planRecovery(
+        {
+          ...(failure.category !== undefined ? { category: failure.category } : {}),
+          ...(failure.kind !== undefined ? { kind: failure.kind } : {}),
+          ...(failure.retryAfterMs !== undefined ? { retryAfterMs: failure.retryAfterMs } : {}),
+        },
+        { startedAtMs, nowMs: now(), attemptsUsed: used },
+        { hasPrompt: true },
+      )
+      if (decision.action === "stop") return null
+      used = decision.attempt
+      return { delayMs: decision.delayMs, attempt: decision.attempt }
+    },
+    remainingMs: () => RECOVERY_BUDGET_MS - (now() - startedAtMs),
+  }
+}
+
+/**
+ * Sanitasi `retryAfter` + keputusan retry untuk kegagalan provider.
+ *
+ * F-12 (dipertahankan): nilai non-finite (Infinity/NaN) atau negatif dibuang
+ * karena `setTimeout(Infinity)` berperilaku seperti ~1 ms → hot fast-retry, bukan
+ * tunggu lama; nilai sangat besar di-cap ke `LIMITS.RETRY_AFTER_MAX_MS`.
+ *
+ * Diekspor agar teruji langsung (pola repo: pure/diekspor-untuk-test).
+ */
 export const cappedRecovery = {
   onError(error: ProviderError, attempt: number): RecoveryAction {
+    const category = error.category
     const ra = error.retryAfterMs
+    const saneRetryAfter =
+      ra != null && Number.isFinite(ra) && ra >= 0
+        ? Math.min(ra, LIMITS.RETRY_AFTER_MAX_MS)
+        : undefined
+
+    // 429 punya plafon percobaan sendiri yang lebih ketat (lihat
+    // RATE_LIMIT_RETRY_ATTEMPTS). Selain itu keputusan jeda diserahkan ke
+    // anggaran bersama supaya retry dan resume tidak mengalikan biaya.
+    const cap = category === "rate_limit" ? RATE_LIMIT_RETRY_ATTEMPTS : RECOVERY_ATTEMPT_QUOTA
+    if (attempt > cap) return { type: "throw" }
+
+    const decision = planRecovery(
+      {
+        category,
+        ...(saneRetryAfter !== undefined ? { retryAfterMs: saneRetryAfter } : {}),
+      },
+      // Sinkron tanpa jam: pakai awal waktu nol. Pagar waktu sesungguhnya
+      // dipegang ledger di atas; di sini kuota + kategori yang menahan.
+      { startedAtMs: 0, nowMs: 0, attemptsUsed: attempt - 1 },
+      { hasPrompt: true },
+    )
+    if (decision.action === "retry") return { type: "retry", delayMs: decision.delayMs }
+
+    // Bukan urusan anggaran bersama → serahkan ke kebijakan kernel (mis.
+    // compaction untuk context_length_exceeded, langsung throw untuk auth).
     if (ra != null && (!Number.isFinite(ra) || ra < 0)) {
       const clean = new ProviderError(error.category, error.message, undefined)
       Object.assign(clean, { cause: (error as unknown as { cause?: unknown }).cause })
@@ -81,7 +192,6 @@ export const cappedRecovery = {
     }
     if (ra != null && ra > LIMITS.RETRY_AFTER_MAX_MS) {
       const capped = new ProviderError(error.category, error.message, LIMITS.RETRY_AFTER_MAX_MS)
-      // preserve extra fields if any
       Object.assign(capped, { cause: (error as unknown as { cause?: unknown }).cause })
       return defaultRecoveryPolicy.onError(capped, attempt)
     }
@@ -205,6 +315,17 @@ export async function createMinicodeSession(
       fromTokens: number
       toTokens: number
       observedTokens: number
+    }) => void
+    /**
+     * [T-008 OBSERVATION.md] Dipanggil ketika batas langkah per turn naik satu
+     * tangga setelah `max_steps_exceeded`. Composition root memakainya untuk
+     * memberi tahu user (footer/log). Tidak pernah dipanggil untuk abort,
+     * timeout, atau error provider non-langkah.
+     */
+    onMaxStepsEscalated?: (info: {
+      fromSteps: number
+      toSteps: number
+      observedSteps: number
     }) => void
     /**
      * [Area B · PROMPT 06] Penyimpanan binding persetujuan milik SESI.
@@ -416,16 +537,14 @@ export async function createMinicodeSession(
   //   3. `beforeToolEffect` writes intent jurnal secara awaited.
   //
   // [Area B · PROMPT 06] Barrier ini juga BATAS EKSEKUSI verifikasi
-  // persetujuan: setelah awaital intent jurnal + no-progress di atas, yang
-  // tersisa ke `tool.execute` hanya kode sinkron kernel
-  // (`permissions.check` → `validateArgs` → emit → execute), jadi verifikasi
-  // di sini efektif sama dengan memeriksa tepat sebelum eksekusi. Membungkus
-  // tool TIDAK dipakai: itu mengganti objek di array tool LIVE yang dipegang
-  // kernel/`setWorkMode` (regresi `test/work-mode-runtime.test.ts`).
+  // persetujuan setelah await intent jurnal + no-progress. Executor memeriksa
+  // versi otorisasi lagi tepat sebelum tool.execute, setelah listener started.
+  // Wrapper per-call tidak mengubah array tool LIVE milik kernel/setWorkMode.
   //
   // Alasan deny "approval stale" dicatat terpisah karena handler base
   // menyimpan alasannya di peta privat; kernel membacanya lewat
   // `describeDenial` yang kita override.
+  let authorizationVersion = 0
   const staleDenyReasons = new Map<string, string>()
   // Barrier selalu dipasang (bukan hanya bila detector/journal ada): di sini
   // verifikasi persetujuan terjadi, dan ia harus berlaku di SETIAP konfigurasi
@@ -433,6 +552,7 @@ export async function createMinicodeSession(
   const withEffectBarrier: PermissionHandler = {
     ...permissions,
     check: async (call, deps) => {
+      const authorizedVersion = authorizationVersion
       const decision = await permissions.check(call, deps)
       // Kernel vendored saat ini hanya memblokir literal "deny". Validasi di
       // composition root ini menjaga production dispatch fail-closed tanpa
@@ -452,12 +572,17 @@ export async function createMinicodeSession(
       // Verifikasi lapis-2 (batas eksekusi): fail-closed saat target berubah
       // sejak user menyetujui.
       const verdict = verifyApprovalBinding(binding)
-      if (verdict.kind === "stale") {
+      if (authorizedVersion !== authorizationVersion || verdict.kind === "stale") {
         const id = (call as { id?: string } | null)?.id
         if (id) {
           if (staleDenyReasons.size > 500)
             staleDenyReasons.delete(staleDenyReasons.keys().next().value as string)
-          staleDenyReasons.set(id, `approval stale: ${verdict.reason}`)
+          staleDenyReasons.set(
+            id,
+            authorizedVersion !== authorizationVersion
+              ? "authorization changed while preparing tool execution; request fresh approval"
+              : `approval stale: ${verdict.kind === "stale" ? verdict.reason : "changed"}`,
+          )
         }
         return "deny"
       }
@@ -485,7 +610,10 @@ export async function createMinicodeSession(
   // (ToolContext's label); the DECISION is the handler's.
   if (onPermissions && !injected) {
     onPermissions({
-      setMode: (m) => withMode.__setMode(m),
+      setMode: (m) => {
+        if (withMode.__getMode() !== m) authorizationVersion++
+        withMode.__setMode(m)
+      },
       getMode: () => withMode.__getMode(),
       // restrictBash adalah opsi tetap (bukan state handler) — dibaca langsung
       // dari closure, bukan lewat wrapper WorkMode yang tak meneruskannya.
@@ -501,7 +629,10 @@ export async function createMinicodeSession(
       __getWorkMode(): WorkMode
     }
     onWorkMode({
-      setWorkMode: (m) => wm.__setWorkMode(m),
+      setWorkMode: (m) => {
+        if (wm.__getWorkMode() !== m) authorizationVersion++
+        wm.__setWorkMode(m)
+      },
       getWorkMode: () => wm.__getWorkMode(),
     })
   }
@@ -512,7 +643,9 @@ export async function createMinicodeSession(
     const pm = injected ? opts.permissionMode : withMode.__getMode()
     const wm = injected ? resolvedWorkMode : (wmCtl.__getWorkMode?.() ?? resolvedWorkMode)
     const planHint = pm === "plan" ? PLAN_PM_HINT : ""
-    return baseSystem + planHint + workModeHint(wm)
+    const contextWindow = contextWindowForModel(currentContextModel())
+    const capacityHint = `\n\n# Harness context capacity\nThe harness currently budgets ${contextWindow} tokens for the selected model. This is the configured/resolved session limit, not a guarantee from the provider. It is independent of the Windows operating system and shell. System instructions, tool schemas, history, and output share this budget; compaction starts before the full window is exhausted. Preserve durable task progress before compaction.`
+    return baseSystem + planHint + workModeHint(wm) + capacityHint
   }
   // [CTX] Kalibrasi dipisahkan per identitas model agar berpindah ke model
   // lain tidak membawa rasio tokenizer/provider dari sesi sebelumnya.
@@ -633,6 +766,28 @@ export async function createMinicodeSession(
         toTokens: next,
         observedTokens,
       })
+    } catch {}
+  }
+
+  // ── Eskalasi adaptif batas langkah (T-008 OBSERVATION.md) ──────────────
+  // Batas langkah adalah backstop, bukan anggaran kerja. Turn yang mentok
+  // karena batas tidak boleh membuang kerja yang sudah dilakukan: naik satu
+  // tangga untuk turn berikutnya, bounded oleh STEP_LIMIT_CEILING. Berlaku
+  // hanya untuk sesi ini (bukan menulis config: itu niat operator).
+  //
+  // KENAPA dipicu HANYA oleh `max_steps_exceeded`: error lain (abort, timeout,
+  // provider, budget konteks) tidak akan tertolong oleh langkah tambahan.
+  let effectiveMaxSteps =
+    typeof rest.maxSteps === "number" && Number.isFinite(rest.maxSteps) && rest.maxSteps >= 1
+      ? Math.floor(rest.maxSteps)
+      : DEFAULT_SESSION_MAX_STEPS
+  const escalateMaxSteps = (observedSteps: number) => {
+    const next = nextStepLimit(effectiveMaxSteps, observedSteps)
+    if (next === undefined) return
+    const from = effectiveMaxSteps
+    effectiveMaxSteps = next
+    try {
+      rest.onMaxStepsEscalated?.({ fromSteps: from, toSteps: next, observedSteps })
     } catch {}
   }
 
@@ -825,6 +980,11 @@ export async function createMinicodeSession(
     contextWindowTokens: contextWindowForModel(currentContextModel()),
     contextWindowTokensForModel: contextWindowForModel,
     maxOutputTokensForModel: maxOutputTokensForModel,
+    // [T-008] Batas langkah adaptif: nilai eksplisit operator (bila ada) tetap
+    // titik awal, lalu naik satu tangga per `max_steps_exceeded`. Kernel membaca
+    // ini sekali per turn lewat seam aditif `maxStepsForRun`.
+    maxSteps: effectiveMaxSteps,
+    maxStepsForRun: () => effectiveMaxSteps,
     // Kompaksi lebih agresif (host-side): ringkas mulai 65% jendela, bukan 75%.
     budget: aggressiveBudgetPolicy,
     provider: dynamicProvider,
@@ -835,6 +995,7 @@ export async function createMinicodeSession(
     estimator: calibratedEstimator,
     recovery: cappedRecovery,
     executor: parallelExecutor({
+      getAuthorizationVersion: () => authorizationVersion,
       concurrency: safeConcurrency ?? LIMITS.EXECUTOR_CONCURRENCY,
       writeConcurrency: safeWriteConcurrency ?? LIMITS.EXECUTOR_WRITE_CONCURRENCY,
     }),
@@ -973,6 +1134,7 @@ export async function createMinicodeSession(
         //
         // Bukan pemicu: `max_steps_exceeded`, `max_turns`, `aborted`, timeout,
         // dan error provider non-konteks — menaikkan jendela tak akan menolong.
+        // (`max_steps_exceeded` punya jalurnya sendiri: eskalasi batas langkah.)
         if (error instanceof AgentError && error.kind === "budget_exceeded") {
           const reason = error.details?.reason
           if (reason === "fixpoint" || reason === "critical") {
@@ -980,6 +1142,14 @@ export async function createMinicodeSession(
               typeof error.details?.fixedTokens === "number" ? error.details.fixedTokens : 0
             escalateContextWindow(modelForRun, used)
           }
+        }
+        // [T-008] Turn mentok batas langkah: naik satu tangga untuk turn
+        // berikutnya. Kerja turn ini tetap hilang (kernel sudah berhenti), tapi
+        // turn lanjutan tidak akan menabrak dinding yang sama. Bounded: satu
+        // langkah per kejadian, dibatasi STEP_LIMIT_CEILING.
+        if (error instanceof AgentError && error.kind === "max_steps_exceeded") {
+          const used = typeof error.details?.steps === "number" ? error.details.steps : 0
+          escalateMaxSteps(used)
         }
         throw error
       })

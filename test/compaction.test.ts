@@ -387,6 +387,34 @@ describe("createLlmCompaction", () => {
     expect(String(out[0]!.content)).toContain("HASIL")
   })
 
+  // Regresi lapangan: 503 `overloaded` sesaat pada panggilan pertama dulu
+  // langsung membuang jalur LLM (ringkasan mekanikal yang jauh kurang
+  // informatif). Sekarang anggaran pemulihan bersama mencoba ulang.
+  test("compactAsync mencoba ulang 503 sesaat lalu memakai ringkasan LLM", async () => {
+    let calls = 0
+    const provider = {
+      name: "flaky",
+      stream: async function* () {
+        calls++
+        if (calls === 1) {
+          const err = new Error("server error (503): overloaded") as Error & { category: string }
+          err.category = "server"
+          throw err
+        }
+        yield { type: "text", text: "RINGKASAN-LLM" }
+        yield { type: "finish" }
+      },
+    } as never
+    const s = createLlmCompaction({ provider, model: "m", maxSummaryTokens: 200 })
+    const out = await s.compactAsync!(
+      storeOf(convo(12)),
+      { keepRecentTurns: 1 },
+      new AbortController().signal,
+    )
+    expect(calls).toBeGreaterThanOrEqual(2)
+    expect(String(out[0]!.content)).toContain("RINGKASAN-LLM")
+  })
+
   test("compactAsync menolak tanpa provider (loop yang fallback)", async () => {
     const s = createLlmCompaction()
     await expect(
@@ -477,7 +505,8 @@ test("kompaksi mekanis merangkum tool output di dalam satu turn aktif", () => {
     storeOf(messages),
     { keepRecentTurns: 1 },
   )
-  expect(compacted).toHaveLength(1)
+  expect(compacted).toHaveLength(2)
+  expect(compacted[1]).toBe(messages[0]!)
   expect(String(compacted[0]!.content)).toContain("Current task/request")
   expect(String(compacted[0]!.content)).toContain("read_file")
   expect(String(compacted[0]!.content).length).toBeLessThanOrEqual(
