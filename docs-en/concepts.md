@@ -26,7 +26,7 @@ is hand-written) and splits the two paths sharply:
   restores the primary buffer exactly (the transcript is not dumped to scrollback).
 - Colour only on a TTY; `NO_COLOR` always wins; program output stays free of cursor control when piped.
 
-Full details and their FROZEN contract: [Terminal Contract](TERMINAL_CONTRACT.md).
+Full details and their FROZEN contract: [Terminal Contract](../TERMINAL_CONTRACT.md).
 
 ## Honesty as a feature
 

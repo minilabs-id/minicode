@@ -6,9 +6,9 @@ The owner's phase roadmap is not available in this checkout; do not infer phase
 status or next actions from the changelog or the code. `TERMINAL_CONTRACT.md` is
 the FROZEN terminal contract — read it before changing output; behaviour changes
 require a contract update and a protection test map. The active output contracts
-live in the [event model](OUTPUT_EVENT_MODEL.md), [protocol](OUTPUT_PROTOCOL_SPEC.md),
-[rendering](OUTPUT_RENDERING_SPEC.md), and [UX rules](OUTPUT_UX_RULES.md). The
-rendering flow map is in [UI Render Pipeline](UI_RENDER_PIPELINE.md).
+live in the [event model](../OUTPUT_EVENT_MODEL.md), [protocol](../OUTPUT_PROTOCOL_SPEC.md),
+[rendering](../OUTPUT_RENDERING_SPEC.md), and [UX rules](../OUTPUT_UX_RULES.md). The
+rendering flow map is in [UI Render Pipeline](../UI_RENDER_PIPELINE.md).
 
 ## Three layers
 

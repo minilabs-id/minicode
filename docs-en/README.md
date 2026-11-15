@@ -16,7 +16,7 @@ MiniCode is a terminal coding agent built on the MiniCore kernel. The interactiv
 
 ## Documentation map
 
-`SUMMARY.md` is the navigation list; the minilabs build reads it to construct the page index. The page count is kept small and free of duplication — one topic, one page. The published version is available at [minilabs.id/projects/minicode/docs](https://minilabs.id/projects/minicode/docs/). [Architecture](architecture.md) holds the structure map and runtime flow.
+`SUMMARY.md` is the navigation list; the minilabs build reads it to construct the page index. The page count is kept small and free of duplication — one topic, one page. The published version is available at [minilabs.id/en/projects/minicode/docs](https://minilabs.id/en/projects/minicode/docs/); the Indonesian set lives at [minilabs.id/projects/minicode/docs](https://minilabs.id/projects/minicode/docs/). [Architecture](architecture.md) holds the structure map and runtime flow.
 
 ## Development
 
