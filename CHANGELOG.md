@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.26.0] - 2026-11-15
 
 ### Fixed
 - Bahasa balasan chat mengikuti bahasa pengguna dan permintaan bahasa eksplisit, termasuk pergantian bahasa dalam sesi; locale Windows/UI tidak lagi memaksa bahasa balasan.
