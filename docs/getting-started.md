@@ -27,12 +27,20 @@ Cek: `bun --version` harus keluar versi ≥ `1.1.13` (contoh `1.4.x`). Kalau mas
 **Langkah 2 — Pasang Minicode:**
 
 ```bash
-npm install -g minicode-ai
+bun add -g minicode-ai
 # bin: minicode
 minicode --version  # pastikan versi terbaru terpasang
 ```
 
-Kenapa butuh keduanya? `npm` = toko distribusi, `Bun` = mesin yang menjalankan. Tanpa Bun, `minicode` gagal dengan `'bun' is not recognized`.
+Minicode adalah paket Bun — memasangnya dengan `bun add -g` memakai runtime yang
+sama dengan yang menjalankannya, tanpa perantara Node. Tanpa Bun di PATH,
+`minicode` gagal dengan `'bun' is not recognized`.
+
+Masih memakai npm? Itu tetap didukung dan menghasilkan bin yang sama:
+
+```bash
+npm install -g minicode-ai
+```
 
 Untuk kontributor (kerja dari source):
 
@@ -137,7 +145,7 @@ One-shot, `exec`, pipe, dan CI hanya menampilkan notifikasi (tanpa install).
 > manual sesuai kebijakan organisasinya.
 
 ```bash
-npm install -g minicode-ai@<versi> # manual, gunakan versi yang sudah ditinjau
+bun add -g minicode-ai@<versi> # manual, gunakan versi yang sudah ditinjau
 minicode sync          # refresh model baru dari semua provider
 minicode pricing sync  # refresh cache harga dari models.dev
 ```

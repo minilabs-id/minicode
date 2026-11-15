@@ -9,9 +9,11 @@ Interactive sessions run as a fullscreen TUI; one-shot and automation runs flow 
 Requires Bun >=1.1.13 for development, local execution, and the published CLI:
 
 ```bash
-npm install -g minicode-ai
+bun add -g minicode-ai
 minicode
 ```
+
+`npm install -g minicode-ai` installs the same binary if you prefer npm.
 
 To run from a clone:
 
