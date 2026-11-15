@@ -18,16 +18,15 @@ import { displayWidth } from "../src/ui/render/width.ts"
 import { popupBoxWidth } from "../src/ui/screens/dialog.ts"
 import { type FakeTty, installFakeTty, KEY } from "./helpers/tui-harness.ts"
 
-// Sudut kotak mengikuti kapabilitas/kill-switch (dialog.ts boxChars()):
-// melengkung default, lancip dengan MINICODE_BOX=square, ASCII dengan
-// MINICODE_ASCII=1 / MINICODE_BOX=ascii.
-const BOX_STYLE = (process.env.MINICODE_BOX ?? "").toLowerCase()
-const BOX_TL =
-  !supportsUtf8() || process.env.MINICODE_ASCII === "1" || BOX_STYLE === "ascii"
-    ? "+"
-    : BOX_STYLE === "square"
-      ? "┌"
-      : "╭"
+// Sudut kotak mengikuti kapabilitas/kill-switch (dialog.ts boxChars()).
+// DIBACA SAAT PANGGILAN, bukan const module scope: di CI Windows WT_SESSION/TERM
+// baru diset installFakeTty SESUDAH import, sehingga konstanta menilai ASCII
+// sementara renderer menggambar `╭` (kelas jebakan AGENTS.md: nilai runtime).
+const boxTl = (): string => {
+  const style = (process.env.MINICODE_BOX ?? "").toLowerCase()
+  if (!supportsUtf8() || process.env.MINICODE_ASCII === "1" || style === "ascii") return "+"
+  return style === "square" ? "┌" : "╭"
+}
 
 const globalPath = join(homedir(), ".minicode", "config.json")
 const globalBak = `${globalPath}.bak-model-manager-test`
@@ -104,7 +103,7 @@ describe("model-manager: alur interactive", () => {
     await tty.ready()
     const expected = popupBoxWidth(100)
     const boxW = () => {
-      const top = tty!.screen().find((l) => l.includes(BOX_TL)) ?? ""
+      const top = tty!.screen().find((l) => l.includes(boxTl())) ?? ""
       return displayWidth(top.trimStart())
     }
     expect(boxW()).toBe(expected)
@@ -135,7 +134,7 @@ describe("model-manager: alur interactive", () => {
     const p = runModelManager({ cwd: workspace, currentModel: "prov::m1" })
     await tty.ready()
     const frame = tty.screen()
-    const top0 = frame.findIndex((l) => l.includes(BOX_TL))
+    const top0 = frame.findIndex((l) => l.includes(boxTl()))
     const srow = frame[top0 + 1] ?? ""
     const m = /^ */.exec(srow)
     const leftPad = m ? m[0].length : 0

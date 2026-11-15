@@ -42,16 +42,22 @@ afterEach(() => {
   }
 })
 
-const BOX_TL = supportsUtf8()
-  ? process.env.MINICODE_ASCII === "1" || (process.env.MINICODE_BOX ?? "").toLowerCase() === "ascii"
+// Glyph sudut DIBACA SAAT PANGGILAN, bukan dibekukan di module scope: di CI
+// (Windows) `WT_SESSION`/`TERM` baru diset oleh installFakeTty SESUDAH modul
+// diimpor, sehingga konstanta module-level menilai ASCII lalu mencari `+`
+// sementara renderer sudah menggambar `╭` → boxW() = 0. Jebakan yang sama
+// dengan `c`/`glyphs` (AGENTS.md): nilai runtime jangan disimpan ke const scope.
+const boxTl = (): string =>
+  !supportsUtf8() || process.env.MINICODE_ASCII === "1"
     ? "+"
-    : (process.env.MINICODE_BOX ?? "").toLowerCase() === "square"
-      ? "┌"
-      : "╭"
-  : "+"
+    : (process.env.MINICODE_BOX ?? "").toLowerCase() === "ascii"
+      ? "+"
+      : (process.env.MINICODE_BOX ?? "").toLowerCase() === "square"
+        ? "┌"
+        : "╭"
 
 const boxW = (): number => {
-  const top = tty!.screen().find((l) => l.includes(BOX_TL)) ?? ""
+  const top = tty!.screen().find((l) => l.includes(boxTl())) ?? ""
   return displayWidth(top.trimStart())
 }
 
