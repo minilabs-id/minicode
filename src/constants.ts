@@ -155,10 +155,26 @@ export const LIMITS = {
   SUB_AGENT_TIMEOUT_MS: 120_000,
   /** Network / providers */
   RETRY_AFTER_MAX_MS: 30_000,
-  /** F-11: timeout per request provider (server hung = turn hung tanpa ini).
-   * Longgar (5 mnt) karena reasoning stream sah bisa bermenit-menit; timeout
-   * turn (default 10–15 mnt) tetap backstop terluar. */
+  /** F-11: batas TOTAL satu request provider (server hung = turn hung tanpa
+   * ini). Longgar (5 mnt) karena reasoning stream sah bisa bermenit-menit;
+   * timeout turn (default 1 jam) tetap backstop terluar.
+   *
+   * Catatan audit freeze 2026-11-16: ini BUKAN timeout idle. Provider yang
+   * menerima koneksi lalu diam tanpa satu byte pun juga menghabiskan seluruh
+   * 5 menit — itulah "macet" yang dikeluhkan. Deteksi diam ditangani
+   * `PROVIDER_IDLE_TIMEOUT_MS` di bawah; keduanya dipakai bersama. */
   PROVIDER_REQUEST_TIMEOUT_MS: 300_000,
+  /** Batas DIAM (tidak ada byte apa pun dari provider) sebelum request
+   * dianggap mati. Timer di-reset setiap ada aktivitas (termasuk frame SSE
+   * keep-alive/thinking), jadi stream panjang TIDAK terpotong — hanya
+   * koneksi yang benar-benar berhenti bicara.
+   *
+   * 60 dtk: lebih pendek dari timeout turn mana pun, dan cukup di atas jeda
+   * wajar antar-chunk pada provider lambat + reasoning panjang saat pertama
+   * token belum keluar. Tanpa ini kegagalan "endpoint hidup tapi bisu"
+   * (proxy salah konfigurasi, TLS setengah terbuka, gateway overload) baru
+   * terlihat setelah 5 menit — user tak bisa membedakannya dari hang. */
+  PROVIDER_IDLE_TIMEOUT_MS: 60_000,
   /** F-16: cap akumulasi teks per stream (anti-OOM); hanya memotong kasus
    * patologis (~250rb token teks dalam satu turn). */
   PROVIDER_TEXT_MAX_CHARS: 1_000_000,

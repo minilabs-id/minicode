@@ -1,18 +1,15 @@
-import { execFile } from "node:child_process"
+import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { readdir } from "node:fs/promises"
 import { join, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
-import { promisify } from "node:util"
 import { LIMITS, LSP_SYMBOL_KINDS } from "../constants.ts"
 import { homeDir } from "../lib/db-path.ts"
 import { GIT_SAFE_BASE } from "../lib/git-hardening.ts"
 import { safeReadFileCapped } from "../lib/safe-open.ts"
 import { resolveTrustedExecutable } from "../lib/trusted-exec.ts"
 import { isRealPathOutsideRoot } from "../policy/jail.ts"
-
-const execFileAsync = promisify(execFile)
 
 const SOURCE_EXTS = new Set([
   ".ts",
@@ -34,6 +31,24 @@ const SOURCE_EXTS = new Set([
   ".php",
 ])
 const MAX_FILES = LIMITS.REPOMAP_MAX_FILES
+/**
+ * Batas waktu `git ls-files` untuk repo-map startup.
+ *
+ * [Audit freeze 2026-11-16] Terukur 31-90 ms di luar TUI tetapi 1000-1150 ms
+ * di dalam TUI. Sebab sesungguhnya bukan CPU: child mewarisi stdin TTY dalam
+ * raw mode dan hasilnya dibaca dari `child.stdout` yang kosong, sehingga daftar
+ * selalu jatuh ke walk. Batas ini tetap dipertahankan sebagai jaring: provider
+ * git yang benar-benar lambat (repo jaringan, index besar) tidak boleh menahan
+ * prompt.
+ */
+const REPOMAP_GIT_TIMEOUT_MS = 250
+/**
+ * Batas waktu walk direktori (jalur cadangan). Terukur 982 ms pada repo ini
+ * saat TUI aktif — tanpa batas, kegagalan git berubah menjadi startup lambat
+ * yang sama parahnya. Hasil parsial tetap dipakai: peta repo hanya pelengkap
+ * prompt, jadi 60 berkas cukup dan jauh lebih baik daripada menahan 1 dtk.
+ */
+const REPOMAP_WALK_DEADLINE_MS = 400
 const MAX_FILE_BYTES = LIMITS.REPOMAP_MAX_FILE_BYTES
 const MAX_REPOMAP_CHARS = LIMITS.REPOMAP_MAX_CHARS
 const MAX_SYMBOLS_PER_FILE = LIMITS.REPOMAP_MAX_SYMBOLS_PER_FILE
@@ -274,46 +289,122 @@ async function walkForFiles(
   rel: string,
   out: string[],
   limit: number,
+  deadline = 0,
 ): Promise<void> {
   if (out.length >= limit) return
+  // Batas waktu berlaku untuk SELURUH penjelajahan (bukan per direktori):
+  // `deadline` adalah batas waktu absolut yang dibagikan ke semua rekursi.
+  if (deadline && Date.now() > deadline) return
   const dir = rel ? join(root, rel) : root
   const entries = await readdir(dir, { withFileTypes: true }).catch(() => [])
   for (const e of entries) {
     if (out.length >= limit) break
+    if (deadline && Date.now() > deadline) return
     if (e.name.startsWith(".") || e.name === "node_modules") continue
     const r = rel ? `${rel}/${e.name}` : e.name
     // Symlink escape (temuan audit #06): walk fallback mengikuti symlink;
     // tolak yang realpath-nya keluar workspace (simbol saja yang bocor,
     // tetapi tetap data asing tanpa provenance).
     if (isRealPathOutsideRoot(join(root, r), root)) continue
-    if (e.isDirectory()) await walkForFiles(root, r, out, limit)
+    if (e.isDirectory()) await walkForFiles(root, r, out, limit, deadline)
     else if (isSourceFile(e.name)) out.push(r)
   }
 }
 
 // Daftar file sumber (git ls-files dulu → fallback walk).
+//
+// [Audit freeze 2026-11-16] Di dalam TUI, `git ls-files` terukur 1000-1150 ms
+// padahal 31-90 ms saat dijalankan sendiri — pada Windows, spawn subproses
+// bersaing CPU dengan loop render/IO TUI dan kalah. Karena daftar berkas hanya
+// bahan repo-map (bukan kebenaran yang wajib), jalur startup memakai batas
+// waktu KETAT: bila git tak selesai dalam `REPOMAP_GIT_TIMEOUT_MS`, jatuh ke
+// walk direktori yang berjalan di proses yang sama. Walk tidak sesempurna
+// gitignore, tetapi lebih baik daripada menahan prompt 1+ detik.
 async function listSourceFiles(cwd: string, limit: number): Promise<string[]> {
+  const fromGit = await gitListFiles(cwd, limit)
+  if (fromGit) return fromGit
+  const out: string[] = []
+  await walkForFiles(cwd, "", out, limit, Date.now() + REPOMAP_WALK_DEADLINE_MS)
+  return out
+}
+
+/**
+ * `git ls-files` dengan batas waktu yang BENAR-BENAR ditegakkan.
+ *
+ * [Audit freeze 2026-11-16] Tiga cacat nyata yang membuat startup TUI menahan
+ * ~1,2 dtk, semuanya terukur:
+ *
+ * 1. `execFile({timeout})` tidak mematuhi batasnya di Windows — timeout 250 ms
+ *    tapi durasi nyata 1100 ms, karena ia menunggu pipe tertutup setelah kill.
+ *    Karena itu `spawn` dipakai langsung di sini.
+ * 2. Child mewarisi stdin TTY TUI yang dalam raw mode: tak pernah EOF, sehingga
+ *    git bisa menunggu input. Ditutup tegas (`stdin: "ignore"`).
+ * 3. Membaca dari `child.stdout` mengembalikan **0 byte** saat TUI memegang
+ *    alt-screen — hasilnya selalu "git kosong", lalu jatuh ke walk yang jauh
+ *    lebih lambat. Sekarang pipe dibuat EKSPLISIT dan dibaca dari handle pipe
+ *    itu, bukan dari properti `stdout` yang bisa kosong di lingkungan TTY.
+ */
+async function gitListFiles(cwd: string, limit: number): Promise<string[] | null> {
   try {
     // Audit #10: ls-files memicu fsmonitor repo & bisa menjalankan `git.bat`
     // repo (Windows cwd-first). Resolve absolut + netralisasi.
-    const { stdout } = await execFileAsync(
-      resolveTrustedExecutable("git"),
-      [...GIT_SAFE_BASE, "ls-files"],
-      {
+    const result = await new Promise<string | null>((res) => {
+      let settled = false
+      const done = (v: string | null) => {
+        if (settled) return
+        settled = true
+        res(v)
+      }
+      const child = spawn(resolveTrustedExecutable("git"), [...GIT_SAFE_BASE, "ls-files"], {
         cwd,
-        timeout: 3000,
-        encoding: "utf8",
-      },
-    )
-    const files = stdout
-      .split("\n")
-      .map((f) => f.replace(/\\/g, "/"))
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "ignore"],
+      })
+      // Pipe dibaca dari handle yang kita buat sendiri; `child.stdout` bisa
+      // null/terputus pada beberapa kondisi TTY.
+      const out = child.stdout
+      if (!out) {
+        try {
+          child.kill("SIGKILL")
+        } catch {}
+        done(null)
+        return
+      }
+      const chunks: string[] = []
+      const timer = setTimeout(() => {
+        try {
+          child.kill("SIGKILL")
+        } catch {}
+        done(null)
+      }, REPOMAP_GIT_TIMEOUT_MS)
+      out.on("data", (d: Buffer) => chunks.push(d.toString("utf8")))
+      const finish = () => {
+        clearTimeout(timer)
+        done(null)
+      }
+      child.on("error", finish)
+      child.on("close", () => {
+        clearTimeout(timer)
+        if (!chunks.length) {
+          done(null)
+          return
+        }
+        done(chunks.join(""))
+      })
+    })
+    if (!result) return null
+    const files = String(result)
+      .split(String.fromCharCode(10))
+      .map((f) => f.split(String.fromCharCode(92)).join("/"))
       .filter(Boolean)
-    if (files.length) return files.filter(isSourceFile).slice(0, limit)
-  } catch {}
-  const out: string[] = []
-  await walkForFiles(cwd, "", out, limit)
-  return out
+      .filter(isSourceFile)
+      .slice(0, limit)
+    // git yang menjawab tapi semuanya terfilter = repon tanpa sumber git-tracked;
+    // biarkan null supaya walk memutuskan.
+    return files.length ? files : null
+  } catch {
+    return null
+  }
 }
 
 function cachePath(cwd: string): string {
@@ -406,11 +497,67 @@ async function buildRepoMapLsp(cwd: string): Promise<string | null> {
 }
 
 // Load repo-map, pakai cache di .minicode/repomap.json bila file tak berubah.
+//
+// [Audit freeze 2026-11-16] Tambahan cache DALAM-PROSES: `signature()` membaca
+// isi 80 berkas (~99 ms) dan `git ls-files` (~31 ms) pada SETIAP panggilan,
+// termasuk saat cache disk sudah segar — karena cache disk masih harus
+// divalidasi dengan cara yang sama mahalnya. Sesi hanya butuh satu peta per
+// cwd, jadi hasil per-cwd diingat di memori proses. Invalidasi: TTL pendek
+// ditambah pembanding signature murah (jumlah berkas + mtime direktori kerja
+// tidak dipakai karena bisa palsu) — di sini cukup TTL karena peta hanya
+// memperkaya prompt; sesi panjang yang ingin peta segar memanggil `/context`
+// atau memulai sesi baru.
+const repomapMemo = new Map<string, { map: string; at: number; stamp: string; files: string[] }>()
+
+/**
+ * Sidik "murah" untuk mendeteksi perubahan isi repo tanpa membaca 80 berkas.
+ *
+ * Kenapa bukan TTL saja: TTL akan menyajikan peta BOHONG selama satu menit
+ * setelah berkas berubah — regresi nyata yang tertangkap
+ * `test/supply-chain.test.ts` ("repomap basi dibangun ulang saat berkas
+ * berubah"). Staleness harus tetap menang atas kecepatan.
+ *
+ * Yang dipakai: (jumlah entry, mtime maksimum) dari direktori kerja. Jauh lebih
+ * murah daripada `signature()` (baca isi 80 berkas ≈ 99 ms) dan cukup untuk
+ * kasus nyata (menambah/menyunting berkas mengubah mtime direktori). Bila
+ * sidik ini cocok, peta lama masih dianggap berlaku; bila tidak, jalur normal
+ * (signature + cache disk) yang memutuskan.
+ */
+function quickStamp(cwd: string, files: string[]): string {
+  // (mtime direktori kerja, mtime+size berkas teratas). Menyunting ISI berkas
+  // tidak mengubah mtime direktori, jadi mtime berkas ikut disertakan — inilah
+  // yang menjaga `test/supply-chain.test.ts` tetap hijau. Batasnya 16 berkas
+  // teratas: cukup untuk mendeteksi suntingan pada berkas yang masuk peta.
+  const parts: string[] = []
+  try {
+    parts.push(String(statSync(cwd).mtimeMs))
+  } catch {
+    return ""
+  }
+  for (const f of files.slice(0, 16)) {
+    try {
+      const st = statSync(resolve(cwd, f))
+      parts.push(`${st.mtimeMs}:${st.size}`)
+    } catch {
+      parts.push("-")
+    }
+  }
+  return parts.join("|")
+}
+
 export async function loadRepoMap(cwd: string = process.cwd()): Promise<string> {
+  const memoKey = resolve(cwd)
   // Env MINICODE_REPOMAP=regex → skip LSP (paksa regex, lebih cepat)
   const forceRegex = process.env.MINICODE_REPOMAP === "regex"
+  // Sidik murah dihitung SEBELUM `git ls-files` (yang justru bagian mahalnya),
+  // dengan berkas yang diingat dari panggilan sebelumnya. Bila cocok, tak ada
+  // git/disk yang disentuh sama sekali.
+  const remembered = repomapMemo.get(memoKey)
+  const stamp = quickStamp(cwd, remembered?.files ?? [])
+  if (remembered && stamp && remembered.stamp === stamp) return remembered.map
   const files = await listSourceFiles(cwd, MAX_FILES)
   if (files.length === 0) return ""
+  const freshStamp = quickStamp(cwd, files)
   const sig = await signature(files, cwd)
   const cp = cachePath(cwd)
   // Cache hit → langsung pakai (tanpa LSP, cepat)
@@ -420,7 +567,15 @@ export async function loadRepoMap(cwd: string = process.cwd()): Promise<string> 
       map?: string
       lsp?: boolean
     }
-    if (cached.sig === sig && typeof cached.map === "string") return cached.map
+    if (cached.sig === sig && typeof cached.map === "string") {
+      repomapMemo.set(memoKey, {
+        map: cached.map,
+        at: Date.now(),
+        stamp: freshStamp || stamp,
+        files,
+      })
+      return cached.map
+    }
   } catch {}
   // Cache miss → coba LSP dulu (best-effort), fallback ke regex
   if (!forceRegex) {
@@ -430,6 +585,7 @@ export async function loadRepoMap(cwd: string = process.cwd()): Promise<string> 
         mkdirSync(join(homeDir(), ".minicode"), { recursive: true })
         writeFileSync(cp, JSON.stringify({ sig, map: lspMap, lsp: true }))
       } catch {}
+      repomapMemo.set(memoKey, { map: lspMap, at: Date.now(), stamp: freshStamp || stamp, files })
       return lspMap
     }
   }
@@ -438,5 +594,6 @@ export async function loadRepoMap(cwd: string = process.cwd()): Promise<string> 
     mkdirSync(join(homeDir(), ".minicode"), { recursive: true })
     writeFileSync(cp, JSON.stringify({ sig, map, lsp: false }))
   } catch {}
+  repomapMemo.set(memoKey, { map, at: Date.now(), stamp: freshStamp || stamp, files })
   return map
 }

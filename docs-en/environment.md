@@ -11,7 +11,8 @@ The variables that most determine behaviour (the rest are referenced below):
 
 | Variable | Function |
 |---|---|
-| `MINICODE_TIMEOUT_MS` | Default timeout (ms) when `--timeout` is not set; `0` = Infinity |
+| `MINICODE_TIMEOUT_MS` | Default timeout (ms) when `--timeout` is not set; `0` = Infinity. This is the **total** budget for one prompt (default 1 hour for interactive sessions) |
+| `MINICODE_DEBUG` | `1` -> print the full stack trace when the process fails fatally (default: one line with the cause only) |
 | `NO_UPDATE_CHECK` | `1` -> skip the update check at startup |
 | `MINICODE_AUTO_UPDATE` | `0`/`false`/`off` -> disable the automatic update check and install |
 | `MINICODE_PLAN` | `1` -> legacy alias for `--work-mode PLAN` (without `--plan`) |

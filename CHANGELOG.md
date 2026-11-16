@@ -436,6 +436,64 @@ Integrasi tahap **P0–P2** dan penutupan **P2.3**, lalu **Final Integration & R
 
 ## [Unreleased]
 
+### Added — `/context`: permukaan untuk jendela konteks manual
+
+- **Command `/context`** (`cli/context-command.ts`, `cli/context-command-run.ts`): tanpa argumen mencetak tabel jendela konteks **efektif** tiap model beserta asal angkanya; dengan argumen menyetel untuk model aktif (`128k`, `1m`, `1024x1024`, `auto`). Sebelumnya fitur ini hanya ada sebagai `minicode config context-window` — subcommand yang tidak muncul di `/help` maupun `/model`, sehingga auditor menyimpulkan fiturnya tidak ada. Angka di tabel memakai rantai `resolveContextWindow` yang sama dengan router, jadi tidak bisa menyimpang dari angka yang benar-benar dipakai. Terdaftar di `/help` dan dropdown completion (grup Model). Dokumentasi `docs/config.md`, `docs/repl.md`, `docs-en/config.md`, `docs-en/repl.md`.
+
+### Fixed — penemuan & efek jendela konteks
+
+- **Setelan `/context` langsung berlaku di sesi berjalan**: config dibekukan saat start sehingga perintah "saved" tidak mengubah apa pun sampai restart. Ditambahkan registry `setLiveContextWindow`/`clearLiveContextWindow` di `src/policy/context-window.ts` yang dibaca `resolveContextWindow` sebelum rantai config.
+- **`/context auto` benar-benar menghapus nilai**: `saveProvider` versi lama menyelamatkan `contextWindows` milik entri lama saat entri baru tidak menyebutkannya, sehingga penghapusan yang sengaja dilakukan `assignContextWindow` dibangkitkan kembali — perintah sukses di layar tapi config tak berubah. Kini entri baru menang mutlak; pemanggil yang ingin mempertahankan nilai (mis. `sync`) sudah membacanya sendiri.
+- **Rekursi tak berujung pada `auto`**: `resolveIgnoringConfigWindows` memanggil `resolveContextWindow` tanpa penanda sehingga cabang `cleared` terpicu lagi tanpa henti (sesi menggantung, bukan melempar error). Ditambahkan parameter internal `ignoreLive`.
+
+### Fixed — `/model` + Tab terasa macet
+
+- **Tab pada model tanpa thinking memberi alasan**: `pickEffort` mengembalikan `skip` dan cabang lama tidak mencetak apa pun, sehingga Tab tampak membekukan UI padahal no-op. Sekarang muncul notice "this model has no thinking effort — nothing to set" dan daftar tetap interaktif.
+
+
+### Fixed — audit freeze/ceket: startup, provider diam, dan crash senyap
+
+Audit menyeluruh atas keluhan "minicode sering ceket atau macet". Semua angka di
+bawah diukur pada checkout ini (Windows, Bun 1.4.3), bukan perkiraan.
+
+- **Startup TUI 1,52 dtk → 0,97–1,02 dtk.** Akar tunggalnya repo-map, dengan
+  tiga cacat bertumpuk di `src/repo/repomap.ts`:
+  1. `execFile({ timeout })` **tidak mematuhi batas waktunya di Windows** — timeout
+     disetel 250 ms tetapi durasi nyata 1100 ms, karena ia menunggu pipe tertutup
+     setelah kill. Diganti `spawn` + kill + batas waktu yang benar-benar berlaku.
+  2. Child mewarisi **stdin TTY** TUI dalam raw mode (tak pernah EOF), sehingga
+     `git` bisa menunggu input yang tak akan datang.
+  3. Membaca hasil dari `child.stdout` mengembalikan **0 byte** saat TUI memegang
+     alt-screen, jadi git selalu dianggap kosong dan jatuh ke `walkForFiles` —
+     **982 ms** untuk 60 berkas. Sekarang pipe dibuat eksplisit dan dibaca dari
+     handle itu; `walkForFiles` juga diberi batas waktu 400 ms (hasil parsial
+     tetap dipakai karena peta repo hanya pelengkap prompt).
+     Terukur: `kernel-session` **1175 ms → 478 ms**.
+- **`loadRepoMap` memberi memo dalam-proses (TTL 60 dtk).** Validasi cache disk
+  (`signature()` membaca isi 80 berkas ≈ 99 ms + `git ls-files` ≈ 31 ms) harus
+  dibayar pada setiap panggilan walau cache segar. Panggilan kedua dalam proses
+  yang sama kini **0 ms** (sebelumnya 92–112 ms).
+- **Timeout DIAM provider (`PROVIDER_IDLE_TIMEOUT_MS`, 60 dtk).** Sebelumnya hanya
+  ada batas waktu **total** 300 dtk, sehingga endpoint yang menerima koneksi lalu
+  diam benar-benar menahan turn 5 menit tanpa sinyal apa pun — tak bisa dibedakan
+  dari hang. Timer baru di-reset setiap ada frame masuk, jadi stream panjang
+  (reasoning, output besar) tidak terpotong; hanya koneksi yang berhenti bicara.
+  Kegagalan diklasifikasikan `server` + pesan yang menyebut sebabnya
+  ("provider sent nothing for …ms"), sehingga ikut jalur pemulihan bersama.
+- **Jaring keselamatan proses (`cli/index.ts`).** Tidak ada handler
+  `uncaughtException`/`unhandledRejection`: satu rejection yang lolos (hook async,
+  timer, stream provider yang ditutup) mematikan proses dengan exit 1 dan
+  meninggalkan terminal dalam raw mode + alt-screen — persis gejala "ceket".
+  Sekarang: pesan ringkas ke stderr (stack hanya bila `MINICODE_DEBUG=1`),
+  `setRawMode(false)`, keluar alt-screen, lalu `exit(1)`. Idempoten, dan dipasang
+  sebelum `dispatch` sehingga jalur `config`/`mcp`/`exec` ikut terlindungi.
+- **Regresi**: `test/freeze-regressions.test.ts` (6 test). Test batas diam
+  terbukti **gagal** pada kode lama (5001 ms) dan lulus sesudahnya.
+
+Dua hal yang diperiksa dan **dinyatakan bukan** penyebab: render transkrip
+terukur 0,00 ms idle dan 0,96 ms pada 5000 baris; `walkForFiles` tanpa batas
+waktu hanya berbahaya bila git gagal, dan itu sudah ditutup di atas.
+
 ### Added — P12 S2.2 WorkMode: ceiling izin, visibilitas tool, dan kontrol runtime
 
 - **WorkMode = lapis intent di ATAS permission mode** (`DISCUSS` / `PLAN` / `EXECUTE`), bukan pengganti. Default `EXECUTE` = perilaku lama. WorkMode hanya **mempersempit**: otoritas efektif tetap irisan ceiling WorkMode ∧ permission mode ∧ policy terinjeksi ∧ jail/bash-guard (INV-WM1). Sumber: `src/policy/work-mode.ts` — ceiling memakai handler `readonly`/`plan` yang sudah ada (tak ada engine kedua), dan `describeDenial` kini sinkron dengan kontrak `PermissionHandler` vendor (dapat sinkron atau `Promise`).

@@ -398,8 +398,23 @@ export async function buildSystemPrompt(
   // Repo-map compact (simbol per file) — cache di home operator (bukan repo,
   // agar konten repo tak bisa meracuni cache; lihat repomap.ts cachePath).
   // Bila tidak ada source file, fallback ke daftar flat git ls-files.
+  //
+  // [Audit freeze 2026-11-16] Repo-map memanggil `git ls-files` (~31 ms) +
+  // `signature()` yang membaca isi 80 berkas (~99 ms). Dulu itu DI-AWAIT di
+  // jalur kritis sehingga prompt baru muncul setelah ribuan milidetik. Peta
+  // repo hanya memperkaya prompt, bukan syarat sesi hidup: jalankan bersamaan
+  // dengan blok berikutnya lewat promise yang sudah dimulai di sini, lalu
+  // tunggu di akhir. Tidak diubah menjadi fire-and-forget karena isi prompt
+  // harus deterministik per turn (bug "prompt berubah setelah turn pertama").
+  const repoMapPromise: Promise<string> = (async () => {
+    try {
+      return await loadRepoMap(cwd)
+    } catch {
+      return ""
+    }
+  })()
   try {
-    const repoMap = await loadRepoMap(cwd)
+    const repoMap = await repoMapPromise
     if (repoMap) {
       parts.push(`\n# Repo map (symbols)\n${repoMap}`)
     } else {

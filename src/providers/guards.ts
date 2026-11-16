@@ -19,6 +19,8 @@ export function withStreamGuards(
   provider: ModelProvider,
   opts: {
     timeoutMs?: number
+    /** Batas diam (tanpa byte) sebelum request dianggap mati. 0 = nonaktif. */
+    idleTimeoutMs?: number
     maxTextChars?: number
     maxReasonChars?: number
     maxToolArgBytes?: number
@@ -32,6 +34,11 @@ export function withStreamGuards(
     configuredTimeout > 0
       ? Math.min(LIMITS.MAX_TIMER_DELAY_MS, Math.max(1, Math.floor(configuredTimeout)))
       : LIMITS.PROVIDER_REQUEST_TIMEOUT_MS
+  const configuredIdle = opts.idleTimeoutMs
+  const idleTimeoutMs =
+    typeof configuredIdle === "number" && Number.isFinite(configuredIdle) && configuredIdle >= 0
+      ? Math.min(LIMITS.MAX_TIMER_DELAY_MS, Math.floor(configuredIdle))
+      : LIMITS.PROVIDER_IDLE_TIMEOUT_MS
   const maxTextChars = opts.maxTextChars ?? LIMITS.PROVIDER_TEXT_MAX_CHARS
   // Reasoning = bukan bagian jawaban; cap agresif (2MB logis ≈ 500k token —
   // jauh di atas reasoning sah mana pun, jauh di bawah OOM).
@@ -67,6 +74,28 @@ export function withStreamGuards(
         timedOut = true
         ctl.abort(new Error(`provider request timed out after ${timeoutMs}ms`))
       }, timeoutMs)
+      // Timeout DIAM (audit freeze 2026-11-16): timer total di atas membiarkan
+      // provider yang tak pernah mengirim byte menahan turn sampai 5 menit —
+      // user tak bisa membedakannya dari hang. Timer ini di-reset setiap ada
+      // frame masuk, jadi hanya koneksi yang benar-benar berhenti bicara yang
+      // dipotong; stream panjang (reasoning, output besar) tidak tersentuh.
+      const idleMs = idleTimeoutMs > 0 ? idleTimeoutMs : 0
+      let idleFired = false
+      let idleTimer: ReturnType<typeof setTimeout> | undefined
+      const armIdle = () => {
+        if (!idleMs) return
+        if (idleTimer) clearTimeout(idleTimer)
+        idleTimer = setTimeout(() => {
+          idleFired = true
+          ctl.abort(new Error(`provider sent nothing for ${idleMs}ms (connection stalled)`))
+        }, idleMs)
+      }
+      armIdle()
+      const stopTimers = () => {
+        clearTimeout(timer)
+        if (idleTimer) clearTimeout(idleTimer)
+        idleTimer = undefined
+      }
       let textChars = 0
       let reasonChars = 0
       let toolArgumentBytes = 0
@@ -81,6 +110,8 @@ export function withStreamGuards(
         while (true) {
           const next = await nextOrAbort(iterator, ctl.signal)
           if (next.done) break
+          // Ada frame masuk = koneksi masih hidup; jadwal diam dimulai ulang.
+          armIdle()
           const ev = next.value
           if (
             finishReason !== undefined &&
@@ -186,14 +217,22 @@ export function withStreamGuards(
           invalidated = true
           yield attemptEvent("invalidated", {
             hadVisibleOutput,
-            reason: timedOut ? "timeout" : "stream-error",
+            reason: timedOut ? "timeout" : idleFired ? "stalled" : "stream-error",
           })
         }
         if (timedOut)
           throw new ProviderError("server", `provider request timed out after ${timeoutMs}ms`)
+        // Diam total = kegagalan sisi server yang bisa diulang, bukan abort user.
+        // Diklasifikasikan "server" supaya jalur pemulihan bersama (anggaran
+        // T-009) yang menanganinya, dengan pesan yang menyebut SEBABNYA.
+        if (idleFired)
+          throw new ProviderError(
+            "server",
+            `provider sent nothing for ${idleTimeoutMs}ms (connection stalled)`,
+          )
         throw e
       } finally {
-        clearTimeout(timer)
+        stopTimers()
         signal.removeEventListener("abort", onParentAbort)
         if (!ctl.signal.aborted && finishReason !== "stop" && finishReason !== "tool_calls") {
           ctl.abort(new DOMException("Provider stream closed", "AbortError"))

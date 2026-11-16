@@ -11,7 +11,8 @@ Variabel yang paling menentukan perilaku (sisanya referensi di bawah):
 
 | Variabel | Fungsi |
 |---|---|
-| `MINICODE_TIMEOUT_MS` | Default timeout (ms) bila `--timeout` tidak diset; `0` = Infinity |
+| `MINICODE_TIMEOUT_MS` | Default timeout (ms) bila `--timeout` tidak diset; `0` = Infinity. Ini batas **total** satu prompt (default 1 jam untuk sesi interaktif) |
+| `MINICODE_DEBUG` | `1` → tampilkan stack trace lengkap saat proses gagal fatal (default: hanya satu baris sebabnya) |
 | `NO_UPDATE_CHECK` | `1` → lewati pemeriksaan pembaruan saat startup |
 | `MINICODE_AUTO_UPDATE` | `0`/`false`/`off` → nonaktifkan pemeriksaan dan pemasangan pembaruan otomatis |
 | `MINICODE_PLAN` | `1` → alias warisan `--work-mode PLAN` (tanpa `--plan`) |

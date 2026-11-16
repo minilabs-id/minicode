@@ -135,7 +135,18 @@
 // Tidak ada `node_modules`/artefak basi terbawa; `gate:pack` lolos seluruh cek
 // selain ukuran. Re-baseline ke 4.224 KiB (4,125 MiB) memberi ~23 KiB ruang di
 // atas aktual. Tetap alarm regresi, bukan target ukuran.
-export const PACK_SIZE_BUDGET_KIB = 4224
+//
+// [Re-baseline 4.224 -> 4.256 KiB, permukaan `/context`] 316 -> 318 file;
+// aktual 4.226 KiB (budget lama terlampaui 2 KiB). Kontribusi terukur:
+//   cli/context-command-run.ts  ~6,9 KiB  (baca tabel jendela efektif +
+//                                          setel/`auto`, termasuk registry live
+//                                          agar setelan berlaku tanpa restart)
+//   cli/context-command.ts      ~3,4 KiB  (label asal + notis simpan, murni,
+//                                          tanpa I/O)
+// Keduanya menutup celah yang terbukti dalam audit: fitur jendela konteks
+// manual tak punya jalan masuk di sesi, jadi dianggap tidak ada. Ruang sisa
+// ~30 KiB di atas aktual — tetap alarm regresi, bukan target.
+export const PACK_SIZE_BUDGET_KIB = 4256
 
 /**
  * True bila ukuran paket (KiB) masih di dalam budget.

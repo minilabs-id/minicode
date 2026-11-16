@@ -36,6 +36,51 @@ import {
 import { dispatch } from "./router.ts"
 import { createCliSession } from "./setup.ts"
 
+/**
+ * Jaring terakhir proses (audit freeze/ceket 2026-11-16).
+ *
+ * Tanpa handler ini, SATU rejection/throw yang lolos (dari hook async, timer,
+ * stream provider yang ditutup, atau fire-and-forget di UI) membunuh proses
+ * dengan exit 1 dan meninggalkan terminal dalam raw mode + alt-screen — gejala
+ * persis "ceket": layar rusak, tak ada pesan, sesi harus ditutup manual.
+ *
+ * Perilaku lama tidak dipertahankan sebagai default karena tak ada satu pun
+ * jalur yang memang menginginkan proses mati diam-diam: kegagalan yang perlu
+ * menghentikan sesi sudah lewat `App.quit()`/`AgentError`.
+ *
+ * Kontrak yang dipilih:
+ * - Cetak ringkas ke stderr (tanpa stack penuh kecuali MINICODE_DEBUG=1).
+ * - Kembalikan terminal (raw mode, alt-screen, kursor) SEBELUM keluar.
+ * - Exit code 1 agar CI/skrip tetap melihat kegagalan.
+ * - Idempoten: penanganan kedua (mis. error saat cleanup) tidak rekursi.
+ */
+let crashGuardArmed = false
+function installCrashGuard(): void {
+  if (crashGuardArmed) return
+  crashGuardArmed = true
+  const restoreAndExit = (kind: string, error: unknown): void => {
+    try {
+      // Kembalikan terminal: tanpa ini shell pengguna tetap dalam raw mode.
+      const stdin = process.stdin as typeof process.stdin & { setRawMode?: (b: boolean) => void }
+      stdin.setRawMode?.(false)
+    } catch {}
+    try {
+      // 1049 = keluar alt-screen; 25h = tampilkan kursor; 0m = reset atribut.
+      process.stdout.write("\u001b[?1049l\u001b[?25h\u001b[0m")
+    } catch {}
+    try {
+      const debug = process.env.MINICODE_DEBUG === "1"
+      const msg = error instanceof Error ? error.message : String(error)
+      const detail = debug && error instanceof Error && error.stack ? `\n${error.stack}` : ""
+      process.stderr.write(`\n[minicode] ${kind}: ${msg}${detail}\n`)
+    } catch {}
+    // 1 = gagal. Dipakai CI dan skrip pemanggil untuk membedakan crash dari exit normal.
+    process.exit(1)
+  }
+  process.on("uncaughtException", (error) => restoreAndExit("internal error", error))
+  process.on("unhandledRejection", (reason) => restoreAndExit("unhandled rejection", reason))
+}
+
 /** Versi dibaca dari package.json — satu sumber, tidak di-hardcode dua tempat. */
 function readVersion(): string {
   try {
@@ -102,6 +147,9 @@ Subcommand flags (config/mcp/sessions/skills/exec/...): see 'minicode <cmd> --he
 `
 
 const args = process.argv.slice(2)
+// Dipasang SEBELUM dispatch: crash di jalur mana pun (termasuk config/mcp/exec)
+// tetap memulihkan terminal, bukan meninggalkan sesi dalam raw mode.
+installCrashGuard()
 function getArg(name: string): string | undefined {
   return rawGetArg(args, name)
 }

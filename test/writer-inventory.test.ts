@@ -25,7 +25,10 @@ const INVENTORY: Record<string, { max: number; owner: string }> = {
   // a `console.log` per output line (23 writers) and this audit failed it, which
   // is the audit working: the command now collects into an array and emits once.
   // Declared here rather than absorbed, per the rule above.
-  "cli/commands.ts": { max: 31, owner: "human-cmd" },
+  // [context] 31 -> 32 for exactly ONE writer: `/context` emits its table as a
+  // single joined block (one call per invocation, not one per line). Declared
+  // here rather than absorbed, per the rule above.
+  "cli/commands.ts": { max: 32, owner: "human-cmd" },
   // [P1 M15] 25 -> 26 for exactly ONE writer: the warning when `--runtime` is
   // given an unknown value. Silent fail-closed here would be an expectation
   // trap — the operator would believe the runtime is active while the process
@@ -68,7 +71,11 @@ const INVENTORY: Record<string, { max: number; owner: string }> = {
   // [loading-bar] 35 -> 36 for exactly ONE writer: the auto-update notice sink
   // (onNotice) — during install/restart the loading bar is stopped, so update
   // progress lines are still emitted to stderr (append-only, not dropped).
-  "cli/index.ts": { max: 36, owner: "human-cmd" },
+  // [crash-guard] 36 -> 38 for exactly TWO writers: the last-resort process
+  // guard. One restores the terminal (alt-screen exit + cursor + raw mode), the
+  // other emits the single diagnostic line. Both live in ONE function and must
+  // bypass the normal UI writers, because the TUI is already dead when they run.
+  "cli/index.ts": { max: 38, owner: "human-cmd" },
   "cli/model-manager.ts": { max: 2, owner: "human-cmd" },
   "cli/provider-manager.ts": { max: 3, owner: "human-cmd" },
   // [P2.1] 26 -> 27 for exactly ONE writer: the canonical identity line

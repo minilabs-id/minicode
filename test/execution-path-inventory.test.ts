@@ -150,8 +150,8 @@ export const EXECUTION_PATHS: Readonly<Record<string, RegisteredPath>> = {
   },
   "src/repo/repomap.ts": {
     cls: "external-integration",
-    entry: "listSourceFiles (execFile git ls-files) + cache",
-    proof: "execFileAsync",
+    entry: "gitListFiles (spawn git ls-files, batas waktu ditegakkan) + cache",
+    proof: 'spawn(resolveTrustedExecutable("git")',
     note: "Peta repo (cache ~/.minicode). Baca saja.",
   },
   "src/providers/anthropic.ts": {
