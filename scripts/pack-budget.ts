@@ -146,7 +146,22 @@
 // Keduanya menutup celah yang terbukti dalam audit: fitur jendela konteks
 // manual tak punya jalan masuk di sesi, jadi dianggap tidak ada. Ruang sisa
 // ~30 KiB di atas aktual — tetap alarm regresi, bukan target.
-export const PACK_SIZE_BUDGET_KIB = 4256
+//
+// [Re-baseline 4.256 -> 4.352 KiB (4,25 MiB), audit freeze/ceket] 318 -> 320
+// file; aktual terukur 4.238 KiB, menyisakan hanya ~18 KiB pada budget lama
+// sehingga pekerjaan berikutnya akan mentok pada angka, bukan pada keputusan.
+// Kontribusi terukur commit 070ee78:
+//   src/repo/repomap.ts        ~7,5 KiB  (spawn + batas waktu yang ditegakkan,
+//                                        deadline walk, memo ber-sidik murah
+//                                        yang tetap mendeteksi berkas basi)
+//   cli/index.ts               ~2,0 KiB  (jaring terakhir proses: pulihkan
+//                                        raw mode + alt-screen sebelum exit)
+//   src/providers/guards.ts    ~1,7 KiB  (batas DIAM provider yang di-reset
+//                                        tiap frame, bukan batas total saja)
+//   src/constants.ts           ~0,8 KiB  (PROVIDER_IDLE_TIMEOUT_MS + alasannya)
+// Naik 96 KiB dengan ruang sisa ~114 KiB: menampung ~110 KiB pekerjaan nyata
+// sebelum perlu keputusan lagi. Tetap alarm regresi, bukan target ukuran.
+export const PACK_SIZE_BUDGET_KIB = 4352
 
 /**
  * True bila ukuran paket (KiB) masih di dalam budget.

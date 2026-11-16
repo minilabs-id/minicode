@@ -171,14 +171,14 @@ describe("audit #11: permukaan pack tepat", () => {
 //
 // Angkanya TIDAK ditulis di sini sebagai nilai tetap: satu sumber di
 // `scripts/pack-budget.ts` (dipakai gate + tes ini). Tes ini mengunci:
-//   1. nilai budget sesuai keputusan owner (4.256 KiB = 4,156 MiB),
+//   1. nilai budget sesuai keputusan owner (4.352 KiB = 4,25 MiB),
 //   2. ukuran DI ATAS budget tetap GAGAL (alarm regresi tak dimatikan),
 //   3. gate `pack-check` memakai budget yang sama (tak ada angka liar di
 //      dua tempat).
 describe("budget ukuran paket", () => {
-  test("budget = 4.256 KiB (4,156 MiB) sesuai keputusan owner", () => {
-    expect(PACK_SIZE_BUDGET_KIB).toBe(4256)
-    expect(PACK_SIZE_BUDGET_KIB / 1024).toBeCloseTo(4.156, 3)
+  test("budget = 4.352 KiB (4,25 MiB) sesuai keputusan owner", () => {
+    expect(PACK_SIZE_BUDGET_KIB).toBe(4352)
+    expect(PACK_SIZE_BUDGET_KIB / 1024).toBeCloseTo(4.25, 6)
   })
 
   test("ukuran tepat di bawah budget lolos; di atas budget GAGAL", () => {

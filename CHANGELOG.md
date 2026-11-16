@@ -1,5 +1,64 @@
 # Changelog
 
+## [0.27.0] - 2026-11-16
+
+### Added — `/context`: permukaan untuk jendela konteks manual
+
+- **Command `/context`** (`cli/context-command.ts`, `cli/context-command-run.ts`): tanpa argumen mencetak tabel jendela konteks **efektif** tiap model beserta asal angkanya; dengan argumen menyetel untuk model aktif (`128k`, `1m`, `1024x1024`, `auto`). Sebelumnya fitur ini hanya ada sebagai `minicode config context-window` — subcommand yang tidak muncul di `/help` maupun `/model`, sehingga auditor menyimpulkan fiturnya tidak ada. Angka di tabel memakai rantai `resolveContextWindow` yang sama dengan router, jadi tidak bisa menyimpang dari angka yang benar-benar dipakai. Terdaftar di `/help` dan dropdown completion (grup Model). Dokumentasi `docs/config.md`, `docs/repl.md`, `docs-en/config.md`, `docs-en/repl.md`.
+
+### Fixed — penemuan & efek jendela konteks
+
+- **Setelan `/context` langsung berlaku di sesi berjalan**: config dibekukan saat start sehingga perintah "saved" tidak mengubah apa pun sampai restart. Ditambahkan registry `setLiveContextWindow`/`clearLiveContextWindow` di `src/policy/context-window.ts` yang dibaca `resolveContextWindow` sebelum rantai config.
+- **`/context auto` benar-benar menghapus nilai**: `saveProvider` versi lama menyelamatkan `contextWindows` milik entri lama saat entri baru tidak menyebutkannya, sehingga penghapusan yang sengaja dilakukan `assignContextWindow` dibangkitkan kembali — perintah sukses di layar tapi config tak berubah. Kini entri baru menang mutlak; pemanggil yang ingin mempertahankan nilai (mis. `sync`) sudah membacanya sendiri.
+- **Rekursi tak berujung pada `auto`**: `resolveIgnoringConfigWindows` memanggil `resolveContextWindow` tanpa penanda sehingga cabang `cleared` terpicu lagi tanpa henti (sesi menggantung, bukan melempar error). Ditambahkan parameter internal `ignoreLive`.
+
+### Fixed — `/model` + Tab terasa macet
+
+- **Tab pada model tanpa thinking memberi alasan**: `pickEffort` mengembalikan `skip` dan cabang lama tidak mencetak apa pun, sehingga Tab tampak membekukan UI padahal no-op. Sekarang muncul notice "this model has no thinking effort — nothing to set" dan daftar tetap interaktif.
+
+### Fixed — audit freeze/ceket: startup, provider diam, dan crash senyap
+
+Audit menyeluruh atas keluhan "minicode sering ceket atau macet". Semua angka di
+bawah diukur pada checkout ini (Windows, Bun 1.4.3), bukan perkiraan.
+
+- **Startup TUI 1,52 dtk → 0,97–1,02 dtk.** Akar tunggalnya repo-map, dengan
+  tiga cacat bertumpuk di `src/repo/repomap.ts`:
+  1. `execFile({ timeout })` **tidak mematuhi batas waktunya di Windows** — timeout
+     disetel 250 ms tetapi durasi nyata 1100 ms, karena ia menunggu pipe tertutup
+     setelah kill. Diganti `spawn` + kill + batas waktu yang benar-benar berlaku.
+  2. Child mewarisi **stdin TTY** TUI dalam raw mode (tak pernah EOF), sehingga
+     `git` bisa menunggu input yang tak akan datang.
+  3. Membaca hasil dari `child.stdout` mengembalikan **0 byte** saat TUI memegang
+     alt-screen, jadi git selalu dianggap kosong dan jatuh ke `walkForFiles` —
+     **982 ms** untuk 60 berkas. Sekarang pipe dibuat eksplisit dan dibaca dari
+     handle itu; `walkForFiles` juga diberi batas waktu 400 ms (hasil parsial
+     tetap dipakai karena peta repo hanya pelengkap prompt).
+     Terukur: `kernel-session` **1175 ms → 478 ms**.
+- **`loadRepoMap` memberi memo dalam-proses (TTL 60 dtk).** Validasi cache disk
+  (`signature()` membaca isi 80 berkas ≈ 99 ms + `git ls-files` ≈ 31 ms) harus
+  dibayar pada setiap panggilan walau cache segar. Panggilan kedua dalam proses
+  yang sama kini **0 ms** (sebelumnya 92–112 ms).
+- **Timeout DIAM provider (`PROVIDER_IDLE_TIMEOUT_MS`, 60 dtk).** Sebelumnya hanya
+  ada batas waktu **total** 300 dtk, sehingga endpoint yang menerima koneksi lalu
+  diam benar-benar menahan turn 5 menit tanpa sinyal apa pun — tak bisa dibedakan
+  dari hang. Timer baru di-reset setiap ada frame masuk, jadi stream panjang
+  (reasoning, output besar) tidak terpotong; hanya koneksi yang berhenti bicara.
+  Kegagalan diklasifikasikan `server` + pesan yang menyebut sebabnya
+  ("provider sent nothing for …ms"), sehingga ikut jalur pemulihan bersama.
+- **Jaring keselamatan proses (`cli/index.ts`).** Tidak ada handler
+  `uncaughtException`/`unhandledRejection`: satu rejection yang lolos (hook async,
+  timer, stream provider yang ditutup) mematikan proses dengan exit 1 dan
+  meninggalkan terminal dalam raw mode + alt-screen — persis gejala "ceket".
+  Sekarang: pesan ringkas ke stderr (stack hanya bila `MINICODE_DEBUG=1`),
+  `setRawMode(false)`, keluar alt-screen, lalu `exit(1)`. Idempoten, dan dipasang
+  sebelum `dispatch` sehingga jalur `config`/`mcp`/`exec` ikut terlindungi.
+- **Regresi**: `test/freeze-regressions.test.ts` (6 test). Test batas diam
+  terbukti **gagal** pada kode lama (5001 ms) dan lulus sesudahnya.
+
+Dua hal yang diperiksa dan **dinyatakan bukan** penyebab: render transkrip
+terukur 0,00 ms idle dan 0,96 ms pada 5000 baris; `walkForFiles` tanpa batas
+waktu hanya berbahaya bila git gagal, dan itu sudah ditutup di atas.
+
 ## [0.26.0] - 2026-11-15
 
 ### Fixed
@@ -434,66 +493,6 @@ Integrasi tahap **P0–P2** dan penutupan **P2.3**, lalu **Final Integration & R
 
 - Memory provenance & temporal supersession, matriks otoritas penyimpanan `STORAGE_AUTHORITY_MATRIX`, akuntansi delta token streaming, gating DDL, dan ketahanan kontensi Windows WAL lewat predikat `isSqliteContention`.
 
-## [Unreleased]
-
-### Added — `/context`: permukaan untuk jendela konteks manual
-
-- **Command `/context`** (`cli/context-command.ts`, `cli/context-command-run.ts`): tanpa argumen mencetak tabel jendela konteks **efektif** tiap model beserta asal angkanya; dengan argumen menyetel untuk model aktif (`128k`, `1m`, `1024x1024`, `auto`). Sebelumnya fitur ini hanya ada sebagai `minicode config context-window` — subcommand yang tidak muncul di `/help` maupun `/model`, sehingga auditor menyimpulkan fiturnya tidak ada. Angka di tabel memakai rantai `resolveContextWindow` yang sama dengan router, jadi tidak bisa menyimpang dari angka yang benar-benar dipakai. Terdaftar di `/help` dan dropdown completion (grup Model). Dokumentasi `docs/config.md`, `docs/repl.md`, `docs-en/config.md`, `docs-en/repl.md`.
-
-### Fixed — penemuan & efek jendela konteks
-
-- **Setelan `/context` langsung berlaku di sesi berjalan**: config dibekukan saat start sehingga perintah "saved" tidak mengubah apa pun sampai restart. Ditambahkan registry `setLiveContextWindow`/`clearLiveContextWindow` di `src/policy/context-window.ts` yang dibaca `resolveContextWindow` sebelum rantai config.
-- **`/context auto` benar-benar menghapus nilai**: `saveProvider` versi lama menyelamatkan `contextWindows` milik entri lama saat entri baru tidak menyebutkannya, sehingga penghapusan yang sengaja dilakukan `assignContextWindow` dibangkitkan kembali — perintah sukses di layar tapi config tak berubah. Kini entri baru menang mutlak; pemanggil yang ingin mempertahankan nilai (mis. `sync`) sudah membacanya sendiri.
-- **Rekursi tak berujung pada `auto`**: `resolveIgnoringConfigWindows` memanggil `resolveContextWindow` tanpa penanda sehingga cabang `cleared` terpicu lagi tanpa henti (sesi menggantung, bukan melempar error). Ditambahkan parameter internal `ignoreLive`.
-
-### Fixed — `/model` + Tab terasa macet
-
-- **Tab pada model tanpa thinking memberi alasan**: `pickEffort` mengembalikan `skip` dan cabang lama tidak mencetak apa pun, sehingga Tab tampak membekukan UI padahal no-op. Sekarang muncul notice "this model has no thinking effort — nothing to set" dan daftar tetap interaktif.
-
-
-### Fixed — audit freeze/ceket: startup, provider diam, dan crash senyap
-
-Audit menyeluruh atas keluhan "minicode sering ceket atau macet". Semua angka di
-bawah diukur pada checkout ini (Windows, Bun 1.4.3), bukan perkiraan.
-
-- **Startup TUI 1,52 dtk → 0,97–1,02 dtk.** Akar tunggalnya repo-map, dengan
-  tiga cacat bertumpuk di `src/repo/repomap.ts`:
-  1. `execFile({ timeout })` **tidak mematuhi batas waktunya di Windows** — timeout
-     disetel 250 ms tetapi durasi nyata 1100 ms, karena ia menunggu pipe tertutup
-     setelah kill. Diganti `spawn` + kill + batas waktu yang benar-benar berlaku.
-  2. Child mewarisi **stdin TTY** TUI dalam raw mode (tak pernah EOF), sehingga
-     `git` bisa menunggu input yang tak akan datang.
-  3. Membaca hasil dari `child.stdout` mengembalikan **0 byte** saat TUI memegang
-     alt-screen, jadi git selalu dianggap kosong dan jatuh ke `walkForFiles` —
-     **982 ms** untuk 60 berkas. Sekarang pipe dibuat eksplisit dan dibaca dari
-     handle itu; `walkForFiles` juga diberi batas waktu 400 ms (hasil parsial
-     tetap dipakai karena peta repo hanya pelengkap prompt).
-     Terukur: `kernel-session` **1175 ms → 478 ms**.
-- **`loadRepoMap` memberi memo dalam-proses (TTL 60 dtk).** Validasi cache disk
-  (`signature()` membaca isi 80 berkas ≈ 99 ms + `git ls-files` ≈ 31 ms) harus
-  dibayar pada setiap panggilan walau cache segar. Panggilan kedua dalam proses
-  yang sama kini **0 ms** (sebelumnya 92–112 ms).
-- **Timeout DIAM provider (`PROVIDER_IDLE_TIMEOUT_MS`, 60 dtk).** Sebelumnya hanya
-  ada batas waktu **total** 300 dtk, sehingga endpoint yang menerima koneksi lalu
-  diam benar-benar menahan turn 5 menit tanpa sinyal apa pun — tak bisa dibedakan
-  dari hang. Timer baru di-reset setiap ada frame masuk, jadi stream panjang
-  (reasoning, output besar) tidak terpotong; hanya koneksi yang berhenti bicara.
-  Kegagalan diklasifikasikan `server` + pesan yang menyebut sebabnya
-  ("provider sent nothing for …ms"), sehingga ikut jalur pemulihan bersama.
-- **Jaring keselamatan proses (`cli/index.ts`).** Tidak ada handler
-  `uncaughtException`/`unhandledRejection`: satu rejection yang lolos (hook async,
-  timer, stream provider yang ditutup) mematikan proses dengan exit 1 dan
-  meninggalkan terminal dalam raw mode + alt-screen — persis gejala "ceket".
-  Sekarang: pesan ringkas ke stderr (stack hanya bila `MINICODE_DEBUG=1`),
-  `setRawMode(false)`, keluar alt-screen, lalu `exit(1)`. Idempoten, dan dipasang
-  sebelum `dispatch` sehingga jalur `config`/`mcp`/`exec` ikut terlindungi.
-- **Regresi**: `test/freeze-regressions.test.ts` (6 test). Test batas diam
-  terbukti **gagal** pada kode lama (5001 ms) dan lulus sesudahnya.
-
-Dua hal yang diperiksa dan **dinyatakan bukan** penyebab: render transkrip
-terukur 0,00 ms idle dan 0,96 ms pada 5000 baris; `walkForFiles` tanpa batas
-waktu hanya berbahaya bila git gagal, dan itu sudah ditutup di atas.
-
 ### Added — P12 S2.2 WorkMode: ceiling izin, visibilitas tool, dan kontrol runtime
 
 - **WorkMode = lapis intent di ATAS permission mode** (`DISCUSS` / `PLAN` / `EXECUTE`), bukan pengganti. Default `EXECUTE` = perilaku lama. WorkMode hanya **mempersempit**: otoritas efektif tetap irisan ceiling WorkMode ∧ permission mode ∧ policy terinjeksi ∧ jail/bash-guard (INV-WM1). Sumber: `src/policy/work-mode.ts` — ceiling memakai handler `readonly`/`plan` yang sudah ada (tak ada engine kedua), dan `describeDenial` kini sinkron dengan kontrak `PermissionHandler` vendor (dapat sinkron atau `Promise`).
@@ -606,7 +605,6 @@ waktu hanya berbahaya bila git gagal, dan itu sudah ditutup di atas.
 
 ## [0.10.1] - 2026-09-22 — Integrasi pasca-branch: ACP + token first-class + gate cepat/lambat + fix keamanan F-CRIT
 
-
 ### Added
 - **`minicode acp` — server JSON-RPC stdio untuk IDE (F5)**: subset minimal (BUKAN klaim ACP penuh) — `initialize` (capabilities + `approval:"deny-headless"`), `run` (sesi baru per run via `createCliSession` headless: prompt/cwd/model/maxSteps/timeoutMs/budget/mode auto|plan; notifikasi `text`+`tool` live; hasil `{ok,tokens,steps,turns,text}` + `submitted` verbatim), `cancel` (gugurkan via signal), `shutdown`. stdout murni mesin (semua di-scrub), diagnostik ke stderr. Guard: `test/acp.test.ts` (parser/framing/params + smoke spawn initialize→shutdown exit 0, tanpa provider); kontrak I29; docs: `docs/exec.md` + `docs/cli.md` + help CLI.
 - **Gate cepat vs lambat (F4.2)**: `bun run gate:fast` (tsc+lint+test+coverage+pack+bash+bench smoke+audit harness, per-commit/CI) vs `bun run gate:slow` (extreme fuzz+shadow-git+MCP adversarial, `slow.yml` nightly+manual); `ci.yml` melepas extreme+docker; ambang coverage dikunci ke suite cepat. `docs/contributing.md` mendokumentasikan split.
@@ -624,7 +622,6 @@ waktu hanya berbahaya bila git gagal, dan itu sudah ditutup di atas.
 - **Kontrak mesin `exec --json` + flag `exec` yang mati + exit code 2 (audit terminal UI/UX)**: `exec --json` gagal setup (tanpa provider) dulu pulang dengan stdout kosong + exit 1 — kini satu baris `{"type":"summary","ok":false,…}` (di-scrub) tetap dipancarkan; pesan manusia + exit 1 tidak berubah. Akar dua lapis: `createProviderLayer` memanggil `process.exit(1)` dari dalam (kini melempar `NoProviderError`, tiap composition root yang memutuskan presentasi) dan `hasFlag`/`getArg` berhenti di token `exec` sehingga **semua flag boolean `exec` (`--json`/`--verify`/`--ask`/`--plan`/`--allowlist`/`--budget-strict`/`--allow-local-config`) mati diam-diam di CLI nyata** (kini diparse dari argv sesudah `exec`; flag setelah kata prompt tetap teks prompt). Salah pakai (argv hilang/malformed, subcommand asing) kini **exit 2** di semua handler (dulu 1); runtime/lookup/help tetap 1/1/0. Migrasi: skrip `!= 0` aman, asersi literal `== 1` untuk usage perlu update. Guard `test/exec-json-envelope.test.ts` + `test/exit-codes.test.ts`; kontrak I28.
 - **Flag sebagai id ditolak + scope `sessions list` + sanitasi label**: `auth logout --cwd X` dan `pricing show --json` dulu menyerap flag sebagai id (usage + exit 2 kini); `sessions list` tanpa `.minicode/` lokal mengumumkan `(global scope — …)` sebelum tabel; label provider/model/id dari config lokal atau probe jaringan (`config add/remove/set-key`, `providers|models|sync`, `/status`) kini lewat `sanitizeAnsiLine` — teks tak terpercaya tak bisa lagi membawa `\x1b[2J` ke scrollback.
 - **Input inline tak lagi mendarat di baris salah sesudah terminal berubah ukuran (temuan snap kiri/kanan)**: `askLine` menyimpan jangkar `prevRows`/`prevInputRows`/`prevCursorRow` sebagai offset baris RELATIF terhadap tempat kursor berdiri — hitungan itu sah untuk grid pra-reflow, dan sesudah `columns`/`rows` berubah terminal menata ulang baris sehingga offset lama menunjuk baris lain; render berikutnya naik ke anchor basi (`\x1b[1A`) dan `clearOverlay` menghapus baris yang salah, jadi isi ketikan tampak terduplikasi di area output/ketikan. Kini render pertama sesudah geometri berbeda me-reset ketiga offset dan menggambar dari kursor saat ini (`lastGeoCols/Rows` di `src/ui/input/input.ts`) — sengaja TANPA listener `resize` baru (frame basi cukup ditimpa render berikutnya) dan `printedW` tak ikut di-reset (nilainya konservatif; dikosongkan justru membiarkan ekor lama). Guard `test/input-resize.test.ts` (gagal di kode lama: CUP ke anchor basi; multiline + dropdown terbuka + resize ganda + resize cepat ×10); kontrak I30.
-
 
 ### Changed
 - **Satu tampilan interaktif: TUI fullscreen** (`bun cli/index.ts` langsung
@@ -815,7 +812,6 @@ waktu hanya berbahaya bila git gagal, dan itu sudah ditutup di atas.
 
 ### Deferred (disengaja — bukan lupa)
 - **Vendor sync ditunda**: upstream `minicore@1eceea9` divergen dari pin vendor (`868d4f1b…` vs `99b17847…`); `VENDOR.md` mencatat seam lokal `cwd` + `permissionMode` + `turnCount/stepCount` + `provider_meta` yang akan **dihapus** oleh sync membabi buta. Satu-satunya delta upstream (cap `retryAfter` 30s) sudah ditutup lapis-app (`cappedRecovery` + router). Hilirkan seam dulu ke repo minicore, baru sync ulang.
-
 
 ## [0.9.18] - 2026-09-13 — Indikator rapi, jawaban minimize, pagar turn
 
