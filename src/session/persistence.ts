@@ -1132,7 +1132,7 @@ export async function saveSession(
   opts?: {
     expectedEpoch?: number
     runId?: string
-    workMode?: "DISCUSS" | "PLAN" | "EXECUTE"
+    workMode?: "DISCUSS" | "EXECUTE"
   },
 ) {
   const db = open(cwd)
@@ -1489,15 +1489,13 @@ function decodeMessageRows(rows: StoredMessageRow[]): unknown[] {
   })
 }
 
-function parseStoredWorkMode(raw: unknown): "DISCUSS" | "PLAN" | "EXECUTE" | undefined {
-  if (raw === "DISCUSS" || raw === "PLAN" || raw === "EXECUTE") return raw
+function parseStoredWorkMode(raw: unknown): "DISCUSS" | "EXECUTE" | undefined {
+  if (raw === "DISCUSS" || raw === "PLAN") return "DISCUSS"
+  if (raw === "EXECUTE") return "EXECUTE"
   return undefined
 }
 
-export function loadSessionWorkMode(
-  id: string,
-  cwd?: string,
-): "DISCUSS" | "PLAN" | "EXECUTE" | undefined {
+export function loadSessionWorkMode(id: string, cwd?: string): "DISCUSS" | "EXECUTE" | undefined {
   const db = open(cwd)
   try {
     const row = db.prepare("SELECT work_mode FROM sessions WHERE id = ?").get(id) as {
@@ -1511,7 +1509,7 @@ export function loadSessionWorkMode(
 
 export function saveSessionWorkMode(
   id: string,
-  workMode: "DISCUSS" | "PLAN" | "EXECUTE",
+  workMode: "DISCUSS" | "EXECUTE",
   cwd?: string,
   opts?: { expectedEpoch?: number },
 ): void {

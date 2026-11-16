@@ -136,17 +136,27 @@ export function parallelExecutor(
         : rawDeps.registry
     const getLiveWorkMode = (rawDeps.permissions as { __getWorkMode?: () => string } | undefined)
       ?.__getWorkMode
-    const baseDeps: ExecutorDeps = { ...rawDeps, registry: liveRegistry }
-    // P0.2 (G-MEM-TRACK / Invariant #2 & #3): saat WorkMode DISCUSS atau PLAN,
+    const liveWorkMode =
+      typeof getLiveWorkMode === "function" ? getLiveWorkMode.call(rawDeps.permissions) : "EXECUTE"
+    // INV-WM1: `unrestricted` hanya berlaku di WorkMode EXECUTE; saat DISCUSS
+    // aktif, klaim `unrestricted` diturunkan ke `auto` di ToolContext agar
+    // `contextUnrestricted(ctx)` pada tool baca tidak melewati jail workspace.
+    const effectivePm =
+      rawDeps.permissionMode === "unrestricted" && liveWorkMode !== "EXECUTE"
+        ? "auto"
+        : rawDeps.permissionMode
+    const baseDeps: ExecutorDeps = {
+      ...rawDeps,
+      registry: liveRegistry,
+      ...(effectivePm !== undefined ? { permissionMode: effectivePm } : {}),
+    }
+    // P0.2 (G-MEM-TRACK / Invariant #2 & #3): saat WorkMode DISCUSS,
     // `read_memory` menerima `permissionMode: "readonly"` per-sesi agar tidak
     // menaikkan `access_count` di SQLite walau PermissionMode dasar `auto`.
     const depsFor = (call: ToolCall): ExecutorDeps => {
       if (call.name === "read_memory") {
-        if (typeof getLiveWorkMode === "function") {
-          const wm = getLiveWorkMode.call(rawDeps.permissions)
-          if (wm === "DISCUSS" || wm === "PLAN") {
-            return { ...baseDeps, permissionMode: "readonly" }
-          }
+        if (liveWorkMode === "DISCUSS") {
+          return { ...baseDeps, permissionMode: "readonly" }
         }
         const listed = typeof rawDeps.registry.list === "function" ? rawDeps.registry.list() : []
         if (

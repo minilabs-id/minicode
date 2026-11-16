@@ -1,7 +1,8 @@
-import { readFileSync } from "node:fs"
-import { resolve } from "node:path"
 import { getMemoryStats, reconcileMemoryStores } from "../../src/memory/vector.ts"
+import { readTraceRows } from "../../src/telemetry/trace.ts"
+import { sanitizeAnsiLine } from "../../src/ui/render/sanitize.ts"
 import { c } from "../../src/ui/render/theme.ts"
+import { guardSubcommand, positionalSubArg } from "../args.ts"
 
 const MEMORY_HELP = `minicode memory — vector RAG store stats
 
@@ -31,20 +32,12 @@ function fmtDate(ts: number | null): string {
 function readHitRate(cwd?: string): { runs: number; avgHits: number } {
   let runs = 0
   let total = 0
-  try {
-    const lines = readFileSync(resolve(cwd ?? ".", ".minicode", "traces.jsonl"), "utf8")
-      .split("\n")
-      .filter(Boolean)
-    for (const l of lines) {
-      try {
-        const t = JSON.parse(l) as MemoryTraceRow
-        if (typeof t.memoryHits === "number") {
-          runs++
-          total += t.memoryHits
-        }
-      } catch {}
+  for (const t of readTraceRows<MemoryTraceRow>(cwd, "traces.jsonl")) {
+    if (typeof t.memoryHits === "number") {
+      runs++
+      total += t.memoryHits
     }
-  } catch {}
+  }
   return { runs, avgHits: runs ? total / runs : 0 }
 }
 
@@ -54,11 +47,8 @@ export async function handleMemory(
 ): Promise<never> {
   // Satu saluran stderr bersama (dihitung inventaris writer sebagai satu site).
   const err = (msg: string): void => console.error(msg)
-  const sub = args[1]
-  if (sub === "--help" || sub === "-h") {
-    console.log(MEMORY_HELP)
-    process.exit(0)
-  }
+  guardSubcommand(args, "memory", MEMORY_HELP, console.log, err, -1)
+  const sub = positionalSubArg(args, 1)
   // [PROMPT 06 · Area E / D4] `reconcileMemoryStores` sebelumnya TIDAK punya
   // call site produksi sama sekali: pesan `write_memory` menyuruh user
   // menjalankan `minicode memory reconcile` padahal subcommand itu tak ada —
@@ -83,8 +73,8 @@ export async function handleMemory(
       process.exit(1)
     }
   }
-  if (sub && sub !== "status" && !sub.startsWith("-")) {
-    err(`unknown memory subcommand "${sub}" — see: minicode memory status`)
+  if (sub && sub !== "status") {
+    err(`unknown memory subcommand "${sanitizeAnsiLine(sub)}" — see: minicode memory status`)
     process.exit(2)
   }
   const cwdArg = getArg("--cwd")
@@ -120,12 +110,14 @@ export async function handleMemory(
       `(db ${fmtBytes(s.dbBytes)} ${dot} wal ${fmtBytes(s.walBytes)} ${dot} shm ${fmtBytes(s.shmBytes)})`,
   ]
   if (s.models.length)
-    lines.push(`  models: ${s.models.map((m) => `${m.model}×${m.count}`).join(", ")}`)
+    lines.push(
+      `  models: ${s.models.map((m) => `${sanitizeAnsiLine(m.model)}×${m.count}`).join(", ")}`,
+    )
   if (s.dims.length)
     lines.push(`  dims: ${s.dims.map((d) => `${d.dim || "none"}×${d.count}`).join(", ")}`)
   if (s.categories.length)
     lines.push(
-      `  categories: ${s.categories.map((m) => `${m.category}×${m.count}`).join(", ")} (scope: ${scope})`,
+      `  categories: ${s.categories.map((m) => `${sanitizeAnsiLine(m.category)}×${m.count}`).join(", ")} (scope: ${sanitizeAnsiLine(scope)})`,
     )
   lines.push(`  range: ${fmtDate(s.oldest)} → ${fmtDate(s.newest)}`)
   lines.push(

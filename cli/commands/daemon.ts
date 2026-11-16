@@ -25,7 +25,13 @@ import {
   resolveRuntimeMode,
 } from "../../src/runtime/production-execution.ts"
 import { listSessionRuns } from "../../src/session/persistence.ts"
-import { displayWorkMode, flagNameOf, resolveWorkModeFlag, valueFlags } from "../args.ts"
+import {
+  allowLocalSubcommand,
+  displayWorkMode,
+  flagNameOf,
+  resolveWorkModeFlag,
+  valueFlags,
+} from "../args.ts"
 import type { CliSession, CliSessionOptions } from "../setup.ts"
 
 export async function handleDaemon(
@@ -157,13 +163,19 @@ function fail(json: unknown, human: string, code = 1): never {
   process.exit(code)
 }
 
+function failUser(json: boolean, reason: string): never {
+  fail(json ? { ok: false, code: "USER_ERROR", reason } : null, reason, 2)
+}
+
 async function openClient(
   cwd: string | undefined,
   scopes: DaemonScope[],
   who: string,
+  json = false,
 ): Promise<{ client: DaemonClient; ep: DaemonEndpoint }> {
   const ep = readEndpoint(cwd)
-  if (!ep) fail(null, "daemon: tidak ada endpoint — jalankan `minicode daemon start` dulu", 3)
+  const msg = "daemon: tidak ada endpoint — jalankan `minicode daemon start` dulu"
+  if (!ep) fail(json ? { ok: false, reason: "no-endpoint", message: msg } : null, msg, 3)
   const cap = issueCapabilityFromEndpoint(ep, { scopes, who })
   const client = await DaemonClient.connect({
     target: { host: ep.host, port: ep.port },
@@ -332,7 +344,7 @@ export async function startDaemonHostedRuntime(opts: {
           sid: () => sessionRef?.sessionId ?? "",
           runId: () => null,
         }),
-        plan: false,
+        allowLocalConfig: allowLocalSubcommand(sub),
         allowlist: false,
         verify: sub.includes("--verify"),
         workMode: workModeResolved.workMode,
@@ -457,7 +469,7 @@ export interface DaemonHostedRuntime {
   /** Tutup sesi yang di-host (idempoten). Dipakai daemon saat shutdown. */
   readonly closeHostedSession: () => Promise<void>
   /** P0.2 (Q5): WorkMode efektif daemon / sesi yang di-host. */
-  readonly workMode: "DISCUSS" | "PLAN" | "BUILD"
+  readonly workMode: "DISCUSS" | "BUILD"
   /** P0.2 (Q5): Peringatan bila nilai `--work-mode` / env tidak valid. */
   readonly workModeWarning?: string
 }
@@ -468,13 +480,15 @@ async function startDaemon(
   cwd: string | undefined,
   json: boolean,
 ): Promise<void> {
+  const portRaw = getArg("--port")
+  if (portRaw !== undefined && (!/^\d+$/.test(portRaw) || Number(portRaw) > 65535)) {
+    failUser(json, `daemon start: --port harus bilangan bulat 0..65535, diterima "${portRaw}"`)
+  }
   let started: DaemonHostedRuntime
   try {
     started = await startDaemonHostedRuntime({ sub, getArg, cwd, autoRunPrompt: true })
   } catch (e) {
-    if (e instanceof VerifyWorkModeConflictError) {
-      fail(json ? { ok: false, code: "USER_ERROR", reason: e.message } : null, e.message, 2)
-    }
+    if (e instanceof VerifyWorkModeConflictError) failUser(json, e.message)
     throw e
   }
   const { host, session, workMode, workModeWarning } = started
@@ -542,7 +556,7 @@ async function stopDaemon(cwd: string | undefined, json: boolean): Promise<void>
     // Objek mentah, bukan string: `fail()` yang meng-encode (lihat kontraknya).
     fail(json ? { ok: false, reason: probe.reason } : null, `daemon: ${probe.reason}`, 3)
   try {
-    const { client } = await openClient(cwd, ["admin"], "operator")
+    const { client } = await openClient(cwd, ["admin"], "operator", json)
     const res = await client.control("daemon.shutdown", { reason: "cli" }, `stop-${Date.now()}`)
     client.close()
     emit(
@@ -551,7 +565,8 @@ async function stopDaemon(cwd: string | undefined, json: boolean): Promise<void>
       res.ok ? 0 : 1,
     )
   } catch (e) {
-    fail(null, `daemon: gagal menghubungi — ${String((e as Error).message ?? e)}`, 1)
+    const msg = `daemon: gagal menghubungi — ${String((e as Error).message ?? e)}`
+    fail(json ? { ok: false, error: msg } : null, msg, 1)
   }
 }
 
@@ -568,15 +583,27 @@ async function issueCapability(
     .map((s) => s.trim())
     .filter((s): s is DaemonScope => (DAEMON_SCOPES as readonly string[]).includes(s))
   if (scopes.length === 0) {
-    fail(
-      null,
+    failUser(
+      json,
       `daemon issue: --scopes wajib berisi salah satu dari: ${DAEMON_SCOPES.join(", ")}`,
-      2,
+    )
+  }
+  if (ttlRaw !== undefined && (!/^\d+$/.test(ttlRaw) || Number(ttlRaw) <= 0)) {
+    failUser(
+      json,
+      `daemon issue: --ttl harus bilangan bulat positif (milidetik), diterima "${ttlRaw}"`,
     )
   }
   const ep = readEndpoint(cwd)
-  if (!ep) fail(null, "daemon issue: tidak ada endpoint", 3)
-  const ttl = ttlRaw !== undefined && /^\d+$/.test(ttlRaw) ? Number(ttlRaw) : undefined
+  if (!ep)
+    fail(
+      json
+        ? { ok: false, reason: "no-endpoint", message: "daemon issue: tidak ada endpoint" }
+        : null,
+      "daemon issue: tidak ada endpoint",
+      3,
+    )
+  const ttl = ttlRaw !== undefined ? Number(ttlRaw) : undefined
   const token = issueCapabilityFromEndpoint(ep, {
     scopes,
     who,
@@ -587,7 +614,7 @@ async function issueCapability(
 
 async function listSessions(cwd: string | undefined, json: boolean): Promise<void> {
   try {
-    const { client } = await openClient(cwd, ["read:session"], "operator")
+    const { client } = await openClient(cwd, ["read:session"], "operator", json)
     const res = await client.control("session.list", {}, `list-${Date.now()}`)
     client.close()
     if (!res.ok)
@@ -604,6 +631,7 @@ async function listSessions(cwd: string | undefined, json: boolean): Promise<voi
         : rows.map((r) => `${r.sid} head=${r.presentationHead} run=${r.runStatus ?? "-"}`)
     emit(lines, json ? JSON.stringify({ ok: true, sessions: rows }) : null, 0)
   } catch (e) {
-    fail(null, `daemon: gagal menghubungi — ${String((e as Error).message ?? e)}`, 1)
+    const msg = `daemon: gagal menghubungi — ${String((e as Error).message ?? e)}`
+    fail(json ? { ok: false, error: msg } : null, msg, 1)
   }
 }

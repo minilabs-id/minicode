@@ -682,22 +682,22 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
      — subcommand lain menerima args mentah. Invarian ini tidak mengubah
      semantik, aksi, atau exit code masing-masing aksi; yang berubah hanya
      invokasi flag-mendahului yang dulu salah rute menjadi rute benar.
-35. **WorkMode = lapis intent di ATAS permission mode (P12 S2.2 + P0.2)** — dua
+35. **WorkMode = lapis intent 2-mode di ATAS permission mode (`DISCUSS` | `BUILD`)** — dua
     dimensi yang BERJALAN BERSAMA, bukan pengganti:
-    **Nilai runtime:** `DISCUSS` (investigasi baca-saja lokal: tepat 16 tool `PURE_READ`
-    lokal, network read `web_fetch`/`web_search` ditolak penuh) · `PLAN`
-    (ceiling rencana: 16 tool baca lokal + `web_fetch`/`web_search` wajib lewat
-    pengawasan eksplisit + ekstra rencana bila diizinkan Tool Access Policy) ·
-    `EXECUTE` (tanpa ceiling tambahan). Nama produk `BUILD` memetakan ke
-    identitas internal `EXECUTE`; sesi baru memakai default `DISCUSS`.
+    **Nilai runtime:** `DISCUSS` (investigasi baca-saja, diskusi, dan perencanaan:
+    16 tool `PURE_READ` lokal + `web_fetch`/`web_search` yang wajib lewat
+    pengawasan eksplisit + ekstra rencana `todo_write`/`delegate_task` [explore]/
+    `submit_result` bila diizinkan Tool Access Policy) · `EXECUTE` (tanpa ceiling
+    tambahan). Nama produk `BUILD` memetakan ke identitas internal `EXECUTE`;
+    sesi baru memakai default `DISCUSS`.
     **Gerbang penolakan & side-effect ceiling:** Tool Access Policy menentukan
     capability yang tersedia; PermissionMode menentukan pengawasan persetujuan;
     WorkMode memasang ceiling tambahan. Irisan ketiganya tidak pernah
     memperluas akses (INV-WM1), `visible === callable` terjaga lintas transisi runtime,
-    hooks diblokir pada `DISCUSS` maupun `PLAN` untuk semua PM, dan `--verify`
-    ditolak fail-closed saat startup bila digabung `DISCUSS`/`PLAN` (exit 2)
-    serta dilewati otomatis saat mode turun ke `DISCUSS`/`PLAN` di TUI.
-    **Command `/work-mode <DISCUSS|PLAN|BUILD>`:** tiga nilai produk yang dapat
+    hooks diblokir pada `DISCUSS` untuk semua PM, dan `--verify` ditolak
+    fail-closed saat startup bila digabung `DISCUSS` (exit 2) serta dilewati
+    otomatis saat mode turun ke `DISCUSS` di TUI.
+    **Command `/work-mode <DISCUSS|BUILD>`:** dua nilai produk yang dapat
     dipilih operator; `EXECUTE` hanya nama internal dan ditolak sebagai input.
     Tanpa argumen → tampilkan mode aktif + usage; nilai invalid → pesan
     kesalahan dan mode AKTIF TIDAK berubah; sesi tanpa kontrol WorkMode
@@ -711,8 +711,8 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
     **Resume (P0.2 Q5 — menggantikan D-2):** WorkMode DIPERSIST di metadata sesi
     (`sessions.work_mode`) lintas `--resume`. Saat resume tanpa sinyal eksplisit
     (`--work-mode` / `MINICODE_WORK_MODE`), WorkMode dipulihkan dari metadata
-    sesi (baris legacy tanpa `work_mode` kembali ke default `DISCUSS`; nilai
-    tersimpan `EXECUTE` lama ditampilkan sebagai `BUILD`) dan
+    sesi (baris legacy tanpa `work_mode` atau bernilai `PLAN` kembali ke default
+    `DISCUSS`; nilai tersimpan `EXECUTE` lama ditampilkan sebagai `BUILD`) dan
     composition root menulis SATU baris stderr human-facing
     (`[resume] WorkMode <MODE> restored from session...` atau notice override/
     legacy) agar otoritas sesi hasil resume selalu terlihat eksplisit. Baris itu
@@ -721,22 +721,22 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
     **Surfacing lintas-surface (F-DISCUSS-4):** WorkMode terlihat di TUI lewat
     footer (Work Mode kiri; Permission Mode kanan), di one-shot/exec linear
     lewat SATU baris stderr human-facing `[work-mode] <MODE> …`, dan di
-    `exec --json` lewat field `summary.workMode` dengan nilai produk `DISCUSS`,
-    `PLAN`, atau `BUILD` — bukan teks dekoratif. ACP memakai `params.workMode`
+    `exec --json` lewat field `summary.workMode` dengan nilai produk `DISCUSS`
+    atau `BUILD` — bukan teks dekoratif. ACP memakai `params.workMode`
     (terstruktur) dan tak menambah baris
     dekoratif. WorkMode selalu dibedakan tegas dari PermissionMode (`[work-mode]`
-    vs `/mode`/`--plan`) dan dari status sesi.
-    **Pemisahan dari PermissionMode:** `Tab` memutar WorkMode;
+    vs `/mode`) dan dari status sesi.
+    **Pemisahan dari PermissionMode:** `Tab` memutar WorkMode (`Discuss` ↔ `Build`);
     `Shift+Tab` dan `/mode` mengubah PermissionMode. PermissionMode menentukan
     pengawasan persetujuan (`AUTO`/`ASK`) dan Tool Access Policy menentukan
-    capability. WorkMode memilih postur (diskusi/rencana/bebas) dan hanya
+    capability. WorkMode memilih postur (diskusi & rencana vs implementasi) dan hanya
     mempersempit akses.
     **Hooks:** gate `shouldRunHooks(permissionMode, workMode)` dievaluasi
     **per pemanggilan** dengan WorkMode dan PermissionMode **AKTIF**. Hooks
-    ditahan pada WorkMode `DISCUSS`/`PLAN` dan PermissionMode warisan
+    ditahan pada WorkMode `DISCUSS` dan PermissionMode warisan
     `plan`/`readonly`; `Tab` mengubah WorkMode, sedangkan `Shift+Tab` mengubah
     PermissionMode AUTO/ASK.
-    **Footer:** Work Mode tampil di kiri (nilai `Build`/`Plan`/`Discuss`; alias
+    **Footer:** Work Mode tampil di kiri (nilai `Build`/`Discuss`; alias
     internal `EXECUTE` ditampilkan `Build`). Permission Mode tampil di kanan dekat
     token konteks sebagai nilai `Auto`/`Ask`. Label produk `Work Mode:` dan
     `Permission Mode:` dihapus v0.24 — nilai saja, lebih lega. Nilai Work Mode

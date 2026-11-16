@@ -310,7 +310,6 @@ describe("P03-B: TUI stale refusal", () => {
       verbose: false,
       allowAll: false,
       ask: false,
-      plan: false,
       allowlist: false,
       verify: false,
       resumeId: sid,

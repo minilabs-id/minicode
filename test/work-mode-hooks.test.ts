@@ -57,12 +57,6 @@ describe("shouldRunHooks — predicate WorkMode-aware", () => {
     }
   })
 
-  test("PLAN menahan hooks di SEMUA permission mode (Q3=A3)", () => {
-    for (const pm of ["auto", "ask", "plan", "allow-all", "allowlist", "readonly"] as const) {
-      expect(shouldRunHooks(pm, "PLAN")).toBe(false)
-    }
-  })
-
   test("EXECUTE mengikuti permission mode (auto/ask/allow-all/allowlist = jalan, plan/readonly = tahan)", () => {
     for (const pm of ["auto", "ask", "allow-all", "allowlist"] as const) {
       expect(shouldRunHooks(pm, "EXECUTE")).toBe(true)
@@ -107,13 +101,13 @@ describe("eksekusi nyata — guard DISCUSS & PLAN mencegah runRunHooks", () => {
     expect(ran).toBe(false)
   })
 
-  test("PLAN × auto & PLAN × allow-all (Q3=A3: guard menolak) → hook TIDAK dijalankan", async () => {
+  test("DISCUSS × auto & DISCUSS × allow-all (Q3=A3: guard menolak) → hook TIDAK dijalankan", async () => {
     const root = tmpRoot("plan")
     const marker = join(root, "plan-ran.txt")
     writeMarkerHook(root, marker)
     process.env.MINICODE_HOOKS = "1"
     for (const pm of ["auto", "allow-all"] as const) {
-      if (shouldRunHooks(pm, "PLAN")) {
+      if (shouldRunHooks(pm, "DISCUSS")) {
         await runRunHooks("pre", { phase: "pre", prompt: "halo", cwd: root }, undefined, {
           allowLocal: true,
         })
@@ -134,7 +128,7 @@ describe("eksekusi nyata — guard DISCUSS & PLAN mencegah runRunHooks", () => {
 // `createCliSession` (composition root) → `runPromptWithVerify` → `runHooksGated`
 // → `runRunHooks` → hook Node yang menulis marker.
 describe("integrasi produksi — transisi WorkMode & PermissionMode menghentikan hook pada sesi yang sama", () => {
-  test("EXECUTE → hook jalan; setWorkMode(PLAN) & setWorkMode(DISCUSS) → hook DILEWATI; kembali EXECUTE → jalan lagi", async () => {
+  test("EXECUTE → pre+post hook jalan; setWorkMode(DISCUSS) → hook DILEWATI; kembali EXECUTE → jalan lagi", async () => {
     const { createCliSession } = await import("../cli/setup.ts")
     const { startFakeProvider } = await import("./helpers/fake-provider.ts")
     const cwd = tmpRoot("prod")
@@ -151,8 +145,12 @@ describe("integrasi produksi — transisi WorkMode & PermissionMode menghentikan
     process.env.MINICODE_HOOKS = "1"
     mkdirSync(join(cwd, ".minicode", "hooks"), { recursive: true })
     writeFileSync(
+      join(cwd, ".minicode", "hooks", "pre-probe.js"),
+      `import fs from "node:fs";\nfs.appendFileSync(process.env.PROBE_OUT, "pre\\n");\n`,
+    )
+    writeFileSync(
       join(cwd, ".minicode", "hooks", "post-probe.js"),
-      `import fs from "node:fs";\nfs.appendFileSync(process.env.PROBE_OUT, "x\\n");\n`,
+      `import fs from "node:fs";\nfs.appendFileSync(process.env.PROBE_OUT, "post\\n");\n`,
     )
     const provider = startFakeProvider([{ kind: "text", text: "ok" }])
     writeFileSync(
@@ -180,32 +178,27 @@ describe("integrasi produksi — transisi WorkMode & PermissionMode menghentikan
         verbose: false,
         allowAll: false,
         ask: false,
-        plan: false,
         allowlist: false,
         verify: false,
         workMode: "EXECUTE",
       })
-      // 1) WorkMode EXECUTE + permissionMode auto → hook post JALAN.
+      // 1) WorkMode EXECUTE + permissionMode auto → hook pre + post JALAN (2 baris).
       await ctx.runPromptWithVerify("turn pertama")
-      expect(countRuns()).toBe(1)
-      // 2) Operator turunkan WorkMode ke PLAN (Q3=A3) → hook DILEWATI.
+      expect(countRuns()).toBe(2)
+      // 2) Operator turunkan WorkMode ke DISCUSS (Q3=A3) → hook pre & post DILEWATI.
       expect(ctx.workModeControl).toBeDefined()
-      ctx.workModeControl!.setWorkMode("PLAN")
-      expect(ctx.workModeControl!.getWorkMode()).toBe("PLAN")
-      await ctx.runPromptWithVerify("turn plan")
-      expect(countRuns()).toBe(1)
-      // 3) Operator turunkan WorkMode ke DISCUSS → hook tetap DILEWATI.
       ctx.workModeControl!.setWorkMode("DISCUSS")
+      expect(ctx.workModeControl!.getWorkMode()).toBe("DISCUSS")
       await ctx.runPromptWithVerify("turn discuss")
-      expect(countRuns()).toBe(1)
-      // 4) Kembali EXECUTE → hook jalan lagi.
+      expect(countRuns()).toBe(2)
+      // 3) Kembali EXECUTE → hook pre + post jalan lagi (total 4 baris).
       ctx.workModeControl!.setWorkMode("EXECUTE")
       await ctx.runPromptWithVerify("turn ketiga")
-      expect(countRuns()).toBe(2)
-      // 5) Runtime ganti PermissionMode ke readonly di bawah EXECUTE → hook DILEWATI.
+      expect(countRuns()).toBe(4)
+      // 4) Runtime ganti PermissionMode ke readonly di bawah EXECUTE → hook DILEWATI.
       ctx.permissions!.setMode("readonly")
       await ctx.runPromptWithVerify("turn exec readonly")
-      expect(countRuns()).toBe(2)
+      expect(countRuns()).toBe(4)
     } finally {
       if (ctx) await ctx.close().catch(() => {})
       provider.close()

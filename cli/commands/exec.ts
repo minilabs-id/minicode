@@ -23,8 +23,10 @@ import {
   displayWorkMode,
   flagsAfterPromptBoundary,
   hasFlag,
+  parseRuntimeNumericFlags,
   promptFromArgs,
   getArg as rawGetArg,
+  resolveToolScope,
   resolveWorkModeFlag,
 } from "../args.ts"
 import { createCliSession } from "../setup.ts"
@@ -33,6 +35,14 @@ import { createCliSession } from "../setup.ts"
 function writeMachineLine(line: string): void {
   process.stdout.write(`${cleanUntrusted(scrubSecrets(line), false)}\n`)
 }
+
+const warnStderr = (msg: string): void => {
+  process.stderr.write(msg)
+}
+
+const EXEC_HELP = `minicode exec — headless one-shot execution (JSONL/linear)
+
+  minicode exec [--json] [--work-mode DISCUSS|BUILD] [--cwd <dir>] [--model <m>] [--sandbox docker|os] "prompt"`
 
 /** Prompt lanjutan (Phase D auto-continue): minta model menyelesaikan sisa
  * pekerjaan dari titik berhenti, memanfaatkan progres parsial yang sudah
@@ -60,6 +70,10 @@ export async function handleExec(
   subArgs: string[],
   getArg: (name: string) => string | undefined,
 ): Promise<never> {
+  if (hasFlag(subArgs, "--help") || hasFlag(subArgs, "-h")) {
+    console.log(EXEC_HELP)
+    process.exit(0)
+  }
   // Bersihkan state submit_result dari run sebelumnya — tanpa ini, exec
   // berturut-turut dalam proses sama bisa membaca hasil run lama.
   clearSubmittedResult()
@@ -79,7 +93,6 @@ export async function handleExec(
   const sessionFlag = getArg("--session") ?? ""
   const allowAll = hasFlag(subArgs, "--allow-all")
   const ask = hasFlag(subArgs, "--ask")
-  const plan = hasFlag(subArgs, "--plan")
   const allowlistFlag = hasFlag(subArgs, "--allowlist")
   // Sama seperti jalur interaktif: OS sandbox otomatis, dan tanpa isolasi nyata
   // permission default turun ke allowlist. Headless CI justru paling butuh ini —
@@ -94,7 +107,7 @@ export async function handleExec(
       writeMachineLine(JSON.stringify(machineFailure(prompt.trim(), new Error(sandboxRefusal))))
     process.exit(1)
   }
-  const sandbox = resolveSandbox(requestedSandbox, allowAll || ask || plan || allowlistFlag)
+  const sandbox = resolveSandbox(requestedSandbox, allowAll || ask || allowlistFlag)
   if (sandbox.mode === "none") delete process.env.MINICODE_SANDBOX
   else process.env.MINICODE_SANDBOX = sandbox.mode
   const allowlist = allowlistFlag || sandbox.fallbackPermission === "allowlist"
@@ -103,30 +116,17 @@ export async function handleExec(
     console.error(
       `[deprecated] --allow-all is a privileged access profile (hard jail/guard still apply); treat it as an explicit override, not ordinary AUTO`,
     )
-  if (allowlist)
+  if (allowlistFlag)
     console.error(
       `[deprecated] --allowlist is a bash/tool access policy; persistent grants remain in ~/.minicode/allowlist.json`,
     )
   // Audit #07 P0: local config repo tak dipercaya kecuali operator opt-in.
   const allowLocal = allowLocalConfig(subArgs)
-  const budgetRaw = getArg("--budget")
-  let budget = budgetRaw ? Number(budgetRaw) : undefined
-  // [Audit #2 A.1/B.4] Selaras dengan cli/index.ts: --budget non-angka/negatif
-  // diingatkan eksplisit, bukan dibiarkan berubah jadi undefined secara diam.
-  if (budgetRaw && (!Number.isFinite(budget) || (budget as number) < 0)) {
-    process.stderr.write(`[warn] --budget requires a USD number, ignoring "${budgetRaw}"\n`)
-    budget = undefined
-  }
   // Harness-P1: sama seperti one-shot — strict fail-closed bila cost tak dikenal.
   const budgetStrict =
     hasFlag(subArgs, "--budget-strict") || process.env.MINICODE_BUDGET_STRICT === "1"
   // Harness-P2: scope tool sesi.
-  const toolScopeRaw = (
-    getArg("--tool-scope") ??
-    process.env.MINICODE_TOOL_SCOPE ??
-    ""
-  ).toLowerCase()
-  const toolScope = toolScopeRaw === "explore" ? ("explore" as const) : ("full" as const)
+  const toolScope = resolveToolScope(getArg)
   // WorkMode (flag > env, default DISCUSS; invalid → DISCUSS + warning).
   const workModeResolved = resolveWorkModeFlag(getArg)
   const workMode = workModeResolved.workMode
@@ -137,63 +137,21 @@ export async function handleExec(
   // (summary.workMode) — bukan teks dekoratif. BUILD = mode yang mengizinkan tulis.
   if (!jsonMode && (workMode !== "EXECUTE" || workModeResolved.explicit)) {
     const modeLabel = displayWorkMode(workMode)
-    const modeNote =
-      workMode === "PLAN" ? " (read-only planning)" : workMode === "DISCUSS" ? " (read-only)" : ""
-    process.stderr.write(`[work-mode] ${modeLabel}${modeNote}\n`)
+    const modeNote = workMode === "DISCUSS" ? " (read-only)" : ""
+    warnStderr(`[work-mode] ${modeLabel}${modeNote}\n`)
   }
-  const ratelimitRaw = getArg("--ratelimit")
-  let rateLimiter: ReturnType<typeof createRateLimiter> | undefined
-  if (ratelimitRaw) {
-    const rpm = Number(ratelimitRaw)
-    if (!Number.isFinite(rpm) || rpm <= 0) {
-      process.stderr.write(
-        `[warn] --ratelimit requires a positive number, ignoring "${ratelimitRaw}"\n`,
-      )
-    } else {
-      rateLimiter = createRateLimiter(rpm)
-    }
-  }
-
-  // Live Hardening 0.13.x — parity flag runtime dengan jalur one-shot
-  // (cli/index.ts): --max-steps, --context-window, --timeout, dan env
-  // MINICODE_COMPACT_KEEP_TURNS kini diteruskan ke sesi. Sebelumnya exec
-  // menyaring nilai flag ini dari prompt tetapi tidak pernah menerapkannya —
-  // operator mengira batas aktif padahal sesi berjalan dengan default kernel
-  // (silently ignored). Parsing + warn tiruan persis jalur one-shot.
-  const maxStepsRaw = getArg("--max-steps")
-  let maxSteps = maxStepsRaw ? Number(maxStepsRaw) : undefined
-  if (maxStepsRaw && (!Number.isFinite(maxSteps) || (maxSteps as number) <= 0)) {
-    process.stderr.write(
-      `[warn] --max-steps requires a positive number, ignoring "${maxStepsRaw}"\n`,
-    )
-    maxSteps = undefined
-  }
-  const ctxWindowRaw = getArg("--context-window")
-  let contextWindowTokens = ctxWindowRaw ? Number(ctxWindowRaw) : undefined
-  if (
-    ctxWindowRaw &&
-    (!Number.isFinite(contextWindowTokens) || (contextWindowTokens as number) <= 0)
-  ) {
-    process.stderr.write(
-      `[warn] --context-window requires a positive number, ignoring "${ctxWindowRaw}"\n`,
-    )
-    contextWindowTokens = undefined
-  }
+  const parsedNums = parseRuntimeNumericFlags(getArg, warnStderr)
+  const { maxSteps, contextWindowTokens, budget } = parsedNums
+  const rateLimiter =
+    parsedNums.ratelimitRpm !== undefined ? createRateLimiter(parsedNums.ratelimitRpm) : undefined
   const keepTurnsRaw = (process.env.MINICODE_COMPACT_KEEP_TURNS ?? "").trim()
   const keepRecentTurns = parseCompactKeepTurns(keepTurnsRaw || undefined)
   if (keepTurnsRaw && keepRecentTurns === undefined)
-    process.stderr.write(
+    warnStderr(
       `[warn] MINICODE_COMPACT_KEEP_TURNS requires an integer >= 1, ignoring "${keepTurnsRaw}"\n`,
     )
-  const timeoutRaw = getArg("--timeout")
   // exec (one-shot/CI) default 15 menit — lebih konservatif dari interaktif (1 jam).
-  let timeoutMs = timeoutRaw ? Number(timeoutRaw) : 900_000
-  if (timeoutRaw && (!Number.isFinite(timeoutMs) || (timeoutMs as number) < 0)) {
-    process.stderr.write(
-      `[warn] --timeout requires a non-negative number, ignoring "${timeoutRaw}"\n`,
-    )
-    timeoutMs = 900_000
-  }
+  const timeoutMs = parsedNums.timeoutMs ?? 900_000
   // Phase D — auto-continue (opt-in): pecah tugas panjang menjadi beberapa turn
   // bounded. Saat turn berakhir dengan max_steps_exceeded, kernel SUDAH
   // meng-commit progres parsial (safeTurnBoundary); run lanjutan melanjutkan dari
@@ -209,7 +167,7 @@ export async function handleExec(
 
   const ignoredFlags = flagsAfterPromptBoundary(subArgs)
   if (ignoredFlags.length > 0) {
-    process.stderr.write(
+    warnStderr(
       `[warn] ignored flag(s) after the prompt: ${ignoredFlags.join(", ")} — put flags before the prompt (e.g. minicode exec ${ignoredFlags.join(" ")} "your prompt")\n`,
     )
   }
@@ -217,7 +175,7 @@ export async function handleExec(
   const effectivePrompt = prompt.trim()
   if (!effectivePrompt) {
     console.error(
-      'usage: minicode exec [--json] [--work-mode DISCUSS|PLAN|BUILD] [--cwd <dir>] [--model <m>] [--sandbox docker|os] "prompt"',
+      'usage: minicode exec [--json] [--work-mode DISCUSS|BUILD] [--cwd <dir>] [--model <m>] [--sandbox docker|os] "prompt"',
     )
     if (jsonMode)
       writeMachineLine(
@@ -241,7 +199,6 @@ export async function handleExec(
     verbose: false,
     allowAll,
     ask,
-    plan,
     allowlist,
     verify: hasFlag(subArgs, "--verify"),
     // [P1 M15] Mode runtime produksi, deterministik per invokasi (sama seperti

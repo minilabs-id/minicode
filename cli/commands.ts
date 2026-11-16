@@ -1,8 +1,10 @@
+import { existsSync } from "node:fs"
 import { basename, resolve as resolvePath } from "node:path"
 import { loadConfig, saveLastModel } from "../src/config.ts"
 import type { Usage } from "../src/policy/usage.ts"
 import { refreshProviderModels } from "../src/providers/provision.ts"
 import type { RuntimeProductionMode } from "../src/runtime/production-execution.ts"
+import { resolveSessionDisplayTarget } from "../src/session/identity.ts"
 import { listSessions, loadSession } from "../src/session/persistence.ts"
 import type { Skill } from "../src/skills/loader.ts"
 import type { ProductionSchedulerHandle } from "../src/task/production-scheduler.ts"
@@ -42,9 +44,9 @@ export interface CommandContext {
   permissionMode?: string
   setModelOverride: (model: string) => void
   /** Dipanggil sebelum spawn anak stdio-inherit — composition root (cli/tui.ts)
-   * mengisinya untuk melepas terminal alt-screen + raw mode. Tanpa injeksi
-   * tetap jalan (no-op). */
-  onBeforeSpawn?: () => void
+   * mengisinya untuk melepas terminal alt-screen + raw mode dan menutup sesi induk.
+   * Tanpa injeksi tetap jalan (no-op). */
+  onBeforeSpawn?: () => void | Promise<void>
   /** Kontrak control-plane (Phase 6): angka konteks SAAT INI dari sumber
    * kebenaran kernel (estimateSessionContext) — bukan usage kumulatif.
    * Dibedakan dari Input/Output/Total (provider usage) di /status. */
@@ -151,7 +153,7 @@ export const BUILTIN_COMMANDS: BuiltinCommand[] = [
  * Opsi A audit UX: undo/redo/clear/copy/history tidak punya duplikat lain. */
 export const DRIVER_HELP_COMMANDS: BuiltinCommand[] = [
   { name: "mode", args: "[name]", descKey: "help.desc.mode" },
-  { name: "work-mode", args: "[DISCUSS|PLAN|BUILD]", descKey: "help.desc.work-mode" },
+  { name: "work-mode", args: "[DISCUSS|BUILD]", descKey: "help.desc.work-mode" },
   { name: "lang", args: "[en|id]", descKey: "help.desc.lang" },
   { name: "undo", descKey: "help.desc.undo" },
   { name: "redo", descKey: "help.desc.redo" },
@@ -294,26 +296,33 @@ function printStatus(ctx: CommandContext): void {
  * argumen langsung (`/sessions <id>`) dan pilihan picker popup.
  * Return true bila anak di-spawn (false = sesi tak ditemukan, tanpa jejak). */
 async function resumeById(target: string, ctx: CommandContext): Promise<boolean> {
-  const sess = loadSession(target, ctx.cwd)
+  const canonical = resolveSessionDisplayTarget(target, ctx.cwd)
+  const sess = loadSession(canonical, ctx.cwd)
   if (!sess?.messages.length) {
-    console.log(t("sess.notFound", { id: target }))
+    console.log(t("sess.notFound", { id: sanitizeAnsiLine(target) }))
     return false
   }
-  // Anak stdio-inherit memakai terminal yang sama; App TUI sudah suspend
-  // (input dilepas) oleh pemanggil popup, dan proses ini exit mengikuti anak.
+  // Anak stdio-inherit memakai terminal yang sama; App TUI sudah melepas
+  // terminal + menutup lease sesi induk lewat onBeforeSpawn, dan fungsi ini
+  // menunggu anak selesai sebelum proses induk keluar (mencegah race app.resume).
   const { spawn } = await import("node:child_process")
   const { waitChildExit } = await import("./auto-update.ts")
   try {
-    ctx.onBeforeSpawn?.()
+    await ctx.onBeforeSpawn?.()
   } catch {}
   const entryPath = resolvePath(import.meta.dir, "index.ts")
   const child = spawn(
     process.execPath,
-    buildResumeSpawnArgs(entryPath, target, ctx.cwd, ctx.runtimeMode),
+    buildResumeSpawnArgs(entryPath, canonical, ctx.cwd, ctx.runtimeMode, {
+      allowLocalConfig: ctx.allowLocalConfig,
+      ask: ctx.permissionMode?.toLowerCase() === "ask",
+      schedulerEnabled: ctx.scheduler?.handle.enabled === true,
+    }),
     { stdio: "inherit", env: { ...process.env, MINICODE_RESUME_NEW: "1" } },
   )
-  void waitChildExit(child).then((code) => process.exit(code ?? 0))
   process.stdin.pause()
+  const code = await waitChildExit(child)
+  process.exit(code ?? 0)
   return true
 }
 
@@ -330,12 +339,16 @@ export function buildResumeSpawnArgs(
   target: string,
   cwd: string | undefined,
   runtimeMode: RuntimeProductionMode | undefined,
+  opts?: { allowLocalConfig?: boolean; ask?: boolean; schedulerEnabled?: boolean },
 ): string[] {
   return [
     entryPath,
     `--resume=${target}`,
     ...(cwd ? [`--cwd=${cwd}`] : []),
     ...(runtimeMode ? ["--runtime", runtimeMode] : []),
+    ...(opts?.allowLocalConfig ? ["--allow-local-config"] : []),
+    ...(opts?.ask ? ["--ask"] : []),
+    ...(opts?.schedulerEnabled ? ["--enable-scheduler"] : []),
   ]
 }
 
@@ -532,8 +545,12 @@ export async function handleBuiltinCommand(
     }
 
     case "init": {
+      if (ctx.workMode === "DISCUSS") {
+        console.log(`\n${t("cmd.initInDiscuss")}\n`)
+        return { handled: true }
+      }
       const target = resolvePath(ctx.cwd ?? process.cwd(), "AGENTS.md")
-      if (require("node:fs").existsSync(target)) {
+      if (existsSync(target)) {
         console.log(`\n${t("cmd.initExists")}\n`)
         return { handled: true }
       }
@@ -542,16 +559,14 @@ export async function handleBuiltinCommand(
       const body = [
         "# AGENTS.md",
         "",
-        "Petunjuk untuk agent yang bekerja di repo ini.",
+        t("cmd.initBodyDesc"),
         "",
-        "## Struktur (repo-map)",
+        t("cmd.initBodyMap"),
         "```",
-        map ?? "(repo-map kosong)",
+        map ?? t("cmd.initBodyEmpty"),
         "```",
         "",
-        "## Konvensi",
-        "- Ikuti gaya kode existing.",
-        "- Jalankan typecheck/test sebelum selesai.",
+        t("cmd.initBodyConv"),
         "",
       ].join("\n")
       const { atomicWriteText } = await import("../src/lib/atomic-write.ts")
@@ -653,13 +668,18 @@ export async function handleBuiltinCommand(
         // "Restart" hanya jujur bila ADA model baru — tanpa updated, restart
         // tak mengubah apa pun (sebelumnya selalu dicetak, menyesatkan saat
         // semua provider gagal).
-        if (updated.length > 0) console.log(t("cmd.restart"))
-        else console.log(t("cmd.nothingUpdated"))
+        if (updated.length > 0) {
+          const { reloadProviders } = await import("../src/app/provider-layer.ts")
+          await reloadProviders(ctx.cwd, { allowLocal: ctx.allowLocalConfig }).catch(() => {})
+          console.log(t("cmd.restart"))
+        } else console.log(t("cmd.nothingUpdated"))
       }
       return { handled: true }
     }
 
+    case "resume":
     case "sessions": {
+      if (cmd === "resume" && !args) return { handled: false }
       const rows = listSessions(ctx.cwd).slice(0, 25)
       if (rows.length === 0) {
         console.log(`\n${t("cmd.noSessions")}`)
@@ -678,7 +698,7 @@ export async function handleBuiltinCommand(
             // Jendela command: judul konsisten dengan /model, /provider, dll.
             showTitle: true,
             items: rows.map((r) => ({
-              name: `${r.id} · ${new Date(r.created_at).toLocaleString()} · ${r.cwd ? shortDir(r.cwd) : "(cwd)"}`,
+              name: `${sanitizeAnsiLine(r.id)} · ${new Date(r.created_at).toLocaleString()} · ${r.cwd ? sanitizeAnsiLine(shortDir(r.cwd)) : "(cwd)"}`,
               provider: "",
               value: r.id,
             })),
@@ -696,7 +716,7 @@ export async function handleBuiltinCommand(
         // angka `[i]` hanya menawarkan affordance yang tidak bisa dipakai.
         rows.forEach((r) => {
           console.log(
-            `  - ${r.id.padEnd(14)} ${new Date(r.created_at).toLocaleString().padEnd(24)} ${r.cwd || "(cwd)"}`,
+            `  - ${sanitizeAnsiLine(r.id).padEnd(14)} ${new Date(r.created_at).toLocaleString().padEnd(24)} ${sanitizeAnsiLine(r.cwd || "(cwd)")}`,
           )
         })
         console.log(t("sess.listHint"))
@@ -706,19 +726,6 @@ export async function handleBuiltinCommand(
         return { handled: true }
       }
       console.log("")
-      return { handled: true }
-    }
-
-    case "resume": {
-      // Alias /sessions <id> (repl.md). Gagal-di-kode-lama: jatuh ke default
-      // → handled:false → sunyi total di TUI (tidak tercatat, tidak spawn).
-      if (!args) return { handled: false }
-      const rows = listSessions(ctx.cwd).slice(0, 25)
-      if (rows.length === 0) {
-        console.log(`\n${t("cmd.noSessions")}\n`)
-        return { handled: true }
-      }
-      if (await resumeById(args, ctx)) console.log("")
       return { handled: true }
     }
 

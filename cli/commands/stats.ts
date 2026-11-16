@@ -1,9 +1,13 @@
-import { readFileSync } from "node:fs"
 import { resolve } from "node:path"
 import type { RuntimeView } from "../../src/runtime/runtime-status.ts"
 import { currentRuntimeView } from "../../src/runtime/runtime-status-provider.ts"
-import { type StepTrace, summarizeStepTraces } from "../../src/telemetry/trace.ts"
+import { readTraceRows, type StepTrace, summarizeStepTraces } from "../../src/telemetry/trace.ts"
 import { c } from "../../src/ui/render/theme.ts"
+import { guardSubcommand } from "../args.ts"
+
+const STATS_HELP = `minicode stats — run & tool telemetry summary
+
+  minicode stats [--json] [--cwd <dir>]`
 
 interface TraceRow {
   ok?: boolean
@@ -30,23 +34,16 @@ function runtimeStatusSummary(view: RuntimeView): string {
   return `phase=${view.phase} · admission=${view.admission} · health=${view.health} · termination=${view.termination} · bukti=${view.evidenceState} · kapabilitas=${caps} · anak-ter-supervisi=${view.supervisedChildren}${missing}${note}`
 }
 
-export async function handleStats(getArg: (name: string) => string | undefined): Promise<never> {
+export async function handleStats(
+  getArg: (name: string) => string | undefined,
+  args: readonly string[] = [],
+): Promise<never> {
+  guardSubcommand(args, "stats", STATS_HELP, console.log, console.error)
   const cwdArg = getArg("--cwd")
-  const asJson = getArg("--json") !== undefined || process.argv.includes("--json")
+  const asJson =
+    getArg("--json") !== undefined || args.includes("--json") || process.argv.includes("--json")
   const file = resolve(cwdArg ?? ".", ".minicode", "traces.jsonl")
-  let traces: TraceRow[] = []
-  try {
-    traces = readFileSync(file, "utf8")
-      .split("\n")
-      .filter(Boolean)
-      .flatMap((l) => {
-        try {
-          return [JSON.parse(l) as TraceRow]
-        } catch {
-          return []
-        }
-      })
-  } catch {}
+  const traces = readTraceRows<TraceRow>(cwdArg, "traces.jsonl")
   const total = traces.length
   const ok = traces.filter((t) => t.ok).length
   const inputTokens = traces.reduce((s, t) => s + (t.inputTokens ?? 0), 0)
@@ -56,19 +53,7 @@ export async function handleStats(getArg: (name: string) => string | undefined):
 
   // Harness-P3: agregat step-trace (P1.2) — deny-rate, tool bermasalah,
   // mode sandbox. Berkas tak ada/rusak = nol, bukan crash.
-  let stepRows: StepTrace[] = []
-  try {
-    stepRows = readFileSync(resolve(cwdArg ?? ".", ".minicode", "step-traces.jsonl"), "utf8")
-      .split("\n")
-      .filter(Boolean)
-      .flatMap((l) => {
-        try {
-          return [JSON.parse(l) as StepTrace]
-        } catch {
-          return []
-        }
-      })
-  } catch {}
+  const stepRows = readTraceRows<StepTrace>(cwdArg, "step-traces.jsonl")
   const steps = summarizeStepTraces(stepRows)
 
   // [P13.1] Status runtime: dari model kanonik, bukan sumber status kedua.

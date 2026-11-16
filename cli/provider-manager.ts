@@ -7,6 +7,7 @@ import { GATEWAY_PRESETS } from "../src/providers/presets.ts"
 import { detectAndSave, removeProvider } from "../src/providers/provision.ts"
 import { t } from "../src/ui/i18n/locale.ts"
 import { formatError } from "../src/ui/render/errors.ts"
+import { sanitizeAnsiLine } from "../src/ui/render/sanitize.ts"
 import {
   type ProviderActionResult,
   type ProviderRow,
@@ -31,7 +32,7 @@ export async function runProviderManager(opts: {
 }): Promise<void> {
   if (!process.stdin.isTTY) {
     const cfg = await loadConfig(opts.cwd, { allowLocal: opts.allowLocalConfig })
-    for (const p of cfg.providers) console.log(p.id)
+    for (const p of cfg.providers) console.log(sanitizeAnsiLine(p.id))
     return
   }
 
@@ -78,7 +79,8 @@ export async function runProviderManager(opts: {
     },
     onDelete: async (row): Promise<ProviderActionResult> => {
       await removeProvider(row.id, { global: true })
-      if (opts.cwd) await removeProvider(row.id, { global: false, cwd: opts.cwd })
+      if (opts.cwd && opts.allowLocalConfig)
+        await removeProvider(row.id, { global: false, cwd: opts.cwd })
       const warn = await reloadSuffix()
       return { ok: `${t("prov.deleted", { id: row.id })}${warn}` }
     },
@@ -92,11 +94,16 @@ export async function runProviderManager(opts: {
       const cfg = await loadConfig(opts.cwd, { allowLocal: opts.allowLocalConfig })
       const cur = cfg.providers.find((p) => p.id === row.id)
       if (!cur) return { err: t("ntc.notFound") }
+      const inGlobal = (await loadConfig(undefined, { allowLocal: false })).providers.some(
+        (p) => p.id === row.id,
+      )
+      const saveGlobal = inGlobal || !opts.allowLocalConfig || !opts.cwd
       try {
-        await removeProvider(row.id, { global: true })
-        if (opts.cwd) await removeProvider(row.id, { global: false, cwd: opts.cwd })
+        if (inGlobal) await removeProvider(row.id, { global: true })
+        if (opts.cwd && opts.allowLocalConfig)
+          await removeProvider(row.id, { global: false, cwd: opts.cwd })
         const entry = await detectAndSave(baseUrl, apiKey, row.id, {
-          global: true,
+          global: saveGlobal,
           cwd: opts.cwd,
           fallbackModels: cur.models,
           allowLocal: opts.allowLocalConfig,
@@ -105,7 +112,7 @@ export async function runProviderManager(opts: {
         return { ok: `${t("ntc.updated", { id: entry.id, n: entry.models.length })}${warn}` }
       } catch (e) {
         await detectAndSave(cur.baseUrl, cur.apiKey, cur.id, {
-          global: true,
+          global: saveGlobal,
           cwd: opts.cwd,
           fallbackModels: cur.models,
         }).catch(() => {})

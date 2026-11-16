@@ -10,6 +10,7 @@ import { formatError } from "../../src/ui/render/errors.ts"
 import { sanitizeAnsiLine } from "../../src/ui/render/sanitize.ts"
 import { renderTable } from "../../src/ui/render/table.ts"
 import { c, glyphs } from "../../src/ui/render/theme.ts"
+import { allowLocalSubcommand, positionalSubArg } from "../args.ts"
 
 // Akhiran baris untuk tabel yang dicetak bersama judul. Konstanta bernama
 // (bukan `"\n"` lepas) supaya tidak tertukar dengan escape di template literal.
@@ -79,19 +80,27 @@ function usageError(message: string): never {
 const isHelpFlag = (s: string | undefined): boolean =>
   s === undefined || s === "--help" || s === "-h"
 
-// Subcommand argv selalu diawali positional ("config", …) sehingga hasFlag
-// yang boundary-aware tak cocok di sini; pakai includes + env operator
-// (gaya yang sama dengan --local/--global di berkas ini).
-function allowLocalHere(args: string[]): boolean {
-  return args.includes("--allow-local-config") || process.env.MINICODE_ALLOW_LOCAL_CONFIG === "1"
+const allowLocalHere = (args: readonly string[]): boolean => allowLocalSubcommand(args)
+
+const positionalArg = (args: readonly string[], i: number): string | undefined =>
+  positionalSubArg(args, i)
+
+/** Parse daftar `K=V` dipisah koma (`--env` / `--header`) menjadi objek. */
+function parseKvList(raw: string | undefined): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const kv of (raw ?? "").split(",")) {
+    const [k, ...rest] = kv.split("=")
+    if (k && rest.length) out[k.trim()] = rest.join("=").trim()
+  }
+  return out
 }
 
-/** Positional yang diawali `-` hampir pasti flag yang salah tempat
- * (mis. `config lsp remove --cwd X` menghapus server bernama "--cwd").
- * Tolak dengan usage, jangan anggap sebagai id/ext. */
-function positionalArg(args: string[], i: number): string | undefined {
-  const v = args[i]
-  return v && !v.startsWith("-") ? v : undefined
+/** Parse daftar nilai dipisah koma (`--args`) menjadi array string bersih. */
+function parseCsvList(raw: string | undefined): string[] {
+  return (raw ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
 }
 
 export async function handleConfig(
@@ -130,10 +139,10 @@ export async function handleConfig(
       console.log(c.dim("(no providers yet - add one via `minicode config add` or the wizard)"))
     else {
       const tableData = cfg.providers.map((p) => ({
-        id: c.cyan(p.id),
-        url: p.baseUrl,
+        id: c.cyan(sanitizeAnsiLine(p.id)),
+        url: sanitizeAnsiLine(p.baseUrl),
         models: String(p.models.length),
-        hint: c.dim(p.providerHint ?? "?"),
+        hint: c.dim(sanitizeAnsiLine(p.providerHint ?? "?")),
       }))
       console.log(
         `\n${c.bold("Configured LLM Providers")}\n` +
@@ -178,12 +187,13 @@ export async function handleConfig(
       "../../src/policy/context-window-assign.ts"
     )
     const { describeContextWindow } = await import("../../src/policy/context-window-presets.ts")
-    const global = !args.includes("--local")
+    const globalFlag = args.includes("--global")
+    const localFlag = args.includes("--local")
     const cwdArg = getArg("--cwd")
-    // Config dimuat lokal untuk cabang ini: daftar/nilai harus mencerminkan
-    // berkas yang benar-benar akan ditulis (global vs lokal), sama seperti
-    // cabang `add`/`remove`.
-    const cfg = await loadConfig(cwdArg, { allowLocal: allowLocalHere(args) })
+    // Bila --local diminta eksplisit, baca juga config lokal tanpa mengharuskan
+    // flag kedua --allow-local-config.
+    const canReadLocal = allowLocalHere(args) || localFlag
+    const cfg = await loadConfig(cwdArg, { allowLocal: canReadLocal })
 
     if (!pid) {
       // Daftar ringkas seluruh provider: model mana yang punya nilai eksplisit.
@@ -263,6 +273,12 @@ ${c.bold(`Context windows — ${sanitizeAnsiLine(provider.id)}`)}
       process.exit(1)
     }
     const { saveProvider } = await import("../../src/providers/provision.ts")
+    // Pertahankan scope asli provider bila user tidak memaksa --global/--local:
+    // mencegah duplikasi provider lokal ke config global (paritas /context).
+    const inGlobal = (await loadConfig(undefined, { allowLocal: false })).providers.some(
+      (p) => p.id === pid,
+    )
+    const global = localFlag ? false : globalFlag ? true : inGlobal || !canReadLocal
     await saveProvider(outcome.provider, { global, ...(cwdArg ? { cwd: cwdArg } : {}) })
     const shown = sanitizeAnsiLine(model)
     const where = global ? "global" : "local"
@@ -323,7 +339,9 @@ ${c.bold(`Context windows — ${sanitizeAnsiLine(provider.id)}`)}
     const { loadConfig } = await import("../../src/config.ts")
     const { saveProvider } = await import("../../src/providers/provision.ts")
     const global = !args.includes("--local")
-    const cfg = await loadConfig(getArg("--cwd"), { allowLocal: allowLocalHere(args) })
+    const cfg = await loadConfig(getArg("--cwd"), {
+      allowLocal: allowLocalHere(args) || !global,
+    })
     const entry = cfg.providers.find((p) => p.id === id)
     if (!entry) {
       console.error(
@@ -344,7 +362,7 @@ ${c.bold(`Context windows — ${sanitizeAnsiLine(provider.id)}`)}
     const baseUrl = getArg("--baseUrl")
     const apiKey = getArg("--apiKey")
     if (!baseUrl || !apiKey) {
-      usageError("usage: minicode config detect --baseUrl <url> --apiKey <key]")
+      usageError("usage: minicode config detect --baseUrl <url> --apiKey <key>")
     }
     const { detectModels } = await import("../../src/providers/detect.ts")
     const res = await detectModels(baseUrl, apiKey).catch((e) => {
@@ -372,18 +390,10 @@ ${c.bold(`Context windows — ${sanitizeAnsiLine(provider.id)}`)}
             "       [--global|--local]",
         )
       }
-      const env: Record<string, string> = {}
-      for (const kv of (getArg("--env") ?? "").split(",")) {
-        const [k, ...rest] = kv.split("=")
-        if (k && rest.length) env[k.trim()] = rest.join("=").trim()
-      }
+      const env = parseKvList(getArg("--env"))
 
       if (url) {
-        const headers: Record<string, string> = {}
-        for (const kv of (getArg("--header") ?? "").split(",")) {
-          const [k, ...rest] = kv.split("=")
-          if (k && rest.length) headers[k.trim()] = rest.join("=").trim()
-        }
+        const headers = parseKvList(getArg("--header"))
         try {
           const parsed = new URL(url)
           if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
@@ -411,10 +421,7 @@ ${c.bold(`Context windows — ${sanitizeAnsiLine(provider.id)}`)}
         process.exit(0)
       }
 
-      const cmdArgs = (cmdArgsRaw ?? "")
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean)
+      const cmdArgs = parseCsvList(cmdArgsRaw)
       await saveMcpServer(
         { id, command, args: cmdArgs, ...(Object.keys(env).length ? { env } : {}) },
         { global: !args.includes("--local"), cwd: getArg("--cwd") },
@@ -431,9 +438,9 @@ ${c.bold(`Context windows — ${sanitizeAnsiLine(provider.id)}`)}
         // Server bisa stdio (command+args) atau HTTP (url). Tampilkan keduanya
         // di kolom yang sama supaya tabel tetap ringkas.
         const tableData = cfg.mcpServers.map((m) => ({
-          id: c.cyan(m.id),
-          command: m.url ? c.dim("(http)") : (m.command ?? ""),
-          args: c.dim(m.url ?? (m.args ?? []).join(" ")),
+          id: c.cyan(sanitizeAnsiLine(m.id)),
+          command: m.url ? c.dim("(http)") : sanitizeAnsiLine(m.command ?? ""),
+          args: c.dim(sanitizeAnsiLine(m.url ?? (m.args ?? []).join(" "))),
         }))
         console.log(
           `\n${c.bold("Configured MCP Servers")}\n` +
@@ -473,15 +480,8 @@ ${c.bold(`Context windows — ${sanitizeAnsiLine(provider.id)}`)}
           'usage: minicode config lsp add <ext> --command <cmd> [--args "<arg1,arg2>"] [--env K=V] [--global|--local]',
         )
       }
-      const cmdArgs = cmdArgsRaw
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean)
-      const env: Record<string, string> = {}
-      for (const kv of (getArg("--env") ?? "").split(",")) {
-        const [k, ...rest] = kv.split("=")
-        if (k && rest.length) env[k.trim()] = rest.join("=").trim()
-      }
+      const cmdArgs = parseCsvList(cmdArgsRaw)
+      const env = parseKvList(getArg("--env"))
       await saveLspServer(
         { ext, command, args: cmdArgs, ...(Object.keys(env).length ? { env } : {}) },
         { global: !args.includes("--local"), cwd: getArg("--cwd") },
@@ -496,9 +496,9 @@ ${c.bold(`Context windows — ${sanitizeAnsiLine(provider.id)}`)}
         console.log(c.dim("(no LSP servers configured - add via minicode config lsp add)"))
       else {
         const tableData = cfg.lspServers.map((l) => ({
-          ext: c.cyan(l.ext),
-          command: l.command,
-          args: c.dim(l.args.join(" ")),
+          ext: c.cyan(sanitizeAnsiLine(l.ext)),
+          command: sanitizeAnsiLine(l.command),
+          args: c.dim(sanitizeAnsiLine(l.args.join(" "))),
         }))
         console.log(
           `\n${c.bold("Configured LSP Language Servers")}\n` +

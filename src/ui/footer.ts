@@ -70,7 +70,6 @@ function workModeValue(workMode?: string): string {
   const normalized = (workMode || "DISCUSS").toUpperCase()
   if (normalized === "EXECUTE" || normalized === "BUILD") return "Build"
   if (normalized === "DISCUSS") return "Discuss"
-  if (normalized === "PLAN") return "Plan"
   return titleCaseMode(workMode ?? "", "Build")
 }
 
@@ -82,10 +81,8 @@ export function paintWorkMode(workMode?: string, _style: ModeLabelStyle = "full"
   const value = workModeValue(workMode)
   const normalized = sanitizeAnsiLine(workMode || "DISCUSS").toUpperCase()
   const labelWidth = displayWidth(sanitizeAnsiLine(value))
-  // Discuss = default sesi baru, jadi TIDAK boleh tampak seperti peringatan.
-  // Plan tetap kuning (postur rencana), Build hijau (akses penuh).
-  const colorValue =
-    normalized === "DISCUSS" ? c.accent : normalized === "PLAN" ? c.warning : c.success
+  // Discuss = default sesi baru (biru aksen), Build = eksekusi penuh (hijau).
+  const colorValue = normalized === "DISCUSS" ? c.accent : c.success
   return `${colorValue(value)}${" ".repeat(Math.max(0, WORK_MODE_VALUE_WIDTH - labelWidth))}`
 }
 

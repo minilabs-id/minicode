@@ -602,7 +602,6 @@ test("FOR-4: komposisi nyata createCliSession + persistCurrent", async () => {
     verbose: false,
     allowAll: false,
     ask: false,
-    plan: false,
     allowlist: false,
     verify: false,
   })

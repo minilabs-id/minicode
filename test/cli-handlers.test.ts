@@ -570,4 +570,69 @@ describe("router: leading global flag before subcommand", () => {
     expect(r.code).toBe(0)
     expect(r.out.trim().length).toBeGreaterThan(0)
   })
+
+  test("--json stats di depan tetap memicu keluaran JSON", async () => {
+    const r = await runDispatch(["--json", "stats", "--cwd", tmp])
+    expect(r.code).toBe(0)
+    expect(() => JSON.parse(r.out)).not.toThrow()
+  })
+
+  test("providers membaca config lokal hanya bila --allow-local-config aktif", async () => {
+    mkdirSync(join(tmp, ".minicode"), { recursive: true })
+    writeFileSync(
+      join(tmp, ".minicode", "config.json"),
+      JSON.stringify({
+        providers: [
+          {
+            id: "hanya-lokal-audit",
+            baseUrl: "https://lokal.example/v1",
+            apiKey: "k",
+            models: ["m1"],
+            providerHint: "openai",
+          },
+        ],
+      }),
+      "utf8",
+    )
+    const off = await runDispatch(["providers", "--cwd", tmp])
+    expect(off.code).toBe(0)
+    expect(off.out).not.toContain("hanya-lokal-audit")
+
+    const on = await runDispatch(["--allow-local-config", "providers", "--cwd", tmp])
+    expect(on.code).toBe(0)
+    expect(on.out).toContain("hanya-lokal-audit")
+  })
+})
+
+describe("subcommand: --help exit 0 dan argumen asing exit 2", () => {
+  for (const [argv, snippet] of [
+    [["providers", "--help"], "minicode providers"],
+    [["models", "--help"], "minicode models"],
+    [["sync", "--help"], "minicode sync"],
+    [["stats", "--help"], "minicode stats"],
+    [["doctor", "--help"], "minicode doctor"],
+    [["mcp", "serve", "--help"], "minicode mcp"],
+    [["acp", "--help"], "minicode acp"],
+    [["exec", "--help"], "minicode exec"],
+  ] as [string[], string][]) {
+    test(`${argv.join(" ")} -> exit 0 + help kontekstual`, async () => {
+      const r = await runDispatch(argv)
+      expect(r.code).toBe(0)
+      expect(r.out).toContain(snippet)
+    })
+  }
+
+  for (const argv of [
+    ["providers", "bogus"],
+    ["sync", "bogus"],
+    ["stats", "bogus"],
+    ["doctor", "bogus"],
+    ["mcp", "pins", "bogus"],
+    ["acp", "bogus"],
+  ]) {
+    test(`${argv.join(" ")} -> exit 2 (salah pakai)`, async () => {
+      const r = await runDispatch([...argv, "--cwd", tmp])
+      expect(r.code).toBe(2)
+    })
+  }
 })

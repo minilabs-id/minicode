@@ -73,7 +73,6 @@ const sessionBase = (dir: string): Omit<CliSessionOptions, "sessionId"> => ({
   allowAll: true,
   prompt: "",
   ask: false,
-  plan: false,
   allowlist: false,
   verify: false,
 })

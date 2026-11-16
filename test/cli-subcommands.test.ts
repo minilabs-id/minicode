@@ -570,4 +570,19 @@ describe("cli: daemon JSON integritas kegagalan (D-1)", () => {
       discard(ws.dir)
     }
   }, 30_000)
+
+  test("D: error argumen (--port/--ttl/missing --scopes) + --json -> objek exit 2", () => {
+    for (const argv of [
+      ["daemon", "issue", "--json", "--cwd", "<DIR>"],
+      ["daemon", "issue", "--scopes", "status", "--ttl", "0", "--json", "--cwd", "<DIR>"],
+      ["daemon", "start", "--port", "99999", "--json", "--cwd", "<DIR>"],
+    ]) {
+      const r = runDaemon(argv)
+      expect(r.code).toBe(2)
+      const parsed = JSON.parse(r.stdout) as { ok?: unknown; code?: unknown }
+      expect(parsed.ok).toBe(false)
+      expect(parsed.code).toBe("USER_ERROR")
+      expect(r.stderr.trim().length).toBeGreaterThan(0)
+    }
+  }, 20_000)
 })

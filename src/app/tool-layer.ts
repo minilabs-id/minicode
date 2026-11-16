@@ -4,7 +4,6 @@ import { configureServers as lspConfigure } from "../lsp/client.ts"
 import { connectAll as mcpConnectAll } from "../mcp/client.ts"
 import {
   EXPLORE_TOOL_NAMES,
-  LOCAL_READONLY_TOOL_NAMES,
   PLAN_EXTRA_TOOL_NAMES,
   READONLY_TOOL_NAMES,
 } from "../policy/tool-contract.ts"
@@ -19,27 +18,23 @@ const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
 export type ToolScope = "full" | "explore"
 
-const LOCAL_READONLY_SET: ReadonlySet<string> = new Set(LOCAL_READONLY_TOOL_NAMES)
-
-// WorkMode ceiling (P12 S2.2 + P0.2) — lapisan intent di ATAS permission mode.
+// WorkMode ceiling (DISCUSS menyatukan diskusi + perencanaan; EXECUTE = BUILD).
 // Invariant INV-WM1 & #7: WorkMode TIDAK PERNAH memperluas akses; `visible`
 // diselaraskan penuh dengan `callable` di handler:
-// - DISCUSS: tepat 16 tool PURE_READ lokal (`LOCAL_READONLY_TOOL_NAMES`);
-//   `web_fetch` & `web_search` ditolak dan disembunyikan.
-// - PLAN: 18 `READONLY_TOOL_NAMES` (16 lokal + 2 network read ber-approval) +
+// - DISCUSS: 18 `READONLY_TOOL_NAMES` (16 lokal + 2 network read ber-approval) +
 //   `PLAN_EXTRA` (kecuali bila `permissionMode` adalah `readonly`/`allowlist`
 //   yang ceiling-nya `readonly`).
 // - EXECUTE: tanpa ceiling WorkMode tambahan; mengikuti `permissionMode`.
 export function workModeVisible(
   name: string,
-  workMode: "DISCUSS" | "PLAN" | "EXECUTE",
+  workMode: "DISCUSS" | "EXECUTE",
   permissionMode?: string,
 ): boolean {
+  const wm = workMode === "EXECUTE" ? "EXECUTE" : "DISCUSS"
   if (isMcpToolName(name)) {
-    return workMode === "EXECUTE" && permissionMode !== "readonly" && permissionMode !== "plan"
+    return wm === "EXECUTE" && permissionMode !== "readonly" && permissionMode !== "plan"
   }
-  if (workMode === "DISCUSS") return LOCAL_READONLY_SET.has(name)
-  if (workMode === "PLAN") {
+  if (wm === "DISCUSS") {
     if (permissionMode === "readonly" || permissionMode === "allowlist") {
       return READONLY_TOOL_NAMES.has(name)
     }
@@ -54,7 +49,7 @@ export function workModeVisible(
 
 export function applyWorkModeFilter<T extends Tool>(
   tools: readonly T[],
-  workMode: "DISCUSS" | "PLAN" | "EXECUTE",
+  workMode: "DISCUSS" | "EXECUTE",
   permissionMode?: string,
 ): T[] {
   return tools.filter((t) => workModeVisible(t.name, workMode, permissionMode))
@@ -68,13 +63,13 @@ export async function setupToolLayer(
   permissionMode?: string,
   verification?: CanonicalScope,
   jobOwnerSid?: string,
-  workMode: "DISCUSS" | "PLAN" | "EXECUTE" = "EXECUTE",
+  workMode: "DISCUSS" | "EXECUTE" = "EXECUTE",
   cwd?: string,
 ): Promise<{
   sessionTools: Tool[]
   evidenceMode: ToolEvidenceMode
   /** P12 S2.2 Slice 5 - set WorkMode runtime (visibilitas tool). */
-  setWorkMode?: (m: "DISCUSS" | "PLAN" | "EXECUTE") => void
+  setWorkMode?: (m: "DISCUSS" | "EXECUTE") => void
   /** P0.2 - set PermissionMode runtime agar visibilitas tetap sinkron saat /mode atau Shift+Tab. */
   setPermissionMode?: (pm: string) => void
 }> {
@@ -124,9 +119,9 @@ export async function setupToolLayer(
   // PermissionMode). `parallelExecutor` meresolusi `registry.get(name)` dari
   // `list()` yang sama sehingga `callable === visible` di kedua arah transisi.
   const candidates = sessionTools
-  let currentWm: "DISCUSS" | "PLAN" | "EXECUTE" = workMode
+  let currentWm: "DISCUSS" | "EXECUTE" = workMode
   let currentPm: string | undefined = permissionMode
-  const computeVisible = (wm: "DISCUSS" | "PLAN" | "EXECUTE", pm?: string): Tool[] => {
+  const computeVisible = (wm: "DISCUSS" | "EXECUTE", pm?: string): Tool[] => {
     if (scope === "explore") {
       // Scope explore sudah dibatasi ke EXPLORE_TOOL_NAMES; tetap terapkan irisan WorkMode.
       return applyWorkModeFilter(candidates, wm, pm)
@@ -140,7 +135,7 @@ export async function setupToolLayer(
     visible.length = 0
     visible.push(...next)
   }
-  const setWorkMode = (wm: "DISCUSS" | "PLAN" | "EXECUTE"): void => {
+  const setWorkMode = (wm: "DISCUSS" | "EXECUTE"): void => {
     currentWm = wm
     syncVisible()
   }

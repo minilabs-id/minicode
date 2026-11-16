@@ -139,29 +139,35 @@ async function runIsolated(script: string): Promise<Record<string, unknown>> {
   }
 }
 
-describe("R1 — resume: WorkMode PLAN (dari --plan) DIPERSIST & dipulihkan; permission auto/ask re-derived", () => {
-  test("sesi plan → resume memulihkan WorkMode PLAN; override --work-mode BUILD membuka kembali", async () => {
+describe("R1 — resume: WorkMode DISCUSS DIPERSIST & dipulihkan; permission auto/ask re-derived", () => {
+  test("sesi DISCUSS → resume memulihkan WorkMode DISCUSS; override --work-mode BUILD membuka kembali", async () => {
     const ws = makeWorkspace()
     const sid = "s-perm-life"
     const base = ["--cwd", ws.dir, "--model", "gpt-4o-mini", "--allow-local-config"]
     try {
-      // Run A — premis: sesi lahir di WorkMode PLAN (dari --plan); tulis ditolak.
+      // Run A — premis: sesi lahir di WorkMode DISCUSS; tulis ditolak.
       const pA = startFakeProvider([
         { kind: "tool", name: "write_file", args: { path: "rA.txt", content: "x" } },
         { kind: "text", text: "rencana" },
       ])
       try {
         writeProviderConfig(ws, pA.baseUrl)
-        const a = await runCli(ws, ["--session", sid, "--plan", ...base, "tulis rA.txt"])
+        const a = await runCli(ws, [
+          "--session",
+          sid,
+          "--work-mode",
+          "DISCUSS",
+          ...base,
+          "tulis rA.txt",
+        ])
         expect(a.code).toBe(0)
         expect(existsSync(join(ws.dir, "rA.txt"))).toBe(false)
       } finally {
         pA.close()
       }
 
-      // Run B — [mode-architecture] --plan kini = WorkMode PLAN yang DIPERSIST:
-      // resume tanpa flag memulihkan PLAN → tulis tetap ditolak. (Berbeda dari
-      // PermissionMode yang re-derived; permission auto/ask tetap re-derived.)
+      // Run B — WorkMode DISCUSS DIPERSIST:
+      // resume tanpa flag memulihkan DISCUSS → tulis tetap ditolak.
       const pB = startFakeProvider([
         { kind: "tool", name: "write_file", args: { path: "rB.txt", content: "x" } },
         { kind: "text", text: "selesai" },
@@ -171,7 +177,7 @@ describe("R1 — resume: WorkMode PLAN (dari --plan) DIPERSIST & dipulihkan; per
         const b = await runCli(ws, ["--resume", sid, ...base, "tulis rB.txt"])
         expect(b.code).toBe(0)
         expect(b.stderr).toContain(`resumed session ${sid}`)
-        expect(b.stderr).toContain("[resume] WorkMode PLAN restored")
+        expect(b.stderr).toContain("[resume] WorkMode DISCUSS restored")
         expect(existsSync(join(ws.dir, "rB.txt"))).toBe(false)
       } finally {
         pB.close()

@@ -69,7 +69,6 @@ function openSession(sessionId: string, enabled: boolean): Promise<CliSession> {
     verbose: false,
     allowAll: false,
     ask: false,
-    plan: false,
     allowlist: false,
     verify: false,
     schedulerEnabled: enabled,

@@ -8,7 +8,9 @@ import {
 } from "../../src/providers/oauth.ts"
 import { saveProvider } from "../../src/providers/provision.ts"
 import { formatError } from "../../src/ui/render/errors.ts"
+import { sanitizeAnsiLine } from "../../src/ui/render/sanitize.ts"
 import { c } from "../../src/ui/render/theme.ts"
+import { hasHelpFlag, positionalSubArg } from "../args.ts"
 
 function usage(code = 0): never {
   console.log(`minicode auth — OAuth login (no API key)
@@ -25,7 +27,7 @@ Tokens are stored at ${authFilePath()} (chmod 600), NOT in config.json.`)
 export async function handleAuth(args: string[]): Promise<never> {
   const sub = (args[1] ?? "").toLowerCase()
 
-  if (!sub || sub === "help" || sub === "--help" || sub === "-h") usage()
+  if (!sub || sub === "help" || hasHelpFlag(args)) usage()
 
   if (sub === "list") {
     console.log(`\n${c.bold("Providers with OAuth support")}`)
@@ -51,44 +53,41 @@ export async function handleAuth(args: string[]): Promise<never> {
           ? c.yellow("expired (auto-refresh)")
           : c.red("expired (re-login required)")
         : c.green("active")
-      console.log(`  ${c.cyan(r.providerId.padEnd(12))} ${state}  ${c.dim(`exp ${exp}`)}`)
+      console.log(
+        `  ${c.cyan(sanitizeAnsiLine(r.providerId).padEnd(12))} ${state}  ${c.dim(`exp ${exp}`)}`,
+      )
     }
     console.log("")
     process.exit(0)
   }
 
   if (sub === "logout") {
-    // Tolak flag sebagai id seperti config (positionalArg): `auth logout
-    // --cwd X` adalah lupa argumen, bukan kredensial bernama "--cwd".
-    const id = args[2] && !args[2]!.startsWith("-") ? args[2] : undefined
+    const id = positionalSubArg(args, 2)
     if (!id) {
       console.error("usage: minicode auth logout <provider>")
       process.exit(2)
     }
     const ok = await removeAuth(id)
+    const safeId = sanitizeAnsiLine(id)
     console.log(
-      ok ? `${c.green("ok")} credentials "${id}" removed` : `(no credentials for "${id}")`,
+      ok ? `${c.green("ok")} credentials "${safeId}" removed` : `(no credentials for "${safeId}")`,
     )
     process.exit(0)
   }
 
   if (sub !== "login") {
-    // Subcommand asing = salah pakai (exit 2), bukan permintaan bantuan
-    // dan bukan gagal runtime (exit 1).
-    console.error(`unknown auth subcommand: ${sub}`)
+    console.error(`unknown auth subcommand: ${sanitizeAnsiLine(sub)}`)
     usage(2)
   }
 
   // ── login ──
-  // Device flow butuh browser + persetujuan manusia — di non-TTY (CI/pipe)
-  // gagalkan cepat dengan pesan jelas, bukan menembak jaringan lalu gagal 400.
   if (!process.stdin.isTTY) {
     console.error(
       "auth login needs an interactive terminal (device-code approval happens in a browser)",
     )
     process.exit(1)
   }
-  const requested = args[2] ?? OAUTH_PROVIDERS[0]?.id
+  const requested = positionalSubArg(args, 2) ?? OAUTH_PROVIDERS[0]?.id
   if (!requested) {
     console.error("no OAuth providers registered")
     process.exit(1)
@@ -96,7 +95,7 @@ export async function handleAuth(args: string[]): Promise<never> {
   const spec = findOAuthProvider(requested)
   if (!spec) {
     console.error(
-      `provider "${requested}" does not support OAuth. Available: ${OAUTH_PROVIDERS.map((p) => p.id).join(", ")}`,
+      `provider "${sanitizeAnsiLine(requested)}" does not support OAuth. Available: ${OAUTH_PROVIDERS.map((p) => p.id).join(", ")}`,
     )
     process.exit(1)
   }

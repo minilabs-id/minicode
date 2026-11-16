@@ -1,17 +1,18 @@
-// Fixture matriks WorkMode × PermissionMode (P12 S2.1 + P0.2) — DATA test-only.
+// Fixture matriks WorkMode × PermissionMode (2-mode: DISCUSS | EXECUTE) — DATA test-only.
 //
-// Ditranskrip dari arah owner (REV-2 §4.2, S2.1, dan keputusan P0.2 Q1–Q5):
-// - Q1=A1: DISCUSS mengizinkan tepat 16 tool baca lokal (`LOCAL_READONLY_TOOL_NAMES`).
-// - Q2=A2: `web_fetch` & `web_search` ditolak di DISCUSS, wajib approval prompt
-//   di PLAN (di seluruh 6 PM; headless = deny), dan mengikuti PM di EXECUTE.
-// - Q3=A3: Hooks diblokir di DISCUSS dan PLAN untuk seluruh 6 PM.
-// - Q4=A4: `--verify` ditolak fail-closed saat startup di DISCUSS dan PLAN.
+// `DISCUSS` menyatukan investigasi read-only, diskusi, dan perencanaan:
+// - Mengizinkan 18 `READONLY_TOOL_NAMES` + 3 `PLAN_EXTRA` (`todo_write`,
+//   `delegate_task` [explore], `submit_result`) = 21 tool saat PM `auto`/`ask`/
+//   `plan`/`allow-all`, atau 18 `READONLY_TOOL_NAMES` saat PM `readonly`/`allowlist`.
+// - `web_fetch` & `web_search` wajib approval prompt di DISCUSS (di seluruh 6 PM;
+//   headless tanpa broker = deny), dan mengikuti PM di EXECUTE.
+// - Hooks diblokir di DISCUSS untuk seluruh 6 PM.
+// - `--verify` ditolak fail-closed saat startup di DISCUSS.
 //
 // `ceiling` = ceiling WorkMode yang dipasang SEBELUM handler PM memutuskan:
-//   "discuss-local" → hanya 16 LOCAL_READONLY_TOOL_NAMES (network read ditolak);
-//   "readonly"      → hanya 18 READONLY_TOOL_NAMES (+ prompt wajib untuk network read di PLAN);
-//   "plan"          → 18 READONLY_TOOL_NAMES + 3 PLAN_EXTRA (+ prompt wajib untuk network read);
-//   "none"          → EXECUTE, tanpa ceiling (handler PM apa adanya).
+//   "readonly" → hanya 18 READONLY_TOOL_NAMES (+ prompt wajib untuk network read di DISCUSS);
+//   "plan"     → 18 READONLY_TOOL_NAMES + 3 PLAN_EXTRA (+ prompt wajib untuk network read di DISCUSS);
+//   "none"     → EXECUTE, tanpa ceiling (handler PM apa adanya).
 
 import type { PermissionMode } from "../../src/policy/permission.ts"
 import type { WorkMode } from "../../src/policy/work-mode.ts"
@@ -19,8 +20,8 @@ import type { WorkMode } from "../../src/policy/work-mode.ts"
 export interface WorkModeCell {
   workMode: WorkMode
   permissionMode: PermissionMode
-  ceiling: "discuss-local" | "readonly" | "plan" | "none"
-  networkRead: "deny" | "prompt" | "pm"
+  ceiling: "readonly" | "plan" | "none"
+  networkRead: "prompt" | "pm"
   hooks: "blocked" | "allowed"
   verify: "refused" | "allowed"
   /** Catatan keputusan yang menyimpang dari tabel literal (bila ada). */
@@ -31,54 +32,6 @@ export const WORK_MODE_CELLS: readonly WorkModeCell[] = [
   {
     workMode: "DISCUSS",
     permissionMode: "auto",
-    ceiling: "discuss-local",
-    networkRead: "deny",
-    hooks: "blocked",
-    verify: "refused",
-  },
-  {
-    workMode: "DISCUSS",
-    permissionMode: "ask",
-    ceiling: "discuss-local",
-    networkRead: "deny",
-    hooks: "blocked",
-    verify: "refused",
-  },
-  {
-    workMode: "DISCUSS",
-    permissionMode: "plan",
-    ceiling: "discuss-local",
-    networkRead: "deny",
-    hooks: "blocked",
-    verify: "refused",
-  },
-  {
-    workMode: "DISCUSS",
-    permissionMode: "allow-all",
-    ceiling: "discuss-local",
-    networkRead: "deny",
-    hooks: "blocked",
-    verify: "refused",
-  },
-  {
-    workMode: "DISCUSS",
-    permissionMode: "allowlist",
-    ceiling: "discuss-local",
-    networkRead: "deny",
-    hooks: "blocked",
-    verify: "refused",
-  },
-  {
-    workMode: "DISCUSS",
-    permissionMode: "readonly",
-    ceiling: "discuss-local",
-    networkRead: "deny",
-    hooks: "blocked",
-    verify: "refused",
-  },
-  {
-    workMode: "PLAN",
-    permissionMode: "auto",
     ceiling: "plan",
     networkRead: "prompt",
     hooks: "blocked",
@@ -86,7 +39,7 @@ export const WORK_MODE_CELLS: readonly WorkModeCell[] = [
     note: "delegate_task & network read wajib lewat gerbang approval (headless deny / TTY prompt)",
   },
   {
-    workMode: "PLAN",
+    workMode: "DISCUSS",
     permissionMode: "ask",
     ceiling: "plan",
     networkRead: "prompt",
@@ -95,7 +48,7 @@ export const WORK_MODE_CELLS: readonly WorkModeCell[] = [
     note: "delegate_task & network read wajib lewat gerbang approval (headless deny / TTY prompt)",
   },
   {
-    workMode: "PLAN",
+    workMode: "DISCUSS",
     permissionMode: "plan",
     ceiling: "plan",
     networkRead: "prompt",
@@ -103,7 +56,7 @@ export const WORK_MODE_CELLS: readonly WorkModeCell[] = [
     verify: "refused",
   },
   {
-    workMode: "PLAN",
+    workMode: "DISCUSS",
     permissionMode: "allow-all",
     ceiling: "plan",
     networkRead: "prompt",
@@ -111,7 +64,7 @@ export const WORK_MODE_CELLS: readonly WorkModeCell[] = [
     verify: "refused",
   },
   {
-    workMode: "PLAN",
+    workMode: "DISCUSS",
     permissionMode: "allowlist",
     ceiling: "readonly",
     networkRead: "prompt",
@@ -120,7 +73,7 @@ export const WORK_MODE_CELLS: readonly WorkModeCell[] = [
     note: "lebih ketat dari irisan literal (owner-approved): read-only saja + prompt untuk network read",
   },
   {
-    workMode: "PLAN",
+    workMode: "DISCUSS",
     permissionMode: "readonly",
     ceiling: "readonly",
     networkRead: "prompt",

@@ -1,5 +1,13 @@
 import { expect, test } from "bun:test"
-import { flagsAfterPromptBoundary, getArg, promptFromArgs } from "../cli/args.ts"
+import {
+  allowLocalSubcommand,
+  flagsAfterPromptBoundary,
+  getArg,
+  hasHelpFlag,
+  parseToggleArg,
+  positionalSubArg,
+  promptFromArgs,
+} from "../cli/args.ts"
 
 test("getArg returns value after flag", () => {
   expect(getArg(["--cwd", "src", "refactor"], "--cwd")).toBe("src")
@@ -10,18 +18,18 @@ test("getArg returns value after flag", () => {
 
 test("promptFromArgs removes boolean flags", () => {
   expect(promptFromArgs(["--verbose", "refactor", "src"])).toBe("refactor src")
-  expect(promptFromArgs(["--allow-all", "--plan", "refactor"])).toBe("refactor")
+  expect(promptFromArgs(["--allow-all", "--ask", "refactor"])).toBe("refactor")
   expect(promptFromArgs(["refactor", "src", "--verbose"])).toBe("refactor src --verbose")
   expect(promptFromArgs(["refactor", "--allow-all"])).toBe("refactor --allow-all")
   expect(promptFromArgs([])).toBe("")
 })
 
-// `--tui` dan `--ui` dihapus: keduanya diparse dan diteruskan tapi tidak pernah
-// dibaca. Flag tak dikenal dibiarkan sebagai kata prompt (perilaku lama).
+// `--tui`, `--ui`, dan `--plan` dihapus: flag tak dikenal dibiarkan sebagai kata prompt.
 // getArg sengaja tetap generik — ia mencari nama apa pun, bukan hanya yang dikenal.
 test("flag yang sudah dihapus tidak lagi disaring dari prompt", () => {
   expect(promptFromArgs(["refactor", "--tui"])).toBe("refactor --tui")
   expect(promptFromArgs(["refactor", "--ui", "full"])).toBe("refactor --ui full")
+  expect(promptFromArgs(["--plan", "refactor"])).toBe("--plan refactor")
 })
 
 test("-v/--version dikenali sebagai flag, bukan prompt", () => {
@@ -152,4 +160,33 @@ test("flagsAfterPromptBoundary melewati nilai flag bentuk --flag=value dan dedup
   expect(
     flagsAfterPromptBoundary(["p", "--model", "x", "--model", "y", "--work-mode", "PLAN"]),
   ).toEqual(["--model", "--work-mode"])
+})
+
+test("flag boolean subcommand (--local/--global/--jsonl/--all-tools) tidak memakan argumen berikut", () => {
+  expect(promptFromArgs(["--local", "--global", "--jsonl", "--all-tools", "lanjut"])).toBe("lanjut")
+  expect(promptFromArgs(["--port", "4040", "--ttl", "60", "jalan"])).toBe("jalan")
+})
+
+test("helper subcommand: positionalSubArg, hasHelpFlag, allowLocalSubcommand, parseToggleArg", () => {
+  // Router mempartisi positional lebih dulu sebelum memanggil handler subcommand.
+  expect(positionalSubArg(["sessions", "export", "id-1", "--cwd", "/tmp"], 0)).toBe("sessions")
+  expect(positionalSubArg(["sessions", "export", "id-1", "--cwd", "/tmp"], 1)).toBe("export")
+  expect(positionalSubArg(["sessions", "export", "id-1", "--cwd", "/tmp"], 2)).toBe("id-1")
+  expect(positionalSubArg(["sessions", "--cwd", "/tmp"], 1)).toBeUndefined()
+
+  expect(hasHelpFlag(["stats", "--help"])).toBe(true)
+  expect(hasHelpFlag(["stats", "-h"])).toBe(true)
+  expect(hasHelpFlag(["stats", "--json"])).toBe(false)
+
+  expect(allowLocalSubcommand(["providers", "--allow-local-config"])).toBe(true)
+  expect(allowLocalSubcommand(["providers"])).toBe(false)
+
+  expect(parseToggleArg("")).toBeUndefined()
+  expect(parseToggleArg("on")).toBe(true)
+  expect(parseToggleArg("ON")).toBe(true)
+  expect(parseToggleArg("1")).toBe(true)
+  expect(parseToggleArg("off")).toBe(false)
+  expect(parseToggleArg("OFF")).toBe(false)
+  expect(parseToggleArg("0")).toBe(false)
+  expect(parseToggleArg("bogus")).toBe("invalid")
 })

@@ -359,12 +359,13 @@ describe("cli: WorkMode surfacing (F-DISCUSS-4)", () => {
     expect(r.stderr).toContain("[work-mode] DISCUSS (read-only)")
   })
 
-  test("one-shot --work-mode PLAN → stderr [work-mode] PLAN (read-only planning)", async () => {
+  test("one-shot --work-mode BUILD → stderr [work-mode] BUILD", async () => {
     const { run: r } = await runWithProvider(
       [{ kind: "text", text: "ok" }],
-      ["rencana", "--work-mode", "PLAN"],
+      ["--work-mode", "BUILD", "implementasikan"],
     )
-    expect(r.stderr).toContain("[work-mode] PLAN (read-only planning)")
+    expect(r.stderr).toContain("[work-mode] BUILD")
+    expect(r.stderr).not.toContain("(read-only)")
   })
 
   test("one-shot tanpa --work-mode → default DISCUSS", async () => {
@@ -382,16 +383,16 @@ describe("cli: WorkMode surfacing (F-DISCUSS-4)", () => {
     expect(r.stderr).toContain("[work-mode] DISCUSS (read-only)")
   })
 
-  test("exec --json --work-mode PLAN → summary.workMode === 'PLAN' (terstruktur)", async () => {
+  test("exec --json --work-mode BUILD → summary.workMode === 'BUILD' (terstruktur)", async () => {
     const { run: r } = await runWithProvider(
       [{ kind: "text", text: "ok" }],
-      ["exec", "--json", "--work-mode", "PLAN", "baca a.ts"],
+      ["exec", "--json", "--work-mode", "BUILD", "baca a.ts"],
     )
     expect(r.code).toBe(0)
     const lines = r.stdout.split("\n").filter(Boolean)
     const summary = JSON.parse(lines[lines.length - 1]!) as Record<string, unknown>
     expect(summary.type).toBe("summary")
-    expect(summary.workMode).toBe("PLAN")
+    expect(summary.workMode).toBe("BUILD")
   })
 
   test("exec --json default → summary.workMode === 'DISCUSS' (selalu hadir)", async () => {
@@ -678,14 +679,14 @@ describe("cli: --budget", () => {
   }, 30_000)
 })
 
-describe("cli: --plan", () => {
+describe("cli: --work-mode DISCUSS", () => {
   test("menolak tool tulis — berkas tidak pernah dibuat", async () => {
     const { run: r, ws } = await runWithProvider(
       [
         { kind: "tool", name: "write_file", args: { path: "jangan.txt", content: "x" } },
         { kind: "text", text: "rencana: tidak menulis apa pun" },
       ],
-      ["tulis jangan.txt", "--plan"],
+      ["--work-mode", "DISCUSS", "tulis jangan.txt"],
     )
     expect(r.code).toBe(0)
     expect(existsSync(join(ws.dir, "jangan.txt"))).toBe(false)
@@ -693,20 +694,20 @@ describe("cli: --plan", () => {
     expect(existsSync(join(repoRoot, "jangan.txt"))).toBe(false)
   })
 
-  test("MINICODE_PLAN=1 setara dengan --plan", async () => {
+  test("MINICODE_WORK_MODE=DISCUSS menahan tool tulis", async () => {
     const { run: r, ws } = await runWithProvider(
       [
         { kind: "tool", name: "write_file", args: { path: "env-plan.txt", content: "x" } },
         { kind: "text", text: "rencana" },
       ],
       ["tulis env-plan.txt"],
-      { env: { MINICODE_PLAN: "1" } },
+      { env: { MINICODE_WORK_MODE: "DISCUSS" } },
     )
     expect(r.code).toBe(0)
     expect(existsSync(join(ws.dir, "env-plan.txt"))).toBe(false)
   })
 
-  test("plan mode membaca berkas tetap boleh", async () => {
+  test("DISCUSS mode membaca berkas tetap boleh", async () => {
     const ws = makeWorkspace()
     writeFileSync(join(ws.dir, "baca.txt"), "konten terbaca", "utf8")
     const provider = startFakeProvider([
@@ -716,13 +717,14 @@ describe("cli: --plan", () => {
     try {
       writeProviderConfig(ws, provider.baseUrl)
       const r = await run(ws, [
-        "baca berkas",
-        "--plan",
+        "--work-mode",
+        "DISCUSS",
         "--cwd",
         ws.dir,
         "--model",
         "gpt-4o-mini",
         "--allow-local-config",
+        "baca berkas",
       ])
       expect(r.code).toBe(0)
       const second = provider.requests()[1]

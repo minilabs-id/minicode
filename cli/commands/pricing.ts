@@ -8,7 +8,9 @@ import {
   syncPricing,
 } from "../../src/policy/pricing.ts"
 import { formatError } from "../../src/ui/render/errors.ts"
+import { sanitizeAnsiLine } from "../../src/ui/render/sanitize.ts"
 import { c } from "../../src/ui/render/theme.ts"
+import { hasHelpFlag, positionalSubArg } from "../args.ts"
 
 const PRICING_HELP = `minicode pricing — price table for cost estimation
 
@@ -18,12 +20,11 @@ const PRICING_HELP = `minicode pricing — price table for cost estimation
   minicode pricing clear         clear cache and use built-in data`
 
 export async function handlePricing(args: string[]): Promise<never> {
-  const raw = args[1]
-  if (raw === "--help" || raw === "-h") {
+  if (hasHelpFlag(args)) {
     console.log(PRICING_HELP)
     process.exit(0)
   }
-  const sub = (raw ?? "status").toLowerCase()
+  const sub = (positionalSubArg(args, 1) ?? "status").toLowerCase()
 
   if (sub === "sync") {
     process.stderr.write("fetching prices from models.dev…\n")
@@ -61,20 +62,20 @@ export async function handlePricing(args: string[]): Promise<never> {
   }
 
   if (sub === "show") {
-    // Flag bukan nama model (`pricing show --json` = lupa argumen).
-    const model = args[2] && !args[2]!.startsWith("-") ? args[2] : undefined
+    const model = positionalSubArg(args, 2)
     if (!model) {
       console.error("usage: minicode pricing show <model>")
       process.exit(2)
     }
     const overlay = await loadPricingOverlay()
     const p = findPrice(model, overlay)
+    const safeModel = sanitizeAnsiLine(model)
     if (!p) {
-      console.log(`(price for "${model}" is unknown — cost will show N/A)`)
+      console.log(`(price for "${safeModel}" is unknown — cost will show N/A)`)
       process.exit(0)
     }
     const src = findPrice(model, {}) === p ? "built-in" : "models.dev"
-    console.log(`\n${c.bold(model)}  ${c.dim(`(${src})`)}`)
+    console.log(`\n${c.bold(safeModel)}  ${c.dim(`(${src})`)}`)
     console.log(`  input        $${p.input}/M token`)
     console.log(`  output       $${p.output}/M token`)
     if (p.cacheRead != null) console.log(`  cache read   $${p.cacheRead}/M`)
@@ -97,7 +98,7 @@ export async function handlePricing(args: string[]): Promise<never> {
 
   // Subcommand asing = salah pakai: exit 2 supaya skrip bisa mendeteksinya
   // dan membedakannya dari gagal runtime (exit 1).
-  console.error(`unknown pricing subcommand: ${sub}\n`)
+  console.error(`unknown pricing subcommand: ${sanitizeAnsiLine(sub)}\n`)
   console.log(PRICING_HELP)
   process.exit(2)
 }

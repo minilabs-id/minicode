@@ -42,29 +42,33 @@ describe("resolveWorkModeFlag — flag vs env vs default", () => {
   })
 
   test("flag DISCUSS → DISCUSS (mengalahkan env)", () => {
-    process.env.MINICODE_WORK_MODE = "PLAN"
+    process.env.MINICODE_WORK_MODE = "BUILD"
     const r = resolveWorkModeFlag(getFrom(["--work-mode", "DISCUSS"]))
     expect(r.workMode).toBe("DISCUSS")
     expect(r.warning).toBeUndefined()
   })
 
-  test("env PLAN (tanpa flag) → PLAN", () => {
-    process.env.MINICODE_WORK_MODE = "PLAN"
+  test("env BUILD (tanpa flag) → EXECUTE", () => {
+    process.env.MINICODE_WORK_MODE = "BUILD"
     const r = resolveWorkModeFlag(getFrom([]))
-    expect(r.workMode).toBe("PLAN")
+    expect(r.workMode).toBe("EXECUTE")
     expect(r.warning).toBeUndefined()
   })
 
   test("case-insensitive: flag lowercase diterima", () => {
-    const r = resolveWorkModeFlag(getFrom(["--work-mode", "plan"]))
-    expect(r.workMode).toBe("PLAN")
+    const r = resolveWorkModeFlag(getFrom(["--work-mode", "build"]))
+    expect(r.workMode).toBe("EXECUTE")
   })
 
-  test("nilai invalid → DISCUSS + warning (fail-closed, tidak melebar)", () => {
+  test("nilai invalid (termasuk PLAN) → DISCUSS + warning (fail-closed, tidak melebar)", () => {
     const r = resolveWorkModeFlag(getFrom(["--work-mode", "YOLO"]))
     expect(r.workMode).toBe("DISCUSS")
-    expect(r.warning).toContain("DISCUSS|PLAN|BUILD")
+    expect(r.warning).toContain("DISCUSS|BUILD")
     expect(r.warning).toContain("using DISCUSS")
+
+    const rPlan = resolveWorkModeFlag(getFrom(["--work-mode", "PLAN"]))
+    expect(rPlan.workMode).toBe("DISCUSS")
+    expect(rPlan.warning).toContain("DISCUSS|BUILD")
   })
 
   test("EXECUTE tidak diterima sebagai nama Work Mode operator", () => {
@@ -81,16 +85,17 @@ describe("parseRunParams — kontrak workMode ACP", () => {
     expect(r.value.workMode).toBe("DISCUSS")
   })
 
-  test("workMode DISCUSS/PLAN/BUILD diterima; BUILD menjadi identitas internal EXECUTE", () => {
-    for (const wm of ["DISCUSS", "PLAN", "BUILD"] as const) {
+  test("workMode DISCUSS/BUILD diterima; BUILD menjadi identitas internal EXECUTE", () => {
+    for (const wm of ["DISCUSS", "BUILD"] as const) {
       const r = parseRunParams({ prompt: "x", workMode: wm })
       if (!r.ok) throw new Error("unexpected")
       expect(r.value.workMode).toBe(wm === "BUILD" ? "EXECUTE" : wm)
     }
   })
 
-  test("EXECUTE tidak diterima sebagai nama Work Mode ACP", () => {
+  test("EXECUTE dan PLAN tidak diterima sebagai nama Work Mode ACP", () => {
     expect(parseRunParams({ prompt: "x", workMode: "EXECUTE" }).ok).toBe(false)
+    expect(parseRunParams({ prompt: "x", workMode: "PLAN" }).ok).toBe(false)
   })
 
   test("workMode invalid → error (bukan diam default)", () => {
@@ -142,14 +147,12 @@ describe("runAcpSession — workMode diteruskan ke factory session", () => {
     createSession: f.createSession as never,
   })
 
-  test("workMode PLAN diteruskan ke createSession", async () => {
+  test("workMode BUILD diteruskan ke createSession sebagai EXECUTE", async () => {
     const f = fakeFactory()
     const out: string[] = []
-    await runAcpSession(1, { prompt: "x", workMode: "PLAN" }, depsOf(f, out))
+    await runAcpSession(1, { prompt: "x", workMode: "BUILD" }, depsOf(f, out))
     const opts = f.options() as Record<string, unknown>
-    expect(opts.workMode).toBe("PLAN")
-    // mode (permission) tetap default auto, tidak ikut berubah jadi plan.
-    expect(opts.plan).toBe(false)
+    expect(opts.workMode).toBe("EXECUTE")
   })
 
   test("tanpa workMode → DISCUSS", async () => {
@@ -211,11 +214,10 @@ describe("Q4=A4 — --verify & self-heal ditolak fail-closed di DISCUSS/PLAN + d
       verbose: false,
       allowAll: false,
       ask: false,
-      plan: false,
       allowlist: false,
     }
     try {
-      for (const wm of ["DISCUSS", "PLAN"] as const) {
+      for (const wm of ["DISCUSS"] as const) {
         await expect(
           createCliSession({ ...base, verify: true, workMode: wm, workModeExplicit: true }),
         ).rejects.toBeInstanceOf(VerifyWorkModeConflictError)
@@ -251,7 +253,7 @@ describe("Q4=A4 — --verify & self-heal ditolak fail-closed di DISCUSS/PLAN + d
     }
   })
 
-  test("transisi runtime EXECUTE → PLAN pada sesi --verify melewati eksekusi verify + memberi peringatan", async () => {
+  test("transisi runtime EXECUTE → DISCUSS pada sesi --verify melewati eksekusi verify + memberi peringatan", async () => {
     const { existsSync, mkdirSync, mkdtempSync, writeFileSync } = await import("node:fs")
     const { rm } = await import("node:fs/promises")
     const { tmpdir } = await import("node:os")
@@ -296,20 +298,19 @@ describe("Q4=A4 — --verify & self-heal ditolak fail-closed di DISCUSS/PLAN + d
         verbose: false,
         allowAll: false,
         ask: false,
-        plan: false,
         allowlist: false,
         verify: true,
         workMode: "EXECUTE",
         workModeExplicit: true,
       })
-      ctx.workModeControl!.setWorkMode("PLAN")
+      ctx.workModeControl!.setWorkMode("DISCUSS")
       process.stderr.write = ((c: unknown) => {
         stderrChunks.push(String(c))
         return true
       }) as typeof process.stderr.write
       await ctx.runPromptWithVerify("buat rencana")
       expect(existsSync(marker)).toBe(false)
-      expect(stderrChunks.join("")).toContain("[warn] verify skipped in work-mode PLAN")
+      expect(stderrChunks.join("")).toContain("[warn] verify skipped in work-mode DISCUSS")
     } finally {
       process.stderr.write = origErr
       if (ctx) await ctx.close().catch(() => {})
@@ -321,7 +322,7 @@ describe("Q4=A4 — --verify & self-heal ditolak fail-closed di DISCUSS/PLAN + d
     }
   })
 
-  test("subproses CLI `exec --json --verify --work-mode PLAN` keluar kode 2 dengan USER_ERROR; flag setelah prompt diperingatkan", async () => {
+  test("subproses CLI `exec --json --verify --work-mode DISCUSS` keluar kode 2 dengan USER_ERROR; flag setelah prompt diperingatkan", async () => {
     const { mkdtempSync } = await import("node:fs")
     const { rm } = await import("node:fs/promises")
     const { tmpdir } = await import("node:os")
@@ -331,9 +332,9 @@ describe("Q4=A4 — --verify & self-heal ditolak fail-closed di DISCUSS/PLAN + d
     const cwd = mkdtempSync(join(tmpdir(), "mc-wm-exec-sub-"))
     const home = mkdtempSync(join(tmpdir(), "mc-wm-exec-home-"))
     try {
-      // 1) --verify + --work-mode PLAN → exit 2 + JSON USER_ERROR.
+      // 1) --verify + --work-mode DISCUSS → exit 2 + JSON USER_ERROR.
       const p1 = Bun.spawn(
-        [process.execPath, cliEntry, "exec", "--json", "--verify", "--work-mode", "PLAN", "uji"],
+        [process.execPath, cliEntry, "exec", "--json", "--verify", "--work-mode", "DISCUSS", "uji"],
         {
           cwd,
           stdout: "pipe",
@@ -354,7 +355,7 @@ describe("Q4=A4 — --verify & self-heal ditolak fail-closed di DISCUSS/PLAN + d
       }
       expect(j1.ok).toBe(false)
       expect(j1.error?.category).toBe("USER_ERROR")
-      expect(j1.workMode).toBe("PLAN")
+      expect(j1.workMode).toBe("DISCUSS")
 
       // 2) `exec` menempatkan `--work-mode DISCUSS` SETELAH prompt → warning eksplisit di stderr (Invariant #6).
       const p2 = Bun.spawn(
@@ -377,7 +378,7 @@ describe("Q4=A4 — --verify & self-heal ditolak fail-closed di DISCUSS/PLAN + d
             HOME: home,
             USERPROFILE: home,
             MINICODE_HOME: home,
-            MINICODE_WORK_MODE: "PLAN",
+            MINICODE_WORK_MODE: "DISCUSS",
           },
         },
       )

@@ -276,12 +276,6 @@ export const EXECUTION_PATHS: Readonly<Record<string, RegisteredPath>> = {
     note: "ACL endpoint daemon (v0.17.0 R4): mode 0600 diabaikan Win32, jadi izin warisan dicabut agar bootstrap secret tak terbaca user lain. Best-effort, tanpa efek ke workspace.",
   },
   // ── Re-exec proses CLI (ditemukan audit P1 F1a; pola glob lama melewatkannya)
-  "cli/index.ts": {
-    cls: "external-integration",
-    entry: "plan-mode re-exec (spawn process.execPath, argv dipertahankan)",
-    proof: "waitChildExit",
-    note: "Re-exec diri sendiri untuk keluar dari mode plan. Mewarisi argv pemanggil (termasuk --runtime bila ada). Bukan eksekusi user work.",
-  },
   "cli/commands.ts": {
     cls: "external-integration",
     entry: "popup-resume re-exec (spawn process.execPath --resume)",

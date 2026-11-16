@@ -1,6 +1,8 @@
 import { findSkill, loadSkills } from "../../src/skills/loader.ts"
+import { sanitizeAnsi, sanitizeAnsiLine } from "../../src/ui/render/sanitize.ts"
 import { renderTable } from "../../src/ui/render/table.ts"
 import { c } from "../../src/ui/render/theme.ts"
+import { allowLocalSubcommand, hasHelpFlag, positionalSubArg } from "../args.ts"
 
 const SKILLS_HELP = `minicode skills — markdown skills in .minicode/skills/*.md
 
@@ -9,18 +11,24 @@ const SKILLS_HELP = `minicode skills — markdown skills in .minicode/skills/*.m
 
   In interactive mode, run a skill with /name [arguments].`
 
+const out = (msg: string): void => console.log(msg)
+const err = (msg: string): void => console.error(msg)
+
 export async function handleSkills(
   args: string[],
   getArg: (name: string) => string | undefined,
 ): Promise<never> {
   const cwdArg = getArg("--cwd")
-  const allowLocal =
-    args.includes("--allow-local-config") || process.env.MINICODE_ALLOW_LOCAL_CONFIG === "1"
+  const allowLocal = allowLocalSubcommand(args)
   const sub = args[1]
+  if (hasHelpFlag(args)) {
+    out(SKILLS_HELP)
+    process.exit(0)
+  }
   if (sub === "list" || sub === undefined) {
     const all = await loadSkills(cwdArg, { allowLocal })
     if (all.length === 0) {
-      console.log(
+      out(
         c.dim(
           allowLocal
             ? "(no skills yet - add markdown files in .minicode/skills/*.md)"
@@ -30,10 +38,10 @@ export async function handleSkills(
       process.exit(0)
     }
     const tableData = all.map((s) => ({
-      skill: c.yellow(`/${s.name}`),
-      desc: s.description || "(no description)",
+      skill: c.yellow(`/${sanitizeAnsiLine(s.name)}`),
+      desc: sanitizeAnsiLine(s.description || "(no description)"),
     }))
-    console.log(
+    out(
       `\n${c.bold("Installed Skills")}\n` +
         renderTable(
           [
@@ -47,23 +55,22 @@ export async function handleSkills(
     process.exit(0)
   }
   if (sub === "show") {
-    // Tolak flag sebagai nama: `skills show --cwd x` adalah lupa argumen,
-    // bukan permintaan skill bernama "--cwd".
-    const name = args[2] && !args[2]!.startsWith("-") ? args[2] : undefined
+    const name = positionalSubArg(args, 2)
     if (!name) {
-      console.error("usage: minicode skills show <name>")
+      err("usage: minicode skills show <name>")
       process.exit(2)
     }
     const s = await findSkill(name, cwdArg, { allowLocal })
     if (!s) {
-      console.error(`skill "${name}" not found - see: minicode skills list`)
+      err(`skill "${sanitizeAnsiLine(name)}" not found - see: minicode skills list`)
       process.exit(1)
     }
-    console.log(`${c.bold(c.cyan(`/${s.name}`))} ${c.dim(`- ${s.description}`)}\n\n${s.body}`)
+    out(
+      `${c.bold(c.cyan(`/${sanitizeAnsiLine(s.name)}`))} ${c.dim(`- ${sanitizeAnsiLine(s.description)}`)}\n\n${sanitizeAnsi(s.body)}`,
+    )
     process.exit(0)
   }
-  const asked = sub === "--help" || sub === "-h"
-  if (!asked) console.error(`unknown skills subcommand: ${sub}\n`)
-  console.log(SKILLS_HELP)
-  process.exit(asked ? 0 : 2)
+  err(`unknown skills subcommand: ${sanitizeAnsiLine(sub)}\n`)
+  out(SKILLS_HELP)
+  process.exit(2)
 }

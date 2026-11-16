@@ -175,8 +175,9 @@ describe("model-manager: alur interactive", () => {
     await tty.send(KEY.enter, 30)
     await p // Enter langsung menyelesaikan — tak menunggu pilihan effort
     expect(overrideLog).toEqual(["cap::o3-mini"])
-    // default = hapus kunci (jangan simpan "default" harfiah)
-    const cfg = await readConfig(localConfigPath())
+    // default = hapus kunci (jangan simpan "default" harfiah); tanpa allowLocalConfig
+    // mutasi hanya menyentuh globalPath, config lokal dibiarkan utuh.
+    const cfg = await readConfig(globalPath)
     expect(cfg.providers[0]).not.toHaveProperty("reasoningEffort")
   })
 
@@ -204,12 +205,17 @@ describe("model-manager: alur interactive", () => {
     await tty.send(KEY.enter, 30) // pilih model
     await p
     expect(overrideLog).toEqual(["cap::o3-mini"])
-    const cfg = await readConfig(localConfigPath())
+    // Tanpa allowLocalConfig: true, hanya config global yang berubah; lokal tetap aman.
+    const cfg = await readConfig(globalPath)
     expect(cfg.providers[1]?.models).toContain("o3-mini")
     const cap = (cfg.providers as { id: string; reasoningEffort?: string }[]).find(
       (x) => x.id === "cap",
     )
     expect(cap?.reasoningEffort).toBe("high")
+    const localCap = (
+      (await readConfig(localConfigPath())).providers as { id: string; reasoningEffort?: string }[]
+    ).find((x) => x.id === "cap")
+    expect(localCap?.reasoningEffort).toBeUndefined()
   })
 
   test("Esc di picker effort = batal effort saja (model tak jadi dipilih)", async () => {
@@ -245,7 +251,7 @@ describe("model-manager: alur interactive", () => {
     await p
     expect(overrideLog).toEqual(["prov::m1"])
     expect(visible()).not.toContain("Thinking effort")
-    const cfg = await readConfig(localConfigPath())
+    const cfg = await readConfig(globalPath)
     expect(cfg.providers[0]).not.toHaveProperty("reasoningEffort")
   })
 
@@ -318,7 +324,9 @@ describe("model-manager: alur interactive", () => {
     await tty.send("y")
     await tty.send(KEY.enter, 30)
     await tty.waitForOutput((out) => out.includes("deleted prov::m1"), 5000)
-    expect((await readConfig(localConfigPath())).providers[0]?.models).not.toContain("m1")
+    // Tanpa allowLocalConfig: true, hapus hanya menyentuh config global; config lokal aman.
+    expect((await readConfig(globalPath)).providers[0]?.models).not.toContain("m1")
+    expect((await readConfig(localConfigPath())).providers[0]?.models).toContain("m1")
     // Render terakhir: daftar tanpa m1. Struk "deleted" tampil sebagai notice
     // (ikut terhapus saat Up me-render ulang) — baca frame segar.
     tty.clear()

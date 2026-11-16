@@ -15,8 +15,27 @@ import { formatError } from "../../src/ui/assistant/simple.ts"
 import type { UiPresentationEvent, UiPresentationSnapshot } from "../../src/ui/contract.ts"
 import { formatUsd } from "../../src/ui/render/money.ts"
 import { cleanUntrusted } from "../../src/ui/render/sanitize.ts"
-import { displayWorkMode, parseWorkModeValue, resolveWorkModeFlag } from "../args.ts"
+import {
+  allowLocalSubcommand,
+  displayWorkMode,
+  guardSubcommand,
+  parseWorkModeValue,
+  resolveWorkModeFlag,
+} from "../args.ts"
 import { createCliSession } from "../setup.ts"
+
+const ACP_HELP = `minicode acp — minimal JSON-RPC stdio server for IDEs
+
+  minicode acp [--allow-local-config]`
+
+const writeStdoutLine = (line: string): void => {
+  try {
+    process.stdout.write(`${line}\n`)
+  } catch {}
+}
+const writeStderrLine = (line: string): void => {
+  process.stderr.write(`${line}\n`)
+}
 
 // minicode acp — server JSON-RPC via stdio untuk IDE (Fase 5, subset minimal).
 //
@@ -27,7 +46,7 @@ import { createCliSession } from "../setup.ts"
 //
 //   -> {"id":1,"method":"initialize","params":{"client":"zed"}}
 //   <- {"id":1,"result":{"server":"minicode-acp","capabilities":{...}}}
-//   -> {"id":2,"method":"run","params":{"prompt":"...","cwd":"...","model":"...","maxSteps":50,"timeoutMs":600000,"budget":0.5,"mode":"auto"|"ask","workMode":"DISCUSS"|"PLAN"|"BUILD"}}
+//   -> {"id":2,"method":"run","params":{"prompt":"...","cwd":"...","model":"...","maxSteps":50,"timeoutMs":600000,"budget":0.5,"mode":"auto"|"ask","workMode":"DISCUSS"|"BUILD"}}
 //   <- {"type":"text","delta":"..."} ... (notifikasi, tanpa id)
 //   <- {"type":"tool","name":"read_file"} ... (notifikasi legacy, tanpa id)
 //   <- {"type":"tool.started","toolCallId":"...","name":"read_file"} ...
@@ -95,7 +114,7 @@ export interface AcpRunParams {
   budget?: number
   mode?: "auto" | "ask"
   /** WorkMode terpisah dari mode persetujuan; input BUILD dipetakan internal. */
-  workMode?: "DISCUSS" | "PLAN" | "EXECUTE"
+  workMode?: "DISCUSS" | "EXECUTE"
 }
 
 /** Validasi params `run`: prompt wajib non-kosong; angka harus hingga-positif;
@@ -125,7 +144,7 @@ export function parseRunParams(
       ? resolveWorkModeFlag(() => undefined).workMode
       : parseWorkModeValue(String(p.workMode))
   if (workMode === undefined)
-    return { ok: false, error: 'params.workMode must be "DISCUSS" | "PLAN" | "BUILD"' }
+    return { ok: false, error: 'params.workMode must be "DISCUSS" | "BUILD"' }
   const out: AcpRunParams = { prompt, mode, workMode }
   if (typeof p.cwd === "string" && p.cwd) out.cwd = p.cwd
   if (typeof p.model === "string" && p.model) out.model = p.model
@@ -354,6 +373,7 @@ export interface AcpSessionDeps {
   shouldExit: () => boolean
   exit: (code: number) => void
   createSession?: typeof createCliSession
+  allowLocalConfig?: boolean
 }
 
 /** Satu `run`: validasi → sesi headless → stream notifikasi → hasil/error
@@ -392,9 +412,9 @@ export async function runAcpSession(
       verbose: false,
       allowAll: false,
       ask: rp.mode === "ask",
-      plan: false,
       allowlist: false,
       verify: false,
+      ...(deps.allowLocalConfig ? { allowLocalConfig: true } : {}),
       // WorkMode terpisah dari mode persetujuan; default DISCUSS.
       workMode: rp.workMode,
       budget: rp.budget,
@@ -461,9 +481,9 @@ export async function runAcpSession(
             sessionId: ctx.sessionId,
             model: ctx.modelRef.current,
             workMode: displayWorkMode(
-              ((ctx as { workMode?: "DISCUSS" | "PLAN" | "EXECUTE" }).workMode ??
+              ((ctx as { workMode?: "DISCUSS" | "EXECUTE" }).workMode ??
                 rp.workMode ??
-                "DISCUSS") as "DISCUSS" | "PLAN" | "EXECUTE",
+                "DISCUSS") as "DISCUSS" | "EXECUTE",
             ),
             tokens: ue.totalTokens,
             inputTokens: ue.inputTokens,
@@ -490,8 +510,8 @@ export async function runAcpSession(
         // histori yang tak durable dilaporkan via stderr diagnostik, bukan
         // pesan protokol kedua.
         if (ctx.isWriterStale()) {
-          process.stderr.write(
-            `[writer] stale writer sid=${ctx.sessionId}, history NOT durable: ${ctx.writerStaleNote()}\n`,
+          writeStderrLine(
+            `[writer] stale writer sid=${ctx.sessionId}, history NOT durable: ${ctx.writerStaleNote()}`,
           )
         }
       } catch {}
@@ -568,14 +588,10 @@ export async function dispatchAcpLine(line: string, loop: AcpLoop): Promise<void
   }
 }
 
-export async function handleAcp(): Promise<void> {
-  const write = (line: string): void => {
-    // Klien bisa mati di tengah run (pipe tertutup): tulis yang gagal
-    // jangan melempar dan membunuh server dengan observasi setengah jalan.
-    try {
-      process.stdout.write(`${line}\n`)
-    } catch {}
-  }
+export async function handleAcp(args: readonly string[] = []): Promise<void> {
+  guardSubcommand(args, "acp", ACP_HELP, writeStdoutLine, writeStderrLine)
+  const allowLocalConfig = allowLocalSubcommand(args)
+  const write = writeStdoutLine
   const flight = createFlight()
   let shuttingDown = false
   // Run sedang berjalan (termasuk antrean setup): flight.active() saja TIDAK
@@ -591,6 +607,7 @@ export async function handleAcp(): Promise<void> {
         startFlight: (abort) => flight.start(abort),
         shouldExit: () => shuttingDown,
         exit: (code) => process.exit(code),
+        allowLocalConfig,
       })
     } finally {
       busy = false
@@ -606,22 +623,14 @@ export async function handleAcp(): Promise<void> {
       shuttingDown = true
     },
     exit: (code) => process.exit(code),
-    warnMalformed: () => process.stderr.write("[acp] ignoring malformed line\n"),
+    warnMalformed: () => writeStderrLine("[acp] ignoring malformed line"),
   }
 
   const rl = createInterface({ input: process.stdin, crlfDelay: Infinity })
-  // Event-driven, BUKAN for-await sekuensial: `cancel`/`shutdown` harus bisa
-  // menyela run yang berjalan. for-await menahan baris berikutnya sampai run
-  // selesai — cancel di stdin tak pernah terbaca (fitur mati di produksi).
-  // Tiap baris didispatch tanpa await; prefik sinkron dispatch (parse →
-  // runOne → startFlight) tetap berurutan per event, jadi run kedua melihat
-  // flight aktif dan ditolak jujur.
   let inflight: Promise<void> | null = null
   rl.on("line", (line: string) => {
     const p = dispatchAcpLine(line, loop).catch((e: unknown) => {
-      // runOne tak pernah melempar (semua jalur jadi respons error), tapi
-      // jangan biarkan satu baris jahat membunuh server diam-diam.
-      process.stderr.write(`[acp] dispatch failed: ${(e as Error)?.message ?? e}\n`)
+      writeStderrLine(`[acp] dispatch failed: ${(e as Error)?.message ?? e}`)
     })
     inflight = p
     void p.finally(() => {

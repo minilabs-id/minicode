@@ -200,7 +200,8 @@ export function setSubAgentWorkMode(fn: () => WorkMode | undefined): void {
 /** WorkMode induk saat ini (live), undefined = EXECUTE (perilaku lama). */
 export function subAgentWorkMode(): WorkMode {
   try {
-    return subAgentWorkModeFn() ?? "EXECUTE"
+    const v = subAgentWorkModeFn()
+    return v === undefined ? "EXECUTE" : v === "EXECUTE" ? "EXECUTE" : "DISCUSS"
   } catch {
     return "EXECUTE"
   }
@@ -363,7 +364,7 @@ export const delegateTaskTool: Tool = {
     // sesi utama (tool-layer), jadi anak memakai set yang sama — tanpa
     // menduplikasi daftar.
     const subToolsFiltered =
-      childWorkMode === "DISCUSS" || childWorkMode === "PLAN"
+      childWorkMode === "DISCUSS"
         ? subTools.filter((t) => EXPLORE_TOOL_NAMES.includes(t.name))
         : subTools
     // F-07: anak tidak punya bash_output/bash_kill (diamputasi di atas),

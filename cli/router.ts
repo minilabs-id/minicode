@@ -60,6 +60,10 @@ export async function dispatch(
       if (a === undefined) continue
       if (a === "--") break
       if (a === name) {
+        if (!valueFlags.has(name)) {
+          found = "1"
+          continue
+        }
         const v = subArgv[i + 1]
         if (v !== undefined && (v === "-" || !v.startsWith("-") || /^-?\d+(\.\d+)?$/.test(v)))
           found = v
@@ -71,19 +75,44 @@ export async function dispatch(
     return found
   }
 
-  // P11.x — argv scoped untuk SEMUA handler subcommand: kecuali yang sudah
-  // memakai pola own-scoped (openwork/exec/daemon), handler lain mengindeks
-  // `args[0]`/`args[1]` sebagai token subcommand. `args` di sini adalah argv
-  // PENUH, jadi flag global yang mendahului subcommand (mis. `--cwd X sessions
-  // list` atau `--json pricing status`) membuat `args[1]` menyimpan NILAI flag,
-  // bukan sub-aksi — handler mencetak "unknown subcommand: <path>" atau diam
-  // (providers exit 0). `args.slice(cmdIndex)` menempatkan kembali token
-  // subcommand di indeks 0; flag global tetap terbaca lewat `subGetArg`
-  // (berbasis subArgv yang sudah memuat flag global + argv dari cmd).
-  const scoped = args.slice(cmdIndex)
+  // P11.x + CMD-03: pisahkan positional pasca-subcommand ke indeks 1..N sebelum
+  // flag global & pasca-subcommand agar flag mendahului subcommand tetap terbaca.
+  const postPositionals: string[] = []
+  const postFlags: string[] = []
+  for (let i = cmdIndex + 1; i < args.length; i++) {
+    const t = args[i]
+    if (t === undefined) continue
+    if (t === "--") {
+      postPositionals.push(...args.slice(i + 1))
+      break
+    }
+    const flag = flagNameOf(t)
+    if (flag) {
+      postFlags.push(t)
+      if (valueFlags.has(flag) && !t.includes("=") && i + 1 < args.length) {
+        const v = args[i + 1]
+        if (v !== undefined) {
+          postFlags.push(v)
+          i++
+        }
+      }
+      continue
+    }
+    if (t.startsWith("-")) {
+      postFlags.push(t)
+      continue
+    }
+    postPositionals.push(t)
+  }
+  const scoped = [
+    args[cmdIndex]!,
+    ...postPositionals,
+    ...subArgv.slice(0, cmdTokenPos),
+    ...postFlags,
+  ]
   if (cmd === "stats") {
     const { handleStats } = await import("./commands/stats.ts")
-    await handleStats(subGetArg)
+    await handleStats(subGetArg, scoped)
     return true
   }
   if (cmd === "sessions") {
@@ -145,7 +174,7 @@ export async function dispatch(
     // Fase 5: server JSON-RPC stdio minimal untuk IDE (subset, bukan ACP penuh).
     // Handler memblokir sampai stdin EOF/shutdown; tak ada sesi CLI yang dibuat.
     const { handleAcp } = await import("./commands/acp.ts")
-    await handleAcp()
+    await handleAcp(scoped)
     return true
   }
   if (cmd === "daemon") {

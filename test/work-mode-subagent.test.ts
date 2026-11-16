@@ -79,7 +79,7 @@ afterEach(async () => {
   setSubAgentWorkMode(() => undefined)
 })
 
-async function runDelegate(workMode: "PLAN" | "DISCUSS", pm: PermissionMode, modeArg: string) {
+async function runDelegate(workMode: "DISCUSS", pm: PermissionMode, modeArg: string) {
   const restore = providerEnv()
   const dir = tmpRoot()
   dirs.push(dir)
@@ -97,11 +97,11 @@ async function runDelegate(workMode: "PLAN" | "DISCUSS", pm: PermissionMode, mod
   }
 }
 
-describe("parent PLAN — child tidak mewarisi EXECUTE hanya karena argumen mode child", () => {
-  test("parent PLAN × auto + mode 'plan' → child workMode PLAN, tools explore (bukan 29)", async () => {
-    const { spec } = await runDelegate("PLAN", "auto", "plan")
+describe("parent DISCUSS — child tidak mewarisi EXECUTE hanya karena argumen mode child", () => {
+  test("parent DISCUSS × auto + mode 'plan' → child workMode DISCUSS, tools explore (bukan 29)", async () => {
+    const { spec } = await runDelegate("DISCUSS", "auto", "plan")
     // Propagar: WorkMode induk diwariskan ke child, TIDAK jatuh ke EXECUTE.
-    expect(spec.workMode).toBe("PLAN")
+    expect(spec.workMode).toBe("DISCUSS")
     // Visibilitas: ceiling WorkMode child menyembunyikan tool tulis/eksekusi —
     // jalur lama yang berisiko (mode "plan" parent auto = 29 tool) TERTUTUP.
     const names = spec.tools.map((t) => t.name)
@@ -110,17 +110,17 @@ describe("parent PLAN — child tidak mewarisi EXECUTE hanya karena argumen mode
     for (const w of ["write_file", "bash", "code_run", "edit"]) expect(names).not.toContain(w)
   })
 
-  test("parent PLAN × auto + mode 'explore' → child workMode PLAN, tools explore", async () => {
-    const { spec } = await runDelegate("PLAN", "auto", "explore")
-    expect(spec.workMode).toBe("PLAN")
+  test("parent DISCUSS × auto + mode 'explore' → child workMode DISCUSS, tools explore", async () => {
+    const { spec } = await runDelegate("DISCUSS", "auto", "explore")
+    expect(spec.workMode).toBe("DISCUSS")
     const names = spec.tools.map((t) => t.name)
     for (const n of names) expect(EXPLORE_TOOL_NAMES).toContain(n)
   })
 })
 
 describe("parent DISCUSS — child juga read-only", () => {
-  test("parent DISCUSS × auto + mode 'plan' → child workMode DISCUSS, tools explore", async () => {
-    const { spec } = await runDelegate("DISCUSS", "auto", "plan")
+  test("parent DISCUSS × ask + mode 'plan' → child workMode DISCUSS, tools explore", async () => {
+    const { spec } = await runDelegate("DISCUSS", "ask", "plan")
     expect(spec.workMode).toBe("DISCUSS")
     const names = spec.tools.map((t) => t.name)
     for (const n of names) expect(EXPLORE_TOOL_NAMES).toContain(n)
@@ -152,8 +152,8 @@ describe("tanpa WorkMode induk — kompatibilitas perilaku lama", () => {
   })
 })
 
-describe("child menerapkan ceiling WorkMode PLAN — operasi tulis ditolak", () => {
-  // Bukti handler-layer bahwa spec.workMode "PLAN" dipasang pada
+describe("child menerapkan ceiling WorkMode DISCUSS — operasi tulis ditolak", () => {
+  // Bukti handler-layer bahwa spec.workMode "DISCUSS" dipasang pada
   // createMinicodeSession menghasilkan ceiling yang menolak tulis (sama
   // dengan jalur produksi: cli/index.ts factory meneruskan spec.workMode).
   //
@@ -168,7 +168,7 @@ describe("child menerapkan ceiling WorkMode PLAN — operasi tulis ditolak", () 
       Object.defineProperty(process.stdin, "isTTY", { value: prev, configurable: true })
     }
   }
-  test("workMode PLAN × PM auto: write_file deny, read_file allow, headless no prompt", async () => {
+  test("workMode DISCUSS × PM auto: write_file deny, read_file allow, headless no prompt", async () => {
     const dir = tmpRoot()
     dirs.push(dir)
     const restoreTty = forceNonTty()
@@ -182,7 +182,7 @@ describe("child menerapkan ceiling WorkMode PLAN — operasi tulis ditolak", () 
       },
     })
     const h = composeWorkModePermissionHandler({
-      workMode: "PLAN",
+      workMode: "DISCUSS",
       base,
       root: dir,
     }) as unknown as {
@@ -200,7 +200,7 @@ describe("child menerapkan ceiling WorkMode PLAN — operasi tulis ditolak", () 
     }
   })
 
-  test("workMode PLAN × PM auto: delegate_task ALLOW otonom (tak lagi gated di AUTO)", async () => {
+  test("workMode DISCUSS × PM auto: delegate_task ALLOW otonom (tak lagi gated di AUTO)", async () => {
     const dir = tmpRoot()
     dirs.push(dir)
     const restoreTty = forceNonTty()
@@ -214,13 +214,13 @@ describe("child menerapkan ceiling WorkMode PLAN — operasi tulis ditolak", () 
       },
     })
     const h = composeWorkModePermissionHandler({
-      workMode: "PLAN",
+      workMode: "DISCUSS",
       base,
       root: dir,
     }) as unknown as {
       check(c: ToolCall, d: unknown): Promise<"allow" | "deny">
     }
-    // [mode-architecture] delegate_task authorized di ceiling PLAN; AUTO = full
+    // [mode-architecture] delegate_task authorized di ceiling DISCUSS; AUTO = full
     // autonomy → allow tanpa prompt (anak dipaksa explore via warisan WorkMode).
     const c: ToolCall = { id: "g1", name: "delegate_task", args: { prompt: "x" } }
     try {
@@ -244,7 +244,7 @@ describe("interleaving dua parent — WorkMode dibaca LIVE per delegate (bukan s
   // setter pertama. Jadi bila sesi baru dibangun (setter dipanggil ulang), semua
   // delegate berikutnya memakai WorkMode sesi baru — tidak ada snapshot basi
   // yang mengikat child ke parent lama.
-  test("dua parent bergantian (PLAN → EXECUTE → PLAN) — tiap child mewarisi WorkMode saat eksekusinya", async () => {
+  test("dua parent bergantian (DISCUSS → EXECUTE → DISCUSS) — tiap child mewarisi WorkMode saat eksekusinya", async () => {
     const restore = providerEnv()
     const dir = tmpRoot()
     dirs.push(dir)
@@ -253,21 +253,21 @@ describe("interleaving dua parent — WorkMode dibaca LIVE per delegate (bukan s
     const seen: SubAgentSpec[] = []
     setSubAgentSessionFactory(fakeFactory(seen))
     try {
-      // Parent #1: PLAN.
-      setSubAgentWorkMode(() => "PLAN")
+      // Parent #1: DISCUSS.
+      setSubAgentWorkMode(() => "DISCUSS")
       await delegateTaskTool.execute({ prompt: "x", mode: "plan" }, ctxFor(dir, "auto"))
       const first = seen[0]!
-      expect(first.workMode).toBe("PLAN")
+      expect(first.workMode).toBe("DISCUSS")
       // Parent #1 berakhir, sesi #2 dibangun: EXECUTE (WorkMode berubah).
       setSubAgentWorkMode(() => "EXECUTE")
       await delegateTaskTool.execute({ prompt: "x", mode: "plan" }, ctxFor(dir, "auto"))
       const second = seen[1]!
       expect(second.workMode).toBe("EXECUTE")
-      // Parent #3 kembali ke PLAN: setter baru, delegate berikutnya ikut.
-      setSubAgentWorkMode(() => "PLAN")
+      // Parent #3 kembali ke DISCUSS: setter baru, delegate berikutnya ikut.
+      setSubAgentWorkMode(() => "DISCUSS")
       await delegateTaskTool.execute({ prompt: "x", mode: "plan" }, ctxFor(dir, "auto"))
       const third = seen[2]!
-      expect(third.workMode).toBe("PLAN")
+      expect(third.workMode).toBe("DISCUSS")
       // Bukti urutan: tiga child berbeda, masing-masing dari parent yang benar.
       expect(seen).toHaveLength(3)
     } finally {

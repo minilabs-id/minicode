@@ -1,5 +1,7 @@
 import { resolve as resolvePath } from "node:path"
 import { configureMcpSchemaPins, mcpSchemaPinRegistry } from "../../src/mcp/client.ts"
+import { sanitizeAnsiLine } from "../../src/ui/render/sanitize.ts"
+import { guardSubcommand, positionalSubArg } from "../args.ts"
 
 const MCP_HELP = `minicode mcp — run minicode as an MCP server / inspect schema pins
 
@@ -27,8 +29,14 @@ export async function handleMcp(
   getArg: (name: string) => string | undefined,
   _help: string,
 ): Promise<never> {
-  const sub = args[1]
+  guardSubcommand(args, "mcp", MCP_HELP, out, err, -1)
+  const sub = positionalSubArg(args, 1)
   const cwdArg = getArg("--cwd")
+  const extra = positionalSubArg(args, 2)
+  if (extra && (sub === "serve" || sub === "pins" || sub === "capabilities")) {
+    err(`unknown mcp ${sub} argument: ${sanitizeAnsiLine(extra)}\n${MCP_HELP}`)
+    process.exit(2)
+  }
   if (sub === "serve") {
     const { serveMcp } = await import("../../src/mcp/server.ts")
     await serveMcp({
@@ -47,7 +55,9 @@ export async function handleMcp(
     } else if (pins.length === 0) {
       out("no MCP schema pins recorded for this workspace")
     } else {
-      for (const p of pins) out(`${p.serverId}.${p.toolName}  ${p.hash}`)
+      for (const p of pins) {
+        out(`${sanitizeAnsiLine(p.serverId)}.${sanitizeAnsiLine(p.toolName)}  ${p.hash}`)
+      }
     }
     process.exit(0)
   }
@@ -73,9 +83,14 @@ export async function handleMcp(
     process.exit(0)
   }
   if (sub === "approve") {
-    const target = args[2]
-    const hash = args[3] ?? getArg("--hash")
-    if (!target?.includes(".") || !hash || !/^[0-9a-f]{64}$/i.test(hash)) {
+    const target = extra
+    const hash = positionalSubArg(args, 3) ?? getArg("--hash")
+    if (
+      !target?.includes(".") ||
+      !hash ||
+      !/^[0-9a-f]{64}$/i.test(hash) ||
+      positionalSubArg(args, 4)
+    ) {
       err("usage: minicode mcp approve <server>.<tool> <64-hex-sha256> [--cwd <dir>]")
       process.exit(2)
     }
@@ -85,13 +100,15 @@ export async function handleMcp(
     const cwd = cwdArg ? resolvePath(cwdArg) : undefined
     configureMcpSchemaPins(cwd)
     mcpSchemaPinRegistry.approveMcpSchemaUpdate(serverId, toolName, hash.toLowerCase())
-    out(`approved ${serverId}.${toolName} -> ${hash.toLowerCase()}`)
+    out(
+      `approved ${sanitizeAnsiLine(serverId)}.${sanitizeAnsiLine(toolName)} -> ${hash.toLowerCase()}`,
+    )
     process.exit(0)
   }
   // Help kontekstual, bukan HELP global 45 baris. Subcommand asing = salah
   // pakai (exit 2), bukan gagal runtime (exit 1).
-  const asking = sub === undefined || sub === "--help" || sub === "-h"
-  if (!asking) err(`unknown mcp subcommand: ${sub}\n`)
+  const asking = sub === undefined
+  if (sub !== undefined) err(`unknown mcp subcommand: ${sanitizeAnsiLine(sub)}\n`)
   out(MCP_HELP)
   process.exit(asking ? 0 : 2)
 }

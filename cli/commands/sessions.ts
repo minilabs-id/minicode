@@ -10,8 +10,10 @@ import {
   loadSession,
   purgeExpired,
 } from "../../src/session/persistence.ts"
+import { sanitizeAnsiLine } from "../../src/ui/render/sanitize.ts"
 import { renderTable } from "../../src/ui/render/table.ts"
 import { c } from "../../src/ui/render/theme.ts"
+import { hasHelpFlag, positionalSubArg } from "../args.ts"
 
 const SESSIONS_HELP = `minicode sessions — session history
 
@@ -19,11 +21,18 @@ const SESSIONS_HELP = `minicode sessions — session history
   minicode sessions export <id> [--jsonl]  export message history
   minicode sessions purge                remove expired sessions (TTL)`
 
+const out = (msg: string): void => console.log(msg)
+const err = (msg: string): void => console.error(msg)
+
 export async function handleSessions(
   args: string[],
   getArg: (name: string) => string | undefined,
 ): Promise<never> {
   const sub = args[1]
+  if (hasHelpFlag(args)) {
+    out(SESSIONS_HELP)
+    process.exit(0)
+  }
   if (sub === "list" || !sub) {
     const cwdArg = getArg("--cwd")
     const rows = listSessions(cwdArg)
@@ -34,15 +43,15 @@ export async function handleSessions(
     const usesLocal =
       existsSync(resolve(base, ".minicode", "sessions.db")) ||
       existsSync(resolve(base, ".minicode"))
-    if (!usesLocal) console.log(c.dim(`(global scope — no local .minicode/sessions.db in ${base})`))
-    if (rows.length === 0) console.log(c.dim("(no recorded sessions yet)"))
+    if (!usesLocal) out(c.dim(`(global scope — no local .minicode/sessions.db in ${base})`))
+    if (rows.length === 0) out(c.dim("(no recorded sessions yet)"))
     else {
       const tableData = rows.map((r) => ({
-        id: c.cyan(r.id),
+        id: c.cyan(sanitizeAnsiLine(r.id)),
         date: new Date(r.created_at).toLocaleString(),
-        cwd: c.dim(r.cwd),
+        cwd: c.dim(sanitizeAnsiLine(r.cwd)),
       }))
-      console.log(
+      out(
         `\n${c.bold("Recent Sessions")}\n` +
           renderTable(
             [
@@ -57,23 +66,21 @@ export async function handleSessions(
     }
     process.exit(0)
   } else if (sub === "export") {
-    // args[2] bisa berupa flag bila user lupa id (`sessions export --cwd x`);
-    // memperlakukannya sebagai id menghasilkan pesan "sesi --cwd tidak ditemukan".
-    const id = args[2] && !args[2]!.startsWith("-") ? args[2] : undefined
+    const id = positionalSubArg(args, 2)
     const asJsonl = args.includes("--jsonl")
     if (!id) {
-      console.error("usage: minicode sessions export <id> [--jsonl]")
+      err("usage: minicode sessions export <id> [--jsonl]")
       process.exit(2)
     }
     // P2.1 read-compat: alias eksak resolve ke kanonik; selain itu input
     // apa adanya (lenien untuk baca; tulis tetap jalur kanonik tunggal).
     const sess = loadSession(resolveSessionDisplayTarget(id, getArg("--cwd")), getArg("--cwd"))
     if (!sess) {
-      console.error(`session "${id}" not found - see: minicode sessions list`)
+      err(`session "${sanitizeAnsiLine(id)}" not found - see: minicode sessions list`)
       process.exit(1)
     }
-    if (asJsonl) for (const m of sess.messages) console.log(JSON.stringify(m))
-    else console.log(JSON.stringify(sess, null, 2))
+    if (asJsonl) for (const m of sess.messages) out(JSON.stringify(m))
+    else out(JSON.stringify(sess, null, 2))
     process.exit(0)
   } else if (sub === "purge") {
     const cwdArg = getArg("--cwd")
@@ -123,16 +130,15 @@ export async function handleSessions(
         }
       } catch {}
       const ttl = getSessionTtlDays()
-      console.log(`[purge] removed ${removed} sessions (older than ${ttl} days)`)
-      if (orphans > 0) console.log(`[purge] removed ${orphans} orphan journals`)
+      out(`[purge] removed ${removed} sessions (older than ${ttl} days)`)
+      if (orphans > 0) out(`[purge] removed ${orphans} orphan journals`)
     } finally {
       db.close()
     }
     process.exit(0)
   } else {
-    const asked = sub === "--help" || sub === "-h"
-    if (!asked) console.error(`unknown sessions subcommand: ${sub}\n`)
-    console.log(SESSIONS_HELP)
-    process.exit(asked ? 0 : 2)
+    err(`unknown sessions subcommand: ${sanitizeAnsiLine(sub)}\n`)
+    out(SESSIONS_HELP)
+    process.exit(2)
   }
 }

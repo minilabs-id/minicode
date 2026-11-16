@@ -51,7 +51,11 @@ import { DEFAULT_SESSION_MAX_STEPS, nextStepLimit } from "../policy/step-escalat
 import { getCachedTokenizer, loadTokenizer } from "../policy/tokenizer-registry.ts"
 import { contractForTool } from "../policy/tool-contract.ts"
 import { maxTurnsExceededError } from "../policy/usage.ts"
-import { createWorkModePermissionHandler, type WorkMode } from "../policy/work-mode.ts"
+import {
+  createWorkModePermissionHandler,
+  normalizeWorkMode,
+  type WorkMode,
+} from "../policy/work-mode.ts"
 import type { ApprovalEventHook } from "../presentation/events.ts"
 
 // Kebijakan kompaksi lebih agresif: ringkas lebih DINI (medium mulai 65%,
@@ -239,17 +243,10 @@ export type WorkModeControl = {
 export function workModeHint(workMode: WorkMode): string {
   if (workMode === "DISCUSS") {
     return (
-      "\n\nDISCUSS MODE: You are in read-only investigation and discussion mode. " +
+      "\n\nDISCUSS MODE: You are in read-only investigation, discussion, and planning mode. " +
       "Do NOT modify files, run bash, or use write/edit tools. " +
-      "Read, search, and reason — investigate the question, then discuss findings, options, and trade-offs with the user. " +
+      "Read, search, and reason — investigate the question thoroughly, discuss findings, options, and trade-offs with the user, and produce a concrete implementation plan. " +
       "Do not implement or execute any change."
-    )
-  }
-  if (workMode === "PLAN") {
-    return (
-      "\n\nPLAN MODE: You are in planning mode. " +
-      "Do NOT modify files, run bash, or use write/edit tools. " +
-      "Only read, search, and reason — investigate thoroughly, then produce a concrete implementation plan."
     )
   }
   return ""
@@ -283,6 +280,8 @@ export async function createMinicodeSession(
      * EXECUTE memasang ceiling tipis di atas handler PM (lihat work-mode.ts);
      * belum ada permukaan CLI/TUI — wiring itu slice integrasi berikutnya. */
     workMode?: WorkMode
+    /** Izinkan callback `ask` non-TTY (mis. broker persetujuan daemon) untuk tool gated. */
+    allowNonTtyAsk?: boolean
     /** Teruskan flag --allow-local-config ke permission handler (allowlist
      * lokal). Default deny — lihat loadAllowlist. */
     allowLocalConfig?: boolean
@@ -388,7 +387,7 @@ export async function createMinicodeSession(
   // Fail-closed lebih awal (sebelum provider/system prompt): WorkMode non-
   // EXECUTE di atas handler terinjeksi belum punya komposisi yang terbukti
   // aman — jangan pernah membungkus atau melewati policy yang diinjeksi 6S.
-  const resolvedWorkMode: WorkMode = opts.workMode ?? "EXECUTE"
+  const resolvedWorkMode: WorkMode = normalizeWorkMode(opts.workMode ?? "EXECUTE")
   if (opts.permissionHandler !== undefined && resolvedWorkMode !== "EXECUTE") {
     throw new Error(
       `createMinicodeSession: workMode ${resolvedWorkMode} dengan permissionHandler terinjeksi belum didukung (fail-closed S2.1)`,
@@ -412,6 +411,7 @@ export async function createMinicodeSession(
     permissionMode,
     restrictBash,
     workMode: _workMode,
+    allowNonTtyAsk,
     allowLocalConfig,
     systemExtra: _extra,
     getContextModel: _getContextModel,
@@ -486,6 +486,7 @@ export async function createMinicodeSession(
         mode: permissionMode ?? "auto",
         root: defaultCwd,
         ask,
+        allowNonTtyAsk,
         allowLocalConfig,
         restrictBash,
         onApprovalEvent,
@@ -515,8 +516,7 @@ export async function createMinicodeSession(
     if (pm === "readonly") return "readonly"
     if (pm === "plan") return "plan"
     const wm = wmCtl.__getWorkMode?.() ?? resolvedWorkMode
-    if (wm === "DISCUSS") return "readonly"
-    if (wm === "PLAN") return "plan"
+    if (wm === "DISCUSS") return "plan"
     if (isAllToolsPureRead()) return "explore"
     return "active"
   }
@@ -642,8 +642,9 @@ export async function createMinicodeSession(
     }
     onWorkMode({
       setWorkMode: (m) => {
-        if (wm.__getWorkMode() !== m) authorizationVersion++
-        wm.__setWorkMode(m)
+        const norm = normalizeWorkMode(m)
+        if (wm.__getWorkMode() !== norm) authorizationVersion++
+        wm.__setWorkMode(norm)
       },
       getWorkMode: () => wm.__getWorkMode(),
     })

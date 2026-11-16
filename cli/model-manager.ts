@@ -56,7 +56,10 @@ export async function runModelManager(opts: {
     id: string,
     mutate: (p: ProviderEntry) => void,
   ): Promise<void> => {
-    const paths = opts.cwd ? [resolve(opts.cwd, LOCAL), globalConfigPath()] : [globalConfigPath()]
+    const paths =
+      opts.cwd && opts.allowLocalConfig
+        ? [resolve(opts.cwd, LOCAL), globalConfigPath()]
+        : [globalConfigPath()]
     let touched = false
     for (const path of paths) {
       let cfg: MinicodeConfig

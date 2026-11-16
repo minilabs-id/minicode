@@ -786,7 +786,7 @@ export class TuiApp {
       this.host.cycleWorkMode(1)
       const wm = this.host.getStatus().footer.workMode
       if (wm) {
-        const label = wm === "EXECUTE" ? "Build" : wm === "PLAN" ? "Plan" : "Discuss"
+        const label = wm === "EXECUTE" ? "Build" : "Discuss"
         this.showToast(t("tui.workModeLine", { m: label }))
       } else {
         this.paintCurrent()
@@ -1148,6 +1148,11 @@ export class TuiApp {
   private rememberHistory(line: string): void {
     if (this.history[this.history.length - 1] !== line) this.history.push(line)
     if (this.history.length > 200) this.history.splice(0, this.history.length - 200)
+  }
+
+  /** Salinan histori prompt sesi ini (untuk perintah `/history` di TUI). */
+  getHistory(): readonly string[] {
+    return [...this.history]
   }
 
   private historyNav(dir: -1 | 1): void {

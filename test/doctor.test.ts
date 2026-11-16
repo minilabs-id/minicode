@@ -110,3 +110,33 @@ test("renderDoctorText: semua bagian tampil + cabang warn", () => {
   const stale = renderDoctorText({ ...base, pricing: { models: 3, ageH: 99, stale: true } })
   expect(stale).toContain("stale")
 })
+
+test("buildDoctorReport: menghormati allowLocal (default false, true saat diminta)", async () => {
+  const { mkdir, writeFile } = await import("node:fs/promises")
+  const dir = await mkdtemp(join(tmpdir(), "minicode-doctor-local-"))
+  try {
+    await mkdir(join(dir, ".minicode"), { recursive: true })
+    await writeFile(
+      join(dir, ".minicode", "config.json"),
+      JSON.stringify({
+        providers: [
+          {
+            id: "doc-local-only",
+            baseUrl: "https://local.test/v1",
+            apiKey: "k",
+            models: ["m1", "m2"],
+          },
+        ],
+      }),
+      "utf8",
+    )
+    const base = await buildDoctorReport(dir)
+    const optedIn = await buildDoctorReport(dir, true)
+    expect(base.configLocal).toBe(true)
+    expect(optedIn.configLocal).toBe(true)
+    expect(optedIn.providers).toBe(base.providers + 1)
+    expect(optedIn.providerModels).toBe(base.providerModels + 2)
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => {})
+  }
+})

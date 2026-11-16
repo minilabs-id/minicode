@@ -1,8 +1,35 @@
+import { readFileSync } from "node:fs"
 import { appendFile, chmod, mkdir, readFile, unlink } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { LIMITS } from "../constants.ts"
 import { atomicWriteText } from "../lib/atomic-write.ts"
 import { scrubSecrets } from "../policy/scrub.ts"
+
+/**
+ * Baca berkas JSONL trace (`.minicode/traces.jsonl` atau `step-traces.jsonl`)
+ * secara toleran: baris kosong/korup dilewati, berkas tak ada -> `[]`.
+ * Dipakai bersama oleh `stats`, `providers`, dan `memory` agar tidak ada
+ * tiga duplikat parser JSONL manual di `cli/commands/*.ts`.
+ */
+export function readTraceRows<T = RunTrace>(
+  cwd?: string,
+  filename: "traces.jsonl" | "step-traces.jsonl" = "traces.jsonl",
+): T[] {
+  try {
+    return readFileSync(resolve(cwd ?? ".", ".minicode", filename), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .flatMap((line) => {
+        try {
+          return [JSON.parse(line) as T]
+        } catch {
+          return []
+        }
+      })
+  } catch {
+    return []
+  }
+}
 
 export interface RunTrace {
   sessionId: string

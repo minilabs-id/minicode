@@ -42,15 +42,22 @@ afterAll(() => {
 })
 
 describe("p23: Audit #2 type-safety & hot-path regression", () => {
-  test("A.1/B.4: validasi --ratelimit & --budget selaras (exec.ts vs index.ts)", () => {
+  test("A.1/B.4: validasi --ratelimit & --budget selaras (exec.ts vs index.ts)", async () => {
     const exec = readFileSync(join(import.meta.dir, "..", "cli", "commands", "exec.ts"), "utf8")
     const index = readFileSync(join(import.meta.dir, "..", "cli", "index.ts"), "utf8")
-    // Guard rate-limit positif (tolak NaN / <= 0) ada di KEDUA entry point.
-    expect(exec).toContain("!Number.isFinite(rpm) || rpm <= 0")
-    expect(index).toContain("!Number.isFinite(rpm) || rpm <= 0")
-    // Warning --budget non-angka konsisten.
-    expect(exec).toContain("--budget requires a USD number")
-    expect(index).toContain("--budget requires a USD number")
+    // Kedua entry point berbagi satu helper kanonik di cli/args.ts (tidak lagi duplikat).
+    expect(exec).toContain("parseRuntimeNumericFlags(")
+    expect(index).toContain("parseRuntimeNumericFlags(")
+    const { parseRuntimeNumericFlags } = await import("../cli/args.ts")
+    const warns: string[] = []
+    const bad = parseRuntimeNumericFlags(
+      (n) => (n === "--ratelimit" ? "0" : n === "--budget" ? "-1" : undefined),
+      (m) => warns.push(m),
+    )
+    expect(bad.ratelimitRpm).toBeUndefined()
+    expect(bad.budget).toBeUndefined()
+    expect(warns.some((w) => w.includes("--ratelimit requires a positive number"))).toBe(true)
+    expect(warns.some((w) => w.includes("--budget requires a USD number"))).toBe(true)
   })
 
   test("A.2: manifest currentIndex luar batas / checkpoints non-array tak crash", async () => {

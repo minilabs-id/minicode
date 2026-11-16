@@ -37,6 +37,7 @@ import type { UiBus } from "../src/ui/contract.ts"
 import { t } from "../src/ui/i18n/locale.ts"
 import { loadHistory } from "../src/ui/input/input.ts"
 import { formatUsd } from "../src/ui/render/money.ts"
+import { sanitizeAnsiLine } from "../src/ui/render/sanitize.ts"
 import { c, glyphs } from "../src/ui/render/theme.ts"
 import { canRenderModal, dialogBox, popupBoxWidth } from "../src/ui/screens/dialog.ts"
 import { runOutputWindow } from "../src/ui/screens/output-window.ts"
@@ -46,7 +47,7 @@ import { runOutputWindow } from "../src/ui/screens/output-window.ts"
 import { defaultUiState, type UiSessionState } from "../src/ui/session-state.ts"
 import { TuiApp, type TuiHost } from "../src/ui/tui/app.ts"
 import { Transcript } from "../src/ui/tui/transcript.ts"
-import { displayWorkMode, parseWorkModeValue } from "./args.ts"
+import { displayWorkMode, parseToggleArg, parseWorkModeValue } from "./args.ts"
 import {
   BUILTIN_COMMANDS,
   type CommandContext,
@@ -59,10 +60,10 @@ import {
 import type { CliSession } from "./setup.ts"
 
 // [mode-architecture] Approval axis (PermissionMode) = AUTO/ASK; operating axis
-// (WorkMode) = DISCUSS/PLAN/BUILD, dikelola terpisah via /work-mode. Nilai
+// (WorkMode) = DISCUSS/BUILD, dikelola terpisah via /work-mode. Nilai
 // internal tetap lowercase (auto/ask) dan EXECUTE (identitas BUILD).
 const PERMISSION_MODES = ["auto", "ask"] as const
-const WORK_MODE_CYCLE = ["DISCUSS", "PLAN", "EXECUTE"] as const
+const WORK_MODE_CYCLE = ["DISCUSS", "EXECUTE"] as const
 // /expand [id]: tanpa arg = semua entry store; dengan id = satu tool.
 const DRIVER_COMMANDS = [
   "/compact",
@@ -192,7 +193,7 @@ export async function runTui(ctx: CliSession): Promise<void> {
   // Mode permission sebelum /unrestric diaktifkan — dipakai untuk memulihkan
   // saat operator menonaktifkannya kembali (toggle, per-sesi).
   let modeBeforeUnrestricted: string | null = null
-  let workModeBeforeUnrestricted: "DISCUSS" | "PLAN" | "EXECUTE" | null = null
+  let workModeBeforeUnrestricted: "DISCUSS" | "EXECUTE" | null = null
   if (process.env.MINICODE_COMPACT === undefined) ui.setCompactMode(true)
   if (process.env.MINICODE_MINIMIZE_TOOL === undefined) ui.setSectionMinimized("tool", true)
   // Grouping aktivitas tool jadi satu baris (opencode-like): default ON di TUI;
@@ -337,7 +338,11 @@ export async function runTui(ctx: CliSession): Promise<void> {
     },
     usage,
     skills: allLoadedSkills,
-    toolsCount: sessionTools.length,
+    // CMD-07: toolsCount & providerHint dibaca live agar perubahan WorkMode
+    // (DISCUSS ↔ BUILD) atau pergantian model tercermin di /status.
+    get toolsCount() {
+      return sessionTools.length
+    },
     // P1.2: dua dimensi selalu terbaca live di /status — bukan snapshot boot.
     // [mode-architecture] /status memakai nilai PRODUK (BUILD/AUTO/ASK).
     get workMode() {
@@ -346,12 +351,21 @@ export async function runTui(ctx: CliSession): Promise<void> {
     get permissionMode() {
       return (permissions?.getMode() ?? mode).toUpperCase()
     },
-    providerHint: cfg.providers[0]?.providerHint,
+    get providerHint() {
+      const cur = modelRef.current
+      const pid = cur?.includes("::") ? cur.slice(0, cur.indexOf("::")) : undefined
+      return (
+        (pid ? cfg.providers.find((p) => p.id === pid)?.providerHint : undefined) ??
+        cfg.providers[0]?.providerHint
+      )
+    },
     setModelOverride: (m) => persistModelChoice(m, modelRef),
     // Spawn anak stdio-inherit (/sessions <id>): keluar alt-screen + cooked
-    // mode DULU — anak mewarisi terminal apa adanya. Tanpa ini: double-ENTER,
-    // EXIT anak merobek buffer parent, stdin mentah macet. Gagal-di-kode-lama.
-    onBeforeSpawn: () => app.releaseTerminal(),
+    // mode DULU dan tutup lease sesi induk agar anak tidak ditolak WRITER_REFUSED.
+    onBeforeSpawn: async () => {
+      app.releaseTerminal()
+      await close().catch(() => {})
+    },
     getContextTokens: () => session.contextTokens,
     budgetState: () => {
       const u = usage.getSession()
@@ -399,13 +413,21 @@ export async function runTui(ctx: CliSession): Promise<void> {
     workModeControl.setWorkMode(next)
   }
 
-  // Shift+Tab: toggle PermissionMode (AUTO ↔ ASK). Tidak ada privilege change
-  // diam — hanya sumbu persetujuan.
+  const clearUnrestrictedBackup = (wasUnrestricted: boolean): void => {
+    if (!wasUnrestricted) return
+    if (workModeBeforeUnrestricted) workModeControl?.setWorkMode(workModeBeforeUnrestricted)
+    modeBeforeUnrestricted = null
+    workModeBeforeUnrestricted = null
+  }
+
+  // Shift+Tab: toggle PermissionMode (AUTO ↔ ASK); pulihkan WorkMode bila keluar unrestricted.
   const togglePermissionMode = (): void => {
     if (!permissions) return
+    const wasUnrestricted = mode === "unrestricted"
     const next = permissions.getMode() === "ask" ? "auto" : "ask"
     permissions.setMode(next)
     mode = next
+    clearUnrestrictedBackup(wasUnrestricted)
   }
 
   async function runBuiltin(
@@ -664,8 +686,10 @@ export async function runTui(ctx: CliSession): Promise<void> {
           transcript.pushInfo([c.muted(t("tui.unknownMode", { a: args, modes: "AUTO, ASK" }))])
           return
         }
+        const wasUnrestricted = mode === "unrestricted"
         mode = norm
         permissions?.setMode(norm as (typeof PERMISSION_MODES)[number])
+        clearUnrestrictedBackup(wasUnrestricted)
       } else {
         togglePermissionMode()
       }
@@ -686,7 +710,7 @@ export async function runTui(ctx: CliSession): Promise<void> {
       const next = parseWorkModeValue(args)
       if (!next) {
         transcript.pushInfo([
-          c.muted(t("tui.workModeUnknown", { a: args, modes: "DISCUSS, PLAN, BUILD" })),
+          c.muted(t("tui.workModeUnknown", { a: args, modes: "DISCUSS, BUILD" })),
         ])
         return
       }
@@ -706,8 +730,12 @@ export async function runTui(ctx: CliSession): Promise<void> {
     // HIDDEN dari daftar "/" dan /help: operator yang tahu perintahnya yang bisa
     // memanggil. Berlaku per-sesi, toggle. Gerbang keamanan = kepercayaan operator.
     if (name === "unrestric" || name === "unrestrict") {
-      const norm = args.trim().toLowerCase()
-      const next = norm === "" ? mode !== "unrestricted" : norm === "on" || norm === "1"
+      const parsed = parseToggleArg(args)
+      if (parsed === "invalid") {
+        transcript.pushInfo([c.muted(t("tui.unrestrictedUsage"))])
+        return
+      }
+      const next = parsed === undefined ? mode !== "unrestricted" : parsed
       if (next) {
         if (mode !== "unrestricted") {
           modeBeforeUnrestricted = mode
@@ -715,18 +743,19 @@ export async function runTui(ctx: CliSession): Promise<void> {
         }
         mode = "unrestricted"
         permissions?.setMode("unrestricted")
-        // WorkMode EXECUTE (BUILD) agar ceiling DISCUSS/PLAN tak menahan tulis.
+        // WorkMode EXECUTE (BUILD) agar ceiling DISCUSS tak menahan tulis.
         workModeControl?.setWorkMode("EXECUTE")
         app.repaint()
         transcript.pushInfo([c.warning(`${c.red(glyphs.unlock)} ${t("tui.unrestrictedOn")}`)])
         return
       }
+      if (mode !== "unrestricted") {
+        transcript.pushInfo([c.muted(`${glyphs.lock} ${t("tui.unrestrictedOff", { m: mode })}`)])
+        return
+      }
       mode = modeBeforeUnrestricted ?? "auto"
-      // modeBeforeUnrestricted adalah nilai sebelum /unrestric: auto/ask (via /mode)
-      // atau allow-all/allowlist (via flag start). Tidak pernah readonly/plan/
-      // unrestricted — cast jujur ke himpunan yang memang bisa dipegang `mode`.
       permissions?.setMode(mode as "auto" | "ask" | "allow-all" | "allowlist")
-      // Pulihkan juga WorkMode semula (DISCUSS/PLAN) agar ceiling read-only
+      // Pulihkan juga WorkMode semula (DISCUSS) agar ceiling read-only
       // kembali berlaku — tanpa ini toggle-off meninggalkan BUILD (tulis bebas).
       workModeControl?.setWorkMode(workModeBeforeUnrestricted ?? "DISCUSS")
       modeBeforeUnrestricted = null
@@ -756,38 +785,36 @@ export async function runTui(ctx: CliSession): Promise<void> {
       app.showToast(t("tui.langLine", { v: next }))
       return
     }
-    if (name === "compact") {
-      const next = args === "" ? undefined : args === "on" || args === "1"
-      const compact = ui.setCompactMode(next)
-      transcript.pushInfo([
-        c.muted(t("tui.compactLine", { v: t(compact ? "state.compact" : "state.expanded") })),
-      ])
-      return
-    }
-    if (name === "thinking") {
-      const next = args === "" ? undefined : args === "on" || args === "1"
-      const visible = ui.setReasoningVisible(next)
-      transcript.pushInfo([
-        c.muted(t("tui.thinkingSet", { v: t(visible ? "state.expanded" : "state.minimized") })),
-      ])
-      return
-    }
-    if (name === "fold") {
-      // [Fase 2] /fold = toggle PANEL AKTIVITAS (thinking + grup tool).
-      // Perilaku lama (minimizeActivity) tetap hidup saat panel off; `/fold`
-      // sekarang mengontrol panel. i18n key sama (folded/expanded).
-      const next = args === "" ? undefined : args === "on" || args === "1"
-      const on = ui.setActivityPanel(next)
-      transcript.pushInfo([
-        c.muted(t("tui.activityFold", { v: t(on ? "state.expanded" : "state.folded") })),
-      ])
+    if (name === "compact" || name === "thinking" || name === "fold") {
+      const parsed = parseToggleArg(args)
+      if (parsed === "invalid") {
+        transcript.pushInfo([c.muted(t("tui.toggleUse", { cmd: name }))])
+        return
+      }
+      const toggleLine =
+        name === "compact"
+          ? t("tui.compactLine", {
+              v: t(ui.setCompactMode(parsed) ? "state.compact" : "state.expanded"),
+            })
+          : name === "thinking"
+            ? t("tui.thinkingSet", {
+                v: t(ui.setReasoningVisible(parsed) ? "state.expanded" : "state.minimized"),
+              })
+            : t("tui.activityFold", {
+                v: t(ui.setActivityPanel(parsed) ? "state.expanded" : "state.folded"),
+              })
+      transcript.pushInfo([c.muted(toggleLine)])
       return
     }
     if (name === "expand") {
       const sections = args ? ctx.expandContent(args) : ctx.expandAllContent()
       const views = args ? [] : ui.collapsedSectionsSnapshot()
       if (!sections.length && !views.length) {
-        transcript.pushInfo([c.muted(t("tui.expandEmpty"))])
+        transcript.pushInfo([
+          c.muted(
+            args ? t("tui.expandNotFound", { id: sanitizeAnsiLine(args) }) : t("tui.expandEmpty"),
+          ),
+        ])
         return
       }
       const lines: string[] = []
@@ -797,39 +824,44 @@ export async function runTui(ctx: CliSession): Promise<void> {
           lines.push(c.muted(t("tui.expandRetention")))
           continue
         }
-        const label = args ?? s.ref?.toolCallId ?? t("tui.expandContent")
+        const label = sanitizeAnsiLine(args ?? s.ref?.toolCallId ?? t("tui.expandContent"))
         const src = s.meta.source === "durable" ? ` [${t("tui.expandDurable")}]` : ""
         lines.push(c.muted(`  ${dash} ${label}${src} ${dash}`))
-        for (const ln of s.text.split("\n")) lines.push(`    ${ln}`)
+        for (const ln of s.text.split("\n")) lines.push(`    ${sanitizeAnsiLine(ln)}`)
       }
       for (const view of views) {
-        lines.push(c.muted(`  ${dash} ${view.label} ${dash}`))
-        for (const ln of view.text.split("\n")) lines.push(`    ${ln}`)
+        lines.push(c.muted(`  ${dash} ${sanitizeAnsiLine(view.label)} ${dash}`))
+        for (const ln of view.text.split("\n")) lines.push(`    ${sanitizeAnsiLine(ln)}`)
       }
       await showCommandOutput(t("out.titleExpand"), lines)
       return
     }
     if (name === "minimize") {
-      const arg = args.trim().toLowerCase()
-      let next: boolean | undefined
-      if (arg === "") next = !(ui.sectionMinimized("tool") && ui.sectionMinimized("answer"))
-      else if (arg === "on" || arg === "1") next = true
-      else if (arg === "off" || arg === "0") next = false
-      else {
+      const parsed = parseToggleArg(args)
+      if (parsed === "invalid") {
         transcript.pushInfo([c.muted(t("tui.minUse"))])
         return
       }
+      const next =
+        parsed === undefined
+          ? !(ui.sectionMinimized("tool") && ui.sectionMinimized("answer"))
+          : parsed
       ui.setSectionMinimized("tool", next)
       ui.setSectionMinimized("answer", next)
       transcript.pushInfo([c.muted(t(next ? "tui.sectionsMin" : "tui.sectionsExp"))])
       return
     }
-    if (name === "undo") {
-      const res = await undoLastCheckpoint(sessionId, cwd)
-      transcript.pushInfo([res.message, ...res.restoredFiles])
-      return
-    }
-    if (name === "redo") {
+    if (name === "undo" || name === "redo") {
+      const currentWm = workModeControl ? workModeControl.getWorkMode() : "EXECUTE"
+      if (currentWm !== "EXECUTE") {
+        transcript.pushInfo([c.muted(t("tui.undoInDiscuss"))])
+        return
+      }
+      if (name === "undo") {
+        const res = await undoLastCheckpoint(sessionId, cwd)
+        transcript.pushInfo([res.message, ...res.restoredFiles])
+        return
+      }
       const res = await redoLastCheckpoint(sessionId, cwd)
       transcript.pushInfo([res.message, ...res.reappliedFiles])
       return
@@ -848,17 +880,18 @@ export async function runTui(ctx: CliSession): Promise<void> {
       return popupBuiltin(`/model${args ? ` ${args}` : ""}`)
     if (name === "providers" || name === "provider") return popupBuiltin("/provider")
     if (name === "history") {
-      const lines = (await loadHistory()).slice(-20)
+      const disk = await loadHistory().catch(() => [])
+      const inMem = app.getHistory().filter((h) => h !== "/history")
+      const merged: string[] = []
+      for (const entry of [...disk, ...inMem]) {
+        if (merged[merged.length - 1] !== entry) merged.push(entry)
+      }
+      const lines = merged.slice(-20)
       await showCommandOutput(t("out.titleHistory"), lines.length ? lines : [t("tui.historyEmpty")])
       return
     }
-    if (name === "resume" && !args) return popupBuiltin("/sessions")
-    if (name === "sessions" && !args) return popupBuiltin("/sessions")
-
-    // Builtin yang bisa membuka popup (/sessions <id> = resume-spawn,
-    // /model dengan filter) dibungkus suspend; yang murni cetak langsung.
-    const MODAL = new Set(["model", "provider", "sessions", "resume"])
-    if (MODAL.has(name)) return popupBuiltin(line)
+    if (name === "sessions" || name === "resume")
+      return popupBuiltin(`/${name}${args ? ` ${args}` : ""}`)
     if (name === "sync") {
       // Tampilkan progres "Syncing models…" langsung di kotak Layer 2 selama
       // probe jaringan berjalan, lalu transisi ke jendela hasil tanpa kedip.
@@ -935,6 +968,7 @@ export async function runTui(ctx: CliSession): Promise<void> {
       ])
       return
     }
+    transcript.pushUser(line)
     await runTurn(await renderSkill(skill, args))
   }
 

@@ -13,13 +13,16 @@
 import type { PermissionHandler, ToolCall } from "#minicore"
 import type { PermissionMode } from "./permission.ts"
 import {
-  LOCAL_READONLY_TOOL_NAMES,
   NETWORK_READ_TOOL_NAMES,
   PLAN_EXTRA_TOOL_NAMES,
   READONLY_TOOL_NAMES,
 } from "./tool-contract.ts"
 
-export type WorkMode = "DISCUSS" | "PLAN" | "EXECUTE"
+export type WorkMode = "DISCUSS" | "EXECUTE"
+
+export function normalizeWorkMode(mode?: WorkMode | string | null): WorkMode {
+  return mode === "EXECUTE" ? "EXECUTE" : "DISCUSS"
+}
 
 /**
  * Error kebijakan startup saat `--verify` digabung dengan WorkMode non-EXECUTE
@@ -28,7 +31,7 @@ export type WorkMode = "DISCUSS" | "PLAN" | "EXECUTE"
  */
 export class VerifyWorkModeConflictError extends Error {
   readonly workMode: Exclude<WorkMode, "EXECUTE">
-  constructor(workMode: Exclude<WorkMode, "EXECUTE">) {
+  constructor(workMode: Exclude<WorkMode, "EXECUTE"> = "DISCUSS") {
     super(
       `[work-mode] --verify cannot be combined with WorkMode ${workMode} (verification runs shell commands and self-heal turns; use --work-mode BUILD or omit --verify)`,
     )
@@ -63,7 +66,7 @@ export type WorkModePermissionHandler = PermissionHandler &
 function requireModeControl(base: PermissionHandler): ModeControl {
   const ctrl = base as Partial<ModeControl>
   if (typeof ctrl.__getMode !== "function" || typeof ctrl.__setMode !== "function") {
-    // Fail-closed: tanpa kontrol mode, ceiling PLAN tak bisa mengikuti mode PM
+    // Fail-closed: tanpa kontrol mode, ceiling DISCUSS tak bisa mengikuti mode PM
     // saat runtime — lebih baik menolak konstruksi daripada memakai snapshot
     // basi yang bisa mencabut ceiling setelah `__setMode`.
     throw new Error(
@@ -74,27 +77,21 @@ function requireModeControl(base: PermissionHandler): ModeControl {
 }
 
 // Seleksi ceiling per mode PM SAAT INI (bukan snapshot konstruksi):
-// DISCUSS selalu read-only; PLAN memakai ceiling read-only saat PM sudah lebih
-// ketat (`allowlist`/`readonly`), selain itu ceiling plan.
-function ceilingFor(workMode: RestrictiveWorkMode, baseMode: PermissionMode): "readonly" | "plan" {
-  if (workMode === "DISCUSS") return "readonly"
+// DISCUSS (gabungan diskusi + perencanaan) memakai ceiling read-only saat PM sudah
+// lebih ketat (`allowlist`/`readonly`), selain itu ceiling plan (18 readonly + 3 plan extra).
+function ceilingFor(_workMode: RestrictiveWorkMode, baseMode: PermissionMode): "readonly" | "plan" {
   return baseMode === "allowlist" || baseMode === "readonly" ? "readonly" : "plan"
 }
 
 // Tool Access Policy — ceiling capability WorkMode dihitung LANGSUNG dari
-// registry kontrak tool (satu sumber), bukan lewat handler PermissionMode
-// `readonly`/`plan` (yang dulunya diduplikasi sebagai primitif ceiling).
-//
-// - DISCUSS → tepat 16 `LOCAL_READONLY_TOOL_NAMES` (network read ditolak
-//   terpisah di check() dengan alasan khusus).
-// - PLAN    → 18 `READONLY_TOOL_NAMES` (+ `PLAN_EXTRA_TOOL_NAMES`), atau
+// registry kontrak tool (satu sumber):
+// - DISCUSS → 18 `READONLY_TOOL_NAMES` (+ `PLAN_EXTRA_TOOL_NAMES`), atau
 //   read-only saja bila PM sudah `readonly`/`allowlist` (lebih ketat).
 function ceilingAllows(
   name: string,
-  workMode: RestrictiveWorkMode,
+  _workMode: RestrictiveWorkMode,
   baseMode: PermissionMode,
 ): boolean {
-  if (workMode === "DISCUSS") return LOCAL_READONLY_TOOL_NAMES.includes(name)
   if (baseMode === "readonly" || baseMode === "allowlist") return READONLY_TOOL_NAMES.has(name)
   return READONLY_TOOL_NAMES.has(name) || PLAN_EXTRA_TOOL_NAMES.has(name)
 }
@@ -105,13 +102,7 @@ export function createWorkModePermissionHandler(opts: {
   root?: string
 }): WorkModePermissionHandler {
   const ctrl = requireModeControl(opts.base)
-  // P12 S2.2 Slice 5 — WorkMode MUTABLE (bukan snapshot konstruksi). Kernel
-  // mengkonsultasi handler per tool call, jadi __setWorkMode runtime menggeser
-  // ceiling tanpa mengganti handler. EXECUTE = delegasi base (perilaku identik).
-  let wm: WorkMode = opts.workMode
-  // Handler deny ceiling — hanya untuk seam describeDenial (alasan yang sama
-  // dengan perilaku lama: "read-only mode" / "plan mode"). Tidak ada lagi
-  // handler PermissionMode `readonly`/`plan` sebagai primitif ceiling.
+  let wm: WorkMode = normalizeWorkMode(opts.workMode)
   const ceilingDenyHandlers: Record<"readonly" | "plan", PermissionHandler> = {
     readonly: {
       async check() {
@@ -176,41 +167,27 @@ export function createWorkModePermissionHandler(opts: {
 
   const handler = {
     async check(call: ToolCall, _deps?: unknown): Promise<"allow" | "deny"> {
-      // EXECUTE = identitas: delegasi penuh ke base tanpa ceiling (perilaku
-      // lama). Memungkinkan upgrade runtime EXECUTE→DISCUSS/PLAN walau komposisi
-      // awal EXECUTE (compose mengembalikan base) TIDAK menyediakan __setWorkMode —
-      // jalur ini dipakai createMinicodeSession yang SELALU membungkus.
       if (wm === "EXECUTE") return opts.base.check(call, _deps as never)
-      // P0.2 (Q2): DISCUSS melarang network read (`web_fetch`, `web_search`) di
-      // SEMUA PermissionMode tanpa pernah menyentuh base (0 prompt).
-      if (wm === "DISCUSS" && NETWORK_READ_TOOL_NAMES.has(call.name)) {
-        rememberDeny(call, discussNetworkDeny)
-        return "deny"
-      }
-      // Baca mode PM sekarang: `__setMode` runtime menggeser seleksi ceiling
-      // (PLAN × allowlist/readonly = read-only), bukan membekukan yang lama.
-      // Baca WorkMode sekarang (`wm` mutable) — __setWorkMode runtime menggeser
-      // ceiling DISCUSS↔PLAN.
       const baseMode = ctrl.__getMode()
       const ceilingKind = ceilingFor(wm, baseMode)
-      // Ceiling DULU (Tool Access Policy): operasi di luar ceiling tak boleh
-      // memicu prompt base (requirement S2.1 #1) — ceiling tak pernah prompt.
       if (!ceilingAllows(call.name, wm, baseMode)) {
         rememberDeny(call, ceilingDenyHandlers[ceilingKind])
         return "deny"
       }
-      // Di dalam ceiling: keputusan mutlak handler PM asli (termasuk prompt
-      // gated `delegate_task` untuk PLAN × auto/ask — owner decision S2.1).
-      const decision = await opts.base.check(call, _deps as never)
+      // Di dalam ceiling DISCUSS: paksa enforceJail=true agar `DISCUSS × unrestricted`
+      // tidak melompati jail workspace maupun proteksi berkas sensitif `.env` (INV-WM1).
+      const baseDeps =
+        _deps && typeof _deps === "object"
+          ? { ...(_deps as Record<string, unknown>), enforceJail: true }
+          : { enforceJail: true }
+      const decision = await opts.base.check(call, baseDeps as never)
       if (decision !== "allow") {
         rememberDeny(call, opts.base)
         return decision
       }
-      // P0.2 (Q2): di PLAN, network read (`web_fetch`, `web_search`) hanya boleh
-      // berjalan lewat approval prompt eksplisit (headless/tanpa __promptGated =
-      // fail-closed deny). Dipasang SETELAH `opts.base.check` agar Invariant #1
-      // terjaga (WorkMode tak pernah melonggarkan penolakan base).
-      if (wm === "PLAN" && NETWORK_READ_TOOL_NAMES.has(call.name)) {
+      // Di DISCUSS, network read (`web_fetch`, `web_search`) wajib melewati
+      // gerbang approval prompt eksplisit (headless/tanpa __promptGated = fail-closed deny).
+      if (NETWORK_READ_TOOL_NAMES.has(call.name)) {
         if (typeof ctrl.__promptGated !== "function") {
           rememberDeny(call, discussNetworkDeny)
           return "deny"
@@ -225,19 +202,15 @@ export function createWorkModePermissionHandler(opts: {
       ctrl.__setMode(m)
     },
     __getMode(): PermissionMode {
-      // Metadata yang dilaporkan tetap mode PM asli; WorkMode tidak bocor.
       return ctrl.__getMode()
     },
     __setWorkMode(m: WorkMode): void {
-      wm = m
+      wm = normalizeWorkMode(m)
     },
     __getWorkMode(): WorkMode {
       return wm
     },
     describeDenial(call: ToolCall): Promise<string | undefined> | string | undefined {
-      // Cek owner map lebih dulu: bila call ditolak saat mode non-EXECUTE lalu
-      // WorkMode diubah ke EXECUTE sebelum describeDenial dipanggil, alasan
-      // deny tetap diambil dari pemilik yang mencatatnya.
       const owner = takeDenyOwner(call)
       if (owner) {
         const seam = owner.describeDenial
@@ -259,9 +232,10 @@ export function composeWorkModePermissionHandler(opts: {
   base: PermissionHandler
   root?: string
 }): PermissionHandler {
-  if (opts.workMode === "EXECUTE") return opts.base
+  const wm = normalizeWorkMode(opts.workMode)
+  if (wm === "EXECUTE") return opts.base
   return createWorkModePermissionHandler({
-    workMode: opts.workMode,
+    workMode: wm,
     base: opts.base,
     root: opts.root,
   })

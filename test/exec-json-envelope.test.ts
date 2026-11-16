@@ -65,7 +65,7 @@ describe("exec --json: kegagalan setup membawa envelope", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
-  })
+  }, 15_000)
 
   test("tanpa --json -> stdout tetap kosong (perilaku lama)", () => {
     const { dir, home } = hermeticWs()
@@ -77,7 +77,7 @@ describe("exec --json: kegagalan setup membawa envelope", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
-  })
+  }, 15_000)
 })
 
 // ── P11.2: prompt diambil dari argv scoped TANPA token subcommand.
@@ -119,5 +119,5 @@ describe("exec: prompt scoping (P11.2)", () => {
       "tugas exec ulang",
     )
     expect(failurePrompt(["exec", "--json", "--cwd", "<DIR>", "exec", "ulang"])).toBe("exec ulang")
-  })
+  }, 15_000)
 })

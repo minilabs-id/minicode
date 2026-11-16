@@ -1,9 +1,10 @@
 // Pure arg-parsing helpers - dipisah dari cli/index.ts agar mudah diuji.
+import { sanitizeAnsiLine } from "../src/ui/render/sanitize.ts"
+
 const BOOLEAN_FLAGS = new Set([
   "--verbose",
   "--allow-all",
   "--ask",
-  "--plan",
   "--interactive",
   "--tui", // alias usang: TUI fullscreen kini satu-satunya tampilan interaktif
   "--verify",
@@ -11,6 +12,16 @@ const BOOLEAN_FLAGS = new Set([
   "--json", // dipakai `exec --json` dan `--help --json`
   "--budget-strict", // penegasan eksplisit fail-closed (kini juga default --budget)
   "--allow-local-config", // opt-in: baca .minicode/config.json + allowlist lokal (default mati)
+  // flag boolean subcommand — harus di sini agar router tidak memakan token berikutnya sebagai nilai
+  "--allow-private",
+  "--jsonl",
+  "--all-tools",
+  "--global",
+  "--local",
+  "--auto-continue",
+  "--blocked",
+  "--closed",
+  "--force",
   // [PHASE 6U] Experimental. Opt-in gate for autonomous Scheduler execution.
   // DEFAULT OFF. A CLI flag and not a config key or env var on purpose: env is
   // inherited by sub-agents and MCP servers, and config is inherited globally or
@@ -31,7 +42,7 @@ const VALUE_FLAGS = new Set([
   "--ratelimit",
   "--budget",
   "--tool-scope", // full | explore (read-only) — tanpa ini jadi kata prompt!
-  "--work-mode", // DISCUSS | PLAN | BUILD — HARUS dikenal agar tak bocor ke prompt.
+  "--work-mode", // DISCUSS | BUILD — HARUS dikenal agar tak bocor ke prompt.
   // [P1 M15] Mode runtime produksi (off | constructed | owned). HARUS terdaftar:
   // flag tak dikenal menghentikan scan `hasFlag`/`getArg` (dianggap prompt
   // boundary), sehingga flag yang diletakkan SETELAH `--runtime` akan hilang
@@ -47,13 +58,27 @@ const VALUE_FLAGS = new Set([
   "--args",
   "--env",
   "--header",
-  "--allow-private",
   "--url",
   "--match",
-  "--jsonl",
-  "--all-tools",
-  "--global",
-  "--local",
+  "--adopt-task",
+  "--max-turns",
+  "--port",
+  "--who",
+  "--scopes",
+  "--ttl",
+  "--hash",
+  "--status",
+  "--state",
+  "--priority",
+  "--min-age-days",
+  "--depends-on",
+  "--stale-days",
+  "--keep",
+  "--drop",
+  "--evidence",
+  "--task",
+  "--format",
+  "--out",
 ])
 export const valueFlags = VALUE_FLAGS
 const KNOWN_FLAGS = new Set([...BOOLEAN_FLAGS, ...VALUE_FLAGS, "-h", "--help", "-v", "--version"])
@@ -95,21 +120,100 @@ export function hasFlag(argv: string[], name: string): boolean {
 
 /** Opt-in config lokal untuk alur sesi utama (index/exec): flag eksplisit
  * operator ATAU env (keduanya default mati). Memakai hasFlag yang
- * boundary-aware: flag di DALAM teks prompt tidak dihitung (anti-injeksi).
- * Handler subcommand (config/providers/…) memakai args.includes langsung
- * karena argv-nya selalu diawali positional subcommand. */
+ * boundary-aware: flag di DALAM teks prompt tidak dihitung (anti-injeksi). */
 export function allowLocalConfig(argv: string[]): boolean {
   return hasFlag(argv, "--allow-local-config") || process.env.MINICODE_ALLOW_LOCAL_CONFIG === "1"
 }
 
-export type CliWorkMode = "DISCUSS" | "PLAN" | "EXECUTE"
+/** Cek --allow-local-config / env pada argv subcommand. */
+export function allowLocalSubcommand(argv: readonly string[]): boolean {
+  return argv.includes("--allow-local-config") || process.env.MINICODE_ALLOW_LOCAL_CONFIG === "1"
+}
 
-/** Parse tiga nilai Work Mode yang ditampilkan ke operator. */
+/** Ambil positional ke-`index` dari argv subcommand (tolak `-*`). */
+export function positionalSubArg(argv: readonly string[], index: number): string | undefined {
+  const v = argv[index]
+  return v && !v.startsWith("-") ? v : undefined
+}
+
+/** Cek apakah argv subcommand meminta `--help` / `-h`. */
+export function hasHelpFlag(argv: readonly string[]): boolean {
+  return argv.includes("--help") || argv.includes("-h")
+}
+
+/** Tangani `--help`/`-h` (exit 0) dan positional tak terduga (exit 2) secara seragam. */
+export function guardSubcommand(
+  args: readonly string[],
+  cmd: string,
+  help: string,
+  out: (s: string) => void,
+  err: (s: string) => void,
+  extraIndex = 1,
+): void {
+  if (hasHelpFlag(args)) {
+    out(help)
+    process.exit(0)
+  }
+  if (extraIndex >= 0) {
+    const extra = positionalSubArg(args, extraIndex)
+    if (extra) {
+      err(`unknown ${cmd} subcommand: ${sanitizeAnsiLine(extra)}\n${help}`)
+      process.exit(2)
+    }
+  }
+}
+
+/** Parse argumen toggle (`/compact`, `/thinking`, `/fold`, `/minimize`, `/unrestric`). */
+export function parseToggleArg(raw: string): boolean | undefined | "invalid" {
+  const norm = raw.trim().toLowerCase()
+  if (norm === "") return undefined
+  if (norm === "on" || norm === "1") return true
+  if (norm === "off" || norm === "0") return false
+  return "invalid"
+}
+
+/** Parse flag numerik runtime + peringatan seragam untuk CLI utama & `exec`. */
+export function parseNumericFlag(
+  getArg: (name: string) => string | undefined,
+  flag: string,
+  kind: "positive" | "non-negative" | "usd",
+  warn: (msg: string) => void,
+): number | undefined {
+  const raw = getArg(flag)
+  if (!raw) return undefined
+  const n = Number(raw)
+  if (Number.isFinite(n) && (kind === "positive" ? n > 0 : n >= 0)) return n
+  const label = kind === "usd" ? "USD number" : `${kind} number`
+  warn(`[warn] ${flag} requires a ${label}, ignoring "${raw}"\n`)
+  return undefined
+}
+
+export function parseRuntimeNumericFlags(
+  getArg: (name: string) => string | undefined,
+  warn: (msg: string) => void,
+) {
+  return {
+    maxSteps: parseNumericFlag(getArg, "--max-steps", "positive", warn),
+    contextWindowTokens: parseNumericFlag(getArg, "--context-window", "positive", warn),
+    timeoutMs: parseNumericFlag(getArg, "--timeout", "non-negative", warn),
+    budget: parseNumericFlag(getArg, "--budget", "usd", warn),
+    ratelimitRpm: parseNumericFlag(getArg, "--ratelimit", "positive", warn),
+  }
+}
+
+export function resolveToolScope(getArg: (name: string) => string | undefined): "explore" | "full" {
+  const raw = (getArg("--tool-scope") ?? process.env.MINICODE_TOOL_SCOPE ?? "").toLowerCase()
+  return raw === "explore" ? "explore" : "full"
+}
+
+export type CliWorkMode = "DISCUSS" | "EXECUTE"
+
+/** Parse dua nilai Work Mode yang ditampilkan ke operator (DISCUSS | BUILD). */
 export function parseWorkModeValue(raw: string): CliWorkMode | undefined {
   const norm = raw.trim().toUpperCase()
   // BUILD adalah nama produk untuk identitas runtime EXECUTE.
   if (norm === "BUILD") return "EXECUTE"
-  if (norm === "DISCUSS" || norm === "PLAN") return norm
+  if (norm === "DISCUSS") return norm
   return undefined
 }
 
@@ -118,7 +222,7 @@ export function parseWorkModeValue(raw: string): CliWorkMode | undefined {
  * ditampilkan sebagai `BUILD`. Dipakai footer, /status, help, dan i18n agar
  * semua permukaan konsisten, tanpa mengubah identitas runtime/persistence.
  */
-export function displayWorkMode(workMode: CliWorkMode): "DISCUSS" | "PLAN" | "BUILD" {
+export function displayWorkMode(workMode: CliWorkMode): "DISCUSS" | "BUILD" {
   return workMode === "EXECUTE" ? "BUILD" : workMode
 }
 
@@ -143,7 +247,7 @@ export function resolveWorkModeFlag(getArg: (n: string) => string | undefined): 
   return {
     workMode: "DISCUSS",
     explicit: true,
-    warning: `--work-mode requires DISCUSS|PLAN|BUILD, ignoring "${raw}" (using DISCUSS)`,
+    warning: `--work-mode requires DISCUSS|BUILD, ignoring "${raw}" (using DISCUSS)`,
   }
 }
 
@@ -217,7 +321,7 @@ export function promptFromArgs(argv: string[]): string {
       }
       continue
     }
-    if (BOOLEAN_FLAGS.has(fname)) continue
+    if (!VALUE_FLAGS.has(fname)) continue
     // value flag sebelum prompt: lewati flag + nilainya
     if (!a.includes("=")) i++
   }

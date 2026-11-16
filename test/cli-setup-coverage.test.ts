@@ -41,7 +41,6 @@ describe("cli/setup: permissionMode & timeout & budget", () => {
       verbose: false,
       allowAll: false,
       ask: false,
-      plan: false,
       allowlist: false,
       verify: false,
     })
@@ -61,7 +60,6 @@ describe("cli/setup: permissionMode & timeout & budget", () => {
       verbose: false,
       allowAll: true,
       ask: false,
-      plan: false,
       allowlist: false,
       verify: false,
     })
@@ -80,7 +78,6 @@ describe("cli/setup: permissionMode & timeout & budget", () => {
       verbose: false,
       allowAll: false,
       ask: true,
-      plan: false,
       allowlist: false,
       verify: false,
     })
@@ -88,7 +85,7 @@ describe("cli/setup: permissionMode & timeout & budget", () => {
     await s.close()
   })
 
-  test("plan -> WorkMode PLAN (permission tetap auto)", async () => {
+  test("workMode DISCUSS default (permission tetap auto)", async () => {
     const cwd = makeWorkspace()
     const s = await createCliSession({
       cwd,
@@ -99,13 +96,11 @@ describe("cli/setup: permissionMode & timeout & budget", () => {
       verbose: false,
       allowAll: false,
       ask: false,
-      plan: true,
       allowlist: false,
       verify: false,
     })
-    // [mode-architecture] --plan legacy → WorkMode PLAN (bukan permission mode).
     expect(s.permissionMode).toBe("auto")
-    expect(s.workMode).toBe("PLAN")
+    expect(s.workMode).toBe("DISCUSS")
     await s.close()
   })
 
@@ -120,7 +115,6 @@ describe("cli/setup: permissionMode & timeout & budget", () => {
       verbose: false,
       allowAll: false,
       ask: false,
-      plan: false,
       allowlist: true,
       verify: false,
     })
@@ -142,7 +136,6 @@ describe("cli/setup: permissionMode & timeout & budget", () => {
       verbose: false,
       allowAll: false,
       ask: false,
-      plan: false,
       allowlist: false,
       verify: false,
       budget: 1.5,
@@ -167,7 +160,6 @@ describe("cli/setup: permissionMode & timeout & budget", () => {
       verbose: false,
       allowAll: false,
       ask: false,
-      plan: false,
       allowlist: false,
       verify: false,
       timeoutMs: 0,
@@ -190,7 +182,6 @@ describe("cli/setup: permissionMode & timeout & budget", () => {
       verbose: false,
       allowAll: false,
       ask: false,
-      plan: false,
       allowlist: false,
       verify: false,
     })
@@ -213,7 +204,6 @@ describe("cli/setup: permissionMode & timeout & budget", () => {
         verbose: false,
         allowAll: false,
         ask: false,
-        plan: false,
         allowlist: false,
         verify: false,
       }),
@@ -231,7 +221,6 @@ describe("cli/setup: permissionMode & timeout & budget", () => {
       verbose: false,
       allowAll: false,
       ask: false,
-      plan: false,
       allowlist: false,
       verify: false,
     })
@@ -251,7 +240,6 @@ describe("cli/setup: permissionMode & timeout & budget", () => {
       verbose: false,
       allowAll: false,
       ask: false,
-      plan: false,
       allowlist: false,
       verify: false,
     })
@@ -274,7 +262,6 @@ describe("cli/setup: permissionMode & timeout & budget", () => {
       verbose: false,
       allowAll: false,
       ask: false,
-      plan: false,
       allowlist: false,
       verify: false,
     })
@@ -301,7 +288,6 @@ describe("cli/setup: permissionMode & timeout & budget", () => {
       verbose: false,
       allowAll: false,
       ask: false,
-      plan: false,
       allowlist: false,
       verify: false,
     })
@@ -336,7 +322,6 @@ describe("cli/setup: permissionMode & timeout & budget", () => {
       verbose: false,
       allowAll: false,
       ask: false,
-      plan: false,
       allowlist: false,
       verify: false,
     }
@@ -435,16 +420,15 @@ describe("cli/setup: WorkMode resume transparency (D-2)", () => {
     verbose: false,
     allowAll: false,
     ask: false,
-    plan: false,
     allowlist: false,
     verify: false,
   })
 
   async function resumeProbe(opts: {
-    savedWorkMode?: "DISCUSS" | "PLAN" | "EXECUTE" | null
-    workMode?: "DISCUSS" | "PLAN" | "EXECUTE"
+    savedWorkMode?: "DISCUSS" | "EXECUTE" | null
+    workMode?: "DISCUSS" | "EXECUTE"
     workModeExplicit?: boolean
-  }): Promise<{ stderr: string; effective: "DISCUSS" | "PLAN" | "EXECUTE" }> {
+  }): Promise<{ stderr: string; effective: "DISCUSS" | "EXECUTE" }> {
     const cwd = makeWorkspace()
     const first = await createCliSession({
       ...baseOpts(cwd),
@@ -506,11 +490,11 @@ describe("cli/setup: WorkMode resume transparency (D-2)", () => {
   test("resume dengan WorkMode eksplisit → override WorkMode tersimpan secara transparan", async () => {
     const r = await resumeProbe({
       savedWorkMode: "DISCUSS",
-      workMode: "PLAN",
+      workMode: "EXECUTE",
       workModeExplicit: true,
     })
-    expect(r.effective).toBe("PLAN")
-    expect(r.stderr).toContain("[resume] WorkMode PLAN (overriding saved DISCUSS)")
+    expect(r.effective).toBe("EXECUTE")
+    expect(r.stderr).toContain("[resume] WorkMode BUILD (overriding saved DISCUSS)")
   })
 })
 
@@ -570,7 +554,6 @@ describe("last-model: default = terakhir dipakai", () => {
         verbose: false,
         allowAll: false,
         ask: false,
-        plan: false,
         allowlist: false,
         verify: false,
         // Provider fake tinggal di config workspace → opt-in (aturan audit #07).

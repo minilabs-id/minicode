@@ -106,9 +106,7 @@ describe("A. exactly one gate, and it is off unless asked for", () => {
     expect(resolveSchedulerGate(["--enable-scheduler"])).toEqual(GATE_ENABLED)
     // DEFAULT OFF under every shape of ordinary invocation.
     expect(resolveSchedulerGate(["-p", "fix it"])).toEqual(GATE_DISABLED)
-    expect(resolveSchedulerGate(["--plan", "--allow-all", "--resume", "abc"])).toEqual(
-      GATE_DISABLED,
-    )
+    expect(resolveSchedulerGate(["--ask", "--allow-all", "--resume", "abc"])).toEqual(GATE_DISABLED)
   })
 
   test("A2. the flag has no value form — `--enable-scheduler=…` does not enable it", () => {

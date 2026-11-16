@@ -445,7 +445,6 @@ describe("7.4 Per-prompt wall-clock timeout", () => {
         modelOverride: "gpt-4o-mini",
         allowAll: false,
         ask: false,
-        plan: false,
         allowlist: false,
         verify: false,
         timeoutMs: 1_000,

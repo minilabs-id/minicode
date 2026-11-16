@@ -543,12 +543,14 @@ describe.serial("provider-manager: edit (e)", () => {
     }, 2000)
     const out = visible(t)
     expect(out).toContain("updated")
-    // Entri updated ditulis ke global (perilaku doEdit: global: true).
-    const cfg = JSON.parse(await readFile(globalPath, "utf8")) as {
+    // Entri updated tetap di scope asal (lokal), tidak menggandakan ke global.
+    const cfg = JSON.parse(await readFile(localConfigPath(), "utf8")) as {
       providers: { baseUrl: string; models: string[] }[]
     }
     expect(cfg.providers[0]?.baseUrl).toBe("https://baru.example/v1")
     expect(cfg.providers[0]?.models).toEqual(["model-a", "model-b"])
+    const globalCfg = await readConfig(globalPath)
+    expect(globalCfg.providers).toHaveLength(0)
     await mgr.close()
   })
 

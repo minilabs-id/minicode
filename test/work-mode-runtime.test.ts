@@ -92,23 +92,24 @@ describe("1. permission ceiling mengikuti WorkMode terbaru", () => {
     expect(await h.check(call("r1", "read_file", { path: "a.txt" }), {})).toBe("allow")
   })
 
-  test("DISCUSS → PLAN: ceiling bergerak, tak melebihi ceiling PLAN", async () => {
+  test("DISCUSS (unified read-only + plan) → EXECUTE: todo_write boleh di DISCUSS, write_file baru boleh di EXECUTE", async () => {
     const root = tmpRoot()
     const h = liveHandler("DISCUSS", "auto", root)
-    // DISCUSS: todo_write (tool rencana) DITOLAK.
-    expect(await h.check(call("t0", "todo_write", { todos: [] }), {})).toBe("deny")
-    h.__setWorkMode("PLAN")
-    // PLAN: todo_write boleh (bagian set-plan), tapi tulis file/bash tetap deny.
+    // DISCUSS (unified): todo_write boleh, tapi tulis file/bash tetap deny.
     expect(await h.check(call("t1", "todo_write", { todos: [] }), {})).toBe("allow")
     expect(await h.check(call("w1", "write_file", { path: "a.txt", content: "x" }), {})).toBe(
       "deny",
     )
     expect(await h.check(call("b1", "bash", { cmd: "echo hi" }), {})).toBe("deny")
+    h.__setWorkMode("EXECUTE")
+    expect(await h.check(call("w2", "write_file", { path: "a.txt", content: "x" }), {})).toBe(
+      "allow",
+    )
   })
 
   test("WorkMode tidak menggeser permission mode dasar (INV-WM1)", async () => {
     const root = tmpRoot()
-    const h = liveHandler("PLAN", "auto", root)
+    const h = liveHandler("DISCUSS", "auto", root)
     h.__setWorkMode("EXECUTE")
     // EXECUTE + PM auto: write boleh (identitas base).
     expect(await h.check(call("w0", "write_file", { path: "a.txt", content: "x" }), {})).toBe(
@@ -116,9 +117,9 @@ describe("1. permission ceiling mengikuti WorkMode terbaru", () => {
     )
   })
 
-  test("permission mode → readonly tetap membatasi meski WorkMode PLAN/EXECUTE", async () => {
+  test("permission mode → readonly tetap membatasi meski WorkMode DISCUSS/EXECUTE", async () => {
     const root = tmpRoot()
-    for (const wm of ["PLAN", "EXECUTE"] as const) {
+    for (const wm of ["DISCUSS", "EXECUTE"] as const) {
       const h = liveHandler(wm, "auto", root)
       h.__setMode("readonly")
       expect(
@@ -145,8 +146,8 @@ describe("2. wiring sesi — kontrol WorkMode hidup di composition root", () => 
     })
     expect(control).toBeDefined()
     expect(control!.getWorkMode()).toBe("EXECUTE")
-    control!.setWorkMode("PLAN")
-    expect(control!.getWorkMode()).toBe("PLAN")
+    control!.setWorkMode("DISCUSS")
+    expect(control!.getWorkMode()).toBe("DISCUSS")
   })
 
   test("sesi dengan handler terinjeksi tidak diberi kontrol WorkMode (fail-closed)", async () => {
@@ -181,10 +182,7 @@ describe("3. tool visibility mengikuti WorkMode aktif (daftar yang dilihat kerne
     expect(setWorkMode).toBeDefined()
     setWorkMode!("DISCUSS")
     // Array yang sama (identitas objek) — kernel menyimpan referensi ini.
-    expect(sessionTools.length).toBe(16)
-    for (const n of sessionTools.map((t) => t.name)) expect(LOCAL_READONLY_TOOL_NAMES).toContain(n)
-    setWorkMode!("PLAN")
-    expect(sessionTools.length).toBeLessThan(full)
+    expect(sessionTools.length).toBe(21)
     expect(sessionTools.map((t) => t.name)).toContain("todo_write")
     setWorkMode!("EXECUTE")
     expect(sessionTools.length).toBe(full)
@@ -256,10 +254,10 @@ describe("4. delegasi mewarisi WorkMode parent yang AKTIF", () => {
     try {
       await delegateTaskTool.execute({ prompt: "x", mode: "plan" }, ctxFor(dir, "auto"))
       expect(seen[0]!.workMode).toBe("EXECUTE")
-      // Operator menaikkan work mode parent (aksI eksplisit di TUI).
-      wm = "PLAN"
+      // Operator menurunkan work mode parent ke DISCUSS (aksi eksplisit di TUI).
+      wm = "DISCUSS"
       await delegateTaskTool.execute({ prompt: "x", mode: "plan" }, ctxFor(dir, "auto"))
-      expect(seen[1]!.workMode).toBe("PLAN")
+      expect(seen[1]!.workMode).toBe("DISCUSS")
       // Child tak pernah lebih lebar: tools anak ikut ceiling WorkMode.
       for (const n of seen[1]!.tools.map((t) => t.name)) expect(EXPLORE_TOOL_NAMES).toContain(n)
     } finally {
@@ -282,13 +280,13 @@ describe("4. delegasi mewarisi WorkMode parent yang AKTIF", () => {
         run: async () => ({ finalText: "ok", usage: { steps: 1 } }),
       }
     })
-    const wm: WorkMode = "PLAN"
+    const wm: WorkMode = "DISCUSS"
     setSubAgentWorkMode(() => wm)
     try {
       // Model meminta mode "plan" (bukan explore) — tak boleh menaikkan parent.
       await delegateTaskTool.execute({ prompt: "x", mode: "plan" }, ctxFor(dir, "auto"))
-      expect(seen[0]!.workMode).toBe("PLAN")
-      expect(wm).toBe("PLAN")
+      expect(seen[0]!.workMode).toBe("DISCUSS")
+      expect(wm).toBe("DISCUSS")
     } finally {
       todoSession.id = prevTodo
       restore()
@@ -297,34 +295,32 @@ describe("4. delegasi mewarisi WorkMode parent yang AKTIF", () => {
 })
 
 describe("5. hooks mengikuti WorkMode AKTIF, bukan snapshot", () => {
-  test("predicate mengikuti handle kontrol yang berubah (Q3=A3: PLAN juga menahan)", () => {
+  test("predicate mengikuti handle kontrol yang berubah (Q3=A3: DISCUSS menahan)", () => {
     let wm: WorkMode = "EXECUTE"
     expect(shouldRunHooks("auto", wm)).toBe(true)
     wm = "DISCUSS"
-    expect(shouldRunHooks("auto", wm)).toBe(false)
-    wm = "PLAN"
     expect(shouldRunHooks("auto", wm)).toBe(false)
   })
 })
 
 describe("6. footer mencerminkan kombinasi WorkMode + permission mode", () => {
   test("EXECUTE → Build: nilai title case tanpa label", () => {
-    // v0.24: label "Work Mode:"/"Permission Mode:" dihapus dari footer — lebar
-    // footer lebih lega dan pembeda sumbu tinggal warna (semantik vs cyan).
     expect(stripAnsi(paintWorkMode("EXECUTE")).trimEnd()).toBe("Build")
     expect(paintWorkMode("EXECUTE")).not.toContain("Work Mode:")
     expect(paintWorkMode("EXECUTE")).not.toContain("EXECUTE")
     expect(stripAnsi(paintPermissionMode("auto"))).toBe("Auto")
     expect(paintPermissionMode("auto")).not.toContain("Permission Mode:")
   })
-  test("Discuss/Plan dan Ask memakai title case tanpa label", () => {
+  test("Discuss dan Ask memakai title case tanpa label", () => {
     expect(stripAnsi(paintWorkMode("DISCUSS")).trimEnd()).toBe("Discuss")
-    expect(stripAnsi(paintWorkMode("PLAN")).trimEnd()).toBe("Plan")
     expect(stripAnsi(paintPermissionMode("ask"))).toBe("Ask")
   })
   test("renderFooter menempatkan kedua nilai mode pada footer", () => {
-    const line = renderFooter({ mode: "auto", workMode: "PLAN", model: "m1", cwd: "cwd" }, 90)[0]!
-    expect(line).toContain("Plan")
+    const line = renderFooter(
+      { mode: "auto", workMode: "DISCUSS", model: "m1", cwd: "cwd" },
+      90,
+    )[0]!
+    expect(line).toContain("Discuss")
     expect(line).toContain("Auto")
     expect(line).not.toContain("Work Mode:")
     expect(line).not.toContain("Permission Mode:")
@@ -359,7 +355,6 @@ describe("8. jalur produksi createCliSession — wiring composition root, G1, & 
       verbose: false,
       allowAll: false,
       ask: false,
-      plan: false,
       allowlist: false,
       verify: false,
       workMode: "EXECUTE",
@@ -370,14 +365,13 @@ describe("8. jalur produksi createCliSession — wiring composition root, G1, & 
       expect(ctx.workMode).toBe("EXECUTE")
       const full = ctx.sessionTools.length
       expect(full).toBeGreaterThan(LOCAL_READONLY_TOOL_NAMES.length)
-      // Transisi operator: tool yang terlihat menyusut tepat ke 16 LOCAL_READONLY_TOOL_NAMES.
+      // Transisi operator: tool yang terlihat menyusut tepat ke 21 tool ceiling DISCUSS.
       ctx.workModeControl!.setWorkMode("DISCUSS")
       expect(ctx.workModeControl!.getWorkMode()).toBe("DISCUSS")
       expect(ctx.workMode).toBe("DISCUSS")
-      expect(ctx.sessionTools).toHaveLength(16)
-      for (const n of ctx.sessionTools.map((t) => t.name)) {
-        expect(LOCAL_READONLY_TOOL_NAMES).toContain(n)
-      }
+      expect(ctx.sessionTools).toHaveLength(21)
+      expect(ctx.sessionTools.map((t) => t.name)).toContain("todo_write")
+      expect(ctx.sessionTools.map((t) => t.name)).not.toContain("write_file")
       // Kembali ke EXECUTE: daftar penuh kembali.
       ctx.workModeControl!.setWorkMode("EXECUTE")
       expect(ctx.sessionTools.length).toBe(full)
@@ -426,7 +420,6 @@ describe("8. jalur produksi createCliSession — wiring composition root, G1, & 
       verbose: false,
       allowAll: false,
       ask: false,
-      plan: false,
       allowlist: false,
       verify: false,
       workMode: "DISCUSS",
@@ -451,7 +444,7 @@ describe("8. jalur produksi createCliSession — wiring composition root, G1, & 
     }
   })
 
-  test("G-MEM-TRACK tertutup: read_memory pada DISCUSS × auto dan PLAN × auto TIDAK menaikkan access_count di SQLite", async () => {
+  test("G-MEM-TRACK tertutup: read_memory pada DISCUSS × auto TIDAK menaikkan access_count di SQLite", async () => {
     const { Database } = await import("bun:sqlite")
     const { mkdirSync, writeFileSync } = await import("node:fs")
     const { addMemory, tripEmbeddingCircuitForTest } = await import("../src/memory/vector.ts")
@@ -470,8 +463,6 @@ describe("8. jalur produksi createCliSession — wiring composition root, G1, & 
     const provider = startFakeProvider([
       { kind: "tool", id: "m1", name: "read_memory", args: { query: "rahasia" } },
       { kind: "text", text: "dibaca di DISCUSS" },
-      { kind: "tool", id: "m2", name: "read_memory", args: { query: "rahasia" } },
-      { kind: "text", text: "dibaca di PLAN" },
       { kind: "tool", id: "m3", name: "read_memory", args: { query: "rahasia" } },
       { kind: "text", text: "dibaca di EXECUTE" },
     ])
@@ -505,7 +496,6 @@ describe("8. jalur produksi createCliSession — wiring composition root, G1, & 
       verbose: false,
       allowAll: false,
       ask: false,
-      plan: false,
       allowlist: false,
       verify: false,
       workMode: "DISCUSS",
@@ -514,10 +504,6 @@ describe("8. jalur produksi createCliSession — wiring composition root, G1, & 
     try {
       expect(readAccessCount()).toBe(0)
       await ctx.runPromptWithVerify("cari di DISCUSS")
-      expect(readAccessCount()).toBe(0)
-
-      ctx.workModeControl!.setWorkMode("PLAN")
-      await ctx.runPromptWithVerify("cari di PLAN")
       expect(readAccessCount()).toBe(0)
 
       ctx.workModeControl!.setWorkMode("EXECUTE")
@@ -571,23 +557,7 @@ describe("7. command /work-mode (TUI end-to-end)", () => {
     } as unknown as CliSession
   }
 
-  test("/work-mode PLAN mengubah WorkMode aktif; footer ikut berubah", async () => {
-    const control = makeControl("EXECUTE")
-    tty = installFakeTty({ columns: 80, rows: 24 })
-    const runP = runTui(fakeSession(control))
-    await tty.ready()
-    await tty.waitForOutput((o) => o.includes("00.00.00"))
-    await tty.send("/work-mode PLAN")
-    await tty.send(KEY.enter)
-    await tty.waitForOutput(() => /Plan/.test(stripAnsi(tty!.screen().join("\n"))))
-    expect(control.getWorkMode()).toBe("PLAN")
-    expect(stripAnsi(tty.screen().join("\n"))).toMatch(/Plan/)
-    await tty.send("/exit")
-    await tty.send(KEY.enter)
-    await runP
-  })
-
-  test("/work-mode DISCUSS dan BUILD mengubah WorkMode aktif", async () => {
+  test("/work-mode DISCUSS dan BUILD mengubah WorkMode aktif; footer ikut berubah", async () => {
     const control = makeControl("EXECUTE")
     tty = installFakeTty({ columns: 80, rows: 24 })
     const runP = runTui(fakeSession(control))
@@ -595,10 +565,12 @@ describe("7. command /work-mode (TUI end-to-end)", () => {
     await tty.waitForOutput((o) => o.includes("00.00.00"))
     await tty.send("/work-mode DISCUSS")
     await tty.send(KEY.enter)
-    await tty.waitForOutput(() => /Discuss/.test(stripAnsi(tty!.screen().join("\n"))))
+    // Toast /work-mode menutupi baris footer selama 2000ms; beri margin 4000ms
+    // agar tidak balapan dengan batas waktu waitForOutput saat beban penuh.
+    await tty.waitForOutput(() => /Discuss/.test(stripAnsi(tty!.screen().join("\n"))), 4000)
     expect(control.getWorkMode()).toBe("DISCUSS")
     expect(stripAnsi(tty.screen().join("\n"))).toMatch(/Discuss/)
-    // BUILD alias diterima → identitas internal EXECUTE, ditampil BUILD.
+    // BUILD diterima → identitas internal EXECUTE, ditampil Build.
     await tty.send("/work-mode BUILD")
     await tty.send(KEY.enter)
     await tty.waitForOutput(() => control.getWorkMode() === "EXECUTE")
@@ -608,56 +580,85 @@ describe("7. command /work-mode (TUI end-to-end)", () => {
     await runP
   })
 
-  test("input invalid: pesan error, WorkMode TIDAK berubah", async () => {
-    const control = makeControl("PLAN")
+  test("/undo dan /redo ditolak saat WorkMode DISCUSS (Temuan #10)", async () => {
+    const control = makeControl("DISCUSS")
     tty = installFakeTty({ columns: 80, rows: 24 })
     const runP = runTui(fakeSession(control))
     await tty.ready()
     await tty.waitForOutput((o) => o.includes("00.00.00"))
-    await tty.send("/work-mode BOGUS")
+    await tty.send("/undo")
+    await tty.send(KEY.enter)
+    await tty.waitForOutput((o) => o.includes("undo/redo unavailable in DISCUSS mode"))
+    await tty.send("/exit")
+    await tty.send(KEY.enter)
+    await runP
+  })
+
+  test("/unrestric state machine: /mode ask atau Shift+Tab saat unrestricted memulihkan WorkMode semula (Temuan #3)", async () => {
+    const control = makeControl("DISCUSS")
+    tty = installFakeTty({ columns: 80, rows: 24 })
+    const runP = runTui(fakeSession(control))
+    await tty.ready()
+    await tty.waitForOutput((o) => o.includes("00.00.00"))
+    await tty.send("/unrestric on")
+    await tty.send(KEY.enter)
+    await tty.waitForOutput(() => control.getWorkMode() === "EXECUTE")
+    expect(control.getWorkMode()).toBe("EXECUTE")
+    await tty.send("/mode ask")
+    await tty.send(KEY.enter)
+    await tty.waitForOutput(() => control.getWorkMode() === "DISCUSS")
+    expect(control.getWorkMode()).toBe("DISCUSS")
+    await tty.send("/exit")
+    await tty.send(KEY.enter)
+    await runP
+  })
+
+  test("input invalid (termasuk PLAN): pesan error, WorkMode TIDAK berubah", async () => {
+    const control = makeControl("DISCUSS")
+    tty = installFakeTty({ columns: 80, rows: 24 })
+    const runP = runTui(fakeSession(control))
+    await tty.ready()
+    await tty.waitForOutput((o) => o.includes("00.00.00"))
+    await tty.send("/work-mode PLAN")
     await tty.send(KEY.enter)
     await tty.waitForOutput((o) => o.includes("unknown work mode"))
-    expect(control.getWorkMode()).toBe("PLAN")
+    expect(control.getWorkMode()).toBe("DISCUSS")
     await tty.send("/exit")
     await tty.send(KEY.enter)
     await runP
   })
 
   test("tanpa argumen: tampilkan mode aktif + pemakaian", async () => {
-    const control = makeControl("PLAN")
+    const control = makeControl("DISCUSS")
     tty = installFakeTty({ columns: 80, rows: 24 })
     const runP = runTui(fakeSession(control))
     await tty.ready()
     await tty.waitForOutput((o) => o.includes("00.00.00"))
     await tty.send("/work-mode")
     await tty.send(KEY.enter)
-    await tty.waitForOutput((o) => o.includes("/work-mode <DISCUSS|PLAN|BUILD>"))
-    expect(control.getWorkMode()).toBe("PLAN")
+    await tty.waitForOutput((o) => o.includes("/work-mode <DISCUSS|BUILD>"))
+    expect(control.getWorkMode()).toBe("DISCUSS")
     await tty.send("/exit")
     await tty.send(KEY.enter)
     await runP
   })
 
   test("/mode = PermissionMode (AUTO/ASK), tak mengubah WorkMode; Shift+Tab = toggle", async () => {
-    const control = makeControl("PLAN")
+    const control = makeControl("DISCUSS")
     tty = installFakeTty({ columns: 80, rows: 24 })
     const runP = runTui(fakeSession(control))
     await tty.ready()
     await tty.waitForOutput((o) => o.includes("00.00.00"))
-    // /mode = permission mode (AUTO/ASK saja; nilai lain "unknown mode").
     await tty.send("/mode ask")
     await tty.send(KEY.enter)
     await tty.waitForOutput(() => /Ask/.test(stripAnsi(tty!.screen().join("\n"))))
-    expect(control.getWorkMode()).toBe("PLAN")
-    // Nilai legacy (readonly) tak lagi diterima sebagai permission mode.
+    expect(control.getWorkMode()).toBe("DISCUSS")
     await tty.send("/mode readonly")
     await tty.send(KEY.enter)
     await tty.waitForOutput((o) => o.includes("unknown mode"))
-    expect(control.getWorkMode()).toBe("PLAN")
-    // Shift+Tab = toggle PermissionMode (WorkMode tak ikut; no crash walau
-    // session fixture tanpa permissions control).
+    expect(control.getWorkMode()).toBe("DISCUSS")
     await tty.send(KEY.shiftTab)
-    expect(control.getWorkMode()).toBe("PLAN")
+    expect(control.getWorkMode()).toBe("DISCUSS")
     await tty.send("/exit")
     await tty.send(KEY.enter)
     await runP

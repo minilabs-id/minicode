@@ -62,7 +62,6 @@ async function openSession(sessionId: string, schedulerEnabled: boolean): Promis
     verbose: false,
     allowAll: false,
     ask: false,
-    plan: false,
     allowlist: false,
     verify: false,
     schedulerEnabled,

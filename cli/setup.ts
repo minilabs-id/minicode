@@ -295,7 +295,6 @@ export interface CliSessionOptions {
    * konsumen Desktop yang mengusulkan keputusan lewat op `approval.decide`.
    */
   permissionAsk?: PermissionAsk
-  plan: boolean
   allowlist: boolean
   verify: boolean
   /** Audit #07 P0 opt-in: baca .minicode/config.json + allowlist lokal.
@@ -308,13 +307,13 @@ export interface CliSessionOptions {
   /** Harness-P2: scope tool sesi — explore = subset read-only. */
   toolScope?: "full" | "explore"
   /**
-   * WorkMode (lapis intent di atas profil izin). Default DISCUSS = read-only;
-   * PLAN = ceiling
-   * rencana (explore + tool rencana). TIDAK pernah memperluas permission mode
+   * WorkMode (lapis intent 2-mode di atas profil izin). Default DISCUSS =
+   * ceiling read-only/investigasi/diskusi/rencana; EXECUTE (UI: BUILD) =
+   * eksekusi penuh sesuai profil izin. TIDAK pernah memperluas permission mode
    * (INV-WM1). Diisi CLI dari --work-mode / MINICODE_WORK_MODE; diserahkan ke
    * setupToolLayer (visibilitas) dan createMinicodeSession (handler ceiling).
    */
-  workMode?: "DISCUSS" | "PLAN" | "EXECUTE"
+  workMode?: "DISCUSS" | "EXECUTE"
   /**
    * Transparansi resume. Benar bila operator memberi sinyal WorkMode eksplisit
    * (--work-mode / MINICODE_WORK_MODE). Saat resume tanpa sinyal eksplisit,
@@ -415,7 +414,7 @@ export interface CliSession {
   permissionMode: string
   /** WorkMode efektif sesi ini (default DISCUSS). Dipakai label/
    * readout TUI; diisi composition root dari flag/env. */
-  workMode: "DISCUSS" | "PLAN" | "EXECUTE"
+  workMode: "DISCUSS" | "EXECUTE"
   /** P12 S2.2 Slice 5 — handle kontrol WorkMode runtime (transisi operator
    * lewat command `/work-mode`). Undefined bila sesi memakai handler izin
    * terinjeksi (policy, bukan mode — fail-closed). */
@@ -913,7 +912,6 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     verbose,
     allowAll,
     ask,
-    plan,
     allowlist,
     verify,
     budget,
@@ -1024,22 +1022,12 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     )
   }
   // P0.2 (Q5): saat `--resume` tanpa sinyal WorkMode eksplisit, pulihkan
-  // WorkMode tersimpan dari metadata sesi (NULL legacy → default DISCUSS).
-  //
-  // [mode-architecture] --plan = alias warisan WorkMode PLAN (bukan permission
-  // mode). Dilipat di sini (satu titik untuk semua pemanggil: index/exec/acp).
+  // WorkMode tersimpan dari metadata sesi (NULL/PLAN legacy → default DISCUSS).
   const persistedWorkMode = identity.resumed ? loadSessionWorkMode(sessionId, cwd) : undefined
-  const planAsWorkMode =
-    plan && !workModeExplicit && workMode === "DISCUSS" ? ("PLAN" as const) : workMode
-  if (plan && !workModeExplicit && workMode === "DISCUSS") {
-    startupWrite(`${c.dim("[deprecated] --plan is now WorkMode PLAN; use --work-mode PLAN\n")}`)
-  }
-  const effectiveWorkMode: "DISCUSS" | "PLAN" | "EXECUTE" =
-    identity.resumed && !workModeExplicit && !plan
-      ? (persistedWorkMode ?? "DISCUSS")
-      : planAsWorkMode
+  const effectiveWorkMode: "DISCUSS" | "EXECUTE" =
+    identity.resumed && !workModeExplicit ? (persistedWorkMode ?? "DISCUSS") : workMode
   // P0.2 (Q4): tolak startup (fail-closed) bila `--verify` digabung dengan
-  // WorkMode DISCUSS atau PLAN (baik dari flag/env maupun pulihan `--resume`).
+  // WorkMode DISCUSS (baik dari flag/env maupun pulihan `--resume`).
   if (verify && effectiveWorkMode !== "EXECUTE") {
     releaseSessionWriter(sessionId, writerToken, cwd)
     throw new VerifyWorkModeConflictError(effectiveWorkMode)
@@ -1245,7 +1233,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     const notice = localConfigNotice(cwd ?? process.cwd(), allowLocalConfig === true)
     if (notice) startupWrite(`${c.dim(notice)}\n`)
   } catch {}
-  if (sandboxNotice && !plan) startupWrite(`${sandboxNotice}\n`)
+  if (sandboxNotice) startupWrite(`${sandboxNotice}\n`)
   // Default model = terakhir dipakai (global), bila tanpa --model dan masih
   // ada di config. Flag selalu menang; tak ada simpanan = provider pertama.
   if (!modelRef.current) {
@@ -1356,8 +1344,8 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     // otoritas sesi hasil resume selalu terlihat eksplisit.
     const resumeNotice = !workModeExplicit
       ? persistedWorkMode !== undefined
-        ? `[resume] WorkMode ${effectiveWorkMode === "EXECUTE" ? "BUILD" : effectiveWorkMode} restored from session; pass --work-mode DISCUSS|PLAN|BUILD to override\n`
-        : `[resume] WorkMode default DISCUSS (legacy session without saved workMode); pass --work-mode PLAN|BUILD to change\n`
+        ? `[resume] WorkMode ${effectiveWorkMode === "EXECUTE" ? "BUILD" : effectiveWorkMode} restored from session; pass --work-mode DISCUSS|BUILD to override\n`
+        : `[resume] WorkMode default DISCUSS (legacy session without saved workMode); pass --work-mode BUILD to change\n`
       : persistedWorkMode !== undefined && persistedWorkMode !== effectiveWorkMode
         ? `[resume] WorkMode ${effectiveWorkMode === "EXECUTE" ? "BUILD" : effectiveWorkMode} (overriding saved ${persistedWorkMode === "EXECUTE" ? "BUILD" : persistedWorkMode})\n`
         : ""
@@ -2008,6 +1996,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       // (daemon → ApprovalBroker). Tanpa injeksi tetap prompt TTY; non-TTY ⇒
       // deny (fail-closed), bukan izin diam-diam.
       ask: opts.permissionAsk ?? promptAsk,
+      allowNonTtyAsk: opts.permissionAsk !== undefined,
       // Cermin observability persetujuan → adaptor presentasi. Keputusan gate
       // tetap milik permission handler; hook ini hanya melaporkan.
       onApprovalEvent: (e) => {
@@ -2299,6 +2288,14 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   }
 
   session.events.on("turn:started", () => {
+    // Temuan #10: hanya rekam git snapshot sebelum turn ketika sesi dalam mode
+    // eksekusi penuh (BUILD / EXECUTE) dan bukan mode izin read-only/plan.
+    const liveWm = workModeControl?.getWorkMode() ?? effectiveWorkMode
+    const livePm = permissions?.getMode() ?? permissionMode
+    if (liveWm !== "EXECUTE" || livePm === "readonly" || livePm === "plan") {
+      preTurnPromise = null
+      return
+    }
     preTurnPromise = beginTurnSnapshot(sessionId, cwd ?? ".")
   })
   session.events.on("execution:completed", (e) => {
@@ -3095,14 +3092,15 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     const verifyRunnableNow =
       verifyActive && liveWm === "EXECUTE" && livePm !== "readonly" && livePm !== "plan"
     if (!verifyRunnableNow) {
-      // P0.2 (Q4 / Invariant #8): bila operator menurunkan WorkMode ke DISCUSS/
-      // PLAN (atau PM ke readonly/plan) di tengah sesi TUI, lewati baseline
+      // P0.2 (Q4 / Invariant #8): bila operator menurunkan WorkMode ke DISCUSS
+      // (atau PM ke readonly/plan) di tengah sesi TUI, lewati baseline
       // shell verify, self-heal, dan auto-memory write secara otomatis.
       if (verifyActive && !verifySkippedNotice) {
         verifySkippedNotice = true
         const modeLabel = liveWm !== "EXECUTE" ? `work-mode ${liveWm}` : `${livePm} mode`
         warnLine(`verify skipped in ${modeLabel} (read-only contract)`)
       }
+      await runHooksGated("pre", { phase: "pre", prompt: p, cwd }, signal)
       await runOnce(p, signal)
       await runHooksGated(
         "post",
@@ -3111,6 +3109,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       )
       return
     }
+    await runHooksGated("pre", { phase: "pre", prompt: p, cwd }, signal)
     // P2.1 — baseline-first: bila baseline sudah merah sebelum agen menyentuh
     // apa pun, tempelkan catatan agar agen memperbaiki dulu, bukan menumpuk
     // fitur di atas baseline rusak (yang hanya memperparah keadaan).

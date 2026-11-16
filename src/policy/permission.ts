@@ -576,10 +576,13 @@ export function createPermissionHandler(
      * permission tetap `auto`/`ask`; ini hanya lapis kapabilitas bash.
      */
     restrictBash?: boolean
+    /** Izinkan callback `ask` non-TTY (mis. `ApprovalBroker` daemon) untuk tool gated. */
+    allowNonTtyAsk?: boolean
   } = {},
 ): PermissionHandler {
   const state = { mode: (opts.mode ?? "auto") as PermissionMode }
   const restrictBash = opts.restrictBash === true
+  const allowNonTtyAsk = opts.allowNonTtyAsk === true
   const root = resolve(opts.root ?? cwd())
   const approvalBindings = opts.approvalBindings
   const askUser = opts.ask
@@ -841,10 +844,12 @@ export function createPermissionHandler(
       const signal = (_deps as { signal?: AbortSignal } | null | undefined)?.signal
       if (signal?.aborted) return "deny"
 
-      // `unrestricted` = full akses: DILEWATI SEBELUM jail/owned-state/bash-guard.
-      // Operator mengaktifkannya eksplisit (/unrestric, per-sesi). Ini satu-satunya
-      // jalur yang menonaktifkan defense-in-depth — hard guard lain tak tersentuh.
-      if (state.mode === "unrestricted") return "allow"
+      // `unrestricted` = full akses di EXECUTE. Saat dipanggil dari ceiling
+      // DISCUSS (`enforceJail = true`), jail path/sensitive tetap ditegakkan
+      // sebelum mengizinkan operasi baca di dalam workspace (INV-WM1).
+      const enforceJail =
+        (_deps as { enforceJail?: boolean } | null | undefined)?.enforceJail === true
+      if (state.mode === "unrestricted" && !enforceJail) return "allow"
 
       // universal file-path jail — harus sebelum allow-all (defense-in-depth)
       // realpath-based: symlink keluar workspace tetap tertangkap walau --allow-all
@@ -951,6 +956,7 @@ export function createPermissionHandler(
       }
 
       const mode = state.mode
+      if (mode === "unrestricted") return "allow"
       if (mode === "allow-all") {
         // allow-all tetap menolak bash berbahaya — izin penuh bukan berarti
         // mengizinkan `rm -rf /` atau fork bomb. Yang dicek di sini FULL
@@ -1041,7 +1047,8 @@ export function createPermissionHandler(
     ask: PermissionAsk | undefined,
     requireTTY: boolean,
   ): Promise<GatedAnswer> {
-    const headless = signal?.aborted === true || !ask || (requireTTY && !process.stdin.isTTY)
+    const ttyReady = allowNonTtyAsk || Boolean(process.stdin.isTTY)
+    const headless = signal?.aborted === true || !ask || (requireTTY && !ttyReady)
     const approvalId = `ap_${++approvalCounter}`
     const callInfo = { id: call.id, name: call.name, args: call.args }
     // F-APPROVAL-1: tier risiko efek samping dari kontrak tool — absen/kontrak
@@ -1121,7 +1128,7 @@ export function createPermissionHandler(
             ? "parent-aborted"
             : !ask
               ? "no-ask"
-              : requireTTY && !process.stdin.isTTY
+              : requireTTY && !ttyReady
                 ? "headless"
                 : "no-ask",
         },
@@ -1189,7 +1196,7 @@ export function createPermissionHandler(
     // requested+settled ter-emit (observability Fase 1); keputusan deny
     // dipetakan pemanggil seperti early-return noTty lama. TTY wajib di
     // jalur GATED (requireTTY=true) — pola lama promptAskOr.
-    if (!askUser || !process.stdin.isTTY) {
+    if (!askUser || (!allowNonTtyAsk && !process.stdin.isTTY)) {
       await gatedPrompt(call, signal, askUser, true)
       return noTty()
     }

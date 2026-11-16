@@ -28,9 +28,11 @@ import {
   displayWorkMode,
   flagsAfterPromptBoundary,
   hasFlag,
+  parseRuntimeNumericFlags,
   promptFromArgs,
   getArg as rawGetArg,
   readPrompt,
+  resolveToolScope,
   resolveWorkModeFlag,
 } from "./args.ts"
 import { dispatch } from "./router.ts"
@@ -116,7 +118,6 @@ Options:
   --session <id>      session id (default random)
   --allow-all         allow all tools (privileged access profile; hard jail/guard still apply)
   --ask               ask per tool (y/n/a) — human-supervised execution
-  --plan              deprecated: alias for --work-mode PLAN (read-only planning)
   --allowlist         bash allowlist only (see MINICODE_BASH_ALLOWLIST)
   --max-steps <n>     max tool steps (default 50)
   --context-window <n> context window tokens
@@ -128,8 +129,8 @@ Options:
   --budget <usd>      session cost limit
   --budget-strict     unknown cost + spend counts as over budget (fail-closed default)
   --tool-scope <s>    full (default) | explore (read-only subset)
-  --work-mode <m>     DISCUSS | PLAN | BUILD (default: DISCUSS). Operating mode: DISCUSS =
-                      read-only investigation, PLAN = planning, BUILD = implementation.
+  --work-mode <m>     DISCUSS | BUILD (default: DISCUSS). Operating mode: DISCUSS =
+                      read-only investigation, discussion & planning, BUILD = implementation.
   --tui               deprecated no-op (interactive mode is always the fullscreen TUI)
   --enable-scheduler  EXPERIMENTAL: opt in to the autonomous scheduler (default: off).
                       Manual only - run /scheduler run. No timer; autonomous turns are
@@ -140,7 +141,7 @@ Options:
                       admitted through the runtime (kernel + durable journal); a rejected
                       admission runs nothing. Unknown value = off.
 
-TUI: /help /provider /model /sync /status /sessions /init /exit /mode /work-mode /undo /redo /clear /copy /history /compact /thinking /minimize
+TUI: /help /provider /model /context /sync /status /sessions /init /exit /mode /work-mode /undo /redo /clear /copy /history /compact /thinking /expand /minimize /fold /lang /scheduler
 Keys: Enter submit · Tab work-mode · Shift+Tab permission · Up/Down history · Mouse wheel/PgUp/PgDn scroll (Shift = half page)
       Home/End jump to transcript top/tail · Ctrl+R search · Esc abort turn (twice = quit) · Ctrl+D exit
 Subcommand flags (config/mcp/sessions/skills/exec/...): see 'minicode <cmd> --help'.
@@ -316,7 +317,6 @@ if (args.includes("-h") || args.includes("--help")) {
           },
           { flag: "--allow-all", desc: "allow all tools (privileged access profile)" },
           { flag: "--ask", desc: "ask per tool (human-supervised)" },
-          { flag: "--plan", desc: "deprecated: alias for --work-mode PLAN" },
           { flag: "--allowlist", desc: "bash allowlist only" },
           { flag: "--interactive", desc: "interactive TUI" },
           { flag: "--verify", desc: "auto-verify + self-heal" },
@@ -326,8 +326,8 @@ if (args.includes("-h") || args.includes("--help")) {
           { flag: "--budget-strict", desc: "unknown cost + spend counts as over budget (default)" },
           { flag: "--tool-scope <full|explore>", desc: "tool subset (explore = read-only)" },
           {
-            flag: "--work-mode <DISCUSS|PLAN|BUILD>",
-            desc: "operating mode: DISCUSS (default, read-only), PLAN (planning), BUILD",
+            flag: "--work-mode <DISCUSS|BUILD>",
+            desc: "operating mode: DISCUSS (default, read-only), BUILD",
           },
           { flag: "--json", desc: "JSON output (help/exec)" },
           { flag: "--tui", desc: "deprecated no-op (interactive is always the fullscreen TUI)" },
@@ -345,7 +345,6 @@ const verbose = hasFlag(args, "--verbose")
 const allowAll = hasFlag(args, "--allow-all")
 const ask = hasFlag(args, "--ask")
 const interactive = hasFlag(args, "--interactive")
-const plan = hasFlag(args, "--plan") || process.env.MINICODE_PLAN === "1"
 const allowlist = hasFlag(args, "--allowlist") || process.env.MINICODE_PERMISSION === "allowlist"
 // [mode-architecture] Deprecation notice utk profil warisan — jangan dihapus
 // diam-diam; peta kompatibilitas di MODE_ARCHITECTURE_MIGRATION_REPORT.
@@ -364,9 +363,8 @@ const cwd = cwdRaw ? resolvePath(cwdRaw) : undefined
 // eksplisit per-invokasi (flag atau env). Tanpa ini repo clone-an bisa
 // men-spawn MCP server dan menyedot prompt ke endpoint penyerang.
 const allowLocal = allowLocalConfig(args)
-// WorkMode (lapis intent di atas profil izin). Flag mengalahkan env;
+// WorkMode (lapis intent 2-mode di atas profil izin). Flag mengalahkan env;
 // keduanya tak ada atau nilainya tak dikenal = DISCUSS (fail-closed).
-// `--plan` adalah alias legacy untuk WorkMode PLAN.
 const workModeResolved = resolveWorkModeFlag(getArg)
 const workMode = workModeResolved.workMode
 // Sinyal WorkMode eksplisit (flag/env) ikut diteruskan agar resume dapat
@@ -421,30 +419,18 @@ const adoptTask = adoptTaskParsed ?? undefined
 const bootId = mintSessionId()
 const modelOverride = getArg("--model")
 const providerOverride = getArg("--provider")
-const maxStepsRaw = getArg("--max-steps")
-let maxSteps = maxStepsRaw ? Number(maxStepsRaw) : undefined
-if (maxStepsRaw && (!Number.isFinite(maxSteps) || (maxSteps as number) <= 0)) {
-  process.stderr.write(`[warn] --max-steps requires a positive number, ignoring "${maxStepsRaw}"\n`)
-  maxSteps = undefined
+const warnStderr = (msg: string): void => {
+  process.stderr.write(msg)
 }
+const { maxSteps, contextWindowTokens, timeoutMs, budget, ratelimitRpm } = parseRuntimeNumericFlags(
+  getArg,
+  warnStderr,
+)
 // `--tui` alias usang (TUI fullscreen kini satu-satunya tampilan interaktif):
 // tetap diterima agar skrip lama tak pecah, tapi TIDAK diam — tanpa peringatan
 // user mengira flag-nya masih mengubah perilaku.
 if (args.includes("--tui")) {
-  process.stderr.write(
-    "[deprecated] --tui is a no-op: interactive mode is always the fullscreen TUI\n",
-  )
-}
-const ctxWindowRaw = getArg("--context-window")
-let contextWindowTokens = ctxWindowRaw ? Number(ctxWindowRaw) : undefined
-if (
-  ctxWindowRaw &&
-  (!Number.isFinite(contextWindowTokens) || (contextWindowTokens as number) <= 0)
-) {
-  process.stderr.write(
-    `[warn] --context-window requires a positive number, ignoring "${ctxWindowRaw}"\n`,
-  )
-  contextWindowTokens = undefined
+  warnStderr("[deprecated] --tui is a no-op: interactive mode is always the fullscreen TUI\n")
 }
 // F3.2: override keepRecentTurns kompaksi kernel via env (bukan flag: jarang
 // diubah, dan permukaan flag CLI sengaja kecil). Selain bilangan >=1 =
@@ -452,23 +438,15 @@ if (
 const keepTurnsRaw = (process.env.MINICODE_COMPACT_KEEP_TURNS ?? "").trim()
 const keepRecentTurns = parseCompactKeepTurns(keepTurnsRaw || undefined)
 if (keepTurnsRaw && keepRecentTurns === undefined)
-  process.stderr.write(
+  warnStderr(
     `[warn] MINICODE_COMPACT_KEEP_TURNS requires an integer >= 1, ignoring "${keepTurnsRaw}"\n`,
   )
-const timeoutRaw = getArg("--timeout")
-let timeoutMs = timeoutRaw ? Number(timeoutRaw) : undefined
-if (timeoutRaw && (!Number.isFinite(timeoutMs) || (timeoutMs as number) < 0)) {
-  process.stderr.write(
-    `[warn] --timeout requires a non-negative number, ignoring "${timeoutRaw}"\n`,
-  )
-  timeoutMs = undefined
-}
 
 // Sandbox: OS-native dipakai otomatis bila tersedia. Bila tidak ada isolasi
 // nyata dan user belum memilih mode permission sendiri, default diturunkan ke
 // `allowlist` — lebih baik membatasi perintah daripada menjalankan apa pun
 // sambil menampilkan label aman. Lihat src/policy/sandbox-policy.ts.
-const explicitPermission = allowAll || ask || plan || allowlist
+const explicitPermission = allowAll || ask || allowlist
 const requestedSandbox = getArg("--sandbox") ?? process.env.MINICODE_SANDBOX
 // F-03: permintaan sandbox EKSPLISIT tanpa backend = tolak sebelum jalan
 // (fail-closed). resolveSandbox di bawah tetap menghitung downgrade allowlist
@@ -485,29 +463,11 @@ else process.env.MINICODE_SANDBOX = sandbox.mode
 // mode tak dikenal). Notice rutin disembunyikan: mode terlihat di prefiks.
 // Cetaknya di setup, setelah provider layer lolos.
 const effectiveAllowlist = allowlist || sandbox.fallbackPermission === "allowlist"
-const budgetRaw = getArg("--budget")
-let budget = budgetRaw ? Number(budgetRaw) : undefined
-if (budgetRaw && (!Number.isFinite(budget) || (budget as number) < 0)) {
-  process.stderr.write(`[warn] --budget requires a USD number, ignoring "${budgetRaw}"\n`)
-  budget = undefined
-}
 // Harness-P1: strict lewat flag ATAU env (simetri dengan MINICODE_SANDBOX_STRICT).
 const budgetStrict = hasFlag(args, "--budget-strict") || process.env.MINICODE_BUDGET_STRICT === "1"
 // Harness-P2: scope tool sesi; nilai selain explore jatuh ke full (eksplisit di bawah).
-const toolScopeRaw = (getArg("--tool-scope") ?? process.env.MINICODE_TOOL_SCOPE ?? "").toLowerCase()
-const toolScope = toolScopeRaw === "explore" ? ("explore" as const) : ("full" as const)
-const ratelimitRaw = getArg("--ratelimit")
-let rateLimiter: ReturnType<typeof createRateLimiter> | undefined
-if (ratelimitRaw) {
-  const rpm = Number(ratelimitRaw)
-  if (!Number.isFinite(rpm) || rpm <= 0) {
-    process.stderr.write(
-      `[warn] --ratelimit requires a positive number, ignoring "${ratelimitRaw}"\n`,
-    )
-  } else {
-    rateLimiter = createRateLimiter(rpm)
-  }
-}
+const toolScope = resolveToolScope(getArg)
+const rateLimiter = ratelimitRpm !== undefined ? createRateLimiter(ratelimitRpm) : undefined
 
 const prompt = promptFromArgs(args) || (await readPrompt())
 // [Live Hardening 0.13.x §8.3] Flag dikenal yang muncul SETELAH prompt boundary
@@ -632,7 +592,6 @@ try {
     verbose,
     allowAll,
     ask,
-    plan,
     allowlist: effectiveAllowlist,
     verify,
     allowLocalConfig: allowLocal,
@@ -731,12 +690,7 @@ if (enterRepl) {
   // efektif (termasuk hasil pulihan `--resume`).
   if (ctx.workMode !== "EXECUTE" || workModeExplicit) {
     const workModeLabel = displayWorkMode(ctx.workMode)
-    const modeNote =
-      ctx.workMode === "PLAN"
-        ? " (read-only planning)"
-        : ctx.workMode === "DISCUSS"
-          ? " (read-only)"
-          : ""
+    const modeNote = ctx.workMode === "DISCUSS" ? " (read-only)" : ""
     process.stderr.write(`[work-mode] ${workModeLabel}${modeNote}\n`)
   }
   const {
@@ -856,29 +810,4 @@ if (enterRepl) {
   }
   await new Promise((r) => setTimeout(r, 200))
   await close()
-
-  if (ctx.permissionMode === "plan" && process.stdin.isTTY) {
-    const { createInterface } = await import("node:readline")
-    const rl = createInterface({ input: process.stdin, output: process.stdout })
-    const ans = await new Promise<string>((res) =>
-      rl.question(c.yellow("\nProceed to execute this plan? [y/N] "), res),
-    )
-    rl.close()
-    if (ans.trim().toLowerCase() === "y") {
-      const { spawn } = await import("node:child_process")
-      const { waitChildExit } = await import("./auto-update.ts")
-      const entry = process.argv[1] ?? resolvePath(import.meta.dir, "index.ts")
-      const filtered = args.filter((a) => a !== "--plan")
-      const child = spawn(process.execPath, [entry, ...filtered], {
-        stdio: "inherit",
-        env: { ...process.env, MINICODE_PLAN: "0" },
-      })
-      // Tunggu via mekanisme tunggal (exit+close+error): exit saja bisa tak
-      // datang bila anak menahan stdio = induk gantung tanpa prompt.
-      void waitChildExit(child).then((code) => process.exit(code ?? 0))
-      process.stdin.resume()
-    } else {
-      process.exit(0)
-    }
-  }
 }

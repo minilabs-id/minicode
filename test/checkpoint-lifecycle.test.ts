@@ -89,7 +89,6 @@ async function createSession(
     verbose: false,
     allowAll: false,
     ask: false,
-    plan: false,
     allowlist: false,
     verify: false,
     workMode: "EXECUTE",

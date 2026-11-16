@@ -128,42 +128,22 @@ const CORPUS: readonly (readonly [string, Record<string, unknown>])[] = [
   ["mcp_call", { server: "s", tool: "t" }],
 ]
 
-// Di luar READONLY_TOOLS (termasuk tiga ekstra plan) — ceiling DISCUSS harus
-// menolaknya TANPA memanggil handler PM (karena itu prompt tak boleh muncul).
-const OUTSIDE_READONLY: readonly string[] = [
-  "write_file",
-  "edit",
-  "apply_patch",
-  "move_file",
-  "delete_file",
-  "bash",
-  "todo_write",
-  "delegate_task",
-  "submit_result",
-  "write_memory",
-  "forget_memory",
-  "mcp_call",
-  "git_commit",
-  "ask_user",
-  "code_run",
-]
-
 const ARGS: Record<string, Record<string, unknown>> = Object.fromEntries(CORPUS)
 
 // ── Fixture & komposisi ──
 
 describe("S2.1 — fixture & komposisi", () => {
-  test("fixture mencakup 18 sel unik", () => {
-    expect(WORK_MODE_CELLS).toHaveLength(18)
+  test("fixture mencakup 12 sel unik (2 WorkMode × 6 PermissionMode)", () => {
+    expect(WORK_MODE_CELLS).toHaveLength(12)
     const keys = WORK_MODE_CELLS.map((c) => `${c.workMode}|${c.permissionMode}`)
-    expect(new Set(keys).size).toBe(18)
+    expect(new Set(keys).size).toBe(12)
   })
 
   test("factory menolak base tanpa __getMode/__setMode (fail-closed)", () => {
     const bare = { check: async () => "allow" as const }
     expect(() =>
       createWorkModePermissionHandler({
-        workMode: "PLAN",
+        workMode: "DISCUSS",
         base: bare as never,
         root: tmpRoot("nocontrol"),
       }),
@@ -255,9 +235,7 @@ describe("DISCUSS — ceiling read-only lokal (16 tool, tanpa network read)", ()
   }
 
   for (const mode of ALL_MODES) {
-    test(`DISCUSS × ${mode}: tulis & network read deny tanpa prompt; 16 local read allow`, async () => {
-      // TTY + ask capaz-allow: kalau ceiling bocor ke base (mis. ask/auto),
-      // prompt pasti terpanggil — assertion prompts=0 membuktikannya tidak.
+    test(`DISCUSS × ${mode}: tulis deny tanpa prompt; 16 local read allow tanpa prompt`, async () => {
       tty = installFakeTty({ isTTY: true })
       const root = tmpRoot(`discuss-${mode}`)
       let prompts = 0
@@ -265,18 +243,25 @@ describe("DISCUSS — ceiling read-only lokal (16 tool, tanpa network read)", ()
         prompts++
         return "allow"
       })
-      for (const name of OUTSIDE_READONLY) {
+      for (const name of [
+        "write_file",
+        "edit",
+        "apply_patch",
+        "move_file",
+        "delete_file",
+        "bash",
+        "code_run",
+        "write_memory",
+        "forget_memory",
+        "mcp_call",
+        "git_commit",
+        "ask_user",
+      ]) {
         const c = call(`disc-${mode}-${name}`, name, ARGS[name] ?? {})
         expect(await h.check(c, {} as never)).toBe("deny")
       }
-      // Q2=A2: web_fetch & web_search DITOLAK di DISCUSS pada seluruh 6 PM tanpa prompt.
-      for (const net of NETWORK_READ_TOOL_NAMES) {
-        const c = call(`disc-net-${mode}-${net}`, net, { url: "https://example.com", query: "x" })
-        expect(await h.check(c, {} as never)).toBe("deny")
-        expect(h.describeDenial(c)).toBe("work-mode DISCUSS: network read disabled")
-      }
       expect(prompts).toBe(0)
-      // Q1=A1: Ke-16 LOCAL_READONLY_TOOL_NAMES diizinkan tanpa prompt di seluruh 6 PM.
+      // Ke-16 LOCAL_READONLY_TOOL_NAMES diizinkan tanpa prompt di seluruh 6 PM.
       expect(LOCAL_READONLY_TOOL_NAMES).toHaveLength(16)
       for (const name of LOCAL_READONLY_TOOL_NAMES) {
         expect(
@@ -302,7 +287,7 @@ describe("DISCUSS — ceiling read-only lokal (16 tool, tanpa network read)", ()
   })
 })
 
-// ── Requirement 3: PLAN menolak di luar ceiling plan ──
+// ── Requirement 3: DISCUSS menolak di luar ceiling plan/readonly ──
 
 const OUTSIDE_PLAN: readonly string[] = [
   "write_file",
@@ -319,12 +304,12 @@ const OUTSIDE_PLAN: readonly string[] = [
   "ask_user",
 ]
 
-describe("PLAN — ceiling plan vs read-only", () => {
-  test("PLAN × auto: di luar ceiling plan ditolak (tanpa menyentuh base)", async () => {
+describe("DISCUSS — ceiling plan vs read-only", () => {
+  test("DISCUSS × auto: di luar ceiling plan ditolak (tanpa menyentuh base)", async () => {
     tty = installFakeTty({ isTTY: true })
     const root = tmpRoot("plan-auto-out")
     let prompts = 0
-    const h = wrap("auto", "PLAN", root, async () => {
+    const h = wrap("auto", "DISCUSS", root, async () => {
       prompts++
       return "allow"
     })
@@ -339,13 +324,11 @@ describe("PLAN — ceiling plan vs read-only", () => {
     ).toBe("allow")
   })
 
-  test("PLAN × plan & allow-all: ekstra plan tetap ada; bash di luar ceiling", async () => {
+  test("DISCUSS × plan & allow-all: ekstra plan tetap ada; bash di luar ceiling", async () => {
     for (const mode of ["plan", "allow-all"] as const) {
       const root = tmpRoot(`plan-native-${mode}`)
       let prompts = 0
-      // TTY + ask allow: bukti ekstra plan tidak memicu prompt (plan/allow-all
-      // memang tak pernah prompt; ini kontrol negatif).
-      const h = wrap(mode, "PLAN", root, async () => {
+      const h = wrap(mode, "DISCUSS", root, async () => {
         prompts++
         return "allow"
       })
@@ -355,36 +338,32 @@ describe("PLAN — ceiling plan vs read-only", () => {
         ).toBe("allow")
       }
       expect(prompts).toBe(0)
-      // Bash tetap di luar ceiling plan (tidak sampai ke base).
       const bash = call(`plan-native-${mode}-bash`, "bash", { cmd: "echo hi" })
       expect(await h.check(bash, {} as never)).toBe("deny")
       expect(h.describeDenial(bash)).toBe("plan mode")
     }
   })
 
-  test("PLAN × plan & allow-all: jail independen tetap menahan baca luar root", async () => {
+  test("DISCUSS × plan & allow-all: jail independen tetap menahan baca luar root", async () => {
     for (const mode of ["plan", "allow-all"] as const) {
       const root = tmpRoot(`plan-jail-${mode}`)
-      const h = wrap(mode, "PLAN", root)
+      const h = wrap(mode, "DISCUSS", root)
       const outside = call(`plan-jail-${mode}`, "read_file", { path: "../rahasia.txt" })
       expect(await h.check(outside, {} as never)).toBe("deny")
       expect(h.describeDenial(outside)).toBe("jail: outside workspace")
     }
   })
 
-  test("PLAN × allowlist/readonly: ceiling read-only lebih ketat dari base", async () => {
+  test("DISCUSS × allowlist/readonly: ceiling read-only lebih ketat dari base", async () => {
     for (const mode of ["allowlist", "readonly"] as const) {
       const root = tmpRoot(`plan-strict-${mode}`)
-      const h = wrap(mode, "PLAN", root)
-      // Dalam ceiling read-only: tetap allow walau base allowlist/readonly.
+      const h = wrap(mode, "DISCUSS", root)
       expect(
         await h.check(
           call(`plan-strict-${mode}-r`, "read_file", { path: "probe.txt" }),
           {} as never,
         ),
       ).toBe("allow")
-      // Di luar ceiling: base allowlist akan allow (write_file/write_memory/
-      // bash echo) — ceiling read-only menahannya lebih dulu.
       for (const name of [
         "write_file",
         "write_memory",
@@ -401,12 +380,8 @@ describe("PLAN — ceiling plan vs read-only", () => {
   })
 })
 
-// ── Requirement 4/5 + 8: gerbang approval PLAN × auto/ask ──
+// ── Requirement 4/5 + 8: gerbang approval DISCUSS × auto/ask ──
 
-/**
- * Probe satu skenario gerbang di anak ber-HOME temp: allowlist global user
- * tidak boleh memengaruhi keputusan maupun jumlah prompt.
- */
 async function runGateProbe(opts: {
   mode: "auto" | "ask"
   tty: boolean
@@ -419,17 +394,15 @@ async function runGateProbe(opts: {
     const root = ${JSON.stringify(root)}
     let asks = 0
     const base = createPermissionHandler({ mode: ${JSON.stringify(opts.mode)}, root, ask: async () => { asks++; return ${JSON.stringify(opts.answer)} } })
-    const h = createWorkModePermissionHandler({ workMode: "PLAN", base, root })
+    const h = createWorkModePermissionHandler({ workMode: "DISCUSS", base, root })
     const c = { id: "gate-probe", name: "delegate_task", args: { prompt: "x" } }
     const decision = await h.check(c, {})
     emit({ decision, asks, reason1: h.describeDenial(c), reason2: h.describeDenial(c) })
   `)
 }
 
-describe("PLAN × auto/ask — delegate_task: AUTO otonom, ASK tetap gated", () => {
-  test("PLAN × auto: delegate_task ALLOW tanpa prompt (otonomi penuh, tak gated)", async () => {
-    // [mode-architecture] delegate_task authorized di ceiling PLAN; AUTO tidak
-    // lagi menahan tool gated — anak dipaksa explore via warisan WorkMode.
+describe("DISCUSS × auto/ask — delegate_task: AUTO otonom, ASK tetap gated", () => {
+  test("DISCUSS × auto: delegate_task ALLOW tanpa prompt (otonomi penuh, tak gated)", async () => {
     const headless = await runGateProbe({ mode: "auto", tty: false, answer: "allow" })
     expect(headless.decision).toBe("allow")
     expect(headless.asks).toBe(0)
@@ -438,14 +411,14 @@ describe("PLAN × auto/ask — delegate_task: AUTO otonom, ASK tetap gated", () 
     expect(tty.asks).toBe(0)
   })
 
-  test("PLAN × ask headless: delegate_task deny tanpa prompt (gated)", async () => {
+  test("DISCUSS × ask headless: delegate_task deny tanpa prompt (gated)", async () => {
     const r = await runGateProbe({ mode: "ask", tty: false, answer: "allow" })
     expect(r.decision).toBe("deny")
     expect(r.asks).toBe(0)
     expect(r.reason1).toBe("gated approval unavailable")
   })
 
-  test("PLAN × ask TTY: prompt dipanggil tepat sekali; deny user dihormati", async () => {
+  test("DISCUSS × ask TTY: prompt dipanggil tepat sekali; deny user dihormati", async () => {
     const allow = await runGateProbe({ mode: "ask", tty: true, answer: "allow" })
     expect(allow.decision).toBe("allow")
     expect(allow.asks).toBe(1)
@@ -461,7 +434,7 @@ describe("PLAN × auto/ask — delegate_task: AUTO otonom, ASK tetap gated", () 
 describe("runtime mode — WorkMode tidak bocor; ceiling tak bisa dicabut", () => {
   test("__getMode melaporkan PM asli; __setMode diteruskan", () => {
     const root = tmpRoot("rt-meta")
-    const h = wrap("auto", "PLAN", root)
+    const h = wrap("auto", "DISCUSS", root)
     expect(h.__getMode()).toBe("auto")
     h.__setMode("allow-all")
     expect(h.__getMode()).toBe("allow-all")
@@ -481,16 +454,14 @@ describe("runtime mode — WorkMode tidak bocor; ceiling tak bisa dicabut", () =
     expect(await h.check(call("rt-d3", "read_file", { path: "p.txt" }), {} as never)).toBe("allow")
   })
 
-  test("PLAN × allowlist → __setMode(auto): seleksi ceiling ikut mode saat ini", async () => {
+  test("DISCUSS × allowlist → __setMode(auto): seleksi ceiling ikut mode saat ini", async () => {
     const root = tmpRoot("rt-plan")
-    const h = wrap("allowlist", "PLAN", root)
+    const h = wrap("allowlist", "DISCUSS", root)
     expect(
       await h.check(call("rt-p1", "write_file", { path: "p.txt", content: "x" }), {} as never),
     ).toBe("deny")
     expect(await h.check(call("rt-p2", "todo_write", { todos: [] }), {} as never)).toBe("deny")
     h.__setMode("auto")
-    // Ceiling plan bertahan (write tetap ditolak), ekstra plan kembali terbuka,
-    // dan delegate_task authorized di AUTO (tak lagi gated headless deny).
     expect(
       await h.check(call("rt-p3", "write_file", { path: "p.txt", content: "x" }), {} as never),
     ).toBe("deny")
@@ -509,20 +480,20 @@ describe("describeDenial — alasan dari handler yang memutuskan", () => {
     const h = wrap("auto", "DISCUSS", root)
     const c = call("dd-c", "write_file", { path: "p.txt", content: "x" })
     expect(await h.check(c, {} as never)).toBe("deny")
-    expect(h.describeDenial(c)).toBe("read-only mode")
+    expect(h.describeDenial(c)).toBe("plan mode")
     expect(h.describeDenial(c)).toBeUndefined()
   })
 
-  test("base deny di dalam ceiling: alasan base, bukan alasan ceiling", async () => {
-    tty = installFakeTty({ isTTY: false })
-    const root = tmpRoot("dd-net")
-    const h = wrap("auto", "PLAN", root)
-    // Network read di PLAN melewati gerbang __promptGated SETELAH base allow
-    // (web_fetch ∈ READONLY). Headless = deny dgn alasan gated, bukan ceiling.
-    const c = call("dd-n", "web_fetch", { url: "https://example.com" })
-    expect(await h.check(c, {} as never)).toBe("deny")
-    expect(h.describeDenial(c)).toBe("gated approval unavailable")
-    expect(h.describeDenial(c)).toBeUndefined()
+  test("base deny di dalam ceiling: alasan base, bukan alasan ceiling", () => {
+    return (async () => {
+      tty = installFakeTty({ isTTY: false })
+      const root = tmpRoot("dd-net")
+      const h = wrap("auto", "DISCUSS", root)
+      const c = call("dd-n", "web_fetch", { url: "https://example.com" })
+      expect(await h.check(c, {} as never)).toBe("deny")
+      expect(h.describeDenial(c)).toBe("gated approval unavailable")
+      expect(h.describeDenial(c)).toBeUndefined()
+    })()
   })
 
   test("allow tak punya alasan; membaca alasan tak mengubah keputusan berikutnya", async () => {
@@ -533,9 +504,9 @@ describe("describeDenial — alasan dari handler yang memutuskan", () => {
     expect(h.describeDenial(ok)).toBeUndefined()
     const c = call("dd-again", "bash", { cmd: "echo hi" })
     expect(await h.check(c, {} as never)).toBe("deny")
-    expect(h.describeDenial(c)).toBe("read-only mode")
+    expect(h.describeDenial(c)).toBe("plan mode")
     expect(await h.check(c, {} as never)).toBe("deny")
-    expect(h.describeDenial(c)).toBe("read-only mode")
+    expect(h.describeDenial(c)).toBe("plan mode")
   })
 })
 
@@ -545,7 +516,7 @@ describe("abort — perilaku lama dipertahankan di bawah WorkMode", () => {
   test("signal sudah aborted: deny tanpa prompt, tanpa alasan", async () => {
     const root = tmpRoot("abort")
     let prompts = 0
-    const h = wrap("auto", "PLAN", root, async () => {
+    const h = wrap("auto", "DISCUSS", root, async () => {
       prompts++
       return "allow"
     })
@@ -561,7 +532,7 @@ describe("abort — perilaku lama dipertahankan di bawah WorkMode", () => {
 // ── Requirement 12: K-1 always utuh lewat wrapper (subproses HOME terisolasi) ──
 
 describe("K-1 always — persistensi repo-lokal tetap utuh melalui wrapper", () => {
-  test("PLAN × ask 'always': tulis <root>/.minicode/allowlist.json + grant sesi", async () => {
+  test("DISCUSS × ask 'always': tulis <root>/.minicode/allowlist.json + grant sesi", async () => {
     const root = tmpRoot("always")
     const args = { prompt: "p12-wm-always" }
     const script = `
@@ -573,7 +544,7 @@ describe("K-1 always — persistensi repo-lokal tetap utuh melalui wrapper", () 
       const args = ${JSON.stringify(args)}
       let asks = 0
       const base = createPermissionHandler({ mode: "ask", root, ask: async () => { asks++; return "always" } })
-      const h = createWorkModePermissionHandler({ workMode: "PLAN", base, root })
+      const h = createWorkModePermissionHandler({ workMode: "DISCUSS", base, root })
       const first = await h.check({ id: "wm-a1", name: "delegate_task", args }, {})
       const asksAfterFirst = asks
       const second = await h.check({ id: "wm-a2", name: "delegate_task", args }, {})
@@ -585,7 +556,6 @@ describe("K-1 always — persistensi repo-lokal tetap utuh melalui wrapper", () 
     const r = await runIsolated(script)
     expect(r.first).toBe("allow")
     expect(r.asksAfterFirst).toBe(1)
-    // Grant sesi in-memory hidup di handler base (wrapper hanya mendelegasikan).
     expect(r.second).toBe("allow")
     expect(r.asksAfterSecond).toBe(1)
     expect(r.allowed).toEqual([r.key])
@@ -598,11 +568,11 @@ describe("createMinicodeSession — wiring S2.1 (handler-layer saja)", () => {
   test("workMode non-EXECUTE + permissionHandler terinjeksi → fail-closed", async () => {
     const base = createPermissionHandler({ mode: "auto", root: tmpRoot("inj") })
     await expect(
-      createMinicodeSession({ permissionHandler: base, workMode: "PLAN" }),
+      createMinicodeSession({ permissionHandler: base, workMode: "DISCUSS" }),
     ).rejects.toThrow(/workMode/)
   })
 
-  test("workMode PLAN × PM auto: onPermissions melaporkan 'auto', bukan WorkMode", async () => {
+  test("workMode DISCUSS × PM auto: onPermissions melaporkan 'auto', bukan WorkMode", async () => {
     const dir = tmpRoot("session")
     await mkdir(join(dir, ".minicode"), { recursive: true })
     let mode: string | undefined
@@ -611,7 +581,7 @@ describe("createMinicodeSession — wiring S2.1 (handler-layer saja)", () => {
       tools: [readFileTool],
       cwd: dir,
       permissionMode: "auto",
-      workMode: "PLAN",
+      workMode: "DISCUSS",
       onPermissions: (c) => {
         mode = c.getMode()
       },
@@ -636,19 +606,17 @@ describe("createMinicodeSession — wiring S2.1 (handler-layer saja)", () => {
   })
 })
 
-// Fixture dipakai juga sebagai lookup eksplisit agar drift tabel ketahuan di
-// dua sumbu: data fixture vs perilaku produksi.
-test("fixture: sel PLAN × auto/ask ber-ceiling plan; DISCUSS ber-ceiling discuss-local", () => {
-  expect(cellOf("PLAN", "auto").ceiling).toBe("plan")
-  expect(cellOf("PLAN", "ask").ceiling).toBe("plan")
-  expect(cellOf("PLAN", "allowlist").ceiling).toBe("readonly")
-  expect(cellOf("DISCUSS", "allow-all").ceiling).toBe("discuss-local")
-  expect(cellOf("DISCUSS", "auto").networkRead).toBe("deny")
-  expect(cellOf("PLAN", "allow-all").networkRead).toBe("prompt")
-  expect(cellOf("PLAN", "auto").hooks).toBe("blocked")
+test("fixture: sel DISCUSS × auto/ask ber-ceiling plan; allowlist/readonly ber-ceiling readonly", () => {
+  expect(cellOf("DISCUSS", "auto").ceiling).toBe("plan")
+  expect(cellOf("DISCUSS", "ask").ceiling).toBe("plan")
+  expect(cellOf("DISCUSS", "allowlist").ceiling).toBe("readonly")
+  expect(cellOf("DISCUSS", "allow-all").ceiling).toBe("plan")
+  expect(cellOf("DISCUSS", "auto").networkRead).toBe("prompt")
+  expect(cellOf("DISCUSS", "allow-all").networkRead).toBe("prompt")
+  expect(cellOf("DISCUSS", "auto").hooks).toBe("blocked")
 })
 
-describe("PLAN × 6 PM — network read wajib approval prompt (Q2=A2)", () => {
+describe("DISCUSS × 6 PM — network read wajib approval prompt (Q2=A2)", () => {
   test("headless: web_fetch & web_search ditolak di seluruh 6 PM tanpa prompt", async () => {
     const root = tmpRoot("plan-net-headless")
     const r = await runIsolated(`
@@ -661,7 +629,7 @@ describe("PLAN × 6 PM — network read wajib approval prompt (Q2=A2)", () => {
       for (const mode of MODES) {
         let asks = 0
         const base = createPermissionHandler({ mode, root, ask: async () => { asks++; return "allow" } })
-        const h = createWorkModePermissionHandler({ workMode: "PLAN", base, root })
+        const h = createWorkModePermissionHandler({ workMode: "DISCUSS", base, root })
         for (const name of NET) {
           const c = { id: "pn-h-" + mode + "-" + name, name, args: { url: "https://example.com", query: "x" } }
           const d = await h.check(c, {})
@@ -685,6 +653,25 @@ describe("PLAN × 6 PM — network read wajib approval prompt (Q2=A2)", () => {
     }
   })
 
+  test("headless + allowNonTtyAsk (daemon broker): web_fetch & gated tool meneruskan ke broker", async () => {
+    tty = installFakeTty({ isTTY: false })
+    const root = tmpRoot("discuss-broker")
+    let asks = 0
+    const base = createPermissionHandler({
+      mode: "ask",
+      root,
+      allowNonTtyAsk: true,
+      ask: async () => {
+        asks++
+        return "allow"
+      },
+    })
+    const h = createWorkModePermissionHandler({ workMode: "DISCUSS", base, root })
+    const cNet = call("brk-net", "web_fetch", { url: "https://example.com" })
+    expect(await h.check(cNet, {} as never)).toBe("allow")
+    expect(asks).toBe(1)
+  })
+
   test("TTY + ask: web_fetch & web_search wajib prompt di seluruh 6 PM (termasuk allow-all & readonly)", async () => {
     const root = tmpRoot("plan-net-tty")
     const r = await runIsolated(`
@@ -698,7 +685,7 @@ describe("PLAN × 6 PM — network read wajib approval prompt (Q2=A2)", () => {
         for (const answer of ["allow", "deny"]) {
           let asks = 0
           const base = createPermissionHandler({ mode, root, ask: async () => { asks++; return answer } })
-          const h = createWorkModePermissionHandler({ workMode: "PLAN", base, root })
+          const h = createWorkModePermissionHandler({ workMode: "DISCUSS", base, root })
           for (const name of NET) {
             const c = { id: "pn-t-" + mode + "-" + answer + "-" + name, name, args: { url: "https://example.com", query: "x" } }
             const d = await h.check(c, {})
@@ -729,8 +716,8 @@ describe("PLAN × 6 PM — network read wajib approval prompt (Q2=A2)", () => {
   })
 })
 
-describe("Invariant #1 — 18 sel × seluruh tool bawaan: WorkMode tak pernah memperluas PermissionMode", () => {
-  test("untuk setiap PM dan setiap tool, allow di DISCUSS/PLAN menyiratkan allow di EXECUTE", async () => {
+describe("Invariant #1 — 12 sel × seluruh tool bawaan: WorkMode tak pernah memperluas PermissionMode", () => {
+  test("untuk setiap PM dan setiap tool, allow di DISCUSS menyiratkan allow di EXECUTE", async () => {
     const root = tmpRoot("mono-18")
     const toolNames = allTools.map((t) => t.name)
     const r = await runIsolated(`
@@ -774,7 +761,7 @@ describe("Invariant #1 — 18 sel × seluruh tool bawaan: WorkMode tak pernah me
       }
       const violations = []
       for (const pm of MODES) {
-        for (const wm of ["DISCUSS", "PLAN"]) {
+        for (const wm of ["DISCUSS"]) {
           const baseExec = createPermissionHandler({ mode: pm, root })
           const execH = composeWorkModePermissionHandler({ workMode: "EXECUTE", base: baseExec, root })
           const baseWm = createPermissionHandler({ mode: pm, root })

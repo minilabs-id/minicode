@@ -179,7 +179,6 @@ test("M14 wiring: createCliSession denga gate mati tidak membangun journal", asy
     verbose: false,
     allowAll: false,
     ask: false,
-    plan: false,
     allowlist: false,
     verify: false,
   })) as CliSession
@@ -206,7 +205,6 @@ test("M14 wiring: gate hidup membangun journal di .minicode dan menutupnya di cl
     verbose: false,
     allowAll: false,
     ask: false,
-    plan: false,
     allowlist: false,
     verify: false,
     runtimeMode: "constructed",
@@ -236,7 +234,6 @@ test("M14 wiring: resume memakai path jurnal sesi yang di-resume", async () => {
     verbose: false,
     allowAll: false,
     ask: false,
-    plan: false,
     allowlist: false,
     verify: false,
   }
@@ -282,7 +279,6 @@ test("M14 wiring: close() menutup runtime (tepat setelah scheduler)", async () =
     verbose: false,
     allowAll: false,
     ask: false,
-    plan: false,
     allowlist: false,
     verify: false,
     runtimeMode: "constructed",

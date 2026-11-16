@@ -9,10 +9,14 @@ import { scrubSecrets } from "../../src/policy/scrub.ts"
 import { dockerAvailable } from "../../src/sandbox/docker.ts"
 import { osSandboxAvailable, osSandboxTypeName } from "../../src/sandbox/os.ts"
 import { c } from "../../src/ui/render/theme.ts"
+import { allowLocalSubcommand, guardSubcommand } from "../args.ts"
 
 const DOCTOR_HELP = `minicode doctor — diagnosis lingkungan lokal (tanpa jaringan)
 
-  minicode doctor [--json] [--cwd <dir>]`
+  minicode doctor [--json] [--allow-local-config] [--cwd <dir>]`
+
+const out = (msg: string): void => console.log(msg)
+const err = (msg: string): void => console.error(msg)
 
 interface DoctorReport {
   bun: string
@@ -32,8 +36,8 @@ interface DoctorReport {
 // Agregasi status yang sebelumnya tersebar di providers/pricing/memory —
 // pola `codex doctor`: satu perintah untuk "apakah mesin ini siap jalan".
 // Murni baca lokal: tanpa request jaringan, tanpa LLM, tanpa tulis file.
-export async function buildDoctorReport(cwd?: string): Promise<DoctorReport> {
-  const cfg = await loadConfig(cwd).catch(() => ({ providers: [] }))
+export async function buildDoctorReport(cwd?: string, allowLocal?: boolean): Promise<DoctorReport> {
+  const cfg = await loadConfig(cwd, { allowLocal }).catch(() => ({ providers: [] }))
   const providers = cfg.providers ?? []
   await loadPricingOverlay().catch(() => {})
   const meta = pricingOverlayMeta()
@@ -89,18 +93,13 @@ export async function handleDoctor(
   args: string[],
   getArg: (name: string) => string | undefined,
 ): Promise<never> {
-  const sub = args[1]
-  if (sub === "--help" || sub === "-h") {
-    console.log(DOCTOR_HELP)
-    process.exit(0)
-  }
-  const r = await buildDoctorReport(getArg("--cwd"))
+  guardSubcommand(args, "doctor", DOCTOR_HELP, out, err)
+  const r = await buildDoctorReport(getArg("--cwd"), allowLocalSubcommand(args))
   if (getArg("--json") !== undefined || args.includes("--json")) {
-    console.log(JSON.stringify(r))
+    out(JSON.stringify(r))
     process.exit(0)
   }
-  console.log(renderDoctorText(r))
-  console.log("")
+  out(`${renderDoctorText(r)}\n`)
   process.exit(0)
 }
 

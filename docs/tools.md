@@ -91,7 +91,7 @@ Batas `BASH_BACKGROUND_MAX_JOBS`; semua job mati saat CLI keluar.
 
 | Tool | Fungsi | Catatan |
 |---|---|---|
-| `delegate_task` | Sub-agen isolasi `explore`/`plan` | Pool 3, context/memory/signal/budget terpisah, abort-aware. Di ASK, TTY meminta persetujuan dan non-TTY menolak; AUTO berjalan tanpa prompt bila authorized. Parent PermissionMode `ASK`/`plan`/`readonly` memaksa `explore`; WorkMode `DISCUSS`/`PLAN` membatasi tool anak ke subset eksplorasi. Anak tidak mendapat commit, memory/todo writes, nesting, atau job background; tool MCP built-in (`mcp_call`/`mcp_read`/`mcp_prompt`) hanya ikut pada mode anak `plan` di bawah `BUILD`. Satu approval mencakup satu delegasi; turn gagal setelah anak committed → warning `[recovery]` |
+| `delegate_task` | Sub-agen isolasi `explore`/`plan` | Pool 3, context/memory/signal/budget terpisah, abort-aware. Di ASK, TTY meminta persetujuan dan non-TTY menolak; AUTO berjalan tanpa prompt bila authorized. Parent PermissionMode `ASK`/`plan`/`readonly` memaksa `explore`; WorkMode `DISCUSS` membatasi tool anak ke subset eksplorasi. Anak tidak mendapat commit, memory/todo writes, nesting, atau job background; tool MCP built-in (`mcp_call`/`mcp_read`/`mcp_prompt`) hanya ikut pada mode anak `plan` di bawah `BUILD`. Satu approval mencakup satu delegasi; turn gagal setelah anak committed → warning `[recovery]` |
 
 ## MCP
 

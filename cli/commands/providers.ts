@@ -1,10 +1,16 @@
-import { readFileSync } from "node:fs"
-import { resolve } from "node:path"
 import { loadConfig, type MinicodeConfig } from "../../src/config.ts"
 import { refreshProviderModels } from "../../src/providers/provision.ts"
+import { readTraceRows } from "../../src/telemetry/trace.ts"
 import { sanitizeAnsiLine } from "../../src/ui/render/sanitize.ts"
 import { renderTable } from "../../src/ui/render/table.ts"
 import { c } from "../../src/ui/render/theme.ts"
+import { allowLocalSubcommand, guardSubcommand, positionalSubArg } from "../args.ts"
+
+const PROVIDERS_HELP = `minicode providers | models | sync — inspect & refresh configured LLM providers
+
+  minicode providers [--allow-local-config] [--cwd <dir>]
+  minicode models [provider] [--match <q>] [--allow-local-config] [--cwd <dir>]
+  minicode sync [--allow-local-config] [--cwd <dir>]`
 
 interface TraceRow {
   model?: string
@@ -13,23 +19,8 @@ interface TraceRow {
   timestamp?: string
 }
 
-// 6.3 — health tanpa jaringan: ambil dari traces.jsonl (last run per provider)
-function readTraces(cwd?: string): TraceRow[] {
-  try {
-    return readFileSync(resolve(cwd ?? ".", ".minicode", "traces.jsonl"), "utf8")
-      .split("\n")
-      .filter(Boolean)
-      .flatMap((l) => {
-        try {
-          return [JSON.parse(l) as TraceRow]
-        } catch {
-          return []
-        }
-      })
-  } catch {
-    return []
-  }
-}
+const out = (msg: string): void => console.log(msg)
+const err = (msg: string): void => console.error(msg)
 
 export function providerOfTrace(cfg: MinicodeConfig, t: TraceRow): string | undefined {
   const m = t.model ?? ""
@@ -64,23 +55,20 @@ export async function handleProviders(
   if (firstArg !== "providers" && firstArg !== "models" && firstArg !== "sync") {
     process.exit(0)
   }
+  guardSubcommand(args, firstArg, PROVIDERS_HELP, out, err, firstArg === "models" ? -1 : 1)
   const cwdArg = getArg("--cwd")
   // Audit #07: local hanya bila operator opt-in (aturan universal — sync
-  // tanpa flag tak boleh menghubungi endpoint repo tak dikenal). argv
-  // subcommand diawali positional sehingga pakai includes + env (gaya --local).
-  const allowLocal =
-    args.includes("--allow-local-config") || process.env.MINICODE_ALLOW_LOCAL_CONFIG === "1"
+  // tanpa flag tak boleh menghubungi endpoint repo tak dikenal).
+  const allowLocal = allowLocalSubcommand(args)
   const cfg = await loadConfig(cwdArg, { allowLocal })
   if (firstArg === "providers") {
     if (cfg.providers.length === 0) {
-      console.log(
+      out(
         "(no providers yet - run `minicode` for the wizard, `minicode auth login` (free, no API key),\nor `minicode config add --baseUrl <url> --apiKey <key>`)",
       )
       process.exit(0)
     }
-    // renderTable menjaga kolom tetap berbaris untuk id sepanjang apa pun;
-    // padEnd(16) manual sebelumnya rusak begitu id lebih dari 16 karakter.
-    const health = healthMap(cfg, readTraces(cwdArg))
+    const health = healthMap(cfg, readTraceRows<TraceRow>(cwdArg, "traces.jsonl"))
     const rows = cfg.providers.map((p) => {
       const h = health.get(p.id)
       const status = !h
@@ -89,13 +77,13 @@ export async function handleProviders(
             h.ts ? new Date(h.ts).toISOString().slice(0, 10) : "-",
           )}`
       return {
-        id: c.cyan(p.id),
+        id: c.cyan(sanitizeAnsiLine(p.id)),
         models: String(p.models.length),
-        url: p.baseUrl,
+        url: sanitizeAnsiLine(p.baseUrl),
         status,
       }
     })
-    console.log(
+    out(
       `\n${c.bold("LLM Providers")}\n` +
         renderTable(
           [
@@ -108,60 +96,54 @@ export async function handleProviders(
         ) +
         "\n",
     )
-    console.log(
+    out(
       `  ${c.dim("next: minicode models | minicode sync | minicode config add --baseUrl <url> --apiKey <key>")}\n`,
     )
     process.exit(0)
   }
   if (firstArg === "models") {
-    const pid = args[1] && !args[1]!.startsWith("--") ? args[1] : undefined
-    const matchIdx = args.indexOf("--match")
-    const filter = (matchIdx >= 0 && args[matchIdx + 1] ? args[matchIdx + 1]! : "").toLowerCase()
+    const pid = positionalSubArg(args, 1)
+    const filter = (getArg("--match") ?? "").toLowerCase()
     const match = (s: string) => (filter ? s.toLowerCase().includes(filter) : true)
     if (pid) {
       const p = cfg.providers.find((x) => x.id === pid)
       if (!p) {
-        console.error(`provider "${sanitizeAnsiLine(pid)}" not found - see: minicode providers`)
+        err(`provider "${sanitizeAnsiLine(pid)}" not found - see: minicode providers`)
         process.exit(1)
       }
       const list = p.models.filter(match)
-      if (!list.length) console.log(`  (no matches for "${sanitizeAnsiLine(filter)}")`)
-      for (const [i, m] of list.entries()) console.log(`  [${i}] ${sanitizeAnsiLine(m)}`)
+      if (!list.length) out(`  (no matches for "${sanitizeAnsiLine(filter)}")`)
+      for (const [i, m] of list.entries()) out(`  [${i}] ${sanitizeAnsiLine(m)}`)
     } else {
-      if (cfg.providers.length === 0) console.log("(no providers yet)")
+      if (cfg.providers.length === 0) out("(no providers yet)")
       let shown = 0
       for (const p of cfg.providers) {
         const list = p.models.filter(match)
         if (!list.length) continue
-        // id/baseUrl dari config (lokal = input repo tak terpercaya); model dari
-        // hasil probe jaringan — sanitasi sebelum masuk scrollback.
-        console.log(
+        out(
           `${sanitizeAnsiLine(p.id)} (${sanitizeAnsiLine(p.baseUrl)})${filter ? ` - matches "${sanitizeAnsiLine(filter)}"` : ""}`,
         )
         shown += list.length
-        for (const m of list.slice(0, 10)) console.log(`  ${sanitizeAnsiLine(m)}`)
-        if (filter && list.length > 10) console.log(`  … +${list.length - 10} more`)
-        if (!filter && p.models.length > 10) console.log(`  … +${p.models.length - 10} more`)
+        for (const m of list.slice(0, 10)) out(`  ${sanitizeAnsiLine(m)}`)
+        if (filter && list.length > 10) out(`  … +${list.length - 10} more`)
+        if (!filter && p.models.length > 10) out(`  … +${p.models.length - 10} more`)
       }
-      // Header provider hanya bila ada yang cocok — tanpa ini filter kosong
-      // mencetak judul lalu "(no matches)", dua baris untuk nol informasi.
-      if (filter && shown === 0) console.log(`  (no matches for "${sanitizeAnsiLine(filter)}")`)
+      if (filter && shown === 0) out(`  (no matches for "${sanitizeAnsiLine(filter)}")`)
     }
     process.exit(0)
   }
   if (firstArg === "sync") {
-    console.log("Syncing model list from providers…")
+    out("Syncing model list from providers…")
     const { updated, failed } = await refreshProviderModels({ cwd: cwdArg, allowLocal })
-    // Kata status eksplisit: warna saja tak terbaca di pipe/NO_COLOR.
     for (const r of updated)
-      console.log(`  ${c.green("ok")} ${sanitizeAnsiLine(r.id)}: ${r.from} -> ${r.to} model`)
+      out(`  ${c.green("ok")} ${sanitizeAnsiLine(r.id)}: ${r.from} -> ${r.to} model`)
     for (const f of failed)
-      console.log(`  ${c.red("failed")} ${sanitizeAnsiLine(f.id)}: ${sanitizeAnsiLine(f.reason)}`)
+      out(`  ${c.red("failed")} ${sanitizeAnsiLine(f.id)}: ${sanitizeAnsiLine(f.reason)}`)
     if (!updated.length && !failed.length) {
       const cfgHere = await loadConfig(cwdArg, { allowLocal })
       if (cfgHere.providers.length === 0)
-        console.log("  (no providers yet - run `minicode config add` first)")
-      else console.log("  (no changes — check API key and network, then retry)")
+        out("  (no providers yet - run `minicode config add` first)")
+      else out("  (no changes — check API key and network, then retry)")
     }
     process.exit(0)
   }
