@@ -503,7 +503,12 @@ export async function runModelManagerView(opts: ModelManagerViewOptions): Promis
             ;(async () => {
               try {
                 const picked = await pickEffort(row.id)
-                if (picked && picked !== "skip") {
+                if (picked === "skip") {
+                  // Keluarga tanpa thinking: sebelumnya cabang ini diam total —
+                  // user menekan Tab, layar tak berubah, dan itu terbaca sebagai
+                  // "minicode macet". Nyatakan alasannya, tetap di daftar.
+                  notice = t("effort.noThinking")
+                } else if (picked) {
                   await withWatchdog(() => opts.onSetEffort!(row.id, picked))
                   // Notice terlihat di daftar (manager tetap terbuka) —
                   // inilah kehidupan baru `effort.saved` setelah A5.

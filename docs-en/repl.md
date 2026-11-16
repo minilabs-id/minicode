@@ -21,6 +21,7 @@ outside the dictionary fail the test.
 | `/help keys` | Complete keyboard shortcuts (alias `/help tombol`) |
 | `/provider` | Manage providers: popup — preset picker + form (URL/key/scope/override), delete (`d`, states how many models are lost), edit (`e`) |
 | `/model [search]` | Popup of all `provider::model` (argument = initial filter; type inside to search live, Ctrl+U clears, Esc leaves the filter). Del = delete (confirm). Enter = select + set thinking effort (`default/low/medium/high`, stored on the provider, applies to the next session; Esc = cancel entirely). Non-default effort shows a `[low\|medium\|high]` badge |
+| `/context [value]` | Table of the effective context window per model plus where each value came from (`manual`/`endpoint`/`katalog`/`models.dev`/`flag`/`default aman`). With an argument: set it for the active model (`128k`, `1m`, `1024x1024`, `auto`) — effective on the next turn. Details in [Configuration](config.md) |
 | `/sync` | Refresh the model list of every provider (only says restart when there really are new models) |
 | `/undo` | Revert the last turn's file changes |
 | `/redo` | Re-apply what was reverted |

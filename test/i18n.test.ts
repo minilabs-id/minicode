@@ -88,6 +88,8 @@ describe("t()", () => {
       "st.budget",
       // Label kop sesi: "Model" adalah istilah teknis yang sama di id.
       "summary.model",
+      // Kepala kolom tabel /context: "Model" juga istilah teknis.
+      "ctx.colModel",
       "help.cMore",
       "help.gModel",
       "help.gMode",

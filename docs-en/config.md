@@ -33,6 +33,21 @@ Where MiniCode settings and data live, how untrusted local files are treated, an
   minicode config context-window <provider> <model> auto   # back to automatic detection
   ```
 
+  Inside a session the same capability is `/context`:
+
+  ```
+  /context              # table of effective windows per model + where each value came from
+  /context 200k         # set it for the active model (used by the very next turn)
+  /context auto         # back to automatic detection
+  ```
+
+  The `/context` table uses the same resolution chain as the router, so the
+  number shown cannot differ from the one actually used. The **Origin** column
+  says who decided: `manual` (your choice, locked against `sync`), `endpoint`
+  (metadata from `/models`, may be overwritten), `katalog`, `models.dev`, `flag`
+  (`--context-window`), or `default aman`. A `/context` change applies to the
+  running session immediately — no restart needed.
+
   Accepted choices follow sizes actually used by production models: `16K`, `32K`, `64K`, `128K`, `200K`, `256K`, `400K`, `500K`, `1M`, `1M (1024^2)`, `1.05M`, `2M`, `4M`, `10M`, plus exact numbers. The **three 1M variants** are deliberate because they really differ: `1000000` (Anthropic/DeepSeek/Qwen), `1048576` (Google/Gemini, Kimi, GLM), `1050000` (OpenAI) — a gap of up to ~50K tokens.
 - `mcpServers` — two forms: stdio (`command`+`args`) and HTTP (`url`+optional `headers`). Transport details in [MCP & LSP](mcp-lsp.md).
 - `verifyCommand` — used by `--verify` when auto-detection finds nothing (detection order: `typecheck` -> `test` -> `tsconfig`).

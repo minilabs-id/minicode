@@ -33,6 +33,22 @@ Di mana pengaturan dan data Minicode tinggal, bagaimana file lokal yang tak tepe
   minicode config context-window <provider> <model> auto   # kembali deteksi otomatis
   ```
 
+  Di dalam sesi, perintah yang sama tersedia sebagai `/context`:
+
+  ```
+  /context              # tabel jendela efektif tiap model + asal angkanya
+  /context 200k         # set untuk model aktif (langsung dipakai turn berikutnya)
+  /context auto         # kembali ke deteksi otomatis
+  ```
+
+  Tabel `/context` memakai rantai resolusi yang sama dengan router, jadi angka
+  yang tampil tidak bisa berbeda dari yang benar-benar dipakai. Kolom **Asal**
+  menyatakan siapa yang memutuskan: `manual` (pilihan Anda, dikunci terhadap
+  `sync`), `endpoint` (metadata `/models`, boleh ditimpa), `katalog`,
+  `models.dev`, `flag` (`--context-window`), atau `default aman`. Perubahan
+  `/context` langsung berlaku pada sesi yang sedang berjalan — tidak perlu
+  restart.
+
   Pilihan yang diterima mengikuti ukuran yang benar-benar dipakai model produksi: `16K`, `32K`, `64K`, `128K`, `200K`, `256K`, `400K`, `500K`, `1M`, `1M (1024²)`, `1.05M`, `2M`, `4M`, `10M`, ditambah angka eksak. **Tiga varian 1M** disengaja karena memang berbeda: `1000000` (Anthropic/DeepSeek/Qwen), `1048576` (Google/Gemini, Kimi, GLM), `1050000` (OpenAI) — selisihnya sampai ~50K token.
 - `mcpServers` — dua bentuk: stdio (`command`+`args`) dan HTTP (`url`+opsional `headers`). Detail transport di [MCP & LSP](mcp-lsp.md).
 - `verifyCommand` — dipakai `--verify` bila auto-detect tidak menemukan (urutan deteksi: `typecheck` → `test` → `tsconfig`).

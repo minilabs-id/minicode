@@ -134,6 +134,7 @@ export const BUILTIN_COMMANDS: BuiltinCommand[] = [
   { name: "help", descKey: "help.desc.help" },
   { name: "provider", descKey: "help.desc.provider" },
   { name: "model", descKey: "help.desc.model" },
+  { name: "context", descKey: "help.desc.context" },
   { name: "sync", descKey: "help.desc.sync" },
   { name: "status", descKey: "help.desc.status" },
   { name: "sessions", descKey: "help.desc.sessions" },
@@ -167,13 +168,17 @@ export const DRIVER_HELP_COMMANDS: BuiltinCommand[] = [
 /** Grup kurasi untuk /help: kategori semantik (bukan urutan registrasi). Dipakai
  * render full help supaya mudah dipindai; nama di sini harus 1:1 dengan isi
  * BUILTIN_COMMANDS + DRIVER_HELP_COMMANDS. */
-const HELP_GROUPS: readonly { key: MsgKey; names: readonly string[] }[] = [
+export const HELP_GROUPS: readonly { key: MsgKey; names: readonly string[] }[] = [
   {
     key: "help.gGeneral",
     names: ["help", "status", "sessions", "history", "clear", "copy", "init", "exit"],
   },
-  { key: "help.gModel", names: ["model", "provider", "sync"] },
+  { key: "help.gModel", names: ["model", "context", "provider", "sync"] },
   { key: "help.gMode", names: ["mode", "work-mode", "undo", "redo", "lang"] },
+  {
+    key: "help.gView",
+    names: ["compact", "thinking", "expand", "minimize", "fold"],
+  },
   { key: "help.gTask", names: ["scheduler"] },
 ]
 
@@ -586,6 +591,22 @@ export async function handleBuiltinCommand(
       // `fire()` had no caller: the handle existed, held a lease, and was reachable
       // from nowhere. This case is that caller.
       await handleSchedulerCommand(args, ctx)
+      return { handled: true }
+    }
+
+    case "context": {
+      // `/context` = bagian "temukan" dari fitur jendela konteks manual. Tanpa
+      // entri di /help dan dropdown, fitur ini praktis tidak ada (temuan audit:
+      // pengguna tidak menemukannya sama sekali). Tanpa argumen = tabel angka
+      // EFEKTIF (rantai resolusi yang sama dengan router, bukan hitungan ulang);
+      // dengan argumen = setel untuk model aktif.
+      const { applyContextWindowArg, formatContextOutput } = await import(
+        "./context-command-run.ts"
+      )
+      // Satu penulis untuk seluruh blok: inventaris writer (OAP-008) menghitung
+      // pemanggilan tulis per berkas, jadi perakitan string dilakukan di modul
+      // perintah, bukan di sini.
+      console.log(formatContextOutput(await applyContextWindowArg(args, ctx)))
       return { handled: true }
     }
 

@@ -17,7 +17,7 @@ const strategy = () => createLlmCompaction({ getContextWindowTokens: () => windo
 const history = (): Message[] => [
   { role: "user", content: "Earlier request" },
   { role: "assistant", content: "Earlier answer" },
-  { role: "user", content: "Keep all current instructions verbatim. " + "instruction ".repeat(90) },
+  { role: "user", content: `Keep all current instructions verbatim. ${"instruction ".repeat(90)}` },
   { role: "assistant", content: "", toolCalls: [{ id: "done", name: "read_file", args: {} }] },
   { role: "tool", toolCallId: "done", name: "read_file", content: "evidence ".repeat(12000) },
 ]
@@ -60,7 +60,7 @@ test("unshrinkable user instructions fail explicitly", () => {
 test("real Previous context user text is preserved without a token target", () => {
   const request: Message = {
     role: "user",
-    content: "Previous context: " + "instruction ".repeat(12000),
+    content: `Previous context: ${"instruction ".repeat(12000)}`,
   }
   const out = createLlmCompaction().compact(storeOf([request]), { keepRecentTurns: 1 })
   expect(out).toEqual([request])
@@ -70,12 +70,12 @@ test("real Previous context user text is preserved without a token target", () =
 test("real Previous context user text cannot be fitted as a synthetic summary", () => {
   const request: Message = {
     role: "user",
-    content: "Previous context: " + "instruction ".repeat(12000),
+    content: `Previous context: ${"instruction ".repeat(12000)}`,
   }
   expect(() => strategy().compact(storeOf([request]), { keepRecentTurns: 1 })).toThrow(
     /cannot fit.*target/i,
   )
-  expect(request.content).toBe("Previous context: " + "instruction ".repeat(12000))
+  expect(request.content).toBe(`Previous context: ${"instruction ".repeat(12000)}`)
 })
 
 test("LLM active-turn compaction preserves a real Previous context request", async () => {
@@ -102,7 +102,7 @@ test.each([undefined, windowTokens])(
     const messages: Message[] = []
     for (let i = 0; i < 40; i++) {
       messages.push(
-        { role: "user", content: "PROVENANCE_FACT " + "older instructions ".repeat(20) },
+        { role: "user", content: `PROVENANCE_FACT ${"older instructions ".repeat(20)}` },
         { role: "assistant", content: "older answer ".repeat(30) },
       )
     }

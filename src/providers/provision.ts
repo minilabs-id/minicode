@@ -64,20 +64,16 @@ export async function saveProvider(
     }
     const idx = cfg.providers.findIndex((p) => p.id === entry.id)
     if (idx >= 0) {
-      const previous = cfg.providers[idx]!
       cfg.providers[idx] = {
         ...entry,
-        ...(entry.contextWindows === undefined && previous.contextWindows
-          ? { contextWindows: previous.contextWindows }
-          : {}),
-        // Sumber harus ikut diselamatkan bersama nilainya. Tanpa ini, entri
-        // yang ditulis tanpa `contextWindows` (mis. hasil `sync`) kehilangan
-        // label `user` sementara angkanya dipertahankan — nilai operator lalu
-        // dianggap milik endpoint dan boleh ditimpa pada sync berikutnya,
-        // yaitu persis hal yang label itu ada untuk mencegahnya.
-        ...(entry.contextWindowSources === undefined && previous.contextWindowSources
-          ? { contextWindowSources: previous.contextWindowSources }
-          : {}),
+        // Entri baru menang MUTLAK atas nilai lama: `saveProvider` menulis apa
+        // yang diberikan pemanggil. Sengaja tanpa "selamatkan nilai lama bila
+        // entry tidak punya field ini" — versi lama melakukan itu dan membuat
+        // `auto` (hapus jendela) mustahil: `assignContextWindow` sengaja MENGHAPUS
+        // kunci, dan penyelamatan di sini membangkitkannya lagi sehingga perintah
+        // "kembali ke otomatis" sukses di layar tapi tak berefek di config.
+        // Pemanggil yang memang ingin mempertahankan nilai lama (mis. `sync`)
+        // sudah membacanya sendiri lewat `loadConfig` sebelum menyusun entry.
       }
     } else cfg.providers.push(entry)
     await writeConfigAtomic(path, cfg)

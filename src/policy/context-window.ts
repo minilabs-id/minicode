@@ -113,6 +113,82 @@ export function findContextWindowFromOverlay(model: string): number | undefined 
   return best?.v
 }
 
+/**
+ * Nilai jendela yang ditulis operator SELAMA proses berjalan (in-process
+ * registry di bawah). Dipisah dari `config` karena `cli/setup.ts` menangkap
+ * config sekali di awal; tanpa lapis ini setiap setelan baru butuh restart.
+ */
+const liveUserWindows = new Map<string, number>()
+/**
+ * Pasangan yang operator-nya MEMILIH `auto`. Nilai `null` sengaja dipakai
+ * sebagai penanda, bukan penghapusan entri: config snapshot muat menahan angka
+ * lama (dibaca saat start), jadi menghapus entri live saja membuat angka basi
+ * itu muncul kembali — `auto` lalu tampak "balik ke nilai lama" alih-alih ke
+ * deteksi otomatis.
+ */
+const liveAutoClears = new Set<string>()
+
+/** Catat pilihan operator untuk sesi yang sedang berjalan. */
+export function setLiveContextWindow(providerId: string, model: string, tokens: number): void {
+  const key = `${providerId}::${model}`
+  liveAutoClears.delete(key)
+  liveUserWindows.set(key, tokens)
+}
+
+/** Hapus pilihan operator (`auto`) — resolusi kembali ke rantai normal. */
+export function clearLiveContextWindow(providerId: string, model: string): void {
+  const key = `${providerId}::${model}`
+  liveUserWindows.delete(key)
+  liveAutoClears.add(key)
+}
+
+/** Reset seluruh registry (test saja). */
+export function __resetLiveContextWindows(): void {
+  liveUserWindows.clear()
+  liveAutoClears.clear()
+}
+
+/** `"cleared"` = operator baru saja memilih `auto`; angka di config snapshot
+ * harus DILEWATI (bukan dipakai) selama proses ini hidup. */
+type LiveOverlay = ContextWindowResolution | "cleared" | undefined
+
+function readLiveWindowOverlay(model: string): LiveOverlay {
+  const sep = model.indexOf("::")
+  if (sep === -1) return undefined
+  const providerId = model.slice(0, sep)
+  const modelId = model.slice(sep + 2)
+  if (liveAutoClears.has(`${providerId}::${modelId}`)) return "cleared"
+  const tokens = liveUserWindows.get(`${providerId}::${modelId}`)
+  if (!validWindow(tokens)) return undefined
+  return { tokens, source: "model", origin: "user", model: modelId, providerId }
+}
+
+/**
+ * Lanjutkan rantai resolusi TANPA nilai `contextWindows` di config.
+ *
+ * Dipakai saat operator memilih `auto` selama sesi hidup: aturan "auto" adalah
+ * kembali ke deteksi otomatis, bukan ke angka yang kebetulan masih tersimpan di
+ * objek config yang sudah dibaca di awal. Bila `auto` juga sedang tertulis di
+ * disk (sesi baru), fungsi ini tidak dipanggil sama sekali — hasilnya identik.
+ */
+function resolveIgnoringConfigWindows(
+  config: MinicodeConfig,
+  model?: string,
+): ContextWindowResolution {
+  const stripped: MinicodeConfig = {
+    ...config,
+    providers: config.providers.map((p) => {
+      const { contextWindows: _w, contextWindowSources: _s, ...rest } = p
+      return rest
+    }),
+  }
+  // `ignoreLive` WAJIB: tanpa penanda ini, cabang `cleared` di pemanggilan
+  // rekursif membaca kunci yang sama dan memanggil fungsi ini lagi — rekursi
+  // tak berujung (satu sesi `auto` langsung menggantung tanpa stack overflow
+  // karena Bun hanya menumpuk frame sampai memori habis).
+  return resolveContextWindow(stripped, model, undefined, true)
+}
+
 /** Resolve a budget in the same order as the router: explicit provider pin,
  * then first provider advertising a bare model, then the provider fallback.
  * Unknown aliases use a conservative budget and remain visible to callers. */
@@ -120,9 +196,19 @@ export function resolveContextWindow(
   config: MinicodeConfig,
   model?: string,
   override?: number,
+  /** Internal: lewati overlay live (dipakai `resolveIgnoringConfigWindows`). */
+  ignoreLive = false,
 ): ContextWindowResolution {
   if (validWindow(override))
     return { tokens: override, source: "override", ...(model ? { model } : {}) }
+  // Nilai operator yang BARU ditulis (`/context`, `config context-window`)
+  // menang atas snapshot `config` yang dibekukan saat sesi start: sesi hidup
+  // harus langsung memakai pilihan yang baru saja dibuat. Tanpa lapis ini
+  // perintah "set 200k" tampak sukses tapi turn berikutnya tetap memakai angka
+  // lama sampai restart — persis keluhan "fitur ini tidak berefek".
+  const live = model && !ignoreLive ? readLiveWindowOverlay(model) : undefined
+  if (live === "cleared") return resolveIgnoringConfigWindows(config, model)
+  if (live) return live
 
   let providerId: string | undefined
   let modelId = model

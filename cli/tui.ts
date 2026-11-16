@@ -49,6 +49,7 @@ import {
   BUILTIN_COMMANDS,
   type CommandContext,
   DRIVER_HELP_COMMANDS,
+  HELP_GROUPS,
   handleBuiltinCommand,
   persistModelChoice,
   suggestSimilar,
@@ -503,17 +504,15 @@ export async function runTui(ctx: CliSession): Promise<void> {
    */
   function helpConcise(): void {
     // Grup kurasi (sengaja bukan dump flat dari registry): label + baris pendek
-    // per kategori supaya /help mudah dipindai. Daftar tetap 1:1 dengan command
-    // yang ditangani di `submit` (bila ada command baru, tambahkan ke grup yang
-    // tepat di sini). Tab completion tetap diturunkan dari registry (suggestions).
-    const group = (label: string, cmds: string): string => `  ${label.padEnd(9)}${cmds}`
+    // per kategori supaya /help mudah dipindai. Sumber daftarnya SATU —
+    // `HELP_GROUPS` di `cli/commands.ts` — karena sebelumnya grup di sini dan
+    // grup di /help lengkap terpelihara terpisah: menambah perintah ke satu sisi
+    // meninggalkan sisi lain basi (persis yang terjadi pada `/context`).
+    const group = (label: string, names: readonly string[]): string =>
+      `  ${label.padEnd(9)}${names.map((n) => `/${n}`).join(" ")}`
     transcript.pushInfo([
       t("help.cHead"),
-      group(t("help.gSession"), "/status /sessions /history /clear /copy /init /exit"),
-      group(t("help.gModel"), "/model /provider /sync"),
-      group(t("help.gMode"), "/mode /work-mode /undo /redo /lang"),
-      group(t("help.gView"), "/compact /thinking /expand /minimize /fold"),
-      group(t("help.gTask"), "/scheduler"),
+      ...HELP_GROUPS.map((g) => group(t(g.key), g.names)),
       t("help.cKeys"),
       t("help.cMore"),
     ])

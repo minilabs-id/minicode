@@ -18,6 +18,7 @@ locale OS > en. `/lang` tanpa argumen = tampilkan aktif. Semua string lewat kamu
 | `/help keys` | Pintasan papan tombol lengkap (alias `/help tombol`) |
 | `/provider` | Kelola provider: popup — picker preset + form (URL/key/scope/timpa), hapus (`d`, menyebut jumlah model yang ikut hilang), ubah (`e`) |
 | `/model [cari]` | Popup semua `provider::model` (argumen = filter awal; di dalam ketik langsung cari live, Ctrl+U clear, Esc keluar filter). Del = hapus (konfirmasi). Enter = pilih + atur thinking effort (`default/low/medium/high`, tersimpan di provider, berlaku sesi berikutnya; Esc = batal total). Effort non-default tampil badge `[low|medium|high]` |
+| `/context [nilai]` | Tabel jendela konteks efektif tiap model + asal angkanya (`manual`/`endpoint`/`katalog`/`models.dev`/`flag`/`default aman`). Dengan argumen: setel untuk model aktif (`128k`, `1m`, `1024x1024`, `auto`) — langsung berlaku turn berikutnya. Detail di [Konfigurasi](config.md) |
 | `/sync` | Segarkan daftar model semua provider (hanya bilang restart bila benar ada model baru) |
 | `/undo` | Batalkan perubahan berkas turn terakhir |
 | `/redo` | Terapkan ulang yang dibatalkan |

@@ -585,6 +585,43 @@ describe("model-manager view: Enter gagal tidak menutup manager", () => {
     resolveHung()
   }, 8000)
 
+  test("Tab pada model tanpa thinking memberi alasan, bukan diam", async () => {
+    // Keluhan "minicode macet saat buka /model lalu Tab": untuk keluarga tanpa
+    // thinking `pickEffort` mengembalikan "skip" dan cabang lama TIDAK mencetak
+    // apa pun — layar beku bagi mata, padahal sebenarnya no-op. Sekarang notice
+    // menyatakan alasannya dan daftar tetap interaktif.
+    const { runModelManagerView } = await import("../src/ui/screens/model-manager.ts")
+    tty = installFakeTty({ rows: 24 })
+    let setEffortCalls = 0
+    const p = runModelManagerView({
+      initialRows: [{ id: "a::m", active: true }],
+      getEfforts: () => ["default"], // tanpa thinking
+      onSelect: () => {},
+      loadRows: async () => [{ id: "a::m", active: true }],
+      onDelete: async () => [{ id: "a::m", active: true }],
+      // Cabang Tab hanya hidup bila handler ini diinjeksi (sama seperti
+      // `cli/model-manager.ts`); tanpa itu Tab memang sengaja no-op.
+      onSetEffort: async () => {
+        setEffortCalls++
+        return [{ id: "a::m", active: true }]
+      },
+    })
+    await tty.ready()
+    await tty.send(KEY.tab, 60)
+    // Alasan dirender di BODY layar (notice), bukan dicetak ke stdout —
+    // `waitForScreen` yang memeriksa frame, bukan byte mentah.
+    // Gagal-di-kode-lama: tak ada baris apa pun yang menyebut alasan.
+    await tty.waitForScreen(
+      (frame) => frame.some((l) => /no thinking effort|tidak punya upaya/.test(l)),
+      2000,
+    )
+    await tty.waitForListener(2000)
+    await tty.send(KEY.esc, 80)
+    await p
+    // Model tanpa thinking TIDAK boleh mengirim effort apa pun.
+    expect(setEffortCalls).toBe(0)
+  }, 8000)
+
   test("PgDn/PgUp/Home/End navigasi daftar panjang", async () => {
     // Gagal-di-kode-lama: kondisi paging memakai panjang list sebagai jatah
     // visible → selalu false → PgDn mati. 12 baris, jatah 8.
