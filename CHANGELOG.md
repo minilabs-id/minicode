@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.28.0] - 2026-11-17
+
+### Added & Changed — penyatuan WorkMode (DISCUSS | BUILD) & audit command
+
+- **Penyatuan WorkMode menjadi 2 mode operasional kanonikal (`DISCUSS` | `BUILD`)**: Mode `DISCUSS` menyatukan `PLAN` dan `EXPLORE` sebagai lingkungan aman tanpa mutasi berkas workspace (hanya alat baca/analisis). Mode `BUILD` adalah mode kerja aktif dengan seluruh alat tulis, edit, dan perlindungan shadow-git checkpoint.
+- **Audit & Deduplikasi Slash Commands**: Menghapus alias redundan, menyelaraskan flag `--mode` di seluruh CLI dan REPL, serta memperjelas deskripsi status di picker mode dan bantuan interaktif.
+
+### Fixed & Hardened — Context Window, Memory Store & Task Authority
+
+- **Kompaksi & Skala Jendela Konteks Dinamis**: Penyelarasan proyeksi kanonikal untuk mencegah inflasi token palsu; kalibrasi budget agresif bertingkat yang menyesuaikan pergantian model secara live di sesi berjalan; perlindungan anti-duplikasi pesan user berturut-turut pada ringkasan LLM.
+- **Penyatuan & Keamanan Memory Store**: Isolasi mutlak antara memori profil global dan memori workspace repo; serialisasi write-lock (`withMemLock`) dan pencegahan serangan symlink/hardlink pada `MEMORY.md`; pelacakan provenance (session ID, turn ID, source kind) untuk revokasi selektif; isolasi status pelajaran kandidat (`provisional` vs `validated`).
+- **Otoritas Tunggal Task & Todo Store**: SQLite `TaskStore` kini menjadi single source of truth untuk seluruh status tugas dan todo; penambahan status native `in_progress`; rekonsiliasi otomatis dua arah antara SQLite, berkas JSON, dan berkas Markdown; isolasi sesi tugas anak pada subagent delegation.
+- **Paritas Resolusi Mention `@berkas`**: Penyeragaman parser sebutan berkas di seluruh prompt, perintah tool, dan runtime REPL dengan sanitasi path traversal.
+- **Suite Regresi Komprehensif**: Penambahan 20 skenario uji regresi baru di `test/audit-context-memory-todo-regressions.test.ts` yang mencakup integritas memori, budget konteks, isolasi subagent, dan task lease locking.
+
 ## [0.27.0] - 2026-11-16
 
 ### Added — `/context`: permukaan untuk jendela konteks manual
