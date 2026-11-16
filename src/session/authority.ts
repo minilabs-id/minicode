@@ -80,21 +80,40 @@ export function acquireSessionWriter(opts: {
   const now = opts.now ?? Date.now()
   const token = opts.token ?? writerTokenFor(bootId)
   const store = new TaskStore(cwd)
-  const pre = store.getSessionAuthority(sessionId)
-  if (pre && pre.ownerToken !== token && isLeaseActive(pre.leaseExpiresAt, now)) {
+  // Baca status lease sebelumnya dan akuisisi secara atomik dalam transaksi IMMEDIATE
+  // agar `pre` selalu mencerminkan pemilik tepat sebelum pengambilalihan tanpa TOCTOU.
+  const leaseOutcome = store.withTransaction((tx) => {
+    const pre = tx.getSessionAuthority(sessionId)
+    if (pre && pre.ownerToken !== token && isLeaseActive(pre.leaseExpiresAt, now)) {
+      return {
+        ok: false as const,
+        holder: { pid: pre.ownerPid, expiresAt: pre.leaseExpiresAt },
+      }
+    }
+    const acquired = tx.acquireSessionAuthority(sessionId, token, SESSION_LEASE_MS, now)
+    if (acquired === "REFUSED_LEASE_HELD") {
+      const cur = tx.getSessionAuthority(sessionId)
+      return {
+        ok: false as const,
+        holder: {
+          pid: cur?.ownerPid ?? null,
+          expiresAt: cur?.leaseExpiresAt ?? null,
+        },
+      }
+    }
+    return { ok: true as const, pre }
+  }, true)
+  if (!leaseOutcome.ok) {
     return {
       ok: false,
-      error: new SessionBusyError(sessionId, pre.ownerPid, pre.leaseExpiresAt),
+      error: new SessionBusyError(
+        sessionId,
+        leaseOutcome.holder.pid,
+        leaseOutcome.holder.expiresAt,
+      ),
     }
   }
-  const acquired = store.acquireSessionAuthority(sessionId, token, SESSION_LEASE_MS, now)
-  if (acquired === "REFUSED_LEASE_HELD") {
-    const holder = holderSummary(sessionId, cwd, now)
-    return {
-      ok: false,
-      error: new SessionBusyError(sessionId, holder.pid, holder.expiresAt),
-    }
-  }
+  const { pre } = leaseOutcome
   // Kita pemegang lease. Takeover (bump epoch) HANYA bila baris lease
   // sebelumnya milik token LAIN (aktif/expired) — akuisisi fresh atau
   // re-acquire token sendiri tak menyentuh epoch (§16).

@@ -39,6 +39,7 @@ export interface SessionConfig {
   systemForContext?: () => string;
   model?: string;
   cwd?: string;
+  sessionId?: string;
   /**
    * Session permission mode, forwarded to each turn's ToolContext so tools
    * can adapt their behavior. Plain string or live getter — prefer the
@@ -156,6 +157,7 @@ export interface SessionInternal {
   readonly systemForContext?: () => string;
   readonly model?: string;
   readonly cwd?: string;
+  readonly sessionId?: string;
   readonly permissionMode?: string | (() => string);
   readonly budget: BudgetPolicy;
   readonly estimator: TokenEstimator;
@@ -200,6 +202,7 @@ export function createSession(config: SessionConfig): Session {
     systemForContext: config.systemForContext,
     model: config.model,
     cwd: config.cwd,
+    sessionId: config.sessionId,
     permissionMode: config.permissionMode,
     budget: config.budget ?? defaultBudgetPolicy,
     estimator: config.estimator ?? defaultTokenEstimator,

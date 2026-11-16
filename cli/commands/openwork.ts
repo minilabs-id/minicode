@@ -423,7 +423,7 @@ function handleList(getArg: (name: string) => string | undefined): never {
   process.exit(0)
 }
 
-function handleMerge(getArg: (name: string) => string | undefined): never {
+async function handleMerge(getArg: (name: string) => string | undefined): Promise<never> {
   const cwd = getArg("--cwd") ?? process.cwd()
   const asJson = getArg("--json") !== undefined || process.argv.includes("--json")
   const sessionId = getArg("--session")
@@ -472,6 +472,10 @@ function handleMerge(getArg: (name: string) => string | undefined): never {
     }
     exit1(sanitizeAnsi(`[openwork] merge refused: ${result.outcome} — ${result.detail}`))
   }
+
+  // Sinkronkan view turunan todos/*.json & plans/*.md pasca merge/cancel duplikat.
+  const { syncTodoViewsFromTaskStore } = await import("../../src/tools/todo.ts")
+  await syncTodoViewsFromTaskStore(sessionId, cwd).catch(() => undefined)
 
   if (asJson) {
     emitJson(result)
@@ -968,7 +972,7 @@ export async function handleOpenwork(
   }
   const sub = actionAfter(args)
   if (sub === "merge") {
-    handleMerge(getArg)
+    return await handleMerge(getArg)
   }
   if (sub === "inventory") {
     handleInventory(getArg)

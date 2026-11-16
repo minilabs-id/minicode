@@ -60,3 +60,50 @@ export function resolveLocalDbPath(filename: string, cwd?: string): string {
   } catch {}
   return join(dir, filename)
 }
+
+const SQLITE_CONTENTION_RE =
+  /SQLITE_BUSY|database is locked|database table is locked|SQLITE_LOCKED|SQLITE_PROTOCOL|SQLITE_IOERR_TRUNCATE|SQLITE_IOERR_SHMOPEN|SQLITE_IOERR_LOCK|disk I\/O error/i
+
+/** Predikat kontensi SQLite transien lintas-proses (aman di-retry; bukan korupsi/constraint). */
+export function isSqliteContention(e: unknown): boolean {
+  const code = (e as { code?: unknown } | null)?.code
+  if (typeof code === "string" && SQLITE_CONTENTION_RE.test(code)) return true
+  const msg = e instanceof Error ? String(e.message ?? e) : String(e)
+  return SQLITE_CONTENTION_RE.test(msg)
+}
+
+export function withSqliteBusyRetrySync<T>(
+  fn: () => T,
+  opts: {
+    attempts?: number
+    backoffMs?: number
+    jitterMaxMs?: number
+    deterministicJitter?: boolean
+    onGiveUp?: (last: unknown, attempts: number) => void
+  } = {},
+): T | null {
+  const attempts = opts.attempts ?? 8
+  const backoffMs = opts.backoffMs ?? 15
+  const jitterMax = opts.jitterMaxMs ?? 0
+  let last: unknown
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return fn()
+    } catch (e) {
+      if (!isSqliteContention(e)) throw e
+      last = e
+      if (i + 1 >= attempts) break
+      const base = backoffMs * 2 ** i
+      const jitter = opts.deterministicJitter
+        ? i === 0
+          ? 0
+          : (i * 7919 + 3) % Math.max(1, Math.floor(base * 0.2))
+        : jitterMax > 0
+          ? Math.floor(Math.random() * jitterMax)
+          : 0
+      Bun.sleepSync(base + jitter)
+    }
+  }
+  opts.onGiveUp?.(last, attempts)
+  return null
+}

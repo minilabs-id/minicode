@@ -4,7 +4,11 @@ import { resolve } from "node:path"
 import { LIMITS } from "../constants.ts"
 import { resolveTrustedExecutable } from "../lib/trusted-exec.ts"
 import { sanitizeSpawnEnv } from "../policy/scrub.ts"
-import { allocateEmptyMaskFile, discoverSandboxMaskTargets } from "./mask.ts"
+import {
+  allocateEmptyMaskFile,
+  createCappedOutputCollector,
+  discoverSandboxMaskTargets,
+} from "./mask.ts"
 
 let dockerOk: boolean | null = null
 
@@ -178,25 +182,9 @@ export function runInDocker(
       env,
     })
     // Cap buffer saat streaming — output container raksasa tidak menumpuk di RAM.
-    const OUT_CAP = LIMITS.DOCKER_OUTPUT_MAX_CHARS
-    let out = "",
-      err = ""
-    let truncated = false
-    const appendCapped = (target: "out" | "err", d: Buffer | string): void => {
-      const s = typeof d === "string" ? d : d.toString()
-      const cur = target === "out" ? out : err
-      if (cur.length >= OUT_CAP) {
-        truncated = true
-        return
-      }
-      const room = OUT_CAP - cur.length
-      if (s.length > room) truncated = true
-      const piece = s.slice(0, Math.max(0, room))
-      if (target === "out") out += piece
-      else err += piece
-    }
-    p.stdout.on("data", (d) => appendCapped("out", d))
-    p.stderr.on("data", (d) => appendCapped("err", d))
+    const collector = createCappedOutputCollector(LIMITS.DOCKER_OUTPUT_MAX_CHARS)
+    p.stdout.on("data", (d) => collector.append("out", d))
+    p.stderr.on("data", (d) => collector.append("err", d))
     const timeout =
       typeof opts.timeoutMs === "number" && Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0
         ? opts.timeoutMs
@@ -213,9 +201,7 @@ export function runInDocker(
       clearTimeout(t)
       signal?.removeEventListener("abort", onAbort)
       emptyMask.cleanup()
-      const marker = truncated ? "\n… [output truncated]" : ""
-      const output = (out + (err ? `\n[stderr]\n${err}` : "")).trim() + marker + suffix
-      resolveResult({ code, output })
+      resolveResult({ code, output: collector.format().output + suffix })
     }
     const requestStop = (reason: "timeout" | "abort") => {
       if (stopReason || settled) return

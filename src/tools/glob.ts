@@ -1,47 +1,8 @@
-import { readdir, realpath, stat } from "node:fs/promises"
-import { join, relative, resolve } from "node:path"
+import { stat } from "node:fs/promises"
 import type { Tool } from "#minicore"
 import { LIMITS } from "../constants.ts"
-import { isIgnored, loadIgnoreMatchers } from "../lib/ignore.ts"
-import { isCwdOutsideRoot, isPathOutsideRoot, isSensitive } from "../policy/jail.ts"
-import { contextUnrestricted, requireToolCwd } from "./context.ts"
-
-async function walk(
-  dir: string,
-  pattern: RegExp,
-  out: string[],
-  root: string,
-  limit: number,
-  signal: AbortSignal,
-  ignoreMatchers: ((rel: string) => boolean)[],
-  relaxed = false,
-  includeDotfiles = false,
-) {
-  if (signal.aborted) throw new Error("aborted")
-  if (out.length >= limit) return
-  const entries = await readdir(dir, { withFileTypes: true }).catch(() => [])
-  for (const e of entries) {
-    if (out.length >= limit) break
-    if (e.name === "node_modules" || e.name === ".git") continue
-    if (!includeDotfiles && e.name.startsWith(".")) continue
-    const full = join(dir, e.name)
-    const rel = relative(root, full).replace(/\\/g, "/")
-    // Hormati .gitignore subset (bukan hard-coded saja).
-    if (isIgnored(rel, ignoreMatchers)) continue
-    if (e.isDirectory()) {
-      await walk(full, pattern, out, root, limit, signal, ignoreMatchers, relaxed, includeDotfiles)
-    } else if (pattern.test(rel) || pattern.test(e.name)) {
-      const real = await realpath(full).catch(() => full)
-      if (
-        (!relaxed && isPathOutsideRoot(real, resolve(root))) ||
-        isSensitive(real) ||
-        isSensitive(rel)
-      )
-        continue
-      out.push(rel)
-    }
-  }
-}
+import { loadIgnoreMatchers } from "../lib/ignore.ts"
+import { resolveSearchRoot, walkWorkspaceFiles } from "./context.ts"
 
 export function globToRegExp(glob: string): RegExp {
   // Tangani brace expansion {a,b} tanpa double-escape
@@ -91,15 +52,7 @@ export const globTool: Tool = {
     additionalProperties: false,
   },
   async execute({ pattern, cwd, limit, includeDotfiles }, ctx) {
-    const sessionRoot = requireToolCwd(ctx)
-    const relaxed = contextUnrestricted(ctx)
-    const rawRoot = (cwd as string) ?? "."
-    const root = resolve(sessionRoot, rawRoot)
-    if (
-      !relaxed &&
-      (isPathOutsideRoot(root, sessionRoot) || isCwdOutsideRoot(rawRoot, sessionRoot))
-    )
-      throw new Error(`cwd outside workspace: ${rawRoot}`)
+    const { root, rawRoot, relaxed } = resolveSearchRoot(cwd, ctx)
     const st = await stat(root).catch(() => null)
     if (!st?.isDirectory()) return `cwd not found: ${rawRoot}`
     const rawLim = limit as number | undefined
@@ -109,16 +62,19 @@ export const globTool: Tool = {
     const re = globToRegExp(pattern as string)
     const ignoreMatchers = await loadIgnoreMatchers(root)
     const out: string[] = []
-    await walk(
-      root,
-      re,
-      out,
-      root,
-      lim,
-      ctx.signal,
-      ignoreMatchers,
-      relaxed,
-      includeDotfiles === true,
+    await walkWorkspaceFiles(
+      {
+        dir: root,
+        root,
+        signal: ctx.signal,
+        ignoreMatchers,
+        relaxed,
+        includeDotfiles: includeDotfiles === true,
+        shouldStop: () => out.length >= lim,
+      },
+      ({ rel, name }) => {
+        if (re.test(rel) || re.test(name)) out.push(rel)
+      },
     )
     if (out.length === 0) return `no files match ${pattern} in ${rawRoot}`
     return out.slice(0, lim).join("\n")

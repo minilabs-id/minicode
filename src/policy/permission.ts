@@ -691,7 +691,13 @@ export function createPermissionHandler(
     const key = `${call.name}:${argsJson}`
     if (!sessionGrants.includes(key)) sessionGrants.push(key)
     allowlistCache = null
-    return saveAllowlist(key, root).catch(() => {})
+    // Eksplisit `allowLocalConfig === false` (sesi runtime tanpa opt-in) menyimpan Always ke global
+    // agar tidak mengotori repo, sementara pemanggil langsung tanpa flag mempertahankan K-1 lokal.
+    return saveAllowlist(
+      key,
+      root,
+      opts.allowLocalConfig === false ? { global: true } : undefined,
+    ).catch(() => {})
   }
 
   // data-driven: tiap mode = satu fungsi keputusan (tanpa cabang saling tumpang tindih).

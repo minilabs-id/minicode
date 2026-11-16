@@ -10,25 +10,15 @@ import {
   checkMemorySupersessionTarget,
   deleteMemoryByQuery,
   invokeMemoryWriteFaultForTest,
+  MemorySupersessionError,
   memoryEntryText,
   recordCandidateLesson,
+  resolveEnvEmbeddingAuth,
   searchHybrid,
 } from "../memory/vector.ts"
+import { scrubSecrets } from "../policy/scrub.ts"
 import { requireToolCwd } from "./context.ts"
 import { subAgentWorkMode } from "./task.ts"
-
-/**
- * Resolusi kredensial embedding secara konsisten antara jalur baca (`read_memory`)
- * dan jalur tulis (`write_memory`), sehingga endpoint `AGENT_BASE_URL` selalu
- * berpasangan dengan API key yang sama.
- */
-function resolveEmbeddingAuth(): { baseUrl: string; apiKey: string } {
-  return {
-    baseUrl: process.env.AGENT_BASE_URL ?? "https://api.openai.com/v1",
-    apiKey:
-      process.env.OPENAI_API_KEY ?? process.env.DEEPSEEK_API_KEY ?? process.env.AGENT_API_KEY ?? "",
-  }
-}
 
 export const readMemoryTool: Tool = {
   name: "read_memory",
@@ -60,7 +50,7 @@ export const readMemoryTool: Tool = {
     // hybrid search — use cwd + try embedding via env (consistent with cli RAG)
     let hits: { text: string; score: number; createdAt: number; id?: string }[] = []
     try {
-      const { baseUrl, apiKey } = resolveEmbeddingAuth()
+      const { baseUrl, apiKey } = resolveEnvEmbeddingAuth()
       hits = await searchHybrid(q, {
         topK: (topK as number) ?? 5,
         cwd,
@@ -76,7 +66,10 @@ export const readMemoryTool: Tool = {
       .split("\n")
       .filter((l) => l.toLowerCase().includes(q.toLowerCase()))
       .slice(0, 5)
-      .map((l) => (l.length > 300 ? `${l.slice(0, 300)}…` : l))
+      .map((l) => {
+        const clean = scrubSecrets(l)
+        return clean.length > 300 ? `${clean.slice(0, 300)}…` : clean
+      })
       .join("\n")
     const fmtDate = (ts: number): string => {
       try {
@@ -100,7 +93,8 @@ export const readMemoryTool: Tool = {
             // [Live Hardening §7.5] ekspos id row agar write_memory.supersedes_id
             // bisa menyasar id nyata (sebelumnya tak diekspos → model memakai teks).
             const idTag = h.id ? ` [id:${h.id}] ` : ""
-            return `- ${h.text.slice(0, 300)}${h.text.length > 300 ? "…" : ""} (${h.score.toFixed(2)}, ${fmtDate(h.createdAt)}) ${meta}${idTag}`
+            const cleanText = scrubSecrets(h.text)
+            return `- ${cleanText.slice(0, 300)}${cleanText.length > 300 ? "…" : ""} (${h.score.toFixed(2)}, ${fmtDate(h.createdAt)}) ${meta}${idTag}`
           },
         )
         .join("\n")}\n`
@@ -158,11 +152,17 @@ export function createWriteMemoryTool(runtimeSessionId?: string): Tool {
       // itu dibaca mentah saat query kosong) dan hanya hidup di store vektor
       // dengan status `provisional` sampai verifikasi mempromosikannya.
       if (validation === "provisional") {
+        if (typeof supersedes_id === "string" && supersedes_id) {
+          throw new Error("supersedes_id cannot be combined with validation=provisional")
+        }
         if (typeof sessionId !== "string" || !sessionId) {
           throw new Error("validation=provisional requires sessionId for later promotion")
         }
-        const { baseUrl, apiKey } = resolveEmbeddingAuth()
-        const tagArr = Array.isArray(tags) ? (tags as string[]) : undefined
+        const { baseUrl, apiKey } = resolveEnvEmbeddingAuth()
+        const tagArr = Array.isArray(tags)
+          ? (tags as string[]).map((tg) => scrubSecrets(String(tg)).replace(/[\r\n]+/g, " "))
+          : undefined
+        const cleanEcho = scrubSecrets(t.trim()).replace(/[\r\n]+/g, " ")
         const id = await recordCandidateLesson(sessionId, t, {
           cwd,
           ...(apiKey ? { baseUrl, apiKey } : {}),
@@ -171,7 +171,7 @@ export function createWriteMemoryTool(runtimeSessionId?: string): Tool {
           turnId: (turnId as string | undefined) ?? null,
           sourceRef: (sourceRef as string | undefined) ?? null,
         })
-        return `candidate lesson recorded (provisional) id=${id}: ${t.slice(0, 100)}`
+        return `candidate lesson recorded (provisional) id=${id}: ${cleanEcho.slice(0, 100)}`
       }
       // [Live Hardening §7.5] Validasi supersedes_id SEBELUM file/vector tersentuh.
       // Id yang tak ada → error actionable, bukan tombstone no-op yang menyisakan
@@ -193,9 +193,12 @@ export function createWriteMemoryTool(runtimeSessionId?: string): Tool {
       // menulisnya hanya ke hasil tool, sehingga baris di MEMORY.md tak punya
       // bukti provenance (tag yang dibangun di bawah terbuang percuma).
       const cat = (category as string) ?? "fact"
-      const tagArr = Array.isArray(tags) ? (tags as string[]) : undefined
+      const tagArr = Array.isArray(tags)
+        ? (tags as string[]).map((tg) => scrubSecrets(String(tg)).replace(/[\r\n]+/g, " "))
+        : undefined
       // [Fase 12 / LF-4] id memori lama yang digantikan (supersession) dari argumen tool.
       const supersedesId = typeof supersedes_id === "string" && supersedes_id ? supersedes_id : null
+      const scrubbedLineText = scrubSecrets(t.trim()).replace(/[\r\n]+/g, " ")
 
       // MEM-01: add provenance tags to MEMORY.md (as metadata comment at end of line)
       const memTags = tagArr ? [...tagArr] : []
@@ -210,8 +213,9 @@ export function createWriteMemoryTool(runtimeSessionId?: string): Tool {
       // persis di titik ini → menghasilkan entri file-only (split-brain arah 1).
       invokeMemoryWriteFaultForTest("after_file_before_vector")
 
-      const { baseUrl, apiKey } = resolveEmbeddingAuth()
+      const { baseUrl, apiKey } = resolveEnvEmbeddingAuth()
       let added = false
+      let supersessionErr: MemorySupersessionError | null = null
       if (apiKey) {
         try {
           await addMemory(t, {
@@ -228,10 +232,12 @@ export function createWriteMemoryTool(runtimeSessionId?: string): Tool {
           })
           added = true
         } catch (e) {
-          process.stderr.write(`[warn] memory vector embedding failed: ${(e as Error).message}\n`)
+          if (e instanceof MemorySupersessionError) supersessionErr = e
+          else
+            process.stderr.write(`[warn] memory vector embedding failed: ${(e as Error).message}\n`)
         }
       }
-      if (!added) {
+      if (!added && !supersessionErr) {
         try {
           await addMemory(t, {
             cwd,
@@ -245,10 +251,22 @@ export function createWriteMemoryTool(runtimeSessionId?: string): Tool {
           })
           added = true
         } catch (e2) {
-          process.stderr.write(
-            `[warn] memory keyword-only fallback failed: ${(e2 as Error).message}\n`,
-          )
+          if (e2 instanceof MemorySupersessionError) supersessionErr = e2
+          else {
+            process.stderr.write(
+              `[warn] memory keyword-only fallback failed: ${(e2 as Error).message}\n`,
+            )
+          }
         }
+      }
+      // P1.3: error semantik supersession (mis. race conflict / self) harus
+      // ditolak tegas setelah rollback file — JANGAN ditelan sebagai
+      // "vector index unavailable".
+      if (supersessionErr) {
+        try {
+          await deleteMemoryEntry(scrubbedLineText, cwd)
+        } catch {}
+        throw supersessionErr
       }
       // [Area E / D6] Fakta lama yang digantikan harus hilang dari MEMORY.md —
       // jalur retrieval file membaca berkas mentah, jadi menambah fakta baru
@@ -261,12 +279,12 @@ export function createWriteMemoryTool(runtimeSessionId?: string): Tool {
           if (oldText) await deleteMemoryEntry(oldText, cwd)
         } catch {}
       }
-      // P1.3: bila store menolak (mis. race: target baru saja superseded), tarik
+      // P1.3: bila store menolak (mis. DB terkunci/gagal dengan supersedesId), tarik
       // kembali baris file yang sudah ditulis agar tidak ada fakta "file-only"
       // yang tetap terbaca sementara relasi supersession gagal.
       if (!added && supersedesId) {
         try {
-          await deleteMemoryEntry(t, cwd)
+          await deleteMemoryEntry(scrubbedLineText, cwd)
         } catch {}
       }
       // [Area E / D1] Jangan klaim sukses penuh bila indeks vektor gagal total:
@@ -276,7 +294,7 @@ export function createWriteMemoryTool(runtimeSessionId?: string): Tool {
       const vectorNote = added
         ? ""
         : " (vector index unavailable — saved to file only; run `minicode memory reconcile` to index)"
-      return `saved to ${path}: ${t.slice(0, 100)}${memTags.length ? ` [tags: ${JSON.stringify(memTags)}]` : ""}${vectorNote}`
+      return `saved to ${path}: ${scrubbedLineText.slice(0, 100)}${memTags.length ? ` [tags: ${JSON.stringify(memTags)}]` : ""}${vectorNote}`
     },
   }
 }
@@ -313,13 +331,20 @@ export const forgetMemoryTool: Tool = {
 
     let resultText = ""
 
-    // Use provenance-based deletion if specified, otherwise fall back to query-based
+    // Use provenance-based deletion if specified (memadukan query jika ikut diisi),
+    // otherwise fall back to query-based.
     if (sessionId || turnId || sourceKind) {
       const { revokeByProvenance } = await import("../memory/vector.ts")
-      const criteria: { sessionId?: string; turnId?: string; sourceKind?: string } = {}
+      const criteria: {
+        sessionId?: string
+        turnId?: string
+        sourceKind?: string
+        query?: string
+      } = {}
       if (sessionId as string) criteria.sessionId = sessionId as string
       if (turnId as string) criteria.turnId = turnId as string
       if (sourceKind as string) criteria.sourceKind = sourceKind as string
+      if (q.trim()) criteria.query = q.trim()
       const { vectorRows, fileLines } = await revokeByProvenance(criteria, cwd)
       resultText = `revoked ${vectorRows} vector entries + ${fileLines} file lines by provenance`
     } else {

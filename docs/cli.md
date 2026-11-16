@@ -44,7 +44,6 @@ Subcommand di-route di `cli/router.ts` (`stats`, `sessions`, `mcp`, `config`, `s
 | `--budget <usd>` | Batas biaya sesi; warn 80%, exit/break bila lewat; cost tak dikenal + pemakaian = over (fail-closed default) |
 | `--budget-strict` | Penegasan eksplisit fail-closed di atas (back-compat) |
 | `--tool-scope <s>` | `full` (default) \| `explore` = subset read-only 12 tool |
-| `--plan` | **Deprecated** — alias untuk `--work-mode PLAN` (read-only planning) |
 | `--allowlist` | Bash hanya perintah aman (tool-access policy warisan) |
 | `--ask` | Minta persetujuan untuk pemanggilan yang digate (human-supervised) |
 | `--allow-all` | Profil akses privileged (path jail + bash-guard tetap aktif) |
@@ -57,7 +56,7 @@ Subcommand di-route di `cli/router.ts` (`stats`, `sessions`, `mcp`, `config`, `s
 | `--max-steps <n>` | Batas langkah tool (default 50) |
 | `--context-window <n>` | Ukuran jendela konteks (token) |
 | `--session <id>` | ID sesi (default random, disanitasi) |
-| `--work-mode <m>` | `DISCUSS` \| `PLAN` \| `BUILD` (default: `DISCUSS`). **Work Mode**: `DISCUSS` = investigasi read-only, `PLAN` = perencanaan, `BUILD` = implementasi. Persetujuan hanya `AUTO`/`ASK` (default `AUTO`). Lihat [TUI](repl.md) untuk `/work-mode` |
+| `--work-mode <m>` | `DISCUSS` \| `BUILD` (default: `DISCUSS`). **Work Mode**: `DISCUSS` = investigasi & perencanaan read-only, `BUILD` = implementasi. Persetujuan hanya `AUTO`/`ASK` (default `AUTO`). Lihat [TUI](repl.md) untuk `/work-mode` |
 | `--enable-scheduler` | Opt-in scheduler otonom (default **off**). Tanpa flag ini, scheduler tidak dibangun sama sekali dan `/scheduler` menjawab "not enabled". Eksekusi manual saja lewat `/scheduler run` — tidak ada timer; turn otonom bersifat read-only. Lihat `/scheduler status` dan `/scheduler stop` |
 | `--runtime <mode>` | `off` (default) \| `constructed` \| `owned`. Arsitektur eksekusi: `off` = perilaku sekarang, tak berubah; `constructed` = runtime + jurnal durable dibangun, turn masih jalan jalur lama; `owned` = setiap turn di-admit lewat runtime (kernel + jurnal durable) dan admission yang ditolak menjalankan tak apa pun. Nilai tak dikenal = `off` |
 
@@ -71,16 +70,15 @@ Batas berubah otomatis saat `/model` mengganti model. MiniCode juga membatasi
 keluaran stream berdasarkan ruang tersisa setelah system prompt, tools, dan
 riwayat dihitung.
 
-Di TUI, **Tab** memutar Work Mode (`Discuss` → `Plan` → `Build`) dan **Shift+Tab** meng-toggle Permission Mode (`Auto` ↔ `Ask`). `/mode <AUTO|ASK>` mengubah persetujuan; `/work-mode <DISCUSS|PLAN|BUILD>` mengubah operating mode. Footer menampilkan Work Mode di kiri dan Permission Mode berwarna cyan di kanan, dekat penggunaan konteks; pada terminal sempit label dipadatkan.
+Di TUI, **Tab** meng-toggle Work Mode (`Discuss` ↔ `Build`) dan **Shift+Tab** meng-toggle Permission Mode (`Auto` ↔ `Ask`). `/mode <AUTO|ASK>` mengubah persetujuan; `/work-mode <DISCUSS|BUILD>` mengubah operating mode. Footer menampilkan Work Mode di kiri dan Permission Mode berwarna cyan di kanan, dekat penggunaan konteks; pada terminal sempit label dipadatkan.
 
 ## Kapan memakai apa
 
 | Tujuan | Pakai |
 |---|---|
-| Memahami repo tanpa perubahan | Default (`DISCUSS` + `AUTO`) — investigasi read-only lokal |
+| Memahami repo / menyusun rencana tanpa perubahan | Default (`DISCUSS` + `AUTO`) — investigasi & perencanaan read-only |
 | Meminta perubahan | `--work-mode BUILD` (`AUTO` default untuk persetujuan) — tool tulis/eksekusi tetap tunduk pada policy |
 | Repo asing / perintah belum dipahami | `--ask` (`BUILD` + `ASK`), jawab `always` hanya untuk pasangan tool+args yang sudah dinilai |
-| Review/analisis tanpa eksekusi | `--work-mode PLAN` (atau `--work-mode DISCUSS` untuk investigasi read-only murni) |
 | CI tanpa manusia | `exec --json` + `--budget`/`--max-steps`; `AUTO` menolak `ask_user` deterministik |
 | Otonom penuh di mesin sendiri | `--work-mode BUILD` + `AUTO`; isolasi tambahan `--sandbox docker` (atau OS) + `--budget` |
 | Model mahal tak terkendali | `--budget 0.50` + `--budget-strict` + `pricing sync` |

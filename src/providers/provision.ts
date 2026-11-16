@@ -12,10 +12,10 @@ import {
   type MinicodeConfig,
   normalizeConfig,
   type ProviderEntry,
+  updateConfigAtomic,
   withConfigLock,
   writeConfigAtomic,
 } from "../config.ts"
-import { atomicWriteText } from "../lib/atomic-write.ts"
 import { getSecret } from "../lib/keystore.ts"
 import { clearDetectCache, type DetectResult, detectModels } from "./detect.ts"
 import { GATEWAY_PRESETS } from "./presets.ts"
@@ -39,44 +39,11 @@ export async function saveProvider(
   const needsKey = entry.auth !== "oauth"
   if (!entry.id || !entry.baseUrl || (needsKey && !entry.apiKey))
     throw new Error("provider id/baseUrl/apiKey required")
-  // A provider may temporarily have no models: `/model` can remove the last
-  // entry before `/sync` discovers a new one.
-  const path =
-    (opts.global ?? true) ? globalConfigPath() : resolve(opts.cwd ?? process.cwd(), LOCAL)
-  // Kunci per-path SAMA dengan saveMcpServer/saveLspServer (audit #07):
-  // tanpa ini baca-modifikasi-tulis paralel last-wins dan menelan entri.
-  return withConfigLock(path, async () => {
-    let cfg: MinicodeConfig = { providers: [] }
-    try {
-      cfg = normalizeConfig(JSON.parse(await readFile(path, "utf8")))
-    } catch (e) {
-      // Audit #08 P1: reset diam-diam saat berkas korup MENGHAPUS semua
-      // provider + MCP/LSP/verify/allowlist lain saat tulis berikutnya.
-      // ENOENT (belum ada file) = mulai kosong; korup = backup + gagal keras
-      // seperti saveMcpServer; error lain (EACCES/…) = teruskan, jangan timpa.
-      if (e instanceof SyntaxError) {
-        const raw = await readFile(path, "utf8").catch(() => "")
-        const backup = `${path}.corrupt.${Date.now()}`
-        await atomicWriteText(backup, raw).catch(() => {})
-        throw new Error(`config corrupt: ${path} — backup to ${backup}: ${e.message}`)
-      }
-      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e
-    }
+  // Entri baru menang mutlak agar perintah `auto` bisa menghapus kunci jendela sebelumnya.
+  return updateConfigAtomic(opts, (cfg) => {
     const idx = cfg.providers.findIndex((p) => p.id === entry.id)
-    if (idx >= 0) {
-      cfg.providers[idx] = {
-        ...entry,
-        // Entri baru menang MUTLAK atas nilai lama: `saveProvider` menulis apa
-        // yang diberikan pemanggil. Sengaja tanpa "selamatkan nilai lama bila
-        // entry tidak punya field ini" — versi lama melakukan itu dan membuat
-        // `auto` (hapus jendela) mustahil: `assignContextWindow` sengaja MENGHAPUS
-        // kunci, dan penyelamatan di sini membangkitkannya lagi sehingga perintah
-        // "kembali ke otomatis" sukses di layar tapi tak berefek di config.
-        // Pemanggil yang memang ingin mempertahankan nilai lama (mis. `sync`)
-        // sudah membacanya sendiri lewat `loadConfig` sebelum menyusun entry.
-      }
-    } else cfg.providers.push(entry)
-    await writeConfigAtomic(path, cfg)
+    if (idx >= 0) cfg.providers[idx] = { ...entry }
+    else cfg.providers.push(entry)
   })
 }
 
@@ -255,25 +222,8 @@ export async function detectAndSave(
 }
 
 export async function removeProvider(id: string, opts: { global?: boolean; cwd?: string } = {}) {
-  const path =
-    (opts.global ?? true) ? globalConfigPath() : resolve(opts.cwd ?? process.cwd(), LOCAL)
-  return withConfigLock(path, async () => {
-    let cfg: MinicodeConfig = { providers: [] }
-    try {
-      cfg = normalizeConfig(JSON.parse(await readFile(path, "utf8")))
-    } catch (e) {
-      // Sama seperti saveProvider (audit #08 P1): korup = backup + gagal
-      // keras, bukan reset diam-diam yang menghapus seluruh config.
-      if (e instanceof SyntaxError) {
-        const raw = await readFile(path, "utf8").catch(() => "")
-        const backup = `${path}.corrupt.${Date.now()}`
-        await atomicWriteText(backup, raw).catch(() => {})
-        throw new Error(`config corrupt: ${path} — backup to ${backup}: ${e.message}`)
-      }
-      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e
-    }
+  return updateConfigAtomic(opts, (cfg) => {
     cfg.providers = cfg.providers.filter((p) => p.id !== id)
-    await writeConfigAtomic(path, cfg)
   })
 }
 

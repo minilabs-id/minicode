@@ -217,6 +217,18 @@ export async function createProductionScheduler(
   // here would create a THIRD copy of one policy, furthest from the tests that
   // justify it and therefore most likely to drift.
 
+  const onEvent = (e: SchedulerEvent): void => {
+    try {
+      d.onSchedulerEvent?.(e)
+    } finally {
+      if (e.kind === "task:claimed" || e.kind === "task:recovered") {
+        void import("../tools/todo.ts")
+          .then(({ syncTodoViewsFromTaskStore }) => syncTodoViewsFromTaskStore(d.sessionId, d.cwd))
+          .catch(() => {})
+      }
+    }
+  }
+
   const scheduler = new Scheduler(d.sessionId, {
     store: d.store,
     runTurn: buildAutonomousRunTurn(d.bindingFor, d.adapter),
@@ -225,7 +237,7 @@ export async function createProductionScheduler(
     // P2.2: teruskan token komposisi (bila ada) — satu penulis per boot.
     ...(d.authorityToken ? { authorityToken: d.authorityToken } : {}),
     ...(d.continuity ? { continuity: d.continuity } : {}),
-    ...(d.onSchedulerEvent ? { onEvent: d.onSchedulerEvent } : {}),
+    onEvent,
   })
 
   const trigger = new TriggerCoordinator({

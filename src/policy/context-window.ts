@@ -152,15 +152,38 @@ export function __resetLiveContextWindows(): void {
  * harus DILEWATI (bukan dipakai) selama proses ini hidup. */
 type LiveOverlay = ContextWindowResolution | "cleared" | undefined
 
-function readLiveWindowOverlay(model: string): LiveOverlay {
-  const sep = model.indexOf("::")
-  if (sep === -1) return undefined
-  const providerId = model.slice(0, sep)
-  const modelId = model.slice(sep + 2)
+function readLiveWindowOverlay(model: string, config?: MinicodeConfig): LiveOverlay {
+  let providerId: string | undefined
+  let modelId = model
+  if (model.includes("::")) {
+    const sep = model.indexOf("::")
+    providerId = model.slice(0, sep)
+    modelId = model.slice(sep + 2)
+  } else if (config) {
+    providerId = config.providers.find((entry) => entry.models?.includes(model))?.id
+  }
+  if (!providerId) return undefined
   if (liveAutoClears.has(`${providerId}::${modelId}`)) return "cleared"
   const tokens = liveUserWindows.get(`${providerId}::${modelId}`)
-  if (!validWindow(tokens)) return undefined
-  return { tokens, source: "model", origin: "user", model: modelId, providerId }
+  if (validWindow(tokens)) {
+    return { tokens, source: "model", origin: "user", model: modelId, providerId }
+  }
+  // Wildcard live (`provider::*`) hanya berlaku bila model ini tidak punya nilai
+  // persis di config snapshot (menjaga prioritas eksak > wildcard).
+  const cfgExact = config?.providers.find((entry) => entry.id === providerId)?.contextWindows?.[
+    modelId
+  ]
+  if (validWindow(cfgExact)) return undefined
+  if (liveAutoClears.has(`${providerId}::*`)) return "cleared"
+  const wildcardTokens = liveUserWindows.get(`${providerId}::*`)
+  if (!validWindow(wildcardTokens)) return undefined
+  return {
+    tokens: wildcardTokens,
+    source: "provider-default",
+    origin: "user",
+    model: modelId,
+    providerId,
+  }
 }
 
 /**
@@ -206,7 +229,7 @@ export function resolveContextWindow(
   // harus langsung memakai pilihan yang baru saja dibuat. Tanpa lapis ini
   // perintah "set 200k" tampak sukses tapi turn berikutnya tetap memakai angka
   // lama sampai restart — persis keluhan "fitur ini tidak berefek".
-  const live = model && !ignoreLive ? readLiveWindowOverlay(model) : undefined
+  const live = model && !ignoreLive ? readLiveWindowOverlay(model, config) : undefined
   if (live === "cleared") return resolveIgnoringConfigWindows(config, model)
   if (live) return live
 

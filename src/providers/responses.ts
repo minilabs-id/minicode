@@ -287,6 +287,7 @@ export function createResponsesProvider(config: ResponsesConfig): ModelProvider 
                       outputTokens:
                         typeof u.output_tokens === "number" ? u.output_tokens : undefined,
                       totalTokens: typeof u.total_tokens === "number" ? u.total_tokens : undefined,
+                      cacheIncluded: true,
                       ...(typeof cached === "number" ? { cacheReadTokens: cached } : {}),
                     },
                   }

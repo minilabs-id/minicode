@@ -452,6 +452,28 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
     }
   }
 
+  const recordPreMutation = async (
+    call: { id: string; name: string; args?: unknown },
+    workspaceRoot: string,
+  ) => {
+    const contract = contractForTool(call.name)
+    if (!call.id) return
+    if (call.name === "bash" || call.name === "code_run") {
+      const entries: { relPath: string; preHash: string | null }[] = []
+      for (const rel of shellCandidatePaths(call, workspaceRoot)) {
+        const pre = await hashWorkspaceFile(resolve(workspaceRoot, rel))
+        if (pre.ok) entries.push({ relPath: rel, preHash: pre.hash })
+      }
+      if (entries.length > 0) inflightExecPreHashes.set(call.id, entries)
+      return
+    }
+    if (contract?.sideEffectTier !== "WORKSPACE_MUTATION") return
+    const rel = targetRelPathForTool(call.name, call.args, workspaceRoot)
+    if (!rel) return
+    const pre = await hashWorkspaceFile(resolve(workspaceRoot, rel))
+    if (pre.ok) inflightPreHash.set(call.id, { relPath: rel, preHash: pre.hash })
+  }
+
   return {
     evaluateBeforeCall,
     assertBeforeCall(call, workspaceRoot) {
@@ -460,50 +482,14 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
         throw new NoProgressError(verdict.kind, verdict.reason, verdict.message)
       }
     },
-    async capturePreMutation(call, workspaceRoot) {
-      const contract = contractForTool(call.name)
-      if (!call.id) return
-      if (call.name === "bash" || call.name === "code_run") {
-        const entries: { relPath: string; preHash: string | null }[] = []
-        for (const rel of shellCandidatePaths(call, workspaceRoot)) {
-          const pre = await hashWorkspaceFile(resolve(workspaceRoot, rel))
-          if (pre.ok) entries.push({ relPath: rel, preHash: pre.hash })
-        }
-        if (entries.length > 0) inflightExecPreHashes.set(call.id, entries)
-        return
-      }
-      if (contract?.sideEffectTier !== "WORKSPACE_MUTATION") return
-      const rel = targetRelPathForTool(call.name, call.args, workspaceRoot)
-      if (!rel) return
-      const pre = await hashWorkspaceFile(resolve(workspaceRoot, rel))
-      if (pre.ok) {
-        inflightPreHash.set(call.id, { relPath: rel, preHash: pre.hash })
-      }
-    },
+    capturePreMutation: recordPreMutation,
     async beforeToolEffectCheck(call, workspaceRoot) {
       await flushPending()
       const verdict = evaluateBeforeCall(call, workspaceRoot)
       if (!verdict.allowed) {
         throw new NoProgressError(verdict.kind, verdict.reason, verdict.message)
       }
-      const contract = contractForTool(call.name)
-      if (!call.id) return
-      if (call.name === "bash" || call.name === "code_run") {
-        const entries: { relPath: string; preHash: string | null }[] = []
-        for (const rel of shellCandidatePaths(call, workspaceRoot)) {
-          const pre = await hashWorkspaceFile(resolve(workspaceRoot, rel))
-          if (pre.ok) entries.push({ relPath: rel, preHash: pre.hash })
-        }
-        if (entries.length > 0) inflightExecPreHashes.set(call.id, entries)
-        return
-      }
-      if (contract?.sideEffectTier !== "WORKSPACE_MUTATION") return
-      const rel = targetRelPathForTool(call.name, call.args, workspaceRoot)
-      if (!rel) return
-      const pre = await hashWorkspaceFile(resolve(workspaceRoot, rel))
-      if (pre.ok) {
-        inflightPreHash.set(call.id, { relPath: rel, preHash: pre.hash })
-      }
+      await recordPreMutation(call, workspaceRoot)
     },
     flushPending,
     recordOutcome(input) {

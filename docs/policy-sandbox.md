@@ -6,9 +6,9 @@ WorkMode, persetujuan, tool access policy, penjaga perintah shell, dan isolasi e
 
 | Sumbu | Nilai | Fungsi |
 |---|---|---|
-| **WorkMode** | `DISCUSS` / `PLAN` / `BUILD` (`EXECUTE` internal) | Membatasi cara agent bekerja. `DISCUSS` read-only; `PLAN` boleh membuat artefak rencana; `BUILD` tidak menambah ceiling. WorkMode hanya mempersempit akses. |
+| **WorkMode** | `DISCUSS` / `BUILD` (`EXECUTE` internal) | Membatasi cara agent bekerja. `DISCUSS` read-only (+ artefak rencana); `BUILD` tidak menambah ceiling. WorkMode hanya mempersempit akses. |
 | **PermissionMode** | `AUTO` / `ASK` | Menentukan pengawasan manusia. `AUTO` menjalankan capability yang diotorisasi tanpa persetujuan rutin; `ASK` meminta persetujuan untuk aksi yang digate. Hard deny tetap berlaku. |
-| **Tool Access Policy** | capability read-only, plan, allowlist, profil akses warisan | Menentukan capability yang tersedia. Nilai internal `readonly`, `plan`, `allowlist`, dan `allow-all` masih dipakai untuk kompatibilitas dan batas akses, bukan sebagai pilihan pengawasan. |
+| **Tool Access Policy** | capability read-only, allowlist, profil akses warisan | Menentukan capability yang tersedia. Nilai internal `readonly`, `plan`, `allowlist`, dan `allow-all` masih dipakai untuk kompatibilitas dan batas akses, bukan sebagai pilihan pengawasan. |
 
 `PermissionMode` internal masih berupa union kompatibilitas yang juga memuat profil akses warisan. Untuk pilihan mode, flag, dan kombinasi yang menghadap pengguna, lihat [Memilih Mode](choosing-mode.md) dan [CLI](cli.md). Delegasi juga mewarisi batas parent; lihat [Sub-Agents & Tasks](agents.md).
 
@@ -66,7 +66,7 @@ Fuzz membangkitkan varian dari transformasi yang shell anggap setara (quote-spli
 |---|---|
 | bwrap (Linux) / seatbelt (macOS) tersedia | Bash di dalamnya, tanpa flag |
 | Tidak tersedia (termasuk semua Windows) | Default turun ke restrictBash (allowlist **developer**, sesi trusted); tanpa pesan `[sandbox]` — pesan itu hanya muncul untuk request `--sandbox` eksplisit |
-| `--allow-all` / `--ask` / `--plan` / `--allowlist` diberikan | Pilihan dihormati, tanpa peringatan |
+| `--allow-all` / `--ask` / `--allowlist` diberikan | Pilihan dihormati, tanpa peringatan |
 | `--sandbox none` | Opt-out sadar; tanpa downgrade |
 | `--sandbox docker` | Container ephemeral (`--network none`, 512m, 1 CPU, `node:22-alpine`) |
 | `--sandbox docker` tapi daemon mati | TOLAK sebelum jalan (fail-closed) + cara opt-in fallback eksplisit; tidak pura-pura terisolasi |

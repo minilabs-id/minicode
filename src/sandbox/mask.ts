@@ -127,3 +127,31 @@ export function allocateEmptyMaskFile(needed: boolean): {
     return { path: null, cleanup: () => {} }
   }
 }
+
+/** Kolektor output proses (stdout+stderr) berbatas karakter untuk runner sandbox. */
+export function createCappedOutputCollector(cap: number) {
+  let out = ""
+  let err = ""
+  let truncated = false
+  const append = (target: "out" | "err", d: Buffer | string): void => {
+    const s = typeof d === "string" ? d : d.toString()
+    const cur = target === "out" ? out : err
+    if (cur.length >= cap) {
+      truncated = true
+      return
+    }
+    const room = cap - cur.length
+    if (s.length > room) truncated = true
+    const piece = s.slice(0, Math.max(0, room))
+    if (target === "out") out += piece
+    else err += piece
+  }
+  const format = () => {
+    const marker = truncated ? "\n… [output truncated]" : ""
+    return {
+      marker,
+      output: (out + (err ? `\n[stderr]\n${err}` : "")).trim() + marker,
+    }
+  }
+  return { append, format }
+}

@@ -358,7 +358,7 @@ export function createUsageCollector(
   // Total bersih = snapshot TERAKHIR (overwrite), bukan penjumlahan chunk.
   // Pada batas permintaan berikutnya (step:started/turn:started), baseline
   // di-reset ke snapshot terakhir (yang sudah penuh terlihat).
-  let pendingRequestTokens: {
+  type SegmentSnapshot = {
     inputTokens: number
     outputTokens: number
     totalTokens: number
@@ -366,13 +366,21 @@ export function createUsageCollector(
     cacheWriteTokens: number
     cost: number | undefined
     segModel: string | undefined
-  } | null = null
+  }
+  let pendingRequestTokens: SegmentSnapshot | null = null
   let requestBoundary = 0
   // totalTokens permintaan yang sedang berjalan. Digunakan untuk mendeteksi
   // MULAI permintaan BARU dalam satu step yang sama (mis. retry recovery
   // kernel): total kumulatif streaming hanya bertambah dalam satu permintaan,
   // jadi nilai yang MENURUN menandakan permintaan baru (bukan chunk lagi).
   let lastRequestTotal = 0
+  const childPending = new Map<
+    string,
+    {
+      lastTotal: number
+      pending: SegmentSnapshot | null
+    }
+  >()
 
   // Terapkan snapshot ke turn+session. `prev` = snapshot permintaan yang sama
   // sebelumnya (null untuk event pertama) — bila ada, hanya SELISIH yang
@@ -444,12 +452,14 @@ export function createUsageCollector(
       sessionTurns += 1
       // Selesaikan snapshot permintaan terakhir di turn ini.
       flushPendingRequest()
+      childPending.clear()
     })
   } catch {}
 
   try {
     bus.on("turn:started", () => {
       beginRequest()
+      childPending.clear()
     })
   } catch {}
 
@@ -461,7 +471,10 @@ export function createUsageCollector(
   } catch {}
 
   bus.on("provider:extension", (e) => {
+    const forwardedChild = (e as { forwardedChild?: unknown }).forwardedChild
+    const isForwarded = forwardedChild != null
     if (e.kind === "effective-model") {
+      if (isForwarded) return
       const d = e.data as { requested?: string; effective?: string; provider?: string }
       effectiveModel = d.effective ?? effectiveModel
       effectiveProvider = d.provider ?? effectiveProvider
@@ -517,6 +530,15 @@ export function createUsageCollector(
       // tanpa menimpa lastProviderUsage atau memicu flush/overwrite pendingRequestTokens.
       if (d.source === "compaction") {
         applyPending(newSnapshot, null)
+        return
+      }
+      if (isForwarded) {
+        const childKey = String((e as { childRunId?: unknown }).childRunId ?? forwardedChild)
+        const prevChild = childPending.get(childKey)
+        const prevSnap =
+          prevChild && reportedTotal < prevChild.lastTotal ? null : (prevChild?.pending ?? null)
+        applyPending(newSnapshot, prevSnap)
+        childPending.set(childKey, { lastTotal: reportedTotal, pending: newSnapshot })
         return
       }
       lastProviderUsage = { inputTokens: input, outputTokens: output, totalTokens: reportedTotal }

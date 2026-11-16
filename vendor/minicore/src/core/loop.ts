@@ -330,6 +330,7 @@ export async function executeTurn(
       state: snapshotState(s.state),
       maxResultTokens: s.toolResultMaxTokens,
       cwd: s.cwd,
+      ...(s.sessionId ? { sessionId: s.sessionId } : {}),
       // Resolved per turn so a live getter reflects runtime mode changes
       // in the next tool context. Failed resolution is undefined (safe).
       permissionMode: resolvePermissionMode(s.permissionMode),
@@ -506,5 +507,14 @@ async function compactStore(s: SessionInternal, signal: AbortSignal): Promise<vo
       s.events.emit({ type: "context:compacted", reason: `llm-failed:${reason}` })
     }
   }
-  s.store.replace(0, s.store.messages.length, s.compaction.compact(s.store, opts));
+  try {
+    s.store.replace(0, s.store.messages.length, s.compaction.compact(s.store, opts));
+  } catch (err) {
+    if (err instanceof AgentError) throw err;
+    throw new AgentError(
+      "budget_exceeded",
+      err instanceof Error ? err.message : String(err),
+      { cause: err },
+    );
+  }
 }

@@ -97,13 +97,10 @@ export function deriveSummaryFromCanonical(
   // dilihat model saat kompaksi. baseSeq=1: ringkasan mewakili baris indeks 0,
   // ekor [1, N) verbatim.
   const first = messages[0] as { role?: unknown; content?: unknown } | undefined
-  if (
+  const isKernelSummary =
     first?.role === "user" &&
     typeof first.content === "string" &&
-    first.content.startsWith("Previous context")
-  ) {
-    return { summaryText: first.content, baseSeq: 1 }
-  }
+    first.content.startsWith("Previous context (")
   const keep =
     Number.isInteger(policy.keepRecentTurns) && policy.keepRecentTurns >= 1
       ? policy.keepRecentTurns
@@ -111,6 +108,10 @@ export function deriveSummaryFromCanonical(
   const store = new ContextStore()
   store.appendAll(messages)
   const folded = mechanicalKeepResults(store, keep)
+  // Reuse ringkasan kernel apa adanya HANYA bila belum ada turn baru di luar `keepRecentTurns`.
+  if (isKernelSummary && folded.length >= messages.length) {
+    return { summaryText: first.content as string, baseSeq: 1 }
+  }
   // Tak ada fold (prefix kosong) → tak ada cakupan untuk proyeksi.
   if (folded.length >= messages.length) return null
   const kept = folded.length - 1

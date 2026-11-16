@@ -118,6 +118,7 @@ export interface MicrocompactResult {
 function contentText(content: unknown): string {
   if (typeof content === "string") return content
   if (content === null || content === undefined) return ""
+  if (content instanceof Uint8Array) return `[binary ${content.byteLength} bytes]`
   try {
     return JSON.stringify(content) ?? ""
   } catch {
@@ -207,12 +208,12 @@ export function applyMicrocompact(
       ? `JANGAN jalankan ulang${wasError ? " (panggilan ini sudah gagal)" : ""}: tool ini dapat mengubah state (berkas/lingkungan), mengulangnya bisa menduplikasi efek. Verifikasi state lebih dulu (mis. baca berkas/hasil) sebelum mengulang.`
       : "Jalankan ulang tool ini bila isinya masih dibutuhkan."
     const sentinel = `${MICROCOMPACT_SENTINEL_PREFIX}: ${m.name} ${original.length} char${wasError ? ", gagal" : ""}. ${hint}]`
-    // Hemat = token asli - token sentinel (sentinel tetap memakan token).
+    // Hemat = token asli - token sentinel; lewati jika sentinel justru lebih panjang.
     const saving = opts.estimateTokens(original) - opts.estimateTokens(sentinel)
+    if (saving <= 0) continue
     out[idx] = { ...m, content: sentinel }
     clearedCount++
-    // Sentinel bisa lebih panjang dari aslinya: jangan catat "hemat" palsu.
-    savedTokens += Math.max(0, saving)
+    savedTokens += saving
   }
 
   // (c): hemat harus berarti. Bila tidak, batalkan seluruh operasi.

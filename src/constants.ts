@@ -55,10 +55,6 @@ export const LIMITS = {
    * angka 0.5 tersebar inline di compaction.ts tanpa nama (magic number). */
   COMPACTION_SUMMARY_TARGET_RATIO: 0.5,
   COMPACTION_LLM_TIMEOUT_MS: 10_000,
-  /** Batas atas cadangan output (framing + respons minimum) saat admission
-   * request provider: `Math.min(reserve, limit/10)` — cadangan tak naik tanpa
-   * batas pada jendela raksasa (1M token tetap cukup 256 untuk framing). */
-  CONTEXT_WINDOW_RESERVE_CAP_TOKENS: 256,
   /** BATAS ATAS ambang ukuran konteks (estimasi chars/token lokal) untuk
    * mengklasifikasi 400 `invalid_request` generik sebagai
    * `context_length_exceeded` alih-alih mati fatal. Di bawah ambang ini, 400

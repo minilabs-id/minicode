@@ -1,4 +1,5 @@
 import { resolve as resolvePath } from "node:path"
+import { expandMentions } from "../../src/app/mentions.ts"
 import { NoProviderError } from "../../src/app/provider-layer.ts"
 // F3.2 parity: exec ikut menghormati MINICODE_COMPACT_KEEP_TURNS, sama seperti
 // jalur one-shot (cli/index.ts) — sebelumnya env ini hanya berlaku di REPL.
@@ -273,6 +274,9 @@ export async function handleExec(
     )
   })
   try {
+    const runPrompt = effectivePrompt.includes("@")
+      ? (await expandMentions(effectivePrompt, cwd ?? process.cwd())).prompt
+      : effectivePrompt
     if (autoContinue) {
       // Lanjutkan sampai selesai / cap tercapai. `isStepLimit` memisahkan
       // "habis langkah" (layak dilanjut) dari error lain (auth/network/dll yang
@@ -284,7 +288,7 @@ export async function handleExec(
       for (let i = 0; i <= autoContinueBudget; i++) {
         let err: unknown = null
         try {
-          await ctx.runPromptWithVerify(i === 0 ? effectivePrompt : CONTINUE_PROMPT)
+          await ctx.runPromptWithVerify(i === 0 ? runPrompt : CONTINUE_PROMPT)
         } catch (e) {
           err = e
         }
@@ -295,7 +299,7 @@ export async function handleExec(
         )
       }
     } else {
-      await ctx.runPromptWithVerify(effectivePrompt)
+      await ctx.runPromptWithVerify(runPrompt)
     }
     // Harness-P1: exec sebelumnya mengabaikan --budget total (flag diteruskan
     // tapi tak pernah diperiksa). Samakan dengan one-shot: over → exit 1.
@@ -334,7 +338,8 @@ export async function handleExec(
     if (jsonMode) {
       // submit_result dari model (bila dipanggil) ikut verbatim — pipeline CI
       // tak perlu menebak batas JSON dari prosa turn terakhir.
-      const submitted = getSubmittedResult()
+      const submitted = getSubmittedResult(ctx.sessionId)
+      clearSubmittedResult(ctx.sessionId)
       // P11.1 — hasil verify TERAKHIR (final pasca-self-heal) untuk summary.
       // Aditif & absen bila verify tak jalan: cermin lastVerify sesi, bukan
       // otoritas baru. ok top-level dan exit code SENGAJA tak berubah.

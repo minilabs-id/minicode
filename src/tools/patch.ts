@@ -1,10 +1,6 @@
-import { stat } from "node:fs/promises"
 import type { Tool } from "#minicore"
 import { LIMITS } from "../constants.ts"
-import { atomicWriteText } from "../lib/atomic-write.ts"
-import { assertSafeWriteTarget, resolveSafePath, safeReadFile } from "../lib/safe-open.ts"
-import { appendLspDiagnostics } from "../policy/verifier.ts"
-import { contextUnrestricted, requireToolCwd } from "./context.ts"
+import { commitSafeTextEdit, readSafeTextForEdit } from "./context.ts"
 import { flexibleMatch } from "./edit.ts"
 
 // Apply SEARCH/REPLACE block (a la Aider) ke file. Search block harus match
@@ -40,18 +36,7 @@ export const applyPatchTool: Tool = {
   async execute({ path, patches }, ctx) {
     ctx.signal.throwIfAborted()
     const p = path as string
-    const root = requireToolCwd(ctx)
-    const relaxed = contextUnrestricted(ctx)
-    // Verifikasi path terpusat (logis + target nyata) — detail di safe-open.ts.
-    const { abs, real: realAbs } = await resolveSafePath(p, root, relaxed)
-    // Tolak menimpa symlink final (swap antara cek dan tulis gagal tutup).
-    await assertSafeWriteTarget(abs, root, relaxed)
-    const st = await stat(realAbs).catch(() => null)
-    if (!st) throw new Error(`file not found: ${p}`)
-    if (st.size > LIMITS.READ_FILE_MAX_BYTES) throw new Error(`file too large: ${p} (${st.size})`)
-
-    // Pakai safeReadFile (O_NOFOLLOW) agar swap symlink di antara cek dan baca gagal ELOOP.
-    let content = await safeReadFile(abs, root, relaxed)
+    let { root, realAbs, content } = await readSafeTextForEdit(p, ctx)
     const patchList = patches as { search: string; replace: string }[]
     if (patchList.length > 50) throw new Error(`too many patches: ${patchList.length} (max 50)`)
     const applied: string[] = []
@@ -81,16 +66,15 @@ export const applyPatchTool: Tool = {
       changedCount++
     }
 
-    if (content.length > LIMITS.WRITE_FILE_MAX_CHARS)
-      throw new Error(`result too large: ${content.length} chars (max 5M)`)
-
     if (changedCount === 0) {
       return `no changes written to ${realAbs} (all patches skipped):\n${applied.join("\n")}`
     }
 
-    await atomicWriteText(realAbs, content)
-
-    const base = `applied ${applied.length} patch(es) to ${realAbs}:\n${applied.join("\n")}`
-    return await appendLspDiagnostics(realAbs, content, base, undefined, root)
+    return await commitSafeTextEdit(
+      realAbs,
+      root,
+      content,
+      `applied ${applied.length} patch(es) to ${realAbs}:\n${applied.join("\n")}`,
+    )
   },
 }

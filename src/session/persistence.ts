@@ -2,7 +2,12 @@ import { Database } from "bun:sqlite"
 import { createHash, randomUUID } from "node:crypto"
 import { existsSync } from "node:fs"
 import { LIMITS } from "../constants.ts"
-import { resolveDbPath, resolveLocalDbPath } from "../lib/db-path.ts"
+import {
+  isSqliteContention,
+  resolveDbPath,
+  resolveLocalDbPath,
+  withSqliteBusyRetrySync,
+} from "../lib/db-path.ts"
 import { scrubSecrets } from "../policy/scrub.ts"
 import { type DomainEvent, DURABILITY, EVENT_SCHEMA_VERSION } from "../presentation/events.ts"
 
@@ -64,56 +69,17 @@ function daemonApprovalsMigrated(db: Database): boolean {
 // startup. Jitter memecah sinkronisasi antar-proses yang mencoba ulang
 // pada waktu yang sama (thundering herd).
 const DB_INIT_ATTEMPTS = 8
-const DB_INIT_BACKOFF_MS = 15
-
-function dbInitBackoffMs(attempt: number): number {
-  const base = DB_INIT_BACKOFF_MS * 2 ** attempt
-  // jitter deterministik kecil (±20%) dari attempt ke-2 dst; attempt pertama
-  // (i=0) tidak dijitter agar kasus SQLITE_BUSY tunggal tetap selesai secepat
-  // mungkin (tanpa menambah latensi startup untuk jalur yang TIDAK balapan).
-  if (attempt === 0) return base
-  return base + ((attempt * 7919 + 3) % Math.max(1, Math.floor(base * 0.2)))
-}
-
-// [Phase 12.2] Predikat kontensi SQLite transien lintas-proses (buka/WAL di
-// Windows). Sebelumnya hanya SQLITE_BUSY/"database is locked" yang di-retry; di
-// Windows, dua proses yang membuka WAL bersamaan di bawah beban disk tinggi juga
-// melempar SQLITE_IOERR_TRUNCATE / SQLITE_IOERR_SHMOPEN / SQLITE_IOERR_LOCK /
-// SQLITE_PROTOCOL / SQLITE_LOCKED — semuanya transien (kompetisi lock), bukan
-// korupsi, dan AMAN di-retry. Bun menaruh kode simbolik di `error.code` dan teks
-// manusiawi di `error.message` (mis. SQLITE_BUSY = "database is locked",
-// SQLITE_IOERR_* = "disk I/O error" atau kode extended), jadi keduanya diperiksa.
-// SENGAJA TIDAK di-retry: SQLITE_CORRUPT / SQLITE_NOTADB / constraint error — retry
-// buta hanya menyembunyikan korupsi skema/data yang nyata.
-const SQLITE_CONTENTION_RE =
-  /SQLITE_BUSY|database is locked|database table is locked|SQLITE_LOCKED|SQLITE_PROTOCOL|SQLITE_IOERR_TRUNCATE|SQLITE_IOERR_SHMOPEN|SQLITE_IOERR_LOCK|disk I\/O error/i
-
-function isSqliteContention(e: unknown): boolean {
-  const code = (e as { code?: unknown } | null)?.code
-  if (typeof code === "string" && SQLITE_CONTENTION_RE.test(code)) return true
-  const msg = e instanceof Error ? String(e.message ?? e) : String(e)
-  return SQLITE_CONTENTION_RE.test(msg)
-}
 
 export function withBusyRetrySync<T>(fn: () => T, attempts = DB_INIT_ATTEMPTS): T | null {
-  let last: unknown
-  for (let i = 0; i < attempts; i++) {
-    try {
-      return fn()
-    } catch (e) {
-      // [Phase 12.2] Retry hanya pada kontensi SQLite transien (lihat
-      // isSqliteContention); korupsi (SQLITE_CORRUPT/NOTADB), constraint, dan
-      // error non-kontensi lain dilempar segera.
-      if (!isSqliteContention(e)) throw e
-      last = e
-      // Backoff sinkron eksponensial + jitter kecil (lihat dbInitBackoffMs).
-      Bun.sleepSync(dbInitBackoffMs(i))
-    }
-  }
-  process.stderr.write(
-    `[warn] persistence: schema setup gave up after ${attempts} attempts: ${String((last as Error)?.message ?? last)}\n`,
-  )
-  return null
+  return withSqliteBusyRetrySync(fn, {
+    attempts,
+    deterministicJitter: true,
+    onGiveUp: (last, n) => {
+      process.stderr.write(
+        `[warn] persistence: schema setup gave up after ${n} attempts: ${String((last as Error)?.message ?? last)}\n`,
+      )
+    },
+  })
 }
 
 function open(cwd?: string, local = false): Database {
@@ -1374,6 +1340,7 @@ export function purgeExpired(db: Database, now = Date.now()): number {
 
   if (expiring.length > 0) {
     const { TaskStore } = require("../task/store.ts") as typeof import("../task/store.ts")
+    const { deleteTodoFilesSync } = require("../tools/todo.ts") as typeof import("../tools/todo.ts")
     const fallbackCwd = sessionCwdOf(db, expiring)
     const byCwd = new Map<string | undefined, string[]>()
     for (const row of expiring) {
@@ -1384,10 +1351,12 @@ export function purgeExpired(db: Database, now = Date.now()): number {
     }
     for (const [cwd, ids] of byCwd) {
       const tasks = new TaskStore(cwd)
+      const resolvedCwd = cwd ?? process.cwd()
       for (const sid of ids) {
-        // 1. invalidate in-flight executions, 2. remove task rows.
+        // 1. invalidate in-flight executions, 2. remove task rows, 3. remove derived todo/plan files.
         tasks.bumpSessionIncarnation(sid)
         tasks.deleteSessionTasks(sid)
+        deleteTodoFilesSync(sid, resolvedCwd)
       }
     }
   }

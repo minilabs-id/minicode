@@ -172,6 +172,7 @@ export function createOpenAICompatProvider(config: OpenAICompatConfig): ModelPro
               inputTokens: usage.prompt_tokens,
               outputTokens: usage.completion_tokens,
               totalTokens: usage.total_tokens,
+              cacheIncluded: true,
               ...(typeof cached === "number" ? { cacheReadTokens: cached } : {}),
             },
           };

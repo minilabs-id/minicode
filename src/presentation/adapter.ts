@@ -14,7 +14,7 @@
 
 import { type CanonicalAssignmentTable, decodeCanonicalAssignments } from "../task/assignment.ts"
 import { classifyToolResult, denyReasonOf, summarizeArgs } from "../telemetry/trace.ts"
-import { normalizeTodos } from "../tools/todo.ts"
+import { extractCommittedTodoStatuses, normalizeTodos } from "../tools/todo.ts"
 import type {
   ApprovalEventHook,
   ApprovalHookEvent,
@@ -483,6 +483,7 @@ export function createPresentationAdapter(
      * back to the legacy positional shape rather than claim `v2`.
      */
     assignment?: CanonicalAssignmentTable,
+    resultContent?: unknown,
   ):
     | {
         steps: PlanStep[]
@@ -501,21 +502,27 @@ export function createPresentationAdapter(
       return undefined
     }
     if (list.length === 0) return undefined
-    const steps: PlanStep[] = list.map((t, i) => ({
-      stepId: String(i + 1),
-      // PHASE 4A.4 - the declared id is passed to the resolver as a HINT only. It
-      // is kept on the step solely when TaskStore confirms that row exists for
-      // this session; otherwise it is stripped below, so an unverified id can
-      // never appear on a published plan.
-      ...(t.taskId ? { taskId: t.taskId } : {}),
-      title: t.content,
-      status:
-        t.status === "completed" || t.status === "cancelled" || t.status === "blocked"
-          ? t.status
-          : t.status === "in_progress"
-            ? "active"
-            : "pending",
-    }))
+    const committed = extractCommittedTodoStatuses(resultContent, list.length)
+    const steps: PlanStep[] = list.map((t, i) => {
+      const effectiveStatus = committed?.[i] ?? t.status
+      return {
+        stepId: String(i + 1),
+        // PHASE 4A.4 - the declared id is passed to the resolver as a HINT only. It
+        // is kept on the step solely when TaskStore confirms that row exists for
+        // this session; otherwise it is stripped below, so an unverified id can
+        // never appear on a published plan.
+        ...(t.taskId ? { taskId: t.taskId } : {}),
+        title: t.content,
+        status:
+          effectiveStatus === "completed" ||
+          effectiveStatus === "cancelled" ||
+          effectiveStatus === "blocked"
+            ? effectiveStatus
+            : effectiveStatus === "in_progress"
+              ? "active"
+              : "pending",
+      }
+    })
     const status = steps.every((step) => step.status === "completed")
       ? "completed"
       : steps.every((step) => step.status === "cancelled")
@@ -946,6 +953,7 @@ export function createPresentationAdapter(
             call.args,
             planSessionId,
             decodeCanonicalAssignments(result.content, { sessionId: planSessionId }),
+            result.content,
           )
           if (plan) {
             publish({

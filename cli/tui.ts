@@ -102,7 +102,11 @@ function fmtCtx(n: number): string | undefined {
  */
 function fmtUsageMetrics(ctx: CliSession, used: number): string | undefined {
   const cost: number | undefined = ctx.usage.getSession().cost
-  const windowTokens: number | undefined = ctx.getContextWindowTokens?.() ?? ctx.contextWindowTokens
+  // Utamakan getter `contextWindowTokens` bila ada agar `safe-default` (`undefined`)
+  // tidak menampilkan % palsu di footer, sambil fallback ke `getContextWindowTokens()`
+  // untuk stub/test minimal yang tidak mendefinisikan properti getter tersebut.
+  const windowTokens: number | undefined =
+    "contextWindowTokens" in ctx ? ctx.contextWindowTokens : ctx.getContextWindowTokens?.()
   const parts: string[] = []
   if (cost !== undefined && Number.isFinite(cost) && cost > 0) parts.push(formatUsd(cost))
   if (
@@ -223,26 +227,36 @@ export async function runTui(ctx: CliSession): Promise<void> {
   const uiBus = session.events as unknown as UiBus
   try {
     liveContextUnsubs.push(
-      uiBus.on("provider:extension", (e: { kind?: unknown; data?: unknown }) => {
-        if (e?.kind !== "context-window") return
-        const d = e.data as { usedTokens?: unknown } | undefined
-        if (typeof d?.usedTokens === "number") liveContextTokens = d.usedTokens
-      }),
+      uiBus.on(
+        "provider:extension",
+        (e: { kind?: unknown; data?: unknown; forwardedChild?: unknown }) => {
+          if (e?.forwardedChild != null) return
+          if (e?.kind !== "context-window") return
+          const d = e.data as { usedTokens?: unknown } | undefined
+          if (typeof d?.usedTokens === "number") liveContextTokens = d.usedTokens
+        },
+      ),
     )
   } catch {}
+  for (const evName of ["turn:started", "turn:completed", "context:compacted"] as const) {
+    try {
+      liveContextUnsubs.push(
+        uiBus.on(evName, () => {
+          liveContextTokens = undefined
+          cachedContext = null
+        }),
+      )
+    } catch {}
+  }
   try {
-    liveContextUnsubs.push(
-      uiBus.on("turn:started", () => {
-        liveContextTokens = undefined
-      }),
-    )
-  } catch {}
-  try {
-    liveContextUnsubs.push(
-      uiBus.on("turn:completed", () => {
-        liveContextTokens = undefined
-      }),
-    )
+    // Kernel memancarkan `turn:interrupted` saat abort/error meski tidak ada di subset UiBus.
+    const unsubInterrupted = (
+      session.events as unknown as { on?: (t: string, fn: () => void) => () => void }
+    ).on?.("turn:interrupted", () => {
+      liveContextTokens = undefined
+      cachedContext = null
+    })
+    if (typeof unsubInterrupted === "function") liveContextUnsubs.push(unsubInterrupted)
   } catch {}
   const getContextTokens = (): number => {
     // Live (per-step) menang saat turn berjalan; idle → committed (cache).
@@ -331,7 +345,10 @@ export async function runTui(ctx: CliSession): Promise<void> {
         }
       : {}),
     get currentModel() {
-      return modelRef.current ?? cfg.providers[0]?.models[0]
+      if (modelRef.current) return modelRef.current
+      const first = cfg.providers[0]
+      const m = first?.models[0]
+      return first && m ? `${first.id}::${m}` : m
     },
     set currentModel(v) {
       modelRef.current = v

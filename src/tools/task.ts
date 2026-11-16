@@ -84,6 +84,8 @@ export interface SubAgentSpec {
     sessionId: string
     parentSessionId?: string
   }
+  /** Canonical session id of this child sub-agent (passed to ToolContext). */
+  sessionId?: string
   /**
    * Model warisan sesi parent (audit #14): anak jalan di model yang sama
    * dengan parent — tanpa ini anak diam-diam memakai default router yang
@@ -237,8 +239,14 @@ export function setSubAgentParentRouting(c: SubAgentParentRouting): void {
   }
 }
 
-async function getProvider(overrides: SubAgentParentRouting = parentRouting) {
-  const cfg = await loadConfig()
+async function getProvider(
+  overrides: SubAgentParentRouting = parentRouting,
+  cfgOpts?: { cwd?: string; allowLocalConfig?: boolean },
+) {
+  const cfg = await loadConfig(
+    cfgOpts?.cwd,
+    cfgOpts?.allowLocalConfig ? { allowLocal: true } : undefined,
+  )
   // Async: sub-agent juga harus bisa memakai provider OAuth milik parent.
   const providers = await buildProviderListAsync(cfg)
   if (providers.length === 0) {
@@ -388,7 +396,11 @@ export const delegateTaskTool: Tool = {
     // Child tools are wrapped with canonical P2.10 evidence after the child
     // identity and authoritative domain exist (see below).
     const parentCwd = requireToolCwd(ctx)
-    const parentId = todoSession.id || "main"
+    const ctxSessionId = (ctx as unknown as { sessionId?: unknown })?.sessionId
+    const parentId =
+      (typeof ctxSessionId === "string" && ctxSessionId ? ctxSessionId : "") ||
+      todoSession.id ||
+      "main"
     // P2.9: id anak = identitas Session KANONIK (128-bit). Id P1 lawas
     // `sub_<8hex>` (32-bit) tidak cukup untuk durable authority; prefix `sub_`
     // dipertahankan agar jurnal/presentasi/diagnostik tetap kompatibel.
@@ -483,14 +495,24 @@ export const delegateTaskTool: Tool = {
     }
     // P2.10 canonical coverage for plain child tools. Delegate itself keeps
     // its explicit parent-side intent; dotted tools are excluded by design.
-    const verifiedSubTools = subToolsGuarded.map((tool) =>
-      withEvidence(tool, {
+    // Child `todo_read` tetap terikat ke namespace `parentId` agar subagent
+    // melihat daftar tugas induk meskipun sesi anak punya `sessionId: childId`.
+    const verifiedSubTools = subToolsGuarded.map((tool) => {
+      const bound =
+        tool.name === "todo_read"
+          ? {
+              ...tool,
+              execute: (args: unknown, subCtx: import("#minicore").ToolContext) =>
+                tool.execute(args, { ...subCtx, sessionId: parentId }),
+            }
+          : tool
+      return withEvidence(bound, {
         sessionId: childId,
         threadId: DEFAULT_THREAD_ID,
         cwd: parentCwd,
         childOf: parentId,
-      }),
-    )
+      })
+    })
     const intent: EffectIntentResult = await persistEffectIntent({
       sessionId: parentId,
       threadId: DEFAULT_THREAD_ID,
@@ -529,19 +551,22 @@ export const delegateTaskTool: Tool = {
           observedSummary = "[sub-agent error] session factory not configured"
           return observedSummary
         }
+        const gov = subAgentGovernance()
         let provider: Awaited<ReturnType<typeof getProvider>>
         try {
-          provider = await getProvider()
+          provider = await getProvider(parentRouting, {
+            cwd: parentCwd,
+            allowLocalConfig: gov.allowLocalConfig === true,
+          })
         } catch (e) {
           observedSummary = `[sub-agent error] provider: ${(e as Error).message}`
           return observedSummary
         }
-
-        const gov = subAgentGovernance()
         const session = await factory({
           provider,
           tools: verifiedSubTools,
           cwd: parentCwd,
+          sessionId: childId,
           // Parent allowlist → anak allowlist (lihat komentar tipe di atas).
           permissionMode: parentMode === "allowlist" ? "allowlist" : "auto",
           // P12 S2.2 — child mewarisi WorkMode induk (ceiling WorkMode anak
@@ -606,6 +631,7 @@ export const delegateTaskTool: Tool = {
         }
         const offUsage = session.events.on("provider:extension", (e) => {
           try {
+            tagForwarded(e)
             ctx.emit(e)
           } catch {}
         })

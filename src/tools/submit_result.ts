@@ -11,14 +11,32 @@ export interface SubmittedResult {
   at: number
 }
 
-let last: SubmittedResult | null = null
+const DEFAULT_SESSION_KEY = "__default__"
+const submittedBySession = new Map<string, SubmittedResult>()
+let latestSessionKey: string | null = null
 
-export function getSubmittedResult(): SubmittedResult | null {
-  return last
+const scopeKey = (sessionId?: string): string =>
+  typeof sessionId === "string" && sessionId.length > 0 ? sessionId : DEFAULT_SESSION_KEY
+
+export function getSubmittedResult(sessionId?: string): SubmittedResult | null {
+  if (sessionId !== undefined) {
+    return submittedBySession.get(scopeKey(sessionId)) ?? null
+  }
+  if (latestSessionKey !== null && submittedBySession.has(latestSessionKey)) {
+    return submittedBySession.get(latestSessionKey) ?? null
+  }
+  return submittedBySession.get(DEFAULT_SESSION_KEY) ?? null
 }
 
-export function clearSubmittedResult(): void {
-  last = null
+export function clearSubmittedResult(sessionId?: string): void {
+  if (sessionId !== undefined) {
+    const key = scopeKey(sessionId)
+    submittedBySession.delete(key)
+    if (latestSessionKey === key) latestSessionKey = null
+    return
+  }
+  submittedBySession.clear()
+  latestSessionKey = null
 }
 
 export const submitResultTool: Tool = {
@@ -43,7 +61,9 @@ export const submitResultTool: Tool = {
     if (!result || typeof result !== "object" || Array.isArray(result))
       throw new Error("result must be a JSON object")
     const s = typeof summary === "string" ? summary.slice(0, 300) : undefined
-    last = { result, ...(s ? { summary: s } : {}), at: Date.now() }
+    const sid = scopeKey((ctx as unknown as { sessionId?: string }).sessionId)
+    submittedBySession.set(sid, { result, ...(s ? { summary: s } : {}), at: Date.now() })
+    latestSessionKey = sid
     const bytes = JSON.stringify(result).length
     return `submitted (${bytes} bytes)${s ? `: ${s}` : ""}`
   },

@@ -1,9 +1,9 @@
-import { appendFile, mkdir, readFile, stat } from "node:fs/promises"
+import { appendFile, lstat, mkdir, readFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { LIMITS } from "../constants.ts"
 import { homeDir } from "../lib/db-path.ts"
-import { safeReadFileCapped } from "../lib/safe-open.ts"
+import { assertSafeWriteTarget, safeReadFileCapped } from "../lib/safe-open.ts"
 import { isRealPathOutsideRoot } from "../policy/jail.ts"
 import { scrubSecrets } from "../policy/scrub.ts"
 
@@ -21,7 +21,10 @@ const ROOT_MEM = "MEMORY.md"
 // Claude-like hierarchy extensions
 const CLAUDE_MEM = "CLAUDE.md"
 
-export async function loadMemoryFiles(cwd = process.cwd()): Promise<string> {
+export async function loadMemoryFiles(
+  cwd = process.cwd(),
+  opts: { allowLocalRules?: boolean } = {},
+): Promise<string> {
   const parts: string[] = []
   const globalMem = globalMemPath()
   // Hierarchy: global → local → root → CLAUDE compat → rules/
@@ -48,31 +51,34 @@ export async function loadMemoryFiles(cwd = process.cwd()): Promise<string> {
         )
     } catch {}
   }
-  // Load .minicode/rules/*.md (Kiro steering style)
-  try {
-    const { readdir } = await import("node:fs/promises")
-    const rulesDir = resolve(cwd, ".minicode/rules")
-    const entries = await readdir(rulesDir).catch(() => [] as string[])
-    // entries may be string[] or Dirent — handle both
-    const files: string[] =
-      Array.isArray(entries) && typeof entries[0] === "string"
-        ? (entries as string[]).filter((f) => f.endsWith(".md")).slice(0, 10)
-        : (entries as unknown as import("node:fs").Dirent[])
-            .filter((e) => e.isFile() && e.name.endsWith(".md"))
-            .map((e) => e.name)
-            .slice(0, 10)
-    for (const f of files) {
-      try {
-        const full = join(rulesDir, f as string)
-        if (isRealPathOutsideRoot(full, cwd)) continue
-        const { text, truncated } = await safeReadFileCapped(full, cwd, 3000)
-        if (text.trim())
-          parts.push(
-            `# rules/${f}\n${scrubSecrets(text)}${truncated ? "\n… [truncated: showing first 3000 bytes]" : ""}`,
-          )
-      } catch {}
-    }
-  } catch {}
+  // Load .minicode/rules/*.md (Kiro steering style) — hanya aktif bila
+  // local config diizinkan (`--allow-local-config`), selaras dengan .minicode/skills/.
+  if (opts.allowLocalRules === true) {
+    try {
+      const { readdir } = await import("node:fs/promises")
+      const rulesDir = resolve(cwd, ".minicode/rules")
+      const entries = await readdir(rulesDir).catch(() => [] as string[])
+      // entries may be string[] or Dirent — handle both
+      const files: string[] =
+        Array.isArray(entries) && typeof entries[0] === "string"
+          ? (entries as string[]).filter((f) => f.endsWith(".md")).slice(0, 10)
+          : (entries as unknown as import("node:fs").Dirent[])
+              .filter((e) => e.isFile() && e.name.endsWith(".md"))
+              .map((e) => e.name)
+              .slice(0, 10)
+      for (const f of files) {
+        try {
+          const full = join(rulesDir, f as string)
+          if (isRealPathOutsideRoot(full, cwd)) continue
+          const { text, truncated } = await safeReadFileCapped(full, cwd, 3000)
+          if (text.trim())
+            parts.push(
+              `# rules/${f}\n${scrubSecrets(text)}${truncated ? "\n… [truncated: showing first 3000 bytes]" : ""}`,
+            )
+        } catch {}
+      }
+    } catch {}
+  }
   return parts.join("\n\n")
 }
 
@@ -80,26 +86,84 @@ const MAX_MEMORY_FILE_BYTES = LIMITS.MEMORY_FILE_MAX_BYTES
 
 // Kunci in-process per berkas (audit #09 P1): appendMemory (append +
 // truncate-guard read-modify-write) dan deleteMemoryLines (read-filter-write)
-// tanpa ini saling menelan — reproducer: forget vs 20 append konkuren →
-// 0/20 selamat. Baca (loadMemoryFiles) sengaja tanpa lock: append O_APPEND
-// atomik sehingga baca basi/robek sesaat tak berbahaya untuk retrieval.
+// serta reconcileMemoryStores/revokeByProvenance berbagi lock ini agar tak
+// saling menelan.
 const memLocks = new Map<string, Promise<void>>()
 
-async function withMemLock<T>(path: string, fn: () => Promise<T>): Promise<T> {
+export async function withMemLock<T>(path: string, fn: () => Promise<T>): Promise<T> {
   const prev = memLocks.get(path) ?? Promise.resolve()
   let release!: () => void
   const next = new Promise<void>((res) => (release = res))
-  memLocks.set(
-    path,
-    prev.then(() => next),
-  )
+  const tail = prev.then(() => next)
+  memLocks.set(path, tail)
   await prev
   try {
     return await fn()
   } finally {
     release()
-    if (memLocks.get(path) === next) memLocks.delete(path)
+    if (memLocks.get(path) === tail) memLocks.delete(path)
   }
+}
+
+/** Cegah symlink/hardlink escape sebelum baca/tulis MEMORY.md. */
+export async function assertSafeMemoryPath(path: string, root: string): Promise<void> {
+  await assertSafeWriteTarget(path, root)
+  try {
+    const st = await lstat(path)
+    if (st.isSymbolicLink() || st.nlink > 1) {
+      throw new Error(`unsafe memory target (symlink or hardlink): ${path}`)
+    }
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") throw e
+  }
+}
+
+export async function safeReadMemoryFile(path: string, root: string): Promise<string> {
+  await assertSafeMemoryPath(path, root)
+  return await readFile(path, "utf8")
+}
+
+async function safeAtomicWriteMemory(path: string, root: string, content: string): Promise<void> {
+  const { atomicWriteText } = await import("../lib/atomic-write.ts")
+  await assertSafeMemoryPath(path, root)
+  await atomicWriteText(path, content)
+}
+
+function sanitizeMemoryTags(tags?: readonly string[]): string[] | undefined {
+  if (!tags?.length) return undefined
+  return tags.map((tg) => scrubSecrets(String(tg)).replace(/[\r\n]+/g, " "))
+}
+
+export async function appendMemoryUnlocked(
+  text: string,
+  cwd = process.cwd(),
+  tags?: readonly string[],
+): Promise<string> {
+  const path = resolve(cwd, LOCAL_MEM)
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 }).catch(() => {})
+  await assertSafeMemoryPath(path, cwd)
+  // Ratakan newline agar satu entri tetap satu baris & tidak memecah parser.
+  const clean = scrubSecrets(text.trim()).replace(/[\r\n]+/g, " ")
+  const safeTags = sanitizeMemoryTags(tags)
+  const meta = safeTags?.length ? ` [tags: ${JSON.stringify(safeTags)}]` : ""
+  const entry = `- ${new Date().toISOString().slice(0, 10)} ${clean}${meta}\n`
+  await appendFile(path, entry, "utf8").catch(async () => {
+    await mkdir(dirname(path), { recursive: true })
+    await assertSafeMemoryPath(path, cwd)
+    await appendFile(path, entry, "utf8")
+  })
+  try {
+    const txt = await safeReadMemoryFile(path, cwd)
+    const buf = Buffer.from(txt, "utf8")
+    if (buf.byteLength > MAX_MEMORY_FILE_BYTES) {
+      const rawKeep = buf.subarray(-LIMITS.MEMORY_TRUNCATE_KEEP_BYTES).toString("utf8")
+      const entryBoundary = rawKeep.indexOf("\n- ")
+      const cut = entryBoundary >= 0 ? entryBoundary + 1 : rawKeep.indexOf("\n")
+      const trimmed = cut >= 0 ? rawKeep.slice(cut + (entryBoundary >= 0 ? 0 : 1)) : rawKeep
+      await safeAtomicWriteMemory(path, cwd, trimmed)
+    }
+  } catch {}
+  return path
 }
 
 export async function appendMemory(
@@ -108,129 +172,95 @@ export async function appendMemory(
   tags?: readonly string[],
 ): Promise<string> {
   const path = resolve(cwd, LOCAL_MEM)
-  return withMemLock(path, async () => {
-    await mkdir(dirname(path), { recursive: true, mode: 0o700 }).catch(() => {})
-    // [Area E / D5] JANGAN potong per-entri di sini. Batas 1000 karakter lama
-    // membuat MEMORY.md lebih pendek daripada chunk vektor (2000) sehingga
-    // reconcile menganggap chunk ekor "vector-only" dan menghapusnya. Batas
-    // ukuran total berkas tetap dijaga MAX_MEMORY_FILE_BYTES di bawah.
-    const clean = scrubSecrets(text.trim())
-    // [Area E / D2] Provenance (MEM-01) benar-benar ditulis ke berkas — tanpa
-    // tag ini jalur revoke-by-provenance tidak punya bukti di sisi file dan
-    // gagal-closed (atau, pada versi lama, menghapus SEMUA baris tanpa tag).
-    const meta = tags && tags.length > 0 ? ` [tags: ${JSON.stringify(tags)}]` : ""
-    const entry = `- ${new Date().toISOString().slice(0, 10)} ${clean}${meta}\n`
-    // atomic append — no read+write race
-    await appendFile(path, entry, "utf8").catch(async () => {
-      // fallback if file not exists
-      await mkdir(dirname(path), { recursive: true })
-      await appendFile(path, entry, "utf8")
-    })
-    // size guard: truncate oldest if too large (keep last 150k)
-    try {
-      const st = await stat(path)
-      if (st.size > MAX_MEMORY_FILE_BYTES) {
-        const txt = await readFile(path, "utf8")
-        const rawKeep = txt.slice(-LIMITS.MEMORY_TRUNCATE_KEEP_BYTES)
-        // Cari batas entri utuh berikutnya (diawali \n- ) agar entri pertama tak terpotong buntung
-        const entryBoundary = rawKeep.indexOf("\n- ")
-        const cut = entryBoundary >= 0 ? entryBoundary + 1 : rawKeep.indexOf("\n")
-        const trimmed = cut >= 0 ? rawKeep.slice(cut + (entryBoundary >= 0 ? 0 : 1)) : rawKeep
-        const { atomicWriteText } = await import("../lib/atomic-write.ts")
-        await atomicWriteText(path, trimmed)
-      }
-    } catch {}
-    return path
-  })
+  return withMemLock(path, () => appendMemoryUnlocked(text, cwd, tags))
 }
 
 export async function readMemoryFile(cwd = process.cwd()): Promise<string> {
   return await loadMemoryFiles(cwd)
 }
 
-/**
- * [Area E / D6] Ambil teks entri dari satu baris MEMORY.md — buang prefix
- * tanggal dan metadata `[tags: ...]`. Dipakai supersession untuk mencocokkan
- * baris lama tanpa bergantung pada posisi/urutan.
- */
-export function memoryLineText(line: string): string {
+/** Parser baris MEMORY.md terpusat (dipakai files.ts & vector.ts). */
+export function parseMemoryLine(line: string): { text: string; tags: string[] } | null {
+  if (!line.startsWith("- ")) return null
   const match = line.match(/^-\s+\d{4}-\d{2}-\d{2}(?:T\S+)?\s+(.+)$/)
-  const body = match
-    ? match[1]!
-    : line
-        .trim()
-        .replace(/^-\s+\S+\s+/, "")
-        .trim()
+  const body = (match ? match[1]! : line.trim().replace(/^-\s+\S+\s+/, "")).trim()
+  if (!body) return null
+  const jsonTagMatch = body.match(/\s*\[tags:\s*(\[.*\])\]\s*$/)
+  if (jsonTagMatch) {
+    try {
+      const parsed = JSON.parse(jsonTagMatch[1]!)
+      if (Array.isArray(parsed)) {
+        return {
+          text: body.slice(0, jsonTagMatch.index!).trim(),
+          tags: parsed.map((item) => String(item)),
+        }
+      }
+    } catch {}
+  }
   const tagMatch = body.match(/\[tags:\s*[^\]]+\]/)
-  return (tagMatch ? body.slice(0, tagMatch.index!) : body).trim()
+  return {
+    text: (tagMatch ? body.slice(0, tagMatch.index!) : body).trim(),
+    tags: [],
+  }
 }
 
-/**
- * [Area E / D6] Hapus SATU entri MEMORY.md lokal berdasarkan teksnya.
- *
- * `target` boleh berupa teks utuh (entri pendek) atau prefix chunk pertama
- * (entri multi-chunk yang tersimpan utuh di berkas). `startsWith` diperlukan
- * karena baris lama yang panjang tidak lagi dipotong saat append.
- *
- * Fail-closed: berkas tak ada / tak ada baris yang cocok → `false`, bukan
- * menulis ulang berkas tanpa perubahan.
- */
-export async function deleteMemoryEntry(target: string, cwd = process.cwd()): Promise<boolean> {
-  const needle = target.trim()
+export function memoryLineText(line: string): string {
+  return parseMemoryLine(line)?.text ?? ""
+}
+
+export async function deleteMemoryEntryUnlocked(
+  target: string,
+  cwd = process.cwd(),
+): Promise<boolean> {
+  const needle = target.trim().replace(/[\r\n]+/g, " ")
   if (!needle) return false
   const path = resolve(cwd, LOCAL_MEM)
-  return withMemLock(path, async () => {
-    let txt: string
-    try {
-      txt = await readFile(path, "utf8")
-    } catch {
-      return false
-    }
-    const lines = txt.split("\n")
-    let removed = 0
-    const kept = lines.filter((line) => {
-      if (!line.startsWith("- ")) return true
-      const text = memoryLineText(line)
-      const hit = text === needle || text.startsWith(needle)
-      if (hit) removed++
-      return !hit
-    })
-    if (removed === 0) return false
-    const { atomicWriteText } = await import("../lib/atomic-write.ts")
-    await atomicWriteText(path, kept.join("\n"))
-    return true
+  let txt: string
+  try {
+    txt = await safeReadMemoryFile(path, cwd)
+  } catch {
+    return false
+  }
+  const lines = txt.split("\n")
+  let removed = 0
+  const kept = lines.filter((line) => {
+    if (!line.startsWith("- ")) return true
+    const text = memoryLineText(line)
+    const hit = text === needle || (needle.length >= 200 && text.startsWith(needle))
+    if (hit) removed++
+    return !hit
   })
+  if (removed === 0) return false
+  await safeAtomicWriteMemory(path, cwd, kept.join("\n"))
+  return true
 }
 
-/**
- * Hapus baris MEMORY.md lokal + global yang cocok query (temuan audit #06,
- * diperluas audit 2026-09-16 M4).
- *
- * forget_memory sebelumnya hanya menghapus baris vector — entri file
- * (sumber `file hits:` di read_memory) bertahan selamanya sehingga "lupa"
- * tidak pernah benar-benar terjadi di jalur file. Perluasan M4: read_memory
- * membaca hierarki lokal DAN global (loadMemoryFiles), jadi hapus lokal saja
- * tak tuntas — baris global yang cocok ikut dihapus. Pencocokan sama persis
- * dengan jalur baca (substring case-insensitive) agar hapus-menemukan apa
- * yang baca-temukan.
- */
+export async function deleteMemoryEntry(target: string, cwd = process.cwd()): Promise<boolean> {
+  const needle = target.trim().replace(/[\r\n]+/g, " ")
+  if (!needle) return false
+  const path = resolve(cwd, LOCAL_MEM)
+  return withMemLock(path, () => deleteMemoryEntryUnlocked(needle, cwd))
+}
+
 export async function deleteMemoryLines(query: string, cwd = process.cwd()): Promise<number> {
   const q = query.trim().toLowerCase()
   if (!q) return 0
   let total = 0
-  for (const path of [resolve(cwd, LOCAL_MEM), globalMemPath()]) {
+  const globalMem = globalMemPath()
+  for (const path of [resolve(cwd, LOCAL_MEM), globalMem]) {
+    const root = path === globalMem ? dirname(path) : cwd
     total += await withMemLock(path, async () => {
       let txt: string
       try {
-        txt = await readFile(path, "utf8")
+        txt = await safeReadMemoryFile(path, root)
       } catch {
         return 0
       }
-      const kept = txt.split("\n").filter((l) => !l.toLowerCase().includes(q))
-      const deleted = txt.split("\n").length - kept.length
+      const lines = txt.split("\n")
+      const kept = lines.filter((l) => !l.toLowerCase().includes(q))
+      const deleted = lines.length - kept.length
       if (deleted === 0) return 0
-      const { atomicWriteText } = await import("../lib/atomic-write.ts")
-      await atomicWriteText(path, kept.join("\n"))
+      await safeAtomicWriteMemory(path, root, kept.join("\n"))
       return deleted
     })
   }

@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { readFileSync } from "node:fs"
 import { resolve as resolvePath } from "node:path"
+import { expandMentions } from "../src/app/mentions.ts"
 import { NoProviderError } from "../src/app/provider-layer.ts"
 import { createMinicodeSession } from "../src/app/session.ts"
 import { parseCompactKeepTurns } from "../src/policy/compaction.ts"
@@ -36,7 +37,7 @@ import {
   resolveWorkModeFlag,
 } from "./args.ts"
 import { dispatch } from "./router.ts"
-import { createCliSession } from "./setup.ts"
+import { createChildCompaction, createCliSession } from "./setup.ts"
 
 /**
  * Jaring terakhir proses (audit freeze/ceket 2026-11-16).
@@ -203,9 +204,17 @@ setSubAgentSessionFactory(async (spec) => {
   const { journal, ...coreSpec } = spec
   const contextWindowTokensForModel = coreSpec.provider.contextWindowTokensForModel
   const contextModelIdentity = coreSpec.provider.contextModelIdentity
+  const getContextModel = () => contextModelIdentity?.(coreSpec.model) ?? coreSpec.model
   let childJournalHandle: ReturnType<typeof attachMutationJournal> | null = null
   const session = await createMinicodeSession({
     ...coreSpec,
+    compaction: createChildCompaction({
+      provider: coreSpec.provider,
+      model: coreSpec.model,
+      cwd: coreSpec.cwd,
+      contextWindowTokensForModel,
+      getContextModel,
+    }),
     ...(journal
       ? {
           beforeToolEffect: async (call) => {
@@ -217,7 +226,7 @@ setSubAgentSessionFactory(async (spec) => {
       ? {
           contextWindowTokens: contextWindowTokensForModel(coreSpec.model),
           contextWindowTokensForModel,
-          getContextModel: () => contextModelIdentity?.(coreSpec.model) ?? coreSpec.model,
+          getContextModel,
         }
       : {}),
   })
@@ -707,7 +716,11 @@ if (enterRepl) {
   } = ctx
   const t0 = Date.now()
   try {
-    await runPromptWithVerify(effectivePrompt)
+    let finalPrompt = effectivePrompt
+    if (finalPrompt.includes("@")) {
+      finalPrompt = (await expandMentions(finalPrompt, wcwd ?? process.cwd())).prompt
+    }
+    await runPromptWithVerify(finalPrompt)
     // Total SESI, bukan turn: satu one-shot hanya punya satu turn, tapi
     // --verify/self-heal bisa menjalankan beberapa dan reset() di antaranya.
     const u = usage.getSession(modelRef.current)

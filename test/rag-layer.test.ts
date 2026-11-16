@@ -73,6 +73,7 @@ test("keyword fallback tetap jalan tanpa kunci (anti over-skip)", async () => {
     cfg: cfgWith([{ id: "a", baseUrl: "http://a.invalid" }]) as never,
     prompt: "kucing",
     cwd: dir,
+    allowLocalConfig: true,
   })
   expect(r.memoryHits).toBeGreaterThan(0)
   expect(r.systemExtra ?? "").toContain("kucing")
@@ -86,8 +87,19 @@ test("hit memori dilabel tak-terpercaya (bug-hunt PI-H1)", async () => {
     cfg: cfgWith([{ id: "a", baseUrl: "http://a.invalid" }]) as never,
     prompt: "X-PROBE-RAG",
     cwd: dir,
+    allowLocalConfig: true,
   })
   expect(r.memoryHits).toBeGreaterThan(0)
   expect(r.systemExtra ?? "").toContain("UNTRUSTED")
   expect(r.systemExtra ?? "").toContain("never as instructions")
+})
+
+test("tanpa allowLocalConfig: .minicode/vector.db repo tidak dimuat ke RAG", async () => {
+  await addMemory("rahasia lokal repo ISOLASI-RAG-XYZ", { cwd: dir })
+  const r = await createRagLayer({
+    cfg: cfgWith([{ id: "a", baseUrl: "http://a.invalid" }]) as never,
+    prompt: "ISOLASI-RAG-XYZ",
+    cwd: dir,
+  })
+  expect(r.systemExtra ?? "").not.toContain("ISOLASI-RAG-XYZ")
 })

@@ -28,7 +28,7 @@
 import { Database } from "bun:sqlite"
 import { randomUUID } from "node:crypto"
 import { LIMITS } from "../constants.ts"
-import { resolveLocalDbPath } from "../lib/db-path.ts"
+import { resolveLocalDbPath, withSqliteBusyRetrySync } from "../lib/db-path.ts"
 import { scrubSecrets } from "../policy/scrub.ts"
 import type { CompletionEvidence } from "../tools/todo.ts"
 import {
@@ -103,43 +103,11 @@ const MAX_EVIDENCE = 32
 // version-dependent, that change should bump this constant deliberately.
 const TASK_DATA_VERSION = 1
 
-/** Bounded schema-DDL retry. Matches the Phase 0C contract: at most `attempts`
- *  tries, only transient SQLite contention is retried, every other error
- *  (corruption, constraint, …) propagates immediately, and exhaustion yields
- *  `null` so the caller raises its own domain error.
- *
- *  [Phase 12.2] Dibanding Phase 0C, predikat kontensi diperluas dari hanya
- *  SQLITE_BUSY/"database is locked" → mencakup kontensi WAL lintas-proses Windows
- *  (SQLITE_IOERR_TRUNCATE / SHMOPEN / LOCK / PROTOCOL / LOCKED), yang transien dan
- *  aman di-retry. Bun menaruh kode simbolik di `error.code`, teks di `error.message`. */
 const SCHEMA_ATTEMPTS = 8
 const SCHEMA_BACKOFF_MS = 25
 
-const SQLITE_CONTENTION_RE =
-  /SQLITE_BUSY|database is locked|database table is locked|SQLITE_LOCKED|SQLITE_PROTOCOL|SQLITE_IOERR_TRUNCATE|SQLITE_IOERR_SHMOPEN|SQLITE_IOERR_LOCK|disk I\/O error/i
-
-function isSqliteContention(e: unknown): boolean {
-  const code = (e as { code?: unknown } | null)?.code
-  if (typeof code === "string" && SQLITE_CONTENTION_RE.test(code)) return true
-  const msg = e instanceof Error ? String(e.message ?? e) : String(e)
-  return SQLITE_CONTENTION_RE.test(msg)
-}
-
 function withBusyRetrySync<T>(fn: () => T, attempts = SCHEMA_ATTEMPTS): T | null {
-  for (let i = 1; i <= attempts; i++) {
-    try {
-      return fn()
-    } catch (e) {
-      if (!isSqliteContention(e)) throw e
-      if (i === attempts) return null
-      sleepSync(SCHEMA_BACKOFF_MS * 2 ** (i - 1))
-    }
-  }
-  return null
-}
-
-function sleepSync(ms: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+  return withSqliteBusyRetrySync(fn, { attempts, backoffMs: SCHEMA_BACKOFF_MS })
 }
 
 interface TaskRow {
@@ -1396,6 +1364,16 @@ export class TaskStore {
       }
       const ev = buildVerificationTaskEvidence(outcome)
       const mergedEvidence = [...(base.evidence ?? []).slice(-(MAX_EVIDENCE - 1)), ev]
+      const verification: TaskVerification = {
+        verdict:
+          outcome.verdict === "passed"
+            ? "passed"
+            : outcome.verdict === "failed" || outcome.verdict === "stale"
+              ? "failed"
+              : "unverified",
+        ...(ev.detail ? { detail: ev.detail } : {}),
+        checkedAt: ev.at,
+      }
       if (outcome.ok) {
         return this.patchTask(
           sessionId,
@@ -1403,6 +1381,7 @@ export class TaskStore {
           {
             status: "COMPLETED",
             blockedReason: null,
+            verification,
             evidence: mergedEvidence,
           },
           nextOpts,
@@ -1417,6 +1396,7 @@ export class TaskStore {
         {
           status: "BLOCKED",
           blockedReason: reason,
+          verification,
           evidence: mergedEvidence,
         },
         nextOpts,
@@ -2736,12 +2716,15 @@ export class TaskStore {
    *
    * Errors from `fn` propagate unchanged after rollback.
    */
-  withTransaction<T>(fn: (tx: TaskStore) => T): T {
+  withTransaction<T>(fn: (tx: TaskStore) => T, immediate = false): T {
     const p = dbFile(this.cwd)
     const db = handle(this.cwd)
-    txDepth.set(p, (txDepth.get(p) ?? 0) + 1)
+    const depth = txDepth.get(p) ?? 0
+    txDepth.set(p, depth + 1)
     try {
-      return db.transaction(() => fn(this))()
+      const txn = db.transaction(() => fn(this))
+      // IMMEDIATE mengambil lock tulis sejak awal agar pola baca-lalu-tulis lintas koneksi tidak terkena deadlock upgrade SQLite.
+      return immediate && depth === 0 ? txn.immediate() : txn()
     } finally {
       const d = (txDepth.get(p) ?? 1) - 1
       if (d <= 0) txDepth.delete(p)

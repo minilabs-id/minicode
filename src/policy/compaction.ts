@@ -7,6 +7,7 @@ import { createOpenAICompatProvider } from "#minicore/providers/openai-compat.ts
 import { LIMITS } from "../constants.ts"
 import { isPrivateHostWithDns } from "../lib/net.ts"
 import { minicodeEstimator } from "./context.ts"
+import { outputReserveFor } from "./context-budget.ts"
 import { applyMicrocompact } from "./microcompact.ts"
 import { planRecovery, type RecoveryState } from "./recovery-budget.ts"
 
@@ -106,6 +107,8 @@ const FACT_TOOLS = new Set([
   "code_run",
   "web_fetch",
   "web_search",
+  "todo_write",
+  "todo_read",
 ])
 const FACT_HEAD_CHARS = 800
 
@@ -117,7 +120,9 @@ function toolHeadLen(name: string | null | undefined, fallback: number): number 
 
 export interface LlmCompactionOptions {
   provider?: ModelProvider
-  model?: string // deepseek v4 flash
+  model?: string
+  /** Resolver live model aktif (mis. pasca `/model` di tengah sesi). */
+  getModel?: () => string | undefined // deepseek v4 flash
   baseUrl?: string
   apiKey?: string
   keepRecentTurns?: number
@@ -138,6 +143,8 @@ export interface LlmCompactionOptions {
   /** Live per-model limit used to keep the active message set below the
    * system/tool/output reserve before the kernel makes its admission check. */
   getContextWindowTokens?: () => number
+  /** Cegah persistensi auto-memory pada mode baca-saja (DISCUSS / readonly / plan). */
+  canPersistMemory?: () => boolean
 }
 
 const COMPACTION_ELISION =
@@ -314,8 +321,9 @@ function activeTurnProtected(messages: readonly import("#minicore/core/types.ts"
       break
     }
   }
+  const scanFrom = Math.max(0, latestUser)
   let pendingStart = messages.length
-  for (let i = 0; i < messages.length; i++) {
+  for (let i = scanFrom; i < messages.length; i++) {
     const message = messages[i]!
     if (message.role !== "assistant" || !message.toolCalls?.length) continue
     const results = new Set(
@@ -567,11 +575,15 @@ export function createLlmCompaction(opts: LlmCompactionOptions = {}): Compaction
       // Skala penghematan minimum mengikuti budget jendela: konstanta keras 20k
       // tak pernah tercapai pada model <=64k, memaksa kompaksi LLM penuh lebih awal.
       const budget = mOpts.budgetTokens
-      const minSavingTokens =
+      const effBudget =
         typeof budget === "number" && Number.isFinite(budget) && budget > 0
+          ? Math.max(1, budget - outputReserveFor(budget))
+          : budget
+      const minSavingTokens =
+        typeof effBudget === "number" && Number.isFinite(effBudget) && effBudget > 0
           ? Math.min(
               LIMITS.MICROCOMPACT_MIN_SAVING_TOKENS,
-              Math.max(1_000, Math.floor(budget * 0.12)),
+              Math.max(1_000, Math.floor(effBudget * 0.12)),
             )
           : LIMITS.MICROCOMPACT_MIN_SAVING_TOKENS
       const result = applyMicrocompact(store.messages, {
@@ -579,7 +591,7 @@ export function createLlmCompaction(opts: LlmCompactionOptions = {}): Compaction
         minSavingTokens,
         minToolShare: LIMITS.MICROCOMPACT_MIN_TOOL_SHARE,
         estimateTokens: (text) => minicodeEstimator(text),
-        budgetTokens: mOpts.budgetTokens,
+        budgetTokens: effBudget,
       })
       return result.clearedCount > 0 ? result.messages : store.messages
     },
@@ -623,7 +635,7 @@ export function createLlmCompaction(opts: LlmCompactionOptions = {}): Compaction
         const attemptOpts = {
           keepRecentTurns: cOpts.keepRecentTurns,
           provider: opts.provider,
-          model: opts.model,
+          model: opts.getModel?.() ?? opts.model,
           baseUrl: opts.baseUrl,
           apiKey: opts.apiKey,
           cwd: opts.cwd,
@@ -638,6 +650,7 @@ export function createLlmCompaction(opts: LlmCompactionOptions = {}): Compaction
           maxSummaryChars: summaryCharBudgetForWindow(opts.getContextWindowTokens?.()),
           maxInputChars: summaryInputCharBudget(opts.getContextWindowTokens?.()),
           ...(opts.onUsage ? { onUsage: opts.onUsage } : {}),
+          ...(opts.canPersistMemory ? { canPersistMemory: opts.canPersistMemory } : {}),
         }
         let out: readonly import("#minicore/core/types.ts").Message[] | undefined
         for (let round = 0; ; round++) {
@@ -876,6 +889,10 @@ export async function compactWithLlm(
     maxInputChars?: number
     provider?: ModelProvider
     model?: string
+    /** Resolver live model aktif (mis. pasca `/model` di tengah sesi). */
+    getModel?: () => string | undefined
+    /** Cegah persistensi auto-memory pada mode baca-saja (DISCUSS / readonly / plan). */
+    canPersistMemory?: () => boolean
     baseUrl?: string
     apiKey?: string
     cwd?: string
@@ -916,11 +933,14 @@ export async function compactWithLlm(
   const keptTail = activeTurn ? activeTurnProtected(messages) : messages.slice(-kept)
 
   const baseUrl = opts.baseUrl ?? "https://api.deepseek.com/v1"
-  try {
-    const hostname = new URL(baseUrl).hostname
-    if (await isPrivateHostWithDns(hostname)) throw new Error(`private host rejected: ${hostname}`)
-  } catch (e) {
-    if (e instanceof Error && e.message.includes("private host")) throw e
+  if (!opts.provider && opts.apiKey) {
+    try {
+      const hostname = new URL(baseUrl).hostname
+      if (await isPrivateHostWithDns(hostname))
+        throw new Error(`private host rejected: ${hostname}`)
+    } catch (e) {
+      if (e instanceof Error && e.message.includes("private host")) throw e
+    }
   }
   const provider =
     opts.provider ??
@@ -979,11 +999,14 @@ export async function compactWithLlm(
   const goalContext = continuity.length
     ? `User goal and recent steering (chronological, excerpts):\n${continuity.join("\n")}\n\n`
     : ""
-  const scrubbedPrefix = scrubSecrets(
-    (currentRequest + goalContext + prefix.map(lineFor).join("\n")).slice(
-      0,
-      opts.maxInputChars ?? LIMITS.COMPACTION_LLM_INPUT_MIN_CHARS,
-    ),
+  const taskState = latestTaskState(all)
+  const taskContext = taskState
+    ? `Latest task list (verbatim):\n${safeHead(taskState, 1200)}\n\n`
+    : ""
+  const maxIn = opts.maxInputChars ?? LIMITS.COMPACTION_LLM_INPUT_MIN_CHARS
+  const scrubbedPrefix = safeHead(
+    scrubSecrets(currentRequest + taskContext + goalContext + prefix.map(lineFor).join("\n")),
+    maxIn,
   )
   // Guard anti-injeksi (temuan audit #02): prefix berisi output tool/web/repo
   // tak-terpercaya yang bisa memuat "abaikan instruksi". Tanpa pagar, payload
@@ -1082,9 +1105,9 @@ export async function compactWithLlm(
   )
   summaryEvidence.set(lruSummary, scrubSecrets(headWithMarker(summary, 1600)))
   // P13 S1 — persist summary ke vector (opt-out via MINICODE_AUTO_MEMORY=0).
-  // cwd diteruskan eksplisit: tanpa ini summary mendarat di DB global/sembarang
-  // tergantung process.cwd() saat compact jalan (temuan audit #02).
-  if (process.env.MINICODE_AUTO_MEMORY !== "0") {
+  // Wajib membawa `opts.cwd` eksplisit agar kompaksi di library/test tanpa
+  // workspace tidak mempolusi DB `process.cwd()`, serta menghormati mode baca-saja.
+  if (process.env.MINICODE_AUTO_MEMORY !== "0" && opts.cwd && opts.canPersistMemory?.() !== false) {
     try {
       const { addMemory } = await import("../memory/vector.ts")
       // fire-and-forget, jangan gagalkan compaction bila embedding gagal.

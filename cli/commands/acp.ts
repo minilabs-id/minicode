@@ -472,7 +472,8 @@ export async function runAcpSession(
             : `[budget] cost unknown (model without pricing) with ${ue.totalTokens} tokens spent - over budget, stopping.`
         write(acpErr(id, msg, machineError(new Error(msg))))
       } else {
-        const submitted = getSubmittedResult()
+        const submitted = getSubmittedResult(sessionId)
+        clearSubmittedResult(sessionId)
         // submitted verbatim seperti exec --json (pipeline tak menebak
         // batas); teks dis-scrub + di-cap (bisa megabyte).
         write(

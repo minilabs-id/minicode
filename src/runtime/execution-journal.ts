@@ -37,6 +37,7 @@ import { createHash } from "node:crypto"
 import { mkdirSync } from "node:fs"
 import { dirname } from "node:path"
 import { LIMITS } from "../constants.ts"
+import { isSqliteContention, withSqliteBusyRetrySync } from "../lib/db-path.ts"
 import type { ExecutionEvent } from "./execution-events.ts"
 
 /** Versi skema jurnal (bentuk/encoding) — BUKAN executionVersion. */
@@ -336,36 +337,10 @@ export async function withJournalBusyRetry<T>(
   throw last instanceof Error ? last : new Error(`SQLITE_BUSY after ${attempts} attempts`)
 }
 
-// [Phase 12.3] Predikat kontensi SQLite transien lintas-proses — SELARAS dengan
-// persistence.ts / store.ts / vector.ts (Fase 12.2). Bun menaruh kode simbolik di
-// `error.code` (mis. "SQLITE_IOERR_TRUNCATE") dan teks manusiawi di `error.message`
-// ("disk I/O error"), jadi keduanya diperiksa. SENGAJA TIDAK di-retry:
-// SQLITE_CORRUPT / SQLITE_NOTADB / constraint error.
-const SQLITE_CONTENTION_RE =
-  /SQLITE_BUSY|database is locked|database table is locked|SQLITE_LOCKED|SQLITE_PROTOCOL|SQLITE_IOERR_TRUNCATE|SQLITE_IOERR_SHMOPEN|SQLITE_IOERR_LOCK|disk I\/O error/i
-
-function isSqliteContention(e: unknown): boolean {
-  const code = (e as { code?: unknown } | null)?.code
-  if (typeof code === "string" && SQLITE_CONTENTION_RE.test(code)) return true
-  const msg = e instanceof Error ? String(e.message ?? e) : String(e)
-  return SQLITE_CONTENTION_RE.test(msg)
-}
-
-const DB_INIT_ATTEMPTS = 8
-const DB_INIT_BACKOFF_MS = 15
-
 /** Retry sinkron untuk setup PRAGMA/WAL saat open (jalur sinkron openExecutionJournal). */
-function withBusyRetrySync<T>(fn: () => T, attempts = DB_INIT_ATTEMPTS): T | null {
-  for (let i = 0; i < attempts; i++) {
-    try {
-      return fn()
-    } catch (e) {
-      if (!isSqliteContention(e)) throw e
-      Bun.sleepSync(DB_INIT_BACKOFF_MS * 2 ** i)
-    }
-  }
-  return null
-}
+const DB_INIT_ATTEMPTS = 8
+const withBusyRetrySync = <T>(fn: () => T, attempts = DB_INIT_ATTEMPTS): T | null =>
+  withSqliteBusyRetrySync(fn, { attempts })
 
 function isCorruptionError(e: unknown): boolean {
   const msg = (e instanceof Error ? e.message : String(e)).toLowerCase()

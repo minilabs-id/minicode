@@ -282,6 +282,36 @@ export async function writeConfigAtomic(path: string, cfg: MinicodeConfig): Prom
   await atomicWriteText(path, JSON.stringify(cfg, null, 2))
 }
 
+/** Baca `.minicode/config.json` lokal SAJA tanpa merge global. */
+export async function loadLocalConfigOnly(cwd = process.cwd()): Promise<MinicodeConfig> {
+  try {
+    const localPath = resolve(cwd, LOCAL)
+    const raw = await readFile(localPath, "utf8")
+    return normalizeConfig(JSON.parse(raw))
+  } catch (e) {
+    // SyntaxError selalu ribut; error baca non-ENOENT (EACCES/…) ribut juga —
+    // reset diam-diam membuat override lokal "hilang" tanpa jejak.
+    const code = (e as NodeJS.ErrnoException)?.code
+    if (e instanceof SyntaxError)
+      process.stderr.write(
+        `[config] invalid JSON in ${resolve(cwd, LOCAL)}: ${(e as Error).message}\n`,
+      )
+    else if (code !== "ENOENT")
+      process.stderr.write(
+        `[config] cannot read ${resolve(cwd, LOCAL)} (${code ?? "error"}) — ignoring local\n`,
+      )
+    return { providers: [] }
+  }
+}
+
+export async function hasProviderInLocalConfig(
+  providerId: string,
+  cwd = process.cwd(),
+): Promise<boolean> {
+  const localCfg = await loadLocalConfigOnly(cwd)
+  return localCfg.providers.some((p) => p.id === providerId)
+}
+
 export async function loadConfig(
   cwd = process.cwd(),
   opts: { allowLocal?: boolean } = {},
@@ -309,24 +339,7 @@ export async function loadConfig(
   // (--allow-local-config / MINICODE_ALLOW_LOCAL_CONFIG=1); default = global
   // saja (fail-closed). Tulis eksplisit (--local) tak terpengaruh.
   if (opts.allowLocal) {
-    try {
-      const localPath = resolve(cwd, LOCAL)
-      const raw = await readFile(localPath, "utf8")
-      localCfg = normalizeConfig(JSON.parse(raw))
-    } catch (e) {
-      // Sama seperti global: SyntaxError selalu ribut; error baca non-ENOENT
-      // (EACCES/…) ribut juga — reset diam-diam membuat override lokal
-      // "hilang" tanpa jejak.
-      const code = (e as NodeJS.ErrnoException)?.code
-      if (e instanceof SyntaxError)
-        process.stderr.write(
-          `[config] invalid JSON in ${resolve(cwd, LOCAL)}: ${(e as Error).message}\n`,
-        )
-      else if (code !== "ENOENT")
-        process.stderr.write(
-          `[config] cannot read ${resolve(cwd, LOCAL)} (${code ?? "error"}) — ignoring local\n`,
-        )
-    }
+    localCfg = await loadLocalConfigOnly(cwd)
   }
   // generic merge helper — deduplicate DRY
   function mergeByKey<T>(global: T[], local: T[], keyFn: (v: T) => string): T[] {
@@ -378,17 +391,22 @@ export async function loadLastModel(): Promise<string | undefined> {
   }
 }
 
-export async function saveLastModel(id: string): Promise<void> {
+async function updateStateAtomic(mutate: (cur: Record<string, unknown>) => void): Promise<void> {
   const path = statePath()
   return withConfigLock(path, async () => {
     await mkdir(join(homeDir(), ".minicode"), { recursive: true, mode: 0o700 }).catch(() => {})
-    // Merge (bukan timpa): state.json menampung preferensi lain (lang).
-    // Timpa utuh menghapusnya diam-diam.
     let cur: Record<string, unknown> = {}
     try {
       cur = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>
     } catch {}
-    await atomicWriteText(path, JSON.stringify({ ...cur, lastModel: id }))
+    mutate(cur)
+    await atomicWriteText(path, JSON.stringify(cur))
+  })
+}
+
+export async function saveLastModel(id: string): Promise<void> {
+  return updateStateAtomic((cur) => {
+    cur.lastModel = id
   })
 }
 
@@ -404,14 +422,37 @@ export async function loadLang(): Promise<"en" | "id" | undefined> {
 }
 
 export async function saveLang(lang: "en" | "id"): Promise<void> {
-  const path = statePath()
+  return updateStateAtomic((cur) => {
+    cur.lang = lang
+  })
+}
+
+/** Pembaru atomik bersama untuk file config global/lokal dengan proteksi corrupt backup. */
+export async function updateConfigAtomic(
+  opts: { global?: boolean; cwd?: string },
+  mutate: (cfg: MinicodeConfig) => void,
+): Promise<void> {
+  const path =
+    (opts.global ?? true) ? globalConfigPath() : resolve(opts.cwd ?? process.cwd(), LOCAL)
   return withConfigLock(path, async () => {
-    await mkdir(join(homeDir(), ".minicode"), { recursive: true, mode: 0o700 }).catch(() => {})
-    let cur: Record<string, unknown> = {}
+    let cfg: MinicodeConfig = { providers: [] }
+    let raw = ""
     try {
-      cur = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>
-    } catch {}
-    await atomicWriteText(path, JSON.stringify({ ...cur, lang }))
+      raw = await readFile(path, "utf8")
+      cfg = normalizeConfig(JSON.parse(raw))
+    } catch (e) {
+      if (e instanceof SyntaxError) {
+        const backup = `${path}.corrupt.${Date.now()}`
+        await atomicWriteText(backup, raw).catch(() => {})
+        throw new Error(`config corrupt: ${path} — backup to ${backup}: ${e.message}`)
+      }
+      if ((e as Error).message?.includes("config corrupt")) throw e
+      if ((e as NodeJS.ErrnoException).code && (e as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw e
+      }
+    }
+    mutate(cfg)
+    await writeConfigAtomic(path, cfg)
   })
 }
 
@@ -421,60 +462,17 @@ export async function saveMcpServer(
 ) {
   if (!entry.id || (!entry.command && !entry.url))
     throw new Error("mcp entry needs an id + (command for stdio or url for http)")
-  const path =
-    (opts.global ?? true) ? globalConfigPath() : resolve(opts.cwd ?? process.cwd(), LOCAL)
-  return withConfigLock(path, async () => {
-    let cfg: MinicodeConfig = { providers: [] }
-    let raw = ""
-    try {
-      raw = await readFile(path, "utf8")
-      cfg = normalizeConfig(JSON.parse(raw))
-    } catch (e) {
-      if (e instanceof SyntaxError) {
-        const backup = `${path}.corrupt.${Date.now()}`
-        await atomicWriteText(backup, raw).catch(() => {})
-        throw new Error(`config corrupt: ${path} — backup to ${backup}: ${e.message}`)
-      }
-      if ((e as NodeJS.ErrnoException).code === "ENOENT") {
-        cfg = { providers: [] }
-      } else if ((e as Error).message?.includes("config corrupt")) {
-        throw e
-      } else if ((e as NodeJS.ErrnoException).code) {
-        throw e
-      } else {
-        cfg = { providers: [] }
-      }
-    }
+  return updateConfigAtomic(opts, (cfg) => {
     cfg.mcpServers ??= []
     const idx = cfg.mcpServers.findIndex((m) => m.id === entry.id)
     if (idx >= 0) cfg.mcpServers[idx] = entry
     else cfg.mcpServers.push(entry)
-    await writeConfigAtomic(path, cfg)
   })
 }
 
 export async function removeMcpServer(id: string, opts: { global?: boolean; cwd?: string } = {}) {
-  const path =
-    (opts.global ?? true) ? globalConfigPath() : resolve(opts.cwd ?? process.cwd(), LOCAL)
-  return withConfigLock(path, async () => {
-    let cfg: MinicodeConfig = { providers: [] }
-    let raw = ""
-    try {
-      raw = await readFile(path, "utf8")
-      cfg = normalizeConfig(JSON.parse(raw))
-    } catch (e) {
-      if (e instanceof SyntaxError) {
-        const backup = `${path}.corrupt.${Date.now()}`
-        await atomicWriteText(backup, raw).catch(() => {})
-        throw new Error(`config corrupt: ${path} — backup to ${backup}: ${e.message}`)
-      }
-      if ((e as NodeJS.ErrnoException).code === "ENOENT") cfg = { providers: [] }
-      else if ((e as Error).message?.includes("config corrupt")) throw e
-      else if ((e as NodeJS.ErrnoException).code) throw e
-      else cfg = { providers: [] }
-    }
+  return updateConfigAtomic(opts, (cfg) => {
     cfg.mcpServers = (cfg.mcpServers ?? []).filter((m) => m.id !== id)
-    await writeConfigAtomic(path, cfg)
   })
 }
 
@@ -487,55 +485,17 @@ export async function saveLspServer(
   opts: { global?: boolean; cwd?: string } = {},
 ) {
   if (!entry.ext || !entry.command) throw new Error("lsp ext/command required")
-  const path =
-    (opts.global ?? true) ? globalConfigPath() : resolve(opts.cwd ?? process.cwd(), LOCAL)
-  return withConfigLock(path, async () => {
-    let cfg: MinicodeConfig = { providers: [] }
-    let raw = ""
-    try {
-      raw = await readFile(path, "utf8")
-      cfg = normalizeConfig(JSON.parse(raw))
-    } catch (e) {
-      if (e instanceof SyntaxError) {
-        const backup = `${path}.corrupt.${Date.now()}`
-        await atomicWriteText(backup, raw).catch(() => {})
-        throw new Error(`config corrupt: ${path} — backup to ${backup}: ${e.message}`)
-      }
-      if ((e as NodeJS.ErrnoException).code === "ENOENT") cfg = { providers: [] }
-      else if ((e as Error).message?.includes("config corrupt")) throw e
-      else if ((e as NodeJS.ErrnoException).code) throw e
-      else cfg = { providers: [] }
-    }
+  return updateConfigAtomic(opts, (cfg) => {
     cfg.lspServers ??= []
     const ext = normalizeExt(entry.ext)
     const idx = cfg.lspServers.findIndex((l) => l.ext.toLowerCase() === ext)
     if (idx >= 0) cfg.lspServers[idx] = { ...entry, ext }
     else cfg.lspServers.push({ ...entry, ext })
-    await writeConfigAtomic(path, cfg)
   })
 }
 
 export async function removeLspServer(ext: string, opts: { global?: boolean; cwd?: string } = {}) {
-  const path =
-    (opts.global ?? true) ? globalConfigPath() : resolve(opts.cwd ?? process.cwd(), LOCAL)
-  return withConfigLock(path, async () => {
-    let cfg: MinicodeConfig = { providers: [] }
-    let raw = ""
-    try {
-      raw = await readFile(path, "utf8")
-      cfg = normalizeConfig(JSON.parse(raw))
-    } catch (e) {
-      if (e instanceof SyntaxError) {
-        const backup = `${path}.corrupt.${Date.now()}`
-        await atomicWriteText(backup, raw).catch(() => {})
-        throw new Error(`config corrupt: ${path} — backup to ${backup}: ${e.message}`)
-      }
-      if ((e as NodeJS.ErrnoException).code === "ENOENT") cfg = { providers: [] }
-      else if ((e as Error).message?.includes("config corrupt")) throw e
-      else if ((e as NodeJS.ErrnoException).code) throw e
-      else cfg = { providers: [] }
-    }
+  return updateConfigAtomic(opts, (cfg) => {
     cfg.lspServers = (cfg.lspServers ?? []).filter((l) => l.ext.toLowerCase() !== normalizeExt(ext))
-    await writeConfigAtomic(path, cfg)
   })
 }

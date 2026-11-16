@@ -6,8 +6,8 @@
 // jalur satu-shot (yang tak pernah membuka `/context`) tidak membayar biaya
 // modul ini. Alasan yang sama dipakai `/model` (`./model-manager.ts`).
 
-import type { ProviderEntry } from "../src/config.ts"
-import { loadConfig } from "../src/config.ts"
+import type { MinicodeConfig, ProviderEntry } from "../src/config.ts"
+import { hasProviderInLocalConfig, loadConfig } from "../src/config.ts"
 import { resolveContextWindow } from "../src/policy/context-window.ts"
 import { assignContextWindow } from "../src/policy/context-window-assign.ts"
 import {
@@ -27,11 +27,18 @@ import {
 } from "./context-command.ts"
 
 /** Baris `provider::model` aktif, diturunkan dari id yang dipakai sesi. */
-function activeRef(ctx: CommandContext): { provider: string; model: string } | undefined {
+function activeRef(
+  ctx: CommandContext,
+  cfg?: MinicodeConfig,
+): { provider: string; model: string } | undefined {
   const id = ctx.currentModel
-  if (!id?.includes("::")) return undefined
-  const sep = id.indexOf("::")
-  return { provider: id.slice(0, sep), model: id.slice(sep + 2) }
+  if (!id) return undefined
+  if (id.includes("::")) {
+    const sep = id.indexOf("::")
+    return { provider: id.slice(0, sep), model: id.slice(sep + 2) }
+  }
+  const owner = cfg?.providers.find((p) => p.models.includes(id))
+  return owner ? { provider: owner.id, model: id } : undefined
 }
 
 /**
@@ -44,17 +51,18 @@ function activeRef(ctx: CommandContext): { provider: string; model: string } | u
  */
 async function rowsFor(ctx: CommandContext): Promise<string[]> {
   const cfg = await loadConfig(ctx.cwd, { allowLocal: ctx.allowLocalConfig })
-  const active = activeRef(ctx)
+  const active = activeRef(ctx, cfg)
   const rows: { model: string; window: string; origin: string }[] = []
   for (const p of cfg.providers) {
     for (const model of p.models ?? []) {
       const res = resolveContextWindow(cfg, `${p.id}::${model}`)
+      const row = contextWindowRow(model, res, describeContextWindow)
       // Angka jendela = data operasional, nama model = input tak terpercaya
       // (bisa datang dari /models jaringan): sanitasi keduanya sebelum tampil.
       rows.push({
         model: `${sanitizeAnsiLine(`${p.id}::${model}`)}${active && active.provider === p.id && active.model === model ? " *" : ""}`,
-        window: sanitizeAnsiLine(contextWindowRow(model, res, describeContextWindow).window),
-        origin: sanitizeAnsiLine(contextWindowRow(model, res, describeContextWindow).origin),
+        window: sanitizeAnsiLine(row.window),
+        origin: sanitizeAnsiLine(row.origin),
       })
     }
   }
@@ -88,9 +96,9 @@ async function rowsFor(ctx: CommandContext): Promise<string[]> {
  * penanda — sehingga perilaku kembali persis ke rantai resolusi normal.
  */
 async function save(ctx: CommandContext, input: string): Promise<string[]> {
-  const active = activeRef(ctx)
-  if (!active) return [`${t("ctx.saveFailed", { msg: "no active model — pick one with /model" })}`]
   const cfg = await loadConfig(ctx.cwd, { allowLocal: ctx.allowLocalConfig })
+  const active = activeRef(ctx, cfg)
+  if (!active) return [`${t("ctx.saveFailed", { msg: "no active model — pick one with /model" })}`]
   const provider = cfg.providers.find((p) => p.id === active.provider)
   if (!provider) return [`${t("ctx.saveFailed", { msg: `provider ${active.provider} not found` })}`]
 
@@ -114,10 +122,7 @@ async function save(ctx: CommandContext, input: string): Promise<string[]> {
   // Provider lokal hanya terbaca bila sesi mengizinkannya (`--allow-local-config`)
   // — tanpa opt-in kita tak boleh menyentuh berkas repo.
   const inLocal =
-    !!ctx.allowLocalConfig &&
-    (await loadConfig(ctx.cwd, { allowLocal: true })).providers.some(
-      (p) => p.id === active.provider,
-    )
+    !!ctx.allowLocalConfig && (await hasProviderInLocalConfig(active.provider, ctx.cwd))
   try {
     await saveProvider(outcome.provider, {
       ...(inLocal ? { global: false, cwd: ctx.cwd ?? process.cwd() } : { global: true }),

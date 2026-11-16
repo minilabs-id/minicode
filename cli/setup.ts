@@ -30,6 +30,7 @@ import {
   isAceEnabled,
 } from "../src/policy/consequence-engine.ts"
 import { minicodeEstimator } from "../src/policy/context.ts"
+import { outputReserveFor } from "../src/policy/context-budget.ts"
 import { loadContextWindowOverlay, resolveContextWindow } from "../src/policy/context-window.ts"
 import type { NoProgressDetector } from "../src/policy/no-progress.ts"
 import type { PermissionAsk } from "../src/policy/permission.ts"
@@ -104,6 +105,7 @@ import { admitTaskWork } from "../src/runtime/runtime-task-admission.ts"
 import {
   acquireSessionWriter,
   checkWriterFresh,
+  describeSessionHolder,
   releaseSessionWriter,
   renewSessionWriter,
   StaleWriterError,
@@ -168,6 +170,7 @@ import {
   loadThreadHistoryWithSeq,
   type PresentationPersistStats,
   RefusedHistoryRewriteError,
+  readWriterEpoch,
   saveSession,
   saveSessionWorkMode,
   shrinkThreadHistory,
@@ -214,6 +217,7 @@ import {
 import {
   reconcileCompletionEvidence,
   setCompletionEvidence,
+  syncTodoViewsFromTaskStore,
   todoSession,
 } from "../src/tools/todo.ts"
 import { promptAsk, promptAskText } from "../src/ui/approval/prompt.ts"
@@ -898,6 +902,24 @@ export function parseVerifyTestEvidence(
   }
 }
 
+/** Kompaksi LLM child session bersama (`canPersistMemory: false` mencegah polusi global). */
+export function createChildCompaction(opts: {
+  provider: unknown
+  model?: string
+  cwd?: string
+  contextWindowTokensForModel?: (model?: string) => number
+  getContextModel?: () => string | undefined
+}) {
+  const getWindow = opts.contextWindowTokensForModel
+  return createLlmCompaction({
+    provider: opts.provider as never,
+    getModel: () => opts.getContextModel?.() ?? opts.model,
+    cwd: opts.cwd ?? process.cwd(),
+    ...(getWindow ? { getContextWindowTokens: () => getWindow(opts.model) } : {}),
+    canPersistMemory: () => false,
+  })
+}
+
 export async function createCliSession(opts: CliSessionOptions): Promise<CliSession> {
   const {
     cwd,
@@ -1017,6 +1039,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       throw new AdoptionRefusedError(adoption)
     }
     const moved = adoption.task
+    await syncTodoViewsFromTaskStore(sessionId, cwd ?? process.cwd()).catch(() => undefined)
     startupWrite(
       `${c.dim(`[adopt] ADOPTED ${adoptTask.taskId} ${adoptTask.sourceSessionId} -> ${sessionId} revision=${moved?.revision ?? "?"} status=${moved?.status ?? "?"} exec=${adoption.transfer?.execGeneration ?? "?"}${adoption.fencedFormerOwner ? " (former owner fenced)" : ""}\n`)}`,
     )
@@ -1054,20 +1077,36 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   // Perpanjangan TAK PERNAH menyentuh writer_epoch (§16).
   let writerRenewTimer: ReturnType<typeof setInterval> | undefined
   let renewWarned = false
-  writerRenewTimer = setInterval(() => {
-    const out = renewSessionWriter(sessionId, writerToken, cwd)
-    if (out === "AUTHORITY_LOST" && !renewWarned) {
-      renewWarned = true
-      startupWrite(
-        `${c.yellow(`[writer] lease lost sid=${sessionId} boot=${bootId} — another writer took over; next mutation will be refused unless re-acquired\n`)}`,
-      )
-      try {
-        if (writerRenewTimer !== undefined) clearInterval(writerRenewTimer)
-      } catch {}
-      writerRenewTimer = undefined
-    }
-  }, SESSION_RENEW_INTERVAL_MS)
-  writerRenewTimer.unref?.()
+  let writerClosed = false
+  const stopWriterRenewTimer = () => {
+    try {
+      if (writerRenewTimer !== undefined) clearInterval(writerRenewTimer)
+    } catch {}
+    writerRenewTimer = undefined
+  }
+  const startWriterRenewTimer = () => {
+    if (writerClosed || writerRenewTimer !== undefined) return
+    renewWarned = false
+    writerRenewTimer = setInterval(() => {
+      const out = renewSessionWriter(sessionId, writerToken, cwd)
+      if (out === "AUTHORITY_LOST") {
+        stopWriterRenewTimer()
+        // Lease tanpa pemilik aktif & epoch sama = dilepas bersih `/scheduler stop`; re-acquire di turn berikutnya.
+        const holder = describeSessionHolder(sessionId, cwd)
+        if (!holder.active && readWriterEpoch(sessionId, cwd) === expectedEpoch) {
+          return
+        }
+        if (!renewWarned) {
+          renewWarned = true
+          startupWrite(
+            `${c.yellow(`[writer] lease lost sid=${sessionId} boot=${bootId} — another writer took over; next mutation will be refused unless re-acquired\n`)}`,
+          )
+        }
+      }
+    }, SESSION_RENEW_INTERVAL_MS)
+    writerRenewTimer.unref?.()
+  }
+  startWriterRenewTimer()
 
   // P2.2 — pagar pra-turn. JANGAN belanjakan provider untuk turn yang tak
   // bisa persist: basi → lewati turn (histori kernel utuh) + flag untuk
@@ -1087,6 +1126,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
           )
         }
         expectedEpoch = re.admission.epoch
+        startWriterRenewTimer()
         return true
       }
       markWriterStale("pre-turn authority refused (lease held by another writer)")
@@ -1245,14 +1285,31 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   const effectiveDefaultModel = () => modelRef.current ?? cfg.providers[0]?.models[0]
   const warnedContextModels = new Set<string>()
   const warnedCatalogDrift = new Set<string>()
+  // Eskalasi jendela konteks adaptif per model selama sesi ini hidup.
+  // Menyimpan baseline saat eskalasi terjadi supaya jika user mengubah pin
+  // lewat `/context set`, perubahan manual menang atas eskalasi sebelumnya.
+  const escalatedWindows = new Map<string, { baseTokens: number; escalatedTokens: number }>()
   const routedContextModel = (model?: string) =>
     router.contextModelIdentity(model ?? effectiveDefaultModel()) ?? model ?? "default"
   const contextModelId = (requested?: string): string => {
     return routedContextModel(requested)
   }
+  const resolveEffectiveContextWindow = (model?: string) => {
+    const key = routedContextModel(model)
+    const resolved = resolveContextWindow(cfg, key, contextWindowTokens)
+    const esc = escalatedWindows.get(key)
+    if (esc) {
+      if (esc.baseTokens !== resolved.tokens) {
+        escalatedWindows.delete(key)
+      } else if (esc.escalatedTokens > resolved.tokens) {
+        return { ...resolved, key, tokens: esc.escalatedTokens, escalated: true }
+      }
+    }
+    return { ...resolved, key, escalated: false }
+  }
   const getContextWindowTokens = (model?: string) => {
-    const resolved = resolveContextWindow(cfg, routedContextModel(model), contextWindowTokens)
-    if (resolved.source === "safe-default") {
+    const resolved = resolveEffectiveContextWindow(model)
+    if (resolved.source === "safe-default" && !resolved.escalated) {
       const key = resolved.providerId
         ? `${resolved.providerId}::${resolved.model ?? "default"}`
         : (resolved.model ?? "default")
@@ -1279,8 +1336,8 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     return resolved.tokens
   }
   const getReportedContextWindowTokens = (model?: string) => {
-    const resolved = resolveContextWindow(cfg, routedContextModel(model), contextWindowTokens)
-    return resolved.source === "safe-default" ? undefined : resolved.tokens
+    const resolved = resolveEffectiveContextWindow(model)
+    return resolved.source === "safe-default" && !resolved.escalated ? undefined : resolved.tokens
   }
   router.updateContextWindowResolver(getContextWindowTokens)
   // Muat overlay jendela konteks models.dev sekali sebelum resolusi dipakai;
@@ -1333,10 +1390,11 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   let lastAceDecision: ConsequenceDecision | null = null
   // Streak kegagalan verify (dipakai ACE sebagai `repeatedFailureCount`).
   let verifyFailureStreak = 0
-  // Baseline kanonik saat resume (isi `messages` yang SUDAH durable). Setelah
-  // proyeksi menutupi prefix, buffer konteks TIDAK lagi superset histori
-  // kanonik — jadi persist harus menyusun ulang: baseline ++ ekor baru.
+  // Baseline kanonik saat resume (hanya prefix sebelum tail/proyeksi). Setelah
+  // proyeksi/budget-tail memotong prefix, persist harus menyusun ulang prefix + ekor.
   let contextCanonicalBaseline: readonly unknown[] | undefined
+  let budgetTailPrefix: readonly unknown[] | undefined
+  let budgetTailInitialMessages: readonly Message[] | undefined
   if (identity.resumed) {
     // P0.2 (Q5 / Invariant #6) — transparansi resume: WorkMode dipulihkan dari
     // metadata sesi bila operator tidak memberi sinyal eksplisit (NULL legacy
@@ -1419,7 +1477,8 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
         )
         const projectionSummary = durableProjection
         const selectedWindow = getContextWindowTokens()
-        const messageBudget = selectedWindow
+        const selectionReserve = selectedWindow > 16_384 ? outputReserveFor(selectedWindow) : 0
+        const messageBudget = Math.max(0, selectedWindow - selectionReserve)
         // N1: turunkan frontier kanonis dari baris yang BARU DIBACA (sumber
         // kebenaran saat ini) dan teruskan ke selector — freshness dihitung
         // via assessContextFreshness (BUKAN hard-code "fresh"). Selector tetap
@@ -1460,7 +1519,17 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
         runtimeContextMetadata = runtimeMetadataFromSelection(selection, revision)
         if (selection.contextOnly) {
           contextOnlyArtifact = selection.contextOnly
-          contextCanonicalBaseline = rowsForSelector.map((r) => r.message)
+          // Hanya prefix sebelum `coveredSeq` — ekor `[coveredSeq..N-1]` SUDAH ada di `initialMessages[1..]`.
+          contextCanonicalBaseline = rowsForSelector
+            .filter((r) => r.seq < selection.coveredSeq)
+            .map((r) => r.message)
+        } else if (selection.selectionBasis === "budget-tail") {
+          const baseSeq =
+            selection.messages.length === 0 ? Infinity : (selection.frontier?.baseSeq ?? 0)
+          if (baseSeq > 0) {
+            budgetTailPrefix = rowsForSelector.filter((r) => r.seq < baseSeq).map((r) => r.message)
+            budgetTailInitialMessages = selection.messages
+          }
         }
         resumeTurnCount = meta.turnCount
         startupConsoleError(
@@ -1865,10 +1934,14 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
         }
       : {
           provider: router,
-          model: modelRef.current ?? cfg.providers[0]?.models[0] ?? "deepseek-chat",
+          getModel: () => modelRef.current ?? cfg.providers[0]?.models[0] ?? "deepseek-chat",
         }),
     cwd: cwd ?? process.cwd(),
     getContextWindowTokens,
+    canPersistMemory: () =>
+      (workModeControl?.getWorkMode() ?? effectiveWorkMode) === "EXECUTE" &&
+      (permissions?.getMode() ?? permissionMode) !== "readonly" &&
+      (permissions?.getMode() ?? permissionMode) !== "plan",
     onUsage: (u) => {
       try {
         // Angka sudah dinormalisasi di compactWithLlm (negatif/NaN → skip).
@@ -1955,9 +2028,6 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
 
   let permissions: PermissionControl | undefined
   let noProgressDetector: NoProgressDetector | null = null
-  // Jendela konteks hasil eskalasi adaptif (0 = belum ada). Dipakai /status
-  // untuk menampilkan angka efektif, bukan tebakan awal.
-  const escalatedWindowRef = { current: 0 }
   const effectiveMaxTurns = (() => {
     const raw = (opts as { maxTurns?: number }).maxTurns ?? Number(process.env.MINICODE_MAX_TURNS)
     return typeof raw === "number" && Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : undefined
@@ -1979,6 +2049,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       provider: router,
       tools: sessionTools,
       cwd,
+      sessionId,
       permissionMode,
       restrictBash,
       allowLocalConfig,
@@ -2041,16 +2112,39 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       onNoProgress: (detector) => {
         noProgressDetector = detector
       },
+      isExplicitContextWindow: (m) => {
+        const resolved = resolveContextWindow(cfg, routedContextModel(m), contextWindowTokens)
+        return resolved.source === "override" || resolved.origin === "user"
+      },
       // Eskalasi jendela konteks: beritahu user secara eksplisit. Tanpa ini,
       // jendela yang naik otomatis terasa seperti angka ajaib — user perlu tahu
       // bahwa ada BUKTI overflow dan berapa nilai barunya, agar bisa memutuskan
       // menyetel `contextWindows` permanen bila perlu.
       onContextWindowEscalated: (info) => {
-        startupWrite(
-          `${c.yellow(`[context] window raised ${info.fromTokens} → ${info.toTokens} tokens for ${sanitizeAnsi(info.model)} after a verified context overflow (observed ${info.observedTokens}). Set provider.contextWindows to make it permanent.
-`)}`,
-        )
-        escalatedWindowRef.current = info.toTokens
+        const currentKey = routedContextModel()
+        const baseForInfo = resolveContextWindow(cfg, info.model, contextWindowTokens).tokens
+        const baseForCurrent = resolveContextWindow(cfg, currentKey, contextWindowTokens).tokens
+        escalatedWindows.set(info.model, {
+          baseTokens: baseForInfo,
+          escalatedTokens: info.toTokens,
+        })
+        if (currentKey !== info.model && info.model.endsWith(`::${currentKey}`)) {
+          escalatedWindows.set(currentKey, {
+            baseTokens: baseForCurrent,
+            escalatedTokens: info.toTokens,
+          })
+        }
+        const msg = `[context] window raised ${info.fromTokens} → ${info.toTokens} tokens for ${sanitizeAnsi(info.model)} after a verified context overflow (observed ${info.observedTokens}). Set provider.contextWindows to make it permanent.`
+        if (enterRepl) {
+          presentation?.noteContextCutoff({
+            reason: msg,
+            usedTokens: info.observedTokens,
+            windowTokens: info.toTokens,
+            turnId: session.state.turnCount,
+          })
+        } else {
+          startupWrite(`${c.yellow(`${msg}\n`)}`)
+        }
       },
       ...(maxSteps ? { maxSteps } : {}),
       ...(keepRecentTurns ? { keepRecentTurns } : {}),
@@ -2091,36 +2185,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   // setelah verify-settle). Dedupe per (id,status,revision) agar tidak
   // double-report saat verify menyelesaikan task yang sama.
   const taskStatusSeen = new Map<string, string>()
-  const emitTaskStatuses = (): void => {
-    try {
-      // Sinkron: one-shot/exec dapat keluar tepat setelah turn selesai; dynamic
-      // import async bisa tidak sempat berjalan sebelum proses berhenti.
-      const tasks = new TaskStore(cwd ?? process.cwd()).listTasks(sessionId)
-      for (const task of tasks) {
-        const key = `${task.status}:${task.revision}`
-        if (taskStatusSeen.get(task.id) === key) continue
-        taskStatusSeen.set(task.id, key)
-        presentation?.noteTaskStatus({
-          taskId: task.id,
-          status: task.status,
-          ...(task.parentId ? { parentId: task.parentId } : {}),
-          ...(task.dependsOn?.length ? { dependsOn: [...task.dependsOn] } : {}),
-          revision: task.revision,
-          verification: task.verification
-            ? { verdict: task.verification.verdict, checkedAt: task.verification.checkedAt }
-            : { verdict: "unverified", checkedAt: "" },
-          turnId: session.state.turnCount,
-        })
-      }
-    } catch {}
-  }
-  session.events.on("execution:completed", (e) => {
-    const call = (e as { execution?: { call?: { name?: unknown } } }).execution?.call
-    if (call?.name === "todo_write") emitTaskStatuses()
-  })
-  // P2.3: transisi AUTHORITATIVE (claim/verify/merge/cancel/fail) diproyeksikan
-  // setelah commit DB oleh sink TaskStore — bukan ditebak dari perubahan teks.
-  setTaskTransitionSink(({ task }) => {
+  const noteTaskChanged = (task: ReturnType<TaskStore["listTasks"]>[number]) => {
     const key = `${task.status}:${task.revision}`
     if (taskStatusSeen.get(task.id) === key) return
     taskStatusSeen.set(task.id, key)
@@ -2135,7 +2200,20 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
         : { verdict: "unverified", checkedAt: "" },
       turnId: session.state.turnCount,
     })
+  }
+  const emitTaskStatuses = (): void => {
+    try {
+      for (const task of new TaskStore(cwd ?? process.cwd()).listTasks(sessionId)) {
+        noteTaskChanged(task)
+      }
+    } catch {}
+  }
+  session.events.on("execution:completed", (e) => {
+    const call = (e as { execution?: { call?: { name?: unknown } } }).execution?.call
+    if (call?.name === "todo_write") emitTaskStatuses()
   })
+  // P2.3: proyeksi transisi AUTHORITATIVE pasca-commit DB.
+  setTaskTransitionSink(({ task }) => noteTaskChanged(task))
   try {
     if (!shadowState) shadowState = createInitialState(sessionId)
     if (!shadowDiag) shadowDiag = createReducerDiagnostics()
@@ -2563,8 +2641,11 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   setCompletionEvidence(() => {
     const liveWm = workModeControl?.getWorkMode() ?? effectiveWorkMode
     const livePm = permissions?.getMode() ?? permissionMode
-    if (!verifyActive || liveWm !== "EXECUTE" || livePm === "readonly" || livePm === "plan") {
-      return { verdict: "unverified" }
+    if (!verifyActive) return { verdict: "unverified" }
+    // Jangan pernah meloloskan `completed` tanpa bukti hanya karena user
+    // beralih mode BUILD -> DISCUSS/readonly/plan di tengah sesi `--verify`.
+    if (liveWm !== "EXECUTE" || livePm === "readonly" || livePm === "plan") {
+      return { verdict: "unverified", requireVerified: true }
     }
     // [Fase 3 / LOOP-INV-12, LOOP-G20] Saat `--verify` aktif tetapi verifier
     // belum menghasilkan verdict pertama, tandai `requireVerified: true` agar
@@ -2703,7 +2784,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       noProgressDetector?.noteVerificationPassed()
     }
     try {
-      settleSessionVerifyingTasks(effectiveRoot, sessionId, {
+      const settled = settleSessionVerifyingTasks(effectiveRoot, sessionId, {
         ok: effectiveOk,
         verdict: effectiveOk ? "passed" : "failed",
         exitCode: effectiveExitCode,
@@ -2715,6 +2796,16 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       // bukan hanya efek samping TaskStore. Dedupe yang sama dengan jalur
       // todo_write agar satu transisi tidak dilaporkan dua kali.
       emitTaskStatuses()
+      if (settled.length > 0) {
+        const synced = await syncTodoViewsFromTaskStore(sessionId, effectiveRoot).catch(() => null)
+        if (synced) {
+          presentation?.notePlanReconciled({
+            todos: synced,
+            sessionId,
+            turnId: session.state.turnCount,
+          })
+        }
+      }
     } catch {}
     const evidence = parseVerifyTestEvidence(verifyCommand, effectiveOutput)
     if (evidence) {
@@ -3173,10 +3264,15 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       // `reconcileCompletionEvidence` sudah best-effort + menulis diagnostik
       // sendiri, jadi pemanggil tak perlu try/catch (dan tak perlu menambah
       // writer di file ini — pagu OAP-008).
-      const reconciled = await reconcileCompletionEvidence(sessionId, cwd ?? ".", {
-        verdict: "failed",
-        detail: `last verification failed (${lastVerify.command}): ${lastVerify.output.slice(0, 200)}`,
-      })
+      const reconciled = await reconcileCompletionEvidence(
+        sessionId,
+        cwd ?? ".",
+        {
+          verdict: "failed",
+          detail: `last verification failed (${lastVerify.command}): ${lastVerify.output.slice(0, 200)}`,
+        },
+        { syncTaskStore: true },
+      )
       if (reconciled) {
         presentation?.notePlanReconciled({
           todos: reconciled,
@@ -3303,12 +3399,22 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       // sudah bersaproven (migrated_compacted=1).
       const buffer = session.state.history
       const tail = stripContextOnly(buffer, contextOnlyArtifact)
+      const hasBudgetPrefixIntact =
+        budgetTailPrefix !== undefined &&
+        budgetTailInitialMessages !== undefined &&
+        buffer.length >= budgetTailInitialMessages.length &&
+        budgetTailInitialMessages.every((m, idx) => {
+          const cur = buffer[idx]
+          return cur === m || JSON.stringify(cur) === JSON.stringify(m)
+        })
       const durableHistory: readonly unknown[] =
         contextOnlyArtifact !== undefined &&
         contextCanonicalBaseline !== undefined &&
         tail.length !== buffer.length
           ? [...contextCanonicalBaseline, ...tail]
-          : buffer
+          : hasBudgetPrefixIntact
+            ? [...budgetTailPrefix!, ...buffer]
+            : buffer
       try {
         await saveSession(sessionId, cwd, undefined, durableHistory, usageData, {
           expectedEpoch,
@@ -3510,18 +3616,26 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
               contextModelIdentity?: (model?: string) => string | undefined
             }
             const contextWindowTokensForModel = childProvider.contextWindowTokensForModel
+            const getContextModel = () =>
+              childProvider.contextModelIdentity?.(spec.model) ?? spec.model
             const child = await createMinicodeSession({
               provider: spec.provider as never,
               tools: spec.tools as never,
               cwd: spec.cwd,
               systemExtra: spec.systemExtra,
               model: spec.model,
+              compaction: createChildCompaction({
+                provider: spec.provider,
+                model: spec.model,
+                cwd: spec.cwd,
+                contextWindowTokensForModel,
+                getContextModel,
+              }),
               ...(contextWindowTokensForModel
                 ? {
                     contextWindowTokens: contextWindowTokensForModel(spec.model),
                     contextWindowTokensForModel,
-                    getContextModel: () =>
-                      childProvider.contextModelIdentity?.(spec.model) ?? spec.model,
+                    getContextModel,
                   }
                 : {}),
               // [PHASE 6U] The child conversation id is NOT a kernel config field.
@@ -3790,10 +3904,8 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     } catch (e) {
       warnLine(`run terminal mark failed: ${(e as Error).message}`)
     }
-    try {
-      if (writerRenewTimer !== undefined) clearInterval(writerRenewTimer)
-    } catch {}
-    writerRenewTimer = undefined
+    writerClosed = true
+    stopWriterRenewTimer()
     releaseSessionWriter(sessionId, writerToken, cwd)
     // SATU-SATUNYA pause() mid-process yang tersisa: teardown sesi. stdin
     // TTY kini mengalir seumur proses (tanpa pause per prompt) agar siklus

@@ -1,9 +1,5 @@
 import type { Tool } from "#minicore"
-import { LIMITS } from "../constants.ts"
-import { atomicWriteText } from "../lib/atomic-write.ts"
-import { assertSafeWriteTarget, resolveSafePath, safeReadFile } from "../lib/safe-open.ts"
-import { appendLspDiagnostics } from "../policy/verifier.ts"
-import { contextUnrestricted, requireToolCwd } from "./context.ts"
+import { commitSafeTextEdit, readSafeTextForEdit } from "./context.ts"
 import { applyHashline } from "./hashline.ts"
 
 function normalizeLf(s: string): string {
@@ -159,88 +155,44 @@ export const editTool: Tool = {
   async execute({ path, oldString, newString }, ctx) {
     ctx.signal.throwIfAborted()
     const p = path as string
-    const root = requireToolCwd(ctx)
-    const relaxed = contextUnrestricted(ctx)
-    // Verifikasi path terpusat (logis + target nyata, induk symlink ikut
-    // ter-resolusi) — symlink internal tetap bisa diedit, targetnya yang dicek.
-    const { abs, real: realAbs } = await resolveSafePath(p, root, relaxed)
-    // Tolak menimpa symlink final (swap antara cek dan tulis gagal tutup).
-    await assertSafeWriteTarget(abs, root, relaxed)
-    // Cek ukuran sebelum baca penuh — hindari OOM 1GB via safeReadFile.
-    // Pakai byte length via stat pada realAbs (handle belum ada), fallback ke content length.
-    const { stat } = await import("node:fs/promises")
-    const st = await stat(realAbs).catch(() => null)
-    if (!st) throw new Error(`file not found: ${p}`)
-    if (st.size > LIMITS.READ_FILE_MAX_BYTES) throw new Error(`file too large: ${p} (${st.size})`)
-    // Baca via safeReadFile (O_NOFOLLOW) agar TOCTOU swap gagal ELOOP, bukan baca luar.
-    const content = await safeReadFile(abs, root, relaxed).catch(() => {
-      throw new Error(`file not found: ${p}`)
-    })
+    const { root, realAbs, content } = await readSafeTextForEdit(p, ctx)
     const oldS = oldString as string
     const newS = newString as string
     if (oldS === newS) throw new Error("oldString == newString (no change)")
-    // Hashline fast path (OpenCode): hanya bila line endings konsisten (hindari CRLF→LF corrupt)
-    // CRLF vs LF ditangani oleh flexibleMatch mode "crlf" yang preservasi original.
+    // Hashline fast path: hanya bila line endings konsisten (CRLF vs LF dijaga flexibleMatch).
     const canHashline = content.includes("\r\n") === oldS.includes("\r\n")
-    let hashApply: string | null = null
     if (canHashline) {
       const hunk = applyHashline(content, oldS, newS)
       if (hunk !== null) {
-        // Uniqueness: aturan YANG SAMA dengan jalur flexibleMatch di bawah
-        // (exact → crlf → trimmed → fuzzy). Pemeriksaan lama hanya mencari
-        // duplikat SUBSTRING PERSIS, jadi needle yang unik-persis tapi
-        // ambigu-fuzzy (mis. "\tfoo" vs "  foo") lolos dan blok PERTAMA
-        // diedit diam-diam — kelas bug yang sama dengan "duplikat diam-diam
-        // edit blok pertama" yang sudah ditutup di jalur bawah.
-        //
-        // flexibleMatch di sini TIDAK memilih target (itu tetap hashline) —
-        // hanya menjawab "apakah needle ini unik?", supaya kedua jalur
-        // menjawab pertanyaan yang sama.
         const first = flexibleMatch(content, oldS)
-        if (!first) {
-          // Hashline menemukan, flexibleMatch tidak (atau fuzzy-nya ambigu →
-          // flexibleMatch sengaja null). Jalur bawah menolak dengan "not
-          // found"; jalur cepat tidak boleh lebih longgar.
-          throw new Error(`oldString not found in ${p}`)
-        }
+        if (!first) throw new Error(`oldString not found in ${p}`)
         if (isAmbiguousMatch(content, oldS, first)) {
           throw new Error(
             `oldString found multiple times in ${p} — provide more surrounding lines to make it unique`,
           )
         }
-        hashApply = hunk
+        return await commitSafeTextEdit(
+          realAbs,
+          root,
+          hunk,
+          `edited ${realAbs} (hashline match) (${oldS.length} → ${newS.length} chars)`,
+        )
       }
-    }
-    if (hashApply !== null) {
-      if (hashApply.length > LIMITS.WRITE_FILE_MAX_CHARS)
-        throw new Error(`result too large: ${hashApply.length} chars (max 5M)`)
-      await atomicWriteText(realAbs, hashApply)
-      return await appendLspDiagnostics(
-        realAbs,
-        hashApply,
-        `edited ${realAbs} (hashline match) (${oldS.length} → ${newS.length} chars)`,
-        undefined,
-        root,
-      )
     }
     const match = flexibleMatch(content, oldS)
     if (!match) throw new Error(`oldString not found in ${p}`)
-
-    // ensure uniqueness untuk semua mode (exact/crlf/trimmed/fuzzy) — trimmed/fuzzy
-    // sebelumnya hanya dicek untuk exact/crlf sehingga duplikat diam-diam edit blok pertama
     if (isAmbiguousMatch(content, oldS, match)) {
       throw new Error(
         `oldString found multiple times in ${p} — provide more surrounding lines to make it unique`,
       )
     }
-
     const next = content.slice(0, match.start) + newS + content.slice(match.end)
-    if (next.length > LIMITS.WRITE_FILE_MAX_CHARS)
-      throw new Error(`result too large: ${next.length} chars (max 5M)`)
-    // atomic (O_EXCL + randomUUID tmp)
-    await atomicWriteText(realAbs, next)
     const note = match.mode !== "exact" ? ` (${match.mode} match)` : ""
-    const base = `edited ${realAbs}${note} (${oldS.length} → ${newS.length} chars)`
-    return await appendLspDiagnostics(realAbs, next, base, undefined, root)
+    return await commitSafeTextEdit(
+      realAbs,
+      root,
+      next,
+      `edited ${realAbs}${note} (${oldS.length} → ${newS.length} chars)`,
+    )
   },
 }

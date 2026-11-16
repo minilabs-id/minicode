@@ -106,6 +106,7 @@ test("P2.1 display membawa score + tanggal", async () => {
       cfg: { providers: [] } as never,
       prompt: marker,
       cwd,
+      allowLocalConfig: true,
     })
     // tanpa provider → jalur keyword-only, tetap ada hit + tanggal
     expect(memoryHits).toBeGreaterThan(0)

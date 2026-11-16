@@ -1,10 +1,8 @@
 import type { FileHandle } from "node:fs/promises"
-import { isAbsolute, resolve } from "node:path"
 import type { Tool } from "#minicore"
 import { LIMITS } from "../constants.ts"
-import { safeOpenRead } from "../lib/safe-open.ts"
 import { scrubSecrets } from "../policy/scrub.ts"
-import { contextUnrestricted, requireToolCwd, sliceSafeChars } from "./context.ts"
+import { openSafeToolReadHandle, sliceSafeChars } from "./context.ts"
 
 // defense-in-depth: also jail inside tool (permission layer is primary)
 
@@ -175,26 +173,9 @@ export const readFileTool: Tool = {
   async execute({ path, offset, limit }, ctx) {
     ctx.signal.throwIfAborted()
     const p = path as string
-    const root = requireToolCwd(ctx)
-    const relaxed = contextUnrestricted(ctx)
-    const abs = isAbsolute(p) ? resolve(p) : resolve(root, p)
-    // Semua verifikasi path (jail + sensitif + O_NOFOLLOW) terjadi di SATU
-    // titik saat open — detail di safe-open.ts. Tidak ada resolve/stat
-    // terpisah: handle dipakai untuk stat (cap ukuran) lalu baca.
-    let handle: Awaited<ReturnType<typeof safeOpenRead>>["handle"]
-    try {
-      ;({ handle } = await safeOpenRead(abs, root, relaxed))
-    } catch (e) {
-      // ENOENT → pesan seragam; sisanya (jail/sensitif/ELOOP/raw IO) apa adanya
-      const msg = (e as Error).message ?? ""
-      if ((e as NodeJS.ErrnoException).code === "ENOENT" || msg.includes("ENOENT"))
-        throw new Error(`file not found: ${p}`)
-      throw e
-    }
+    const { handle, st } = await openSafeToolReadHandle(p, ctx)
     let raw: string
     try {
-      const st = await handle.stat().catch(() => null)
-      if (!st) throw new Error(`file not found: ${p}`)
       if (st.isDirectory()) throw new Error(`path is a directory, not a file: ${p}`)
 
       const paged = offset != null || limit != null

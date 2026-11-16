@@ -3,7 +3,11 @@ import { join, resolve } from "node:path"
 import { LIMITS } from "../constants.ts"
 import { resolveTrustedExecutable } from "../lib/trusted-exec.ts"
 import { sanitizeSpawnEnv } from "../policy/scrub.ts"
-import { allocateEmptyMaskFile, discoverSandboxMaskTargets } from "./mask.ts"
+import {
+  allocateEmptyMaskFile,
+  createCappedOutputCollector,
+  discoverSandboxMaskTargets,
+} from "./mask.ts"
 
 let osSandboxOk: boolean | null = null
 let osSandboxType: "seatbelt" | "bwrap" | "none" | null = null
@@ -217,25 +221,9 @@ function runSpawn(
       stdio: ["ignore", "pipe", "pipe"],
       detached: true,
     })
-    const OUT_CAP = LIMITS.DOCKER_OUTPUT_MAX_CHARS
-    let out = ""
-    let err = ""
-    let truncated = false
-    const appendCapped = (target: "out" | "err", d: Buffer | string): void => {
-      const s = typeof d === "string" ? d : d.toString()
-      const cur = target === "out" ? out : err
-      if (cur.length >= OUT_CAP) {
-        truncated = true
-        return
-      }
-      const room = OUT_CAP - cur.length
-      if (s.length > room) truncated = true
-      const piece = s.slice(0, Math.max(0, room))
-      if (target === "out") out += piece
-      else err += piece
-    }
-    p.stdout.on("data", (d) => appendCapped("out", d))
-    p.stderr.on("data", (d) => appendCapped("err", d))
+    const collector = createCappedOutputCollector(LIMITS.DOCKER_OUTPUT_MAX_CHARS)
+    p.stdout.on("data", (d) => collector.append("out", d))
+    p.stderr.on("data", (d) => collector.append("err", d))
     let aborted = false
     let timedOut = false
     let settled = false
@@ -278,8 +266,7 @@ function runSpawn(
         reject(signal?.reason)
         return
       }
-      const marker = truncated ? "\n… [output truncated]" : ""
-      const output = (out + (err ? `\n[stderr]\n${err}` : "")).trim() + marker
+      const { marker, output } = collector.format()
       if (timedOut) {
         // Kontrak lapisan ini adalah RESOLVE (bukan reject): runner hanya
         // melaporkan hasil proses (code/output), dan pemanggil yang memutuskan

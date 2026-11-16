@@ -23,6 +23,7 @@ export interface ToolContext {
   readonly signal: AbortSignal;
   readonly state: Readonly<SessionState>;
   readonly cwd?: string;
+  readonly sessionId?: string;
   /**
    * Session permission mode at dispatch time (e.g. "auto" | "plan").
    * Optional for backward compatibility; tools that adapt to read-only

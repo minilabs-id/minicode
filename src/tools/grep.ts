@@ -1,14 +1,14 @@
 import { spawn, spawnSync } from "node:child_process"
-import { readdir, realpath, stat } from "node:fs/promises"
-import { isAbsolute, join, relative, resolve } from "node:path"
+import { stat } from "node:fs/promises"
+import { isAbsolute, resolve } from "node:path"
 import type { Tool } from "#minicore"
 import { LIMITS } from "../constants.ts"
-import { isIgnored, loadIgnoreMatchers } from "../lib/ignore.ts"
+import { loadIgnoreMatchers } from "../lib/ignore.ts"
 import { safeReadFile } from "../lib/safe-open.ts"
 import { resolveTrustedExecutable } from "../lib/trusted-exec.ts"
-import { isCwdOutsideRoot, isPathOutsideRoot, isSensitive } from "../policy/jail.ts"
+import { isPathOutsideRoot, isSensitive } from "../policy/jail.ts"
 import { sanitizeSpawnEnv, scrubSecrets } from "../policy/scrub.ts"
-import { contextUnrestricted, requireToolCwd } from "./context.ts"
+import { resolveSearchRoot, walkWorkspaceFiles } from "./context.ts"
 import { globToRegExp } from "./glob.ts"
 
 async function walkGrep(
@@ -23,54 +23,28 @@ async function walkGrep(
   relaxed = false,
   includeDotfiles = false,
 ) {
-  if (signal.aborted) throw new Error("aborted")
-  if (out.length >= limit) return
-  const entries = await readdir(dir, { withFileTypes: true }).catch(() => [])
-  for (const e of entries) {
-    if (out.length >= limit) break
-    if (e.name === "node_modules" || e.name === ".git") continue
-    if (!includeDotfiles && e.name.startsWith(".")) continue
-    const full = join(dir, e.name)
-    const rel = relative(root, full).replace(/\\/g, "/")
-    if (isIgnored(rel, ignoreMatchers)) continue
-    if (e.isDirectory()) {
-      await walkGrep(
-        full,
-        re,
-        out,
-        root,
-        limit,
-        signal,
-        includeRe,
-        ignoreMatchers,
-        relaxed,
-        includeDotfiles,
-      )
-    } else {
-      if (includeRe && !includeRe.test(rel) && !includeRe.test(e.name)) continue
-      if (/\.(png|jpg|jpeg|gif|webp|pdf|zip|exe|dll|bin)$/i.test(e.name)) continue
-      // symlink file escape check — resolve realpath and jail
-      const real = await realpath(full).catch(() => full)
-      if (
-        (!relaxed && isPathOutsideRoot(real, resolve(root))) ||
-        isSensitive(real) ||
-        isSensitive(rel)
-      )
-        continue
-      // also skip if symlink points outside (already covered) or sensitive
+  await walkWorkspaceFiles(
+    {
+      dir,
+      root,
+      signal,
+      ignoreMatchers,
+      relaxed,
+      includeDotfiles,
+      shouldStop: () => out.length >= limit,
+    },
+    async ({ rel, name, real }) => {
+      if (includeRe && !includeRe.test(rel) && !includeRe.test(name)) return
+      if (/\.(png|jpg|jpeg|gif|webp|pdf|zip|exe|dll|bin)$/i.test(name)) return
       const st = await stat(real).catch(() => null)
-      if (!st || st.size > LIMITS.GREP_FILE_MAX_BYTES) continue
-      // Baca via safeReadFile (O_NOFOLLOW + verifikasi ulang target saat
-      // open): swap symlink antara realpath di atas dan read di bawah tak
-      // lagi bisa menyelundupkan konten luar/sensitif. Gagal = lewati berkas.
+      if (!st || st.size > LIMITS.GREP_FILE_MAX_BYTES) return
       const text = (await safeReadFile(real, root, relaxed).catch(() => null)) ?? ""
-      if (text.includes("\0")) continue
+      if (text.includes("\0")) return
       const lines = text.split("\n")
       for (let i = 0; i < lines.length; i++) {
         re.lastIndex = 0
         if (re.test(lines[i]!)) {
           const body = lines[i]!
-          // Baris terpotong ditandai "…" agar tak tampak utuh (audit #02).
           const cut = body.length > LIMITS.GREP_MATCH_MAX_CHARS
           out.push(
             `${rel}:${i + 1}: ${scrubSecrets(cut ? `${body.slice(0, LIMITS.GREP_MATCH_MAX_CHARS)}…` : body)}`,
@@ -78,8 +52,8 @@ async function walkGrep(
           if (out.length >= limit) break
         }
       }
-    }
-  }
+    },
+  )
 }
 
 function includeToRegExp(include: string): RegExp | null {
@@ -272,15 +246,7 @@ export const grepTool: Tool = {
     additionalProperties: false,
   },
   async execute({ pattern, cwd, include, limit, caseInsensitive, includeDotfiles }, ctx) {
-    const sessionRoot = requireToolCwd(ctx)
-    const relaxed = contextUnrestricted(ctx)
-    const rawRoot = (cwd as string) ?? "."
-    const root = resolve(sessionRoot, rawRoot)
-    if (
-      !relaxed &&
-      (isPathOutsideRoot(root, sessionRoot) || isCwdOutsideRoot(rawRoot, sessionRoot))
-    )
-      throw new Error(`cwd outside workspace: ${rawRoot}`)
+    const { root, rawRoot, relaxed } = resolveSearchRoot(cwd, ctx)
     const rawLim = limit as number | undefined
     const lim = Number.isFinite(rawLim)
       ? Math.min(Math.max(Math.floor(rawLim!), 1), LIMITS.SEARCH_MAX_LIMIT)

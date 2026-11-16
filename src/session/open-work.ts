@@ -35,7 +35,8 @@
 // brainstorming sebagai tugas.
 
 import { resolve as resolvePath } from "node:path"
-import type { TaskStatus, TaskVerification } from "../task/model.ts"
+import { TaskGraph } from "../task/graph.ts"
+import type { Task, TaskStatus, TaskVerification } from "../task/model.ts"
 import type { ExecutionOwner, TaskMerge, TaskTransfer, UnfinishedWorkItem } from "../task/store.ts"
 import { TaskStore } from "../task/store.ts"
 import { readCheckpointInventorySync } from "./checkpoint.ts"
@@ -393,14 +394,27 @@ export function projectOpenWork(opts: ProjectOpenWorkOptions = {}): OpenWorkRepo
     keyCounts.set(key, (keyCounts.get(key) ?? 0) + 1)
   }
 
+  // Indeks snapshot & graf per sesi SEKALI di depan untuk membuang query SQL
+  // berulang (N+1) sekaligus mendeteksi blocker graf seperti siklus/parent hilang.
+  const tasksBySession = new Map<string, Map<string, Task>>()
+  const graphsBySession = new Map<string, TaskGraph>()
+  for (const item of items) {
+    if (tasksBySession.has(item.sessionId)) continue
+    const snap = store.getSnapshot(item.sessionId)
+    tasksBySession.set(item.sessionId, new Map(snap.tasks.map((t) => [t.id, t])))
+    graphsBySession.set(item.sessionId, new TaskGraph(snap))
+  }
+
   const open: OpenWorkEntry[] = items.map((item, idx) => {
     const meta = sessionMeta.get(item.sessionId)
     const ageMs = Math.max(0, now - toMs(item.task.updatedAt))
     const titleKey = titleKeys[idx] ?? ""
+    const sessionTasks = tasksBySession.get(item.sessionId)
+    const graph = graphsBySession.get(item.sessionId)
 
     // ── P14.4: dependensi direkonsiliasi ke status kanonik saat baca ──
     const dependencies: WorkDependency[] = item.task.dependsOn.map((depId) => {
-      const dep = store.getTask(item.sessionId, depId)
+      const dep = sessionTasks?.get(depId)
       const status: TaskStatus | "MISSING" = dep?.status ?? "MISSING"
       return {
         taskId: depId,
@@ -409,12 +423,18 @@ export function projectOpenWork(opts: ProjectOpenWorkOptions = {}): OpenWorkRepo
         satisfied: status === "COMPLETED",
       }
     })
+    const structuralBlockers = (graph?.blockers(item.task.id) ?? []).filter(
+      (b) =>
+        b.kind !== "DEPENDENCY_UNSATISFIED" &&
+        b.kind !== "DEPENDENCY_TERMINAL" &&
+        b.kind !== "DANGLING_DEPENDENCY",
+    )
 
     // ── P14.1: state berbasis bukti, bukan tebakan ──
     const unresolvedDep = dependencies.find((d) => !d.satisfied)
     const { state, reason: stateReason } = taskWorkState(item.task.status, {
       verification: item.task.verification,
-      unresolvedDependency: unresolvedDep !== undefined,
+      unresolvedDependency: unresolvedDep !== undefined || structuralBlockers.length > 0,
     })
 
     // ── P14.4: blocker eksplisit (blocker kosong = tidak ada yang diklaim) ──
@@ -426,6 +446,9 @@ export function projectOpenWork(opts: ProjectOpenWorkOptions = {}): OpenWorkRepo
       if (!d.satisfied) {
         blockers.push({ kind: "DEPENDENCY", detail: `${d.taskId} (${d.status})` })
       }
+    }
+    for (const b of structuralBlockers) {
+      blockers.push({ kind: "DEPENDENCY", detail: `${b.kind}: ${b.detail}` })
     }
     if (item.task.verification?.verdict === "failed") {
       blockers.push({

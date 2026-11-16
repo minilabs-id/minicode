@@ -1,3 +1,4 @@
+import { rmSync } from "node:fs"
 import { mkdir, readFile } from "node:fs/promises"
 import { resolve } from "node:path"
 import type { Tool } from "#minicore"
@@ -11,7 +12,7 @@ import {
   detectEvaluationTampering,
 } from "../session/verification.ts"
 import { type CanonicalAssignmentTable, encodeCanonicalAssignments } from "../task/assignment.ts"
-import { isTaskId, TaskError } from "../task/model.ts"
+import { isTaskId, type Task, TaskError, type TaskStatus } from "../task/model.ts"
 import { TaskStore } from "../task/store.ts"
 import { hasCanonicalIdentity, hasCanonicalTasks, synchronizeCanonicalTasks } from "../task/sync.ts"
 import { requireToolCwd } from "./context.ts"
@@ -262,18 +263,84 @@ function legacyPlanPath(sessionId: string, cwd: string): string {
 // Audit #13 chain 28: todo + plan snapshot adalah state milik sesi —
 // deleteSession wajib menghapusnya agar konten rencana tak bertahan sebagai
 // residual reachable pasca-hapus. Best-effort (kegagalan tak menggagalkan hapus).
-export async function deleteTodoFiles(sessionId: string, cwd: string): Promise<void> {
-  const { rm } = await import("node:fs/promises")
-  // Both are removed: canonical (N2) and legacy, because old files can still
-  // exist in a workspace that was never rewritten after the upgrade.
+export function deleteTodoFilesSync(sessionId: string, cwd: string): void {
   for (const p of [
     todoPath(sessionId, cwd),
     legacyTodoPath(sessionId, cwd),
     planPath(sessionId, cwd),
     legacyPlanPath(sessionId, cwd),
   ]) {
-    await rm(p, { force: true }).catch(() => {})
+    try {
+      rmSync(p, { force: true })
+    } catch {}
   }
+}
+
+export async function deleteTodoFiles(sessionId: string, cwd: string): Promise<void> {
+  deleteTodoFilesSync(sessionId, cwd)
+}
+
+export function taskStatusToTodoStatus(status: TaskStatus): TodoStatus {
+  switch (status) {
+    case "COMPLETED":
+      return "completed"
+    case "CANCELLED":
+      return "cancelled"
+    case "BLOCKED":
+      return "blocked"
+    case "IN_PROGRESS":
+    case "VERIFYING":
+      return "in_progress"
+    default:
+      return "pending"
+  }
+}
+
+export async function syncTodoViewsFromTaskStore(
+  sessionId: string,
+  cwd: string,
+): Promise<TodoItem[] | null> {
+  const tasks = new TaskStore(cwd).listTasks(sessionId)
+  if (!tasks.length) return null
+  const mapped: TodoItem[] = [...tasks]
+    .sort((a, b) => a.order - b.order || a.id.localeCompare(b.id))
+    .map((t: Task) => {
+      const status = taskStatusToTodoStatus(t.status)
+      return {
+        content: t.title,
+        status,
+        ...(status === "blocked" ? { blockedReason: t.blockedReason ?? "blocked" } : {}),
+        taskId: t.id,
+      }
+    })
+  await saveTodos(sessionId, mapped, cwd)
+  await savePlanSnapshot(sessionId, mapped, cwd).catch(() => {})
+  return mapped
+}
+
+const GLYPH_TO_STATUS: Record<string, TodoStatus> = {
+  " ": "pending",
+  "~": "in_progress",
+  x: "completed",
+  "-": "cancelled",
+  "!": "blocked",
+}
+
+export function extractCommittedTodoStatuses(
+  resultContent: unknown,
+  expectedCount: number,
+): TodoStatus[] | undefined {
+  if (typeof resultContent !== "string" || expectedCount <= 0) return undefined
+  const lines = resultContent.split("\n")
+  const headerIdx = lines.findIndex((l) => /^todos \d+\/\d+/.test(l))
+  if (headerIdx === -1) return undefined
+  const out: TodoStatus[] = []
+  for (let i = headerIdx + 1; i < lines.length && out.length < expectedCount; i++) {
+    const st = GLYPH_TO_STATUS[lines[i]!.match(/^ {2}\[([ ~x!-])\] /)?.[1] ?? ""]
+    if (!st) break
+    out.push(st)
+  }
+  return out.length === expectedCount ? out : undefined
 }
 
 /** Sanitasi + batasi daftar + terapkan kebijakan completion. Diekspor untuk test.
@@ -301,29 +368,17 @@ export function applyCompletionPolicy(
   opts?: { requireVerified?: boolean },
 ): TodoItem[] | null {
   const requireVerified = opts?.requireVerified === true || evidence.requireVerified === true
-  // `failed` DAN `stale` menolak `completed` — tapi labelnya dipertahankan
-  // berbeda: gagal uji vs bukti basi. Jangan samakan keduanya.
-  // [Fase 3 / LOOP-INV-12, LOOP-G20] Saat `requireVerified` aktif dan bukti
-  // masih `unverified`, klaim `completed` juga ditahan (tidak fail-open).
-  if (evidence.verdict === "failed" || evidence.verdict === "stale") {
-    const reason =
-      evidence.detail?.trim().slice(0, 300) ||
-      (evidence.verdict === "stale" ? "verification stale" : "verification failed")
-    if (!list.some((t) => t.status === "completed")) return null
-    return list.map((t) =>
-      t.status === "completed" ? { ...t, status: "blocked" as const, blockedReason: reason } : t,
-    )
-  }
-  if (requireVerified && evidence.verdict === "unverified") {
-    if (!list.some((t) => t.status === "completed")) return null
-    const reason =
-      evidence.detail?.trim().slice(0, 300) ||
-      "verification required: run verifier before marking completed"
-    return list.map((t) =>
-      t.status === "completed" ? { ...t, status: "blocked" as const, blockedReason: reason } : t,
-    )
-  }
-  return null
+  const fallbackReason =
+    evidence.verdict === "failed" || evidence.verdict === "stale"
+      ? `verification ${evidence.verdict}`
+      : requireVerified && evidence.verdict === "unverified"
+        ? "verification required: run verifier before marking completed"
+        : null
+  if (!fallbackReason || !list.some((t) => t.status === "completed")) return null
+  const reason = evidence.detail?.trim().slice(0, 300) || fallbackReason
+  return list.map((t) =>
+    t.status === "completed" ? { ...t, status: "blocked" as const, blockedReason: reason } : t,
+  )
 }
 
 export function normalizeTodos(
@@ -462,6 +517,7 @@ export async function reconcileCompletionEvidence(
   sessionId: string,
   cwd: string,
   evidence: CompletionEvidence,
+  opts: { syncTaskStore?: boolean } = {},
 ): Promise<TodoItem[] | null> {
   // `stale` diperlakukan seperti `failed` untuk otorisasi (tolak klaim),
   // dengan label + alasan basi dipertahankan apa adanya.
@@ -469,6 +525,55 @@ export async function reconcileCompletionEvidence(
   try {
     const current = await loadTodos(sessionId, cwd)
     const next = applyCompletionPolicy(current, evidence)
+    const canonical = opts.syncTaskStore === true && hasCanonicalTasks(cwd, sessionId)
+    let canonicalChanged = false
+    if (canonical) {
+      const store = new TaskStore(cwd)
+      const outcome = {
+        ok: false as const,
+        verdict: evidence.verdict,
+        ...(evidence.detail ? { detail: evidence.detail } : {}),
+        summary: evidence.detail?.trim().slice(0, 300) || `verification ${evidence.verdict}`,
+      }
+      const blockedReason =
+        evidence.detail?.trim().slice(0, 300) ||
+        (evidence.verdict === "stale" ? "verification stale" : "verification failed")
+      store.withTransaction((tx) => {
+        const tasks = tx.listTasks(sessionId)
+        for (const t of tasks) {
+          if (t.status === "VERIFYING") {
+            tx.completeTaskVerification(sessionId, t.id, outcome)
+            canonicalChanged = true
+            continue
+          }
+          const jsonItem = (next ?? current).find((it) => it.taskId === t.id)
+          if (
+            jsonItem?.status === "blocked" &&
+            t.status !== "BLOCKED" &&
+            t.status !== "CANCELLED"
+          ) {
+            tx.patchTask(
+              sessionId,
+              t.id,
+              {
+                status: "BLOCKED",
+                blockedReason: jsonItem.blockedReason ?? blockedReason,
+                verification: {
+                  verdict: "failed",
+                  ...(evidence.detail ? { detail: evidence.detail.slice(0, 300) } : {}),
+                  checkedAt: new Date().toISOString(),
+                },
+              },
+              { allowReopen: t.status === "COMPLETED" },
+            )
+            canonicalChanged = true
+          }
+        }
+      })
+    }
+    if (canonicalChanged) {
+      return await syncTodoViewsFromTaskStore(sessionId, cwd)
+    }
     if (!next) return null
     await saveTodos(sessionId, next, cwd)
     await savePlanSnapshot(sessionId, next, cwd).catch(() => {})

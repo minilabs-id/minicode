@@ -789,15 +789,22 @@ test("permission: abort di tengah prompt → cancelled + deny (late approval ter
   expect(early).toBe("deny")
   expect(events).toHaveLength(0)
 
-  // ABORT di tengah prompt: requested+settled(cancelled) harus terbit.
+  // ABORT di tengah prompt: requested+settled(cancelled) harus terbit deterministik.
   const mid: ApprovalHookEvent[] = []
+  let enteredPrompt!: () => void
+  const inPrompt = new Promise<void>((r) => {
+    enteredPrompt = r
+  })
   const h = createPermissionHandler({
     mode: "ask",
     root: process.cwd(),
     // View yang TIDAK PERNAH menjawab: raceAbort menang lewat signal abort
     // (late-approval = deny). Bila view ikut resolve saat abort, jawaban
     // user bisa membuka gerbang — persis bug yang dicegah raceAbort.
-    ask: () => new Promise(() => {}),
+    ask: () => {
+      enteredPrompt()
+      return new Promise(() => {})
+    },
     onApprovalEvent: (e) => mid.push(e),
   })
   const p = h.check(
@@ -806,9 +813,8 @@ test("permission: abort di tengah prompt → cancelled + deny (late approval ter
       signal: ctl.signal,
     } as never,
   )
-  // Biarkan handler MASUK gatedPrompt dulu (allowlist async), baru abort —
-  // abort sebelum prompt = early-return check() tanpa event (diuji di atas).
-  await new Promise((r) => setTimeout(r, 10))
+  // Tunggu handler benar-benar masuk gatedPrompt/ask() dulu agar tahan bebas dari jitter CPU `--coverage`.
+  await inPrompt
   ctl.abort()
   const decision = await p
   expect(decision).toBe("deny")

@@ -1,14 +1,51 @@
 import { Database } from "bun:sqlite"
 import { Buffer } from "node:buffer"
 import { randomUUID } from "node:crypto"
+import { chmodSync, existsSync } from "node:fs"
+import { join } from "node:path"
 import { LIMITS } from "../constants.ts"
-import { resolveDbPath } from "../lib/db-path.ts"
+import {
+  homeDir,
+  isSqliteContention,
+  resolveDbPath,
+  withSqliteBusyRetrySync,
+} from "../lib/db-path.ts"
 import { isPrivateHostWithDns } from "../lib/net.ts"
 import { scrubSecrets } from "../policy/scrub.ts"
 
 const dbPath = (cwd?: string) => resolveDbPath("vector.db", cwd)
+const globalVectorPath = () => join(homeDir(), ".minicode", "vector.db")
 
 const initializedPaths = new Set<string>()
+
+/** Jangan pernah pasangkan DEEPSEEK_API_KEY ke default host api.openai.com. */
+export function resolveEnvEmbeddingAuth(): { baseUrl: string; apiKey: string } {
+  const explicitBaseUrl = process.env.AGENT_BASE_URL?.trim()
+  if (explicitBaseUrl) {
+    return {
+      baseUrl: explicitBaseUrl,
+      apiKey:
+        process.env.OPENAI_API_KEY ??
+        process.env.DEEPSEEK_API_KEY ??
+        process.env.AGENT_API_KEY ??
+        "",
+    }
+  }
+  return {
+    baseUrl: "https://api.openai.com/v1",
+    apiKey: process.env.OPENAI_API_KEY ?? process.env.AGENT_API_KEY ?? "",
+  }
+}
+
+function chmodMemoryDbSync(p: string): void {
+  try {
+    for (const f of [p, `${p}-wal`, `${p}-shm`]) {
+      try {
+        chmodSync(f, 0o600)
+      } catch {}
+    }
+  } catch {}
+}
 
 // [Fase 7 / Live #3] Circuit-breaker embedding per-endpoint.
 // Gateway tanpa endpoint `/embeddings` memicu timeout 3,5 dtk (per-attempt)
@@ -114,47 +151,17 @@ function open(cwd?: string): Database {
  * didokumentasikan tak pernah dihormati. Global yang belum pernah ada
  * dilewati (fallback resolusi normal) agar baca tak membuat DB kosong.
  */
-function openGlobalDb(fallbackCwd?: string): Database {
+function openGlobalDb(): Database | null {
   try {
-    const { join } = require("node:path") as typeof import("node:path")
-    const { existsSync } = require("node:fs") as typeof import("node:fs")
-    const { homeDir } = require("../lib/db-path.ts") as typeof import("../lib/db-path.ts")
-    const g = join(homeDir(), ".minicode", "vector.db")
+    const g = globalVectorPath()
     if (existsSync(g)) return openAt(g)
   } catch {}
-  return open(fallbackCwd)
-}
-
-// [Phase 12.2] Predikat + retry sinkron kontensi SQLite transien (buka/WAL di
-// Windows). Sebelumnya vector.db tidak me-retry setup WAL/DDL sama sekali, dan
-// predikat retry tulis hanya mengenali SQLITE_BUSY/"database is locked".
-// SQLITE_IOERR_TRUNCATE / SHMOPEN / LOCK / PROTOCOL / LOCKED (transien, bukan
-// korupsi) kini ikut di-retry. Bun menaruh kode simbolik di `error.code`, teks
-// manusiawi di `error.message`, jadi keduanya diperiksa.
-const SQLITE_CONTENTION_RE =
-  /SQLITE_BUSY|database is locked|database table is locked|SQLITE_LOCKED|SQLITE_PROTOCOL|SQLITE_IOERR_TRUNCATE|SQLITE_IOERR_SHMOPEN|SQLITE_IOERR_LOCK|disk I\/O error/i
-
-function isSqliteContention(e: unknown): boolean {
-  const code = (e as { code?: unknown } | null)?.code
-  if (typeof code === "string" && SQLITE_CONTENTION_RE.test(code)) return true
-  const msg = e instanceof Error ? String(e.message ?? e) : String(e)
-  return SQLITE_CONTENTION_RE.test(msg)
+  return null
 }
 
 const DB_INIT_ATTEMPTS = 8
-const DB_INIT_BACKOFF_MS = 15
-
-function withBusyRetrySync<T>(fn: () => T, attempts = DB_INIT_ATTEMPTS): T | null {
-  for (let i = 0; i < attempts; i++) {
-    try {
-      return fn()
-    } catch (e) {
-      if (!isSqliteContention(e)) throw e
-      Bun.sleepSync(DB_INIT_BACKOFF_MS * 2 ** i)
-    }
-  }
-  return null
-}
+const withBusyRetrySync = <T>(fn: () => T, attempts = DB_INIT_ATTEMPTS): T | null =>
+  withSqliteBusyRetrySync(fn, { attempts, backoffMs: 15, jitterMaxMs: 15 })
 
 function openAt(p: string): Database {
   const db = new Database(p)
@@ -265,6 +272,8 @@ function openAt(p: string): Database {
       db.close()
     } catch {}
     throw err
+  } finally {
+    chmodMemoryDbSync(p)
   }
 }
 
@@ -469,21 +478,17 @@ function escapeLike(s: string): string {
 }
 
 export async function deleteMemoryByQuery(query: string, cwd?: string): Promise<number> {
+  if (!query.trim()) return 0
   // Hapus dari DB lokal DAN global (bila berkasnya beda): searchHybrid
   // scope=all menggabung keduanya, sehingga hapus satu sisi membuat "lupa"
-  // tak tuntas — data lama global tetap ditemukan (temuan audit 2026-09-16
-  // M4; tulisan baru selalu lokal sejak audit #10 P1, tapi data legacy
-  // global masih bisa ada). Global yang belum pernah ada dilewati agar
-  // forget tak membuat berkas DB kosong sebagai side-effect.
+  // tak tuntas. Lewati file yang belum ada agar forget tak membuat DB kosong.
   const pattern = escapeLike(query.toLowerCase())
-  const paths = [dbPath(cwd)]
+  const candidates = [dbPath(cwd)]
   try {
-    const { join } = await import("node:path")
-    const { homeDir } = await import("../lib/db-path.ts")
-    const { existsSync } = await import("node:fs")
-    const g = join(homeDir(), ".minicode", "vector.db")
-    if (g !== paths[0] && existsSync(g)) paths.push(g)
+    const g = globalVectorPath()
+    if (g !== candidates[0]) candidates.push(g)
   } catch {}
+  const paths = candidates.filter((p) => existsSync(p))
   let total = 0
   for (const p of paths) {
     const db = openAt(p)
@@ -551,6 +556,32 @@ export function splitMemoryChunks(text: string): string[] {
   return out
 }
 
+async function pruneExpiredMemoryRows(db: Database, nowMs: number): Promise<number> {
+  let deleted = 0
+  const day = 24 * 60 * 60 * 1000
+  const cuts = [
+    { cats: ["snippet"], ms: LIMITS.MEMORY_TTL_SNIPPET_DAYS * day },
+    { cats: ["summary"], ms: LIMITS.MEMORY_TTL_SUMMARY_DAYS * day },
+    { cats: ["fact", "decision", "preference", "manual"], ms: LIMITS.MEMORY_TTL_FACT_DAYS * day },
+  ]
+  for (const c of cuts) {
+    if (c.ms <= 0) continue
+    const ph = c.cats.map(() => "?").join(",")
+    const nullCatch = c.cats.includes("fact") ? " OR category IS NULL" : ""
+    const result = await withBusyRetry(() =>
+      db
+        .prepare(`DELETE FROM memory WHERE (category IN (${ph})${nullCatch}) AND created_at < ?`)
+        .run(...c.cats, nowMs - c.ms),
+    )
+    deleted += result.changes ?? 0
+  }
+  const cnt = (db.prepare("SELECT count(*) as c FROM memory").get() as { c: number } | null)?.c ?? 0
+  if (cnt > LIMITS.MEMORY_MAX_ROWS) {
+    deleted += await withBusyRetry(() => pruneMemoryCap(db))
+  }
+  return deleted
+}
+
 export async function addMemory(
   text: string,
   opts: {
@@ -576,17 +607,7 @@ export async function addMemory(
 ) {
   const clean = scrubSecrets(text)
   const chunks = splitMemoryChunks(clean)
-  // Audit #10 P1 (§10/§39): tulis SELALU lokal ke proyek. Tanpa ini,
-  // addMemory dari cwd tanpa `.minicode/` jatuh ke DB GLOBAL bersama
-  // (resolveDbPath) — memori repo jahat A terbaca di proyek B yang tak
-  // terkait. Buat direktori lokal dulu agar resolusi mendarat lokal; baca
-  // tetap boleh fallback global (kompatibilitas data lama).
-  try {
-    const { mkdirSync } = require("node:fs") as typeof import("node:fs")
-    const { resolve: resolvePath, join: joinPath } =
-      require("node:path") as typeof import("node:path")
-    mkdirSync(joinPath(resolvePath(opts.cwd ?? process.cwd()), ".minicode"), { recursive: true })
-  } catch {}
+  ensureLocalMemoryDir(opts.cwd)
   const embedModel =
     opts.embeddingModel ?? process.env.MINICODE_EMBED_MODEL ?? "text-embedding-3-small"
   // Satu panggilan batch untuk semua chunk — hemat round-trip embedding.
@@ -597,16 +618,7 @@ export async function addMemory(
   const parentId = randomUUID()
   const now = Date.now()
   const db = open(opts.cwd)
-  // chmod 600 untuk vector.db (+ -wal/-shm) agar secret tidak world-readable
-  try {
-    const { chmodSync } = require("node:fs") as typeof import("node:fs")
-    const p = dbPath(opts.cwd)
-    for (const f of [p, `${p}-wal`, `${p}-shm`]) {
-      try {
-        chmodSync(f, 0o600)
-      } catch {}
-    }
-  } catch {}
+  chmodMemoryDbSync(dbPath(opts.cwd))
   try {
     // F8.1 + Live Hardening §7.5: validasi supersedesId + insert semua chunk +
     // tombstone baris lama dalam SATU transaksi SQLite. Sebelumnya tiap INSERT dan
@@ -675,31 +687,10 @@ export async function addMemory(
     // Fakta/keputusan awet 180 hari, ringkasan 90, snippet 14 — snippet basi
     // (mis. "test X lolos") menyesatkan bila dibiarkan selama fakta.
     try {
-      const day = 24 * 60 * 60 * 1000
-      const cuts = [
-        { cats: ["snippet"], ms: LIMITS.MEMORY_TTL_SNIPPET_DAYS * day },
-        { cats: ["summary"], ms: LIMITS.MEMORY_TTL_SUMMARY_DAYS * day },
-        { cats: ["fact", "decision", "preference"], ms: LIMITS.MEMORY_TTL_FACT_DAYS * day },
-      ]
-      for (const c of cuts) {
-        if (c.ms <= 0) continue
-        const ph = c.cats.map(() => "?").join(",")
-        // Bucket fakta juga menampung NULL (DB lama pra-S2) — jangan abadi.
-        const nullCatch = c.cats.includes("fact") ? " OR category IS NULL" : ""
-        await withBusyRetry(() =>
-          db
-            .prepare(
-              `DELETE FROM memory WHERE (category IN (${ph})${nullCatch}) AND created_at < ?`,
-            )
-            .run(...c.cats, now - c.ms),
-        )
-      }
+      await pruneExpiredMemoryRows(db, now)
       const cnt =
         (db.prepare("SELECT count(*) as c FROM memory").get() as { c: number } | null)?.c ?? 0
-      if (cnt > LIMITS.MEMORY_MAX_ROWS) {
-        await withBusyRetry(() => pruneMemoryCap(db))
-      }
-      if (cnt % 1000 === 0) {
+      if (cnt > 0 && cnt % 1000 === 0) {
         try {
           db.exec("VACUUM")
         } catch {}
@@ -1077,14 +1068,14 @@ function textSim(a: string, b: string): number {
 
 // P2.1: buang near-duplikat (cosine > MEMORY_DEDUP_COSINE) + MMR λ untuk
 // diversitas. Tanpa vektor hanya dedup teks eksak (Map) + MMR via textSim.
-function mmrRerank(
-  cands: { text: string; score: number; vec: number[] | null }[],
+function mmrRerank<T extends { text: string; score: number; vec: number[] | null }>(
+  cands: T[],
   topK: number,
-): { text: string; score: number }[] {
+): T[] {
   const lambda = LIMITS.MEMORY_MMR_LAMBDA
   // 1. near-dedup: kandidat skor-rendah yang nyaris identik dengan yang
   //    skor-lebih-tinggi dibuang (tak ada gunanya di prompt dua-duanya).
-  const kept: typeof cands = []
+  const kept: T[] = []
   for (const c of cands) {
     let dup = false
     for (const k of kept) {
@@ -1101,7 +1092,7 @@ function mmrRerank(
     if (!dup) kept.push(c)
   }
   // 2. MMR: tiap putaran pilih kandidat dengan λ*relevansi − (1−λ)*maxSimTerpilih.
-  const selected: typeof cands = []
+  const selected: T[] = []
   const rest = [...kept]
   while (rest.length > 0 && selected.length < topK) {
     let best = 0
@@ -1124,7 +1115,7 @@ function mmrRerank(
     }
     selected.push(rest.splice(best, 1)[0]!)
   }
-  return selected.map(({ text, score }) => ({ text, score }))
+  return selected
 }
 
 // Peringatan dim-mismatch cukup sekali per dimensi agar tidak spam stderr tiap hit.
@@ -1157,31 +1148,43 @@ export async function searchHybrid(
   } = {},
 ): Promise<MemoryHit[]> {
   const scope = opts.scope ?? (process.env.MINICODE_MEMORY_SCOPE as string) ?? "cwd"
+  type SourcedMemoryRow = MemoryRow & { _sourceDb?: "local" | "global" }
+  // [Fase 6A / ACE-03] Filter status validasi DI SQL (sebelum LIMIT & Map dedup)
+  // agar baris provisional/rejected tak menggeser fakta valid keluar dari slot.
+  const notSuperseded =
+    opts.includeSuperseded === true ? `1=1` : `(superseded_by IS NULL OR superseded_by = '')`
+  const validatedSql =
+    opts.includeProvisional === true
+      ? `1=1`
+      : `(validation_status IS NULL OR validation_status = 'validated')`
+  const whereActive = `${notSuperseded} AND ${validatedSql}`
   // helper untuk ambil rows dari satu DB path (dipakai untuk scope all)
-  const fetchRows = (db: ReturnType<typeof open>): MemoryRow[] => {
+  const fetchRows = (
+    db: ReturnType<typeof open>,
+    sourceDb: "local" | "global",
+  ): SourcedMemoryRow[] => {
     const keywords = query.toLowerCase().split(/\W+/).filter(Boolean).slice(0, 5)
     const escKeywords = keywords.map((k) =>
       k.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_"),
     )
-    // F8.1: recall default SENGAJA mengecualikan baris yang sudah di-supersede
-    // (superseded_by IS NOT NULL AND != ''). Hanya `includeSuperseded: true`
-    // yang menampilkannya kembali (untuk forensik/audit).
-    const notSuperseded =
-      opts.includeSuperseded === true ? `1=1` : `(superseded_by IS NULL OR superseded_by = '')`
     const cols = `id, text, embedding, dim, model, created_at, category, tags, session_id, turn_id, source_kind, source_ref, validation_status, supersedes, superseded_by`
+    let picked: MemoryRow[]
     if (keywords.length > 0) {
       const recentRows = db
         .prepare(
-          `SELECT ${cols} FROM memory WHERE ${notSuperseded} ORDER BY created_at DESC LIMIT ${LIMITS.VECTOR_RECENT_LIMIT}`,
+          `SELECT ${cols} FROM memory WHERE ${whereActive} ORDER BY created_at DESC LIMIT ${LIMITS.VECTOR_RECENT_LIMIT}`,
         )
         .all() as MemoryRow[]
       let keywordRows: MemoryRow[] = []
       const ftsQ = buildFtsQuery(query)
       if (ftsQ) {
+        const ftsActive = whereActive
+          .replace(/superseded_by/g, "m.superseded_by")
+          .replace(/validation_status/g, "m.validation_status")
         try {
           keywordRows = db
             .prepare(
-              `SELECT m.id as id, m.text as text, m.embedding as embedding, m.dim as dim, m.model as model, m.created_at as created_at, m.category as category, m.tags as tags, m.session_id as session_id, m.turn_id as turn_id, m.source_kind as source_kind, m.source_ref as source_ref, m.validation_status as validation_status, m.supersedes as supersedes, m.superseded_by as superseded_by FROM memory_fts f JOIN memory m ON m.rowid = f.rowid WHERE ${notSuperseded} AND memory_fts MATCH ? ORDER BY rank LIMIT ${LIMITS.VECTOR_KEYWORD_LIMIT}`,
+              `SELECT m.id as id, m.text as text, m.embedding as embedding, m.dim as dim, m.model as model, m.created_at as created_at, m.category as category, m.tags as tags, m.session_id as session_id, m.turn_id as turn_id, m.source_kind as source_kind, m.source_ref as source_ref, m.validation_status as validation_status, m.supersedes as supersedes, m.superseded_by as superseded_by FROM memory_fts f JOIN memory m ON m.rowid = f.rowid WHERE ${ftsActive} AND memory_fts MATCH ? ORDER BY rank LIMIT ${LIMITS.VECTOR_KEYWORD_LIMIT}`,
             )
             .all(ftsQ) as MemoryRow[]
         } catch {
@@ -1194,39 +1197,38 @@ export async function searchHybrid(
           .join(" OR ")
         keywordRows = db
           .prepare(
-            `SELECT ${cols} FROM memory WHERE ${notSuperseded} AND (${likeClauses}) ORDER BY created_at DESC LIMIT ${LIMITS.VECTOR_KEYWORD_LIMIT}`,
+            `SELECT ${cols} FROM memory WHERE ${whereActive} AND (${likeClauses}) ORDER BY created_at DESC LIMIT ${LIMITS.VECTOR_KEYWORD_LIMIT}`,
           )
           .all(...escKeywords) as MemoryRow[]
       }
       const merged = new Map<string, MemoryRow>()
       for (const r of [...recentRows, ...keywordRows])
         if (!merged.has(r.text)) merged.set(r.text, r)
-      return [...merged.values()].slice(0, LIMITS.VECTOR_SEARCH_LIMIT)
+      picked = [...merged.values()].slice(0, LIMITS.VECTOR_SEARCH_LIMIT)
     } else {
-      return db
+      picked = db
         .prepare(
-          `SELECT ${cols} FROM memory WHERE ${notSuperseded} ORDER BY created_at DESC LIMIT ${LIMITS.VECTOR_SEARCH_LIMIT}`,
+          `SELECT ${cols} FROM memory WHERE ${whereActive} ORDER BY created_at DESC LIMIT ${LIMITS.VECTOR_SEARCH_LIMIT}`,
         )
         .all() as MemoryRow[]
     }
+    return picked.map((r) => ({ ...r, _sourceDb: sourceDb }))
   }
 
-  let rows: MemoryRow[]
-  const db = scope === "global" ? openGlobalDb(opts.cwd) : open(opts.cwd)
+  let rows: SourcedMemoryRow[] = []
+  const db = scope === "global" ? openGlobalDb() : open(opts.cwd)
+  if (!db) return []
   try {
-    rows = fetchRows(db)
+    rows = fetchRows(db, scope === "global" ? "global" : "local")
     if (scope === "all") {
       try {
-        const { join } = await import("node:path")
-        const { homeDir } = await import("../lib/db-path.ts")
-        const { Database } = await import("bun:sqlite")
-        const globalPath = join(homeDir(), ".minicode", "vector.db")
+        const globalPath = globalVectorPath()
         const localPath = dbPath(opts.cwd)
-        if (globalPath !== localPath) {
-          const gdb = new Database(globalPath)
+        if (globalPath !== localPath && existsSync(globalPath)) {
+          const gdb = openAt(globalPath)
           try {
-            const gRows = fetchRows(gdb as unknown as ReturnType<typeof open>)
-            const merged = new Map<string, MemoryRow>()
+            const gRows = fetchRows(gdb, "global")
+            const merged = new Map<string, SourcedMemoryRow>()
             for (const r of [...rows, ...gRows]) if (!merged.has(r.text)) merged.set(r.text, r)
             rows = [...merged.values()].slice(0, LIMITS.VECTOR_SEARCH_LIMIT)
           } finally {
@@ -1237,12 +1239,6 @@ export async function searchHybrid(
     }
   } finally {
     db.close()
-  }
-  // [Fase 6A / ACE-03] Gate default: pelajaran kandidat (`provisional`) dan
-  // yang sudah ditolak (`rejected`) TIDAK boleh tampil seolah fakta. NULL
-  // legacy = validated agar DB lama tetap terbaca.
-  if (opts.includeProvisional !== true) {
-    rows = rows.filter((r) => (r.validation_status ?? "validated") === "validated")
   }
   if (rows.length === 0) return []
 
@@ -1278,67 +1274,57 @@ export async function searchHybrid(
     const kw = keywordScore(query, r.text)
     // hybrid 0.7 vector + 0.3 keyword, if no vector -> keyword only
     let score = queryVec ? vecScore * 0.7 + kw * 0.3 : kw
-    // Recency decay (audit #14): koreksi kemarin harus mengalahkan fakta 170
-    // hari dengan skor hampir sama — TTL menghapus di ujung, tapi sebelum itu
-    // tak ada penurunan bertahap. Paruh-hidup 60 hari: 1 minggu ≈ 0.92×,
-    // 6 bulan ≈ 0.12× (jatuh di bawah ambang relevansi, efeknya sama dengan
-    // kadaluwarsa). Fakta fresh (age≈0) tidak berubah → test lama tetap hijau.
-    const ageDays = (Date.now() - r.created_at) / 86_400_000
+    // Recency decay (paruh-hidup 60 hari); clamp ageDays >= 0 agar timestamp masa depan
+    // tak pernah menginflasikan skor melampaui relevansi dasar.
+    const ageDays = Math.max(0, (Date.now() - r.created_at) / 86_400_000)
     score *= 0.5 ** (ageDays / 60)
-    // P13 S2 — boost decision/preference bila query menyentuh kata kuncinya.
-    // Regex kini dwibahasa (EN + ID): prompt Indonesia ("perbaiki",
-    // "keputusan", "suka") tidak boleh kehilangan boost yang dinikmati versi EN.
-    if (
-      (r as MemoryRow).category === "decision" &&
-      /fix|decide|decision|perbaiki|keputusan|selesaikan/i.test(query)
-    )
-      score += 0.1
-    if (
-      (r as MemoryRow).category === "preference" &&
-      /prefer|like|preference|suka|ingin/i.test(query)
-    )
-      score += 0.05
-    return { text: r.text, score, vec, createdAt: r.created_at }
+    // Boost kategori hanya bila hit punya relevansi nyata (> 0), bukan mempromosikan baris 0-skor.
+    if (score > 0) {
+      if (
+        (r as MemoryRow).category === "decision" &&
+        /fix|decide|decision|perbaiki|keputusan|selesaikan/i.test(query)
+      )
+        score += 0.1
+      if (
+        (r as MemoryRow).category === "preference" &&
+        /prefer|like|preference|suka|ingin/i.test(query)
+      )
+        score += 0.05
+    }
+    return { text: r.text, score, vec, createdAt: r.created_at, row: r }
   })
   const minScore = queryVec ? LIMITS.MEMORY_MIN_SCORE_HYBRID : LIMITS.MEMORY_MIN_SCORE_KEYWORD
   const filtered = scored.filter((s) => s.score >= minScore)
   filtered.sort((a, b) => b.score - a.score)
-  // P2.1: MMR di atas kandidat teratas agar prompt tidak dipenuhi parafrase sama.
+  // P2.1: MMR di atas kandidat teratas — bawa objek row utuh agar id/provenance tak hilang saat benturan teks.
   const pool = filtered.slice(0, LIMITS.MEMORY_MMR_CANDIDATES)
   const ranked = mmrRerank(pool, opts.topK ?? 5)
-  const createdByText = new Map(pool.map((p) => [p.text, p.createdAt] as const))
-  const rowsByText = new Map(rows.map((r) => [r.text, r] as const))
-  const hits = ranked.map((h) => {
-    const row = rowsByText.get(h.text)
-    return {
-      ...h,
-      id: row?.id,
-      createdAt: createdByText.get(h.text) ?? Date.now(),
-      provenance: row
-        ? {
-            sessionId: row.session_id,
-            turnId: row.turn_id,
-            sourceKind: row.source_kind,
-            sourceRef: row.source_ref,
-            validationStatus: row.validation_status ?? "validated",
-          }
-        : undefined,
-    }
-  })
-  // P13 P1 — bukti manfaat per row: hit yang dikembalikan menaikkan
-  // access_count (best-effort; gagal diam — jangan rusak retrieval).
-  // Hanya DB lokal yang disentuh; row global (scope all) tidak dihitung.
+  const hits = ranked.map((h) => ({
+    text: h.text,
+    score: h.score,
+    id: h.row.id,
+    createdAt: h.row.created_at,
+    provenance: {
+      sessionId: h.row.session_id,
+      turnId: h.row.turn_id,
+      sourceKind: h.row.source_kind,
+      sourceRef: h.row.source_ref,
+      validationStatus: h.row.validation_status ?? "validated",
+    },
+  }))
+  // P13 P1 — naikkan access_count hanya untuk baris lokal (berdasarkan id eksak).
   // Dilewati bila trackAccess === false (mode readonly/plan).
-  if (hits.length > 0 && opts.trackAccess !== false) {
+  const localIds = ranked.filter((h) => h.row._sourceDb === "local").map((h) => h.row.id)
+  if (localIds.length > 0 && opts.trackAccess !== false) {
     try {
       const db2 = open(opts.cwd)
       try {
-        const ph = hits.map(() => "?").join(",")
+        const ph = localIds.map(() => "?").join(",")
         db2
           .prepare(
-            `UPDATE memory SET access_count = COALESCE(access_count, 0) + 1 WHERE text IN (${ph})`,
+            `UPDATE memory SET access_count = COALESCE(access_count, 0) + 1 WHERE id IN (${ph})`,
           )
-          .run(...hits.map((h) => h.text))
+          .run(...localIds)
       } finally {
         db2.close()
       }
@@ -1382,32 +1368,7 @@ function pruneMemoryCap(db: Database): number {
 export async function pruneTTL(cwd?: string, nowMs: number = Date.now()): Promise<number> {
   const db = open(cwd)
   try {
-    let deleted = 0
-    const day = 24 * 60 * 60 * 1000
-    // Hierarki TTL: snippet (14d), summary (90d), fact/decision/preference (180d)
-    const cuts = [
-      { cats: ["snippet"], ms: LIMITS.MEMORY_TTL_SNIPPET_DAYS * day },
-      { cats: ["summary"], ms: LIMITS.MEMORY_TTL_SUMMARY_DAYS * day },
-      { cats: ["fact", "decision", "preference"], ms: LIMITS.MEMORY_TTL_FACT_DAYS * day },
-    ]
-    for (const c of cuts) {
-      if (c.ms <= 0) continue
-      const ph = c.cats.map(() => "?").join(",")
-      const nullCatch = c.cats.includes("fact") ? " OR category IS NULL" : ""
-      const result = await withBusyRetry(() =>
-        db
-          .prepare(`DELETE FROM memory WHERE (category IN (${ph})${nullCatch}) AND created_at < ?`)
-          .run(...c.cats, nowMs - c.ms),
-      )
-      deleted += result.changes ?? 0
-    }
-    // CAP: potong ke MEMORY_MAX_rows bila melebihi batas (per entri utuh)
-    const cnt =
-      (db.prepare("SELECT count(*) as c FROM memory").get() as { c: number } | null)?.c ?? 0
-    if (cnt > LIMITS.MEMORY_MAX_ROWS) {
-      deleted += await withBusyRetry(() => pruneMemoryCap(db))
-    }
-    return deleted
+    return await pruneExpiredMemoryRows(db, nowMs)
   } finally {
     db.close()
   }
@@ -1416,10 +1377,11 @@ export async function pruneTTL(cwd?: string, nowMs: number = Date.now()): Promis
 // MEM-01 / Fase 5A: Revoke semua memori berdasarkan provenance (selective poisoning).
 // Hapus dari vektor DB + MEMORY.md secara atomik/idempoten. Returns { vectorRows, fileLines }.
 export async function revokeByProvenance(
-  criteria: { sessionId?: string; turnId?: string; sourceKind?: string },
+  criteria: { sessionId?: string; turnId?: string; sourceKind?: string; query?: string },
   cwd?: string,
 ): Promise<{ vectorRows: number; fileLines: number }> {
-  const { sessionId, turnId, sourceKind } = criteria
+  const { sessionId, turnId, sourceKind, query } = criteria
+  const textNeedle = query?.trim().toLowerCase() ?? ""
   let vectorDeleted = 0
 
   // Dari vektor DB: filter sesuai kriteria provenance yang tersedia
@@ -1436,6 +1398,10 @@ export async function revokeByProvenance(
   if (sourceKind) {
     conditions.push(`source_kind = ?`)
     values.push(sourceKind)
+  }
+  if (textNeedle) {
+    conditions.push(`lower(text) LIKE '%' || ? || '%' ESCAPE '\\'`)
+    values.push(escapeLike(textNeedle))
   }
 
   if (conditions.length > 0) {
@@ -1469,74 +1435,53 @@ export async function revokeByProvenance(
     }
   }
 
-  // Dari MEMORY.md: hapus baris yang memuat metadata provenance (jika tersimpan sebagai tag)
-  // FILE_STORE: tags JSON dalam baris → parse dan match terhadap criteria
+  // Dari MEMORY.md: hapus baris yang memuat metadata provenance (dalam lock + jail symlink)
   let fileDeleted = 0
   try {
-    const { readFile } = await import("node:fs/promises")
     const { resolve } = await import("node:path")
     const { atomicWriteText } = await import("../lib/atomic-write.ts")
-    const LOCAL_MEM = ".minicode/MEMORY.md"
-    const path = resolve(cwd ?? process.cwd(), LOCAL_MEM)
+    const { assertSafeMemoryPath, parseMemoryLine, safeReadMemoryFile, withMemLock } = await import(
+      "./files.ts"
+    )
+    const root = cwd ?? process.cwd()
+    const path = resolve(root, ".minicode/MEMORY.md")
 
-    let txt: string
-    try {
-      txt = await readFile(path, "utf8")
-    } catch {
-      // File belum ada atau tidak bisa dibaca — ok saja
-      return { vectorRows: vectorDeleted, fileLines: fileDeleted }
-    }
-
-    const lines = txt.split("\n")
-    const kept: string[] = []
-    let del = 0
-
-    for (const line of lines) {
-      // [Area E / D2] Kriteria provenance AND (sama dengan query vektor). Versi
-      // lama memakai OR gabungan `!criterion`: revoke dengan satu kriteria
-      // menghapus SEMUA baris tanpa tag, termasuk fakta sesi lain. Baris tanpa
-      // tag tak membuktikan provenance → dipertahankan (fail-closed). Regex
-      // greedy sampai `]` akhir baris karena tag berbentuk array JSON.
-      const tagMatch = line.match(/\[tags:\s*(.+)\]\s*$/)
-      if (!tagMatch) {
-        kept.push(line)
-        continue
-      }
-      if (!sessionId && !turnId && !sourceKind) {
-        kept.push(line)
-        continue
-      }
-      let matched = false
+    fileDeleted = await withMemLock(path, async () => {
+      let txt: string
       try {
-        const tags = JSON.parse(tagMatch![1] as string) as string[]
-        const hasSessionId = sessionId
-          ? tags.some((t: string) => t.includes(`session:${sessionId as string}`))
-          : false
-        const hasTurnId = turnId
-          ? tags.some((t: string) => t.includes(`turn:${turnId as string}`))
-          : false
-        const hasSource = sourceKind
-          ? tags.some((t: string) => t.includes(`source:${sourceKind as string}`))
-          : false
-        matched =
-          (!sessionId || hasSessionId) && (!turnId || hasTurnId) && (!sourceKind || hasSource)
+        txt = await safeReadMemoryFile(path, root)
       } catch {
-        // Tag corrupted / bukan JSON → skip
-        kept.push(line)
-        continue
+        return 0
       }
 
-      if (matched) {
-        del++
-      } else {
-        kept.push(line)
-      }
-    }
+      const lines = txt.split("\n")
+      const kept: string[] = []
+      let del = 0
 
-    if (del > 0) {
-      await atomicWriteText(path, kept.join("\n"))
-      fileDeleted = del
-    }
+      for (const line of lines) {
+        if (!sessionId && !turnId && !sourceKind) {
+          kept.push(line)
+          continue
+        }
+        const parsed = parseMemoryLine(line)
+        if (!parsed || parsed.tags.length === 0) {
+          kept.push(line)
+          continue
+        }
+        const hasSessionId = sessionId ? parsed.tags.includes(`session:${sessionId}`) : true
+        const hasTurnId = turnId ? parsed.tags.includes(`turn:${turnId}`) : true
+        const hasSource = sourceKind ? parsed.tags.includes(`source:${sourceKind}`) : true
+        const hasQuery = textNeedle ? parsed.text.toLowerCase().includes(textNeedle) : true
+        if (hasSessionId && hasTurnId && hasSource && hasQuery) del++
+        else kept.push(line)
+      }
+
+      if (del > 0) {
+        await assertSafeMemoryPath(path, root)
+        await atomicWriteText(path, kept.join("\n"))
+      }
+      return del
+    })
   } catch {}
 
   return { vectorRows: vectorDeleted, fileLines: fileDeleted }
@@ -1622,176 +1567,161 @@ export async function reconcileMemoryStores(cwd?: string): Promise<{
   legacySuspectLines: number
   legacySuspectSamples: string[]
 }> {
-  const db = open(cwd)
-  try {
-    // P1.3: reconcile hanya boleh menghidupkan fakta AKTIF. Tanpa filter ini,
-    // baris superseded (yang sudah dihapus dari MEMORY.md) dianggap
-    // "vector-only" lalu ditulis ulang ke file — resurrect ke retrieval +
-    // system prompt. Kelompokkan per ENTRI (chunk berbagi `parent`) hanya dari
-    // baris live; teks superseded dipakai untuk membersihkan file, bukan adopsi.
-    const allRows = db.prepare("SELECT id, text, parent, superseded_by FROM memory").all() as {
-      id: string
-      text: string
-      parent: string | null
-      superseded_by: string | null
-    }[]
-    const isLive = (r: { superseded_by: string | null }): boolean =>
-      r.superseded_by === null || r.superseded_by === ""
-    const vectorRows = allRows.filter(isLive)
-    const supersededRows = allRows.filter((r) => !isLive(r))
-    const groups = new Map<string, string[]>()
-    for (const row of vectorRows) {
-      const key = row.parent ?? row.id
-      const list = groups.get(key) ?? []
-      list.push(row.text)
-      groups.set(key, list)
-    }
-    const vectorTexts = new Set(vectorRows.map((r) => r.text))
-    // Entri superseded dikelompokkan per parent lalu digabung: file menyimpan
-    // ENTRI utuh, sedangkan DB menyimpan chunk. Pencocokan harus exact agar
-    // baris fakta BARU yang kebetulan memuat teks lama sebagai substring tidak
-    // ikut terhapus.
-    const supersededGroups = new Map<string, string[]>()
-    for (const row of supersededRows) {
-      const key = row.parent ?? row.id
-      const list = supersededGroups.get(key) ?? []
-      list.push(row.text)
-      supersededGroups.set(key, list)
-    }
-    const supersededEntries = new Set<string>()
-    for (const parts of supersededGroups.values()) {
-      const merged = mergeChunkTexts(parts)
-      if (merged) supersededEntries.add(merged)
-      for (const p of parts) if (p) supersededEntries.add(p)
-    }
-
-    // Baca MEMORY.md dan extract unique texts
-    const { readFile } = await import("node:fs/promises")
-    const { resolve } = await import("node:path")
-    const LOCAL_MEM = ".minicode/MEMORY.md"
-    const path = resolve(cwd ?? process.cwd(), LOCAL_MEM)
-
-    let txt: string
-    try {
-      txt = await readFile(path, "utf8")
-    } catch {
-      // [Fase 9 / 9.2] File MEMORY.md ABSENT bukan berarti "clean slate" —
-      // vector.db yang sudah punya baris (crash "after_vector_before_file")
-      // berarti split-brain vector-only. Perlakukan file kosong (bukan early
-      // return) agar entri vector-only tetap terdeteksi & diadopsi.
-      txt = ""
-    }
-
-    const fileLines = txt.split("\n").filter((l) => l.startsWith("- "))
-    const fileTexts = new Set<string>()
-    for (const line of fileLines) {
-      // MEMORY.md format: `- YYYY-MM-DD text` ATAU `- YYYY-MM-DDTHH:MM:SS.sssZ text`.
-      // [LF-1] Lama mensyaratkan `T` (ISO timestamp) sehingga tanggal polos
-      // `YYYY-MM-DD` jatuh ke fallback rusak yang memotong teks ke kata pertama.
-      const match = line.match(/^-\s+\d{4}-\d{2}-\d{2}(?:T\S+)?\s+(.+)$/)
-      if (match) {
-        let text = match[1]!
-        // Strip tags metadata if present
-        const tagMatch = text.match(/\[tags:\s*([^\]]+)\]/)
-        if (tagMatch) {
-          text = text.slice(0, tagMatch.index!)
-        }
-        fileTexts.add(text.trim())
-      } else {
-        // [LF-1] Fallback: buang prefix `- <date-token> ` dan pertahankan SISA TEKS
-        // UTUH (bukan potong ke kata pertama seperti `split(" ", 3)` lama).
-        const text = line
-          .trim()
-          .replace(/^-\s+\S+\s+/, "")
-          .trim()
-        if (text) fileTexts.add(text)
-      }
-    }
-
-    let vectorOnlyAdopted = 0
-    let fileOnlyAdded = 0
-    let reconciled = 0
-    let supersededFileRemoved = 0
-    let legacySuspectLines = 0
-    const legacySuspectSamples: string[] = []
-    const fileHas = (text: string): boolean =>
-      Array.from(fileTexts).some((ft) => ft.toLowerCase().includes(text.toLowerCase()))
-
-    // 1. Adopsi entri vector-only ke MEMORY.md — JANGAN hapus. Menghapus baris
-    //    vektor karena file tidak memuatnya membuang fakta sah saat crash
-    //    "after_vector_before_file" (justru arah yang harus dipulihkan).
-    const { appendMemory, deleteMemoryEntry } = await import("../memory/files.ts")
-    for (const parts of groups.values()) {
-      const present = parts.filter((text) => fileHas(text))
-      if (present.length === parts.length) {
-        reconciled += parts.length
-        continue
-      }
-      // Baris file yang hanya memuat sebagian entri (legacy truncation 1000
-      // karakter) dibuang dulu agar tidak ada dua representasi entri yang sama.
-      for (const text of present) {
-        try {
-          await deleteMemoryEntry(text, cwd)
-        } catch {}
-      }
-      const full = mergeChunkTexts(parts)
-      if (!full) continue
-      await appendMemory(full, cwd)
-      vectorOnlyAdopted++
-      reconciled += parts.length
-    }
-
-    // 2. Tambah file-only rows yang belum ada di vector — KECUALI yang cocok
-    // dengan entri superseded: itu sisa file lama yang harus dibersihkan,
-    // bukan diindeks ulang (P1.3 no-resurrection).
-    for (const text of fileTexts) {
-      const representedByLive = Array.from(vectorTexts).some(
-        (vt) => vt.length > 0 && (vt === text || text.includes(vt) || vt.includes(text)),
-      )
-      if (representedByLive) continue
-      const representedBySuperseded = supersededEntries.has(text)
-      if (representedBySuperseded) {
-        // Exact match: aman dibersihkan (provenance supersession terdukung).
-        try {
-          await deleteMemoryEntry(text, cwd)
-          supersededFileRemoved++
-        } catch {}
-        continue
-      }
-      // P2.3: PARTIAL match (mis. baris legacy ter-truncate) TIDAK dihapus dan
-      // TIDAK diindeks ulang — keduanya berisiko (hapus fakta sah / resurrect
-      // fakta superseded). Quarantine: biarkan di file, laporkan ke operator.
-      const partialSuperseded = Array.from(supersededEntries).some(
-        (e) => e.length > 0 && (e.includes(text) || text.includes(e)),
-      )
-      if (partialSuperseded) {
-        legacySuspectLines++
-        if (legacySuspectSamples.length < 5) legacySuspectSamples.push(text.slice(0, 160))
-        continue
-      }
-      // Insert into vector (without embedding, keyword-only fallback)
-      await withBusyRetry(() =>
-        db
-          .prepare(
-            "INSERT OR IGNORE INTO memory (id, text, embedding, created_at, category, session_id, turn_id, source_kind, source_ref) VALUES (?, ?, NULL, ?, 'manual', NULL, NULL, NULL, NULL)",
-          )
-          .run(randomUUID(), text, Date.now()),
-      )
-      fileOnlyAdded++
-    }
-
+  const { existsSync } = await import("node:fs")
+  const { join, resolve } = await import("node:path")
+  const root = cwd ?? process.cwd()
+  const localMemPath = resolve(root, ".minicode", "MEMORY.md")
+  const localDbPath = join(resolve(root), ".minicode", "vector.db")
+  // Jangan jatuh ke DB global ~/.minicode/vector.db saat workspace kosong.
+  if (!existsSync(localMemPath) && !existsSync(localDbPath)) {
     return {
-      reconciled,
-      vectorOnlyAdopted,
-      fileOnlyAdded,
-      supersededFileRemoved,
-      supersededSkipped: supersededRows.length,
-      legacySuspectLines,
-      legacySuspectSamples,
+      reconciled: 0,
+      vectorOnlyAdopted: 0,
+      fileOnlyAdded: 0,
+      supersededFileRemoved: 0,
+      supersededSkipped: 0,
+      legacySuspectLines: 0,
+      legacySuspectSamples: [],
     }
-  } finally {
-    db.close()
   }
+  const {
+    appendMemoryUnlocked,
+    deleteMemoryEntryUnlocked,
+    parseMemoryLine,
+    safeReadMemoryFile,
+    withMemLock,
+  } = await import("../memory/files.ts")
+  return await withMemLock(localMemPath, async () => {
+    ensureLocalMemoryDir(cwd)
+    const db = openAt(localDbPath)
+    try {
+      // P1.3 + MEM-01: hanya fakta AKTIF & TERVALIDASI yang boleh hidup ke MEMORY.md.
+      // Baris `provisional`/`rejected` dan baris `superseded` dikecualikan agar
+      // tidak bocor atau hidup ulang.
+      const allRows = db
+        .prepare("SELECT id, text, parent, superseded_by, validation_status FROM memory")
+        .all() as {
+        id: string
+        text: string
+        parent: string | null
+        superseded_by: string | null
+        validation_status?: string | null
+      }[]
+      const isSuperseded = (r: { superseded_by: string | null }): boolean =>
+        r.superseded_by !== null && r.superseded_by !== ""
+      const isValidated = (r: { validation_status?: string | null }): boolean =>
+        (r.validation_status ?? "validated") === "validated"
+      const vectorRows = allRows.filter((r) => !isSuperseded(r) && isValidated(r))
+      const supersededRows = allRows.filter((r) => isSuperseded(r))
+      const groups = new Map<string, string[]>()
+      for (const row of vectorRows) {
+        const key = row.parent ?? row.id
+        const list = groups.get(key) ?? []
+        list.push(row.text)
+        groups.set(key, list)
+      }
+      const vectorTexts = new Set(vectorRows.map((r) => r.text))
+      const supersededGroups = new Map<string, string[]>()
+      for (const row of supersededRows) {
+        const key = row.parent ?? row.id
+        const list = supersededGroups.get(key) ?? []
+        list.push(row.text)
+        supersededGroups.set(key, list)
+      }
+      const supersededEntries = new Set<string>()
+      for (const parts of supersededGroups.values()) {
+        const merged = mergeChunkTexts(parts)
+        if (merged) supersededEntries.add(merged)
+        for (const p of parts) if (p) supersededEntries.add(p)
+      }
+
+      let txt = ""
+      try {
+        txt = await safeReadMemoryFile(localMemPath, root)
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException)?.code
+        if (code && code !== "ENOENT") throw e
+        if (String((e as Error)?.message ?? "").includes("unsafe memory")) throw e
+      }
+
+      const fileTexts = new Set<string>()
+      for (const line of txt.split("\n")) {
+        const parsed = parseMemoryLine(line)
+        if (parsed?.text) fileTexts.add(parsed.text)
+      }
+
+      let vectorOnlyAdopted = 0
+      let fileOnlyAdded = 0
+      let reconciled = 0
+      let supersededFileRemoved = 0
+      let legacySuspectLines = 0
+      const legacySuspectSamples: string[] = []
+      const fileHas = (text: string): boolean =>
+        Array.from(fileTexts).some((ft) => ft.toLowerCase().includes(text.toLowerCase()))
+
+      // 1. Adopsi entri vector-only tervalidasi ke MEMORY.md lokal.
+      for (const parts of groups.values()) {
+        const present = parts.filter((text) => fileHas(text))
+        if (present.length === parts.length) {
+          reconciled += parts.length
+          continue
+        }
+        for (const text of present) {
+          try {
+            await deleteMemoryEntryUnlocked(text, cwd)
+          } catch {}
+        }
+        const full = mergeChunkTexts(parts)
+        if (!full) continue
+        await appendMemoryUnlocked(full, cwd)
+        vectorOnlyAdopted++
+        reconciled += parts.length
+      }
+
+      // 2. Tambah file-only rows yang belum ada di vector — kecuali yang superseded.
+      for (const text of fileTexts) {
+        const representedByLive = Array.from(vectorTexts).some(
+          (vt) => vt.length > 0 && (vt === text || text.includes(vt) || vt.includes(text)),
+        )
+        if (representedByLive) continue
+        if (supersededEntries.has(text)) {
+          try {
+            await deleteMemoryEntryUnlocked(text, cwd)
+            supersededFileRemoved++
+          } catch {}
+          continue
+        }
+        const partialSuperseded = Array.from(supersededEntries).some(
+          (e) => e.length > 0 && (e.includes(text) || text.includes(e)),
+        )
+        if (partialSuperseded) {
+          legacySuspectLines++
+          if (legacySuspectSamples.length < 5) legacySuspectSamples.push(text.slice(0, 160))
+          continue
+        }
+        await withBusyRetry(() =>
+          db
+            .prepare(
+              "INSERT OR IGNORE INTO memory (id, text, embedding, created_at, category, session_id, turn_id, source_kind, source_ref) VALUES (?, ?, NULL, ?, 'manual', NULL, NULL, NULL, NULL)",
+            )
+            .run(randomUUID(), text, Date.now()),
+        )
+        fileOnlyAdded++
+      }
+
+      return {
+        reconciled,
+        vectorOnlyAdopted,
+        fileOnlyAdded,
+        supersededFileRemoved,
+        supersededSkipped: supersededRows.length,
+        legacySuspectLines,
+        legacySuspectSamples,
+      }
+    } finally {
+      db.close()
+    }
+  })
 }
 
 export interface MemoryStats {
@@ -1809,10 +1739,32 @@ export interface MemoryStats {
   newest: number | null
 }
 
-// P2.4: observabilitas untuk `minicode memory status` — tanpa embedding, murni SQL.
+// P2.4: observabilitas untuk `minicode memory status` / `doctor` — murni baca
+// tanpa membuat berkas `vector.db` baru di direktori kosong.
 export function getMemoryStats(cwd?: string): MemoryStats {
-  const db = open(cwd)
+  const { existsSync, statSync } = require("node:fs") as typeof import("node:fs")
+  const p = dbPath(cwd)
+  const emptyStats: MemoryStats = {
+    rows: 0,
+    liveRows: 0,
+    supersededRows: 0,
+    dbBytes: 0,
+    walBytes: 0,
+    shmBytes: 0,
+    models: [],
+    dims: [],
+    categories: [],
+    oldest: null,
+    newest: null,
+  }
+  if (!existsSync(p)) return emptyStats
+  const db = new Database(p, { readonly: true })
   try {
+    db.exec(`PRAGMA busy_timeout=${LIMITS.SQLITE_BUSY_TIMEOUT_MS}`)
+    const hasTable = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='memory'")
+      .get() as { name: string } | null
+    if (!hasTable) return emptyStats
     const rows =
       (db.prepare("SELECT count(*) as c FROM memory").get() as { c: number } | null)?.c ?? 0
     const liveRows =
@@ -1841,10 +1793,9 @@ export function getMemoryStats(cwd?: string): MemoryStats {
         "SELECT coalesce(category, 'fact') as category, count(*) as count FROM memory GROUP BY category ORDER BY count DESC",
       )
       .all() as { category: string; count: number }[]
-    const p = dbPath(cwd)
     const sizeOf = (f: string): number => {
       try {
-        return (require("node:fs") as typeof import("node:fs")).statSync(f).size
+        return statSync(f).size
       } catch {
         return 0
       }
