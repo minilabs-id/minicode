@@ -559,32 +559,44 @@ export async function createMinicodeSession(
       // mengubah salinan MiniCore yang wajib disinkronkan dari repo sumber.
       // Handler ASK yang sah tetap menunggu approval lalu mengembalikan allow/deny.
       if (decision !== "allow") return "deny"
+      const recordStaleDeny = (reason: string): "deny" => {
+        const id = (call as { id?: string } | null)?.id
+        if (id) {
+          if (staleDenyReasons.size > 500)
+            staleDenyReasons.delete(staleDenyReasons.keys().next().value as string)
+          staleDenyReasons.set(id, reason)
+        }
+        return "deny"
+      }
       // Ambil (konsumsi) bukti persetujuan milik call ini — sekali saja.
       // Diambil SEBELUM await supaya tak ada binding tersisa kalau barrier
       // memblokir call (tak ada deny lalu tak ada jejak).
-      const binding = approvalBindings.take(call.name, canonicalArgsHash(call.args))
+      const binding = approvalBindings.take(call.name, canonicalArgsHash(call.args), call.id)
+      // Verifikasi awal SEBELUM preflightIntent menulis record `pending` ke
+      // jurnal agar persetujuan basi / pergeseran mode tidak menodai jurnal.
+      const preVerdict = verifyApprovalBinding(binding)
+      if (authorizedVersion !== authorizationVersion || preVerdict.kind === "stale") {
+        return recordStaleDeny(
+          authorizedVersion !== authorizationVersion
+            ? "authorization changed while preparing tool execution; request fresh approval"
+            : `approval stale: ${preVerdict.kind === "stale" ? preVerdict.reason : "changed"}`,
+        )
+      }
       if (detector !== null) {
         await detector.beforeToolEffectCheck(call, effectiveRoot)
       }
       if (beforeToolEffect !== undefined) {
         await beforeToolEffect(call)
       }
-      // Verifikasi lapis-2 (batas eksekusi): fail-closed saat target berubah
-      // sejak user menyetujui.
+      // Verifikasi lapis-2 (batas eksekusi): fail-closed bila target atau mode
+      // berubah selama await no-progress / intent jurnal berlangsung.
       const verdict = verifyApprovalBinding(binding)
       if (authorizedVersion !== authorizationVersion || verdict.kind === "stale") {
-        const id = (call as { id?: string } | null)?.id
-        if (id) {
-          if (staleDenyReasons.size > 500)
-            staleDenyReasons.delete(staleDenyReasons.keys().next().value as string)
-          staleDenyReasons.set(
-            id,
-            authorizedVersion !== authorizationVersion
-              ? "authorization changed while preparing tool execution; request fresh approval"
-              : `approval stale: ${verdict.kind === "stale" ? verdict.reason : "changed"}`,
-          )
-        }
-        return "deny"
+        return recordStaleDeny(
+          authorizedVersion !== authorizationVersion
+            ? "authorization changed while preparing tool execution; request fresh approval"
+            : `approval stale: ${verdict.kind === "stale" ? verdict.reason : "changed"}`,
+        )
       }
       return "allow"
     },

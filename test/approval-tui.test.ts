@@ -2,7 +2,9 @@
 // menjawab; keputusan tercatat. Tanpa sink = tulis langsung warisan.
 import { afterEach, describe, expect, test } from "bun:test"
 import { promptAsk, promptAskText } from "../src/ui/approval/prompt.ts"
-import { stripAnsi } from "../src/ui/render/theme.ts"
+import { glyphs, stripAnsi } from "../src/ui/render/theme.ts"
+import { displayWidth } from "../src/ui/render/width.ts"
+import { popupBoxWidth } from "../src/ui/screens/dialog.ts"
 import { getApprovalSink, setApprovalSink } from "../src/ui/tui/transcript.ts"
 import { installFakeTty, KEY } from "./helpers/tui-harness.ts"
 
@@ -159,7 +161,7 @@ describe("approval sink TUI", () => {
     await tty.send(KEY.enter)
     expect(await p).toBe("deny")
     const q = stripAnsi(blocks[0]!.join("\n"))
-    expect(q).toContain("Risk:")
+    expect(q).toContain("Effect:")
     expect(q).toContain("irreversible external effect")
     expect(q).toContain("Diff:")
     expect(q).toContain("- secret.txt")
@@ -276,5 +278,132 @@ describe("approval: navigasi daftar opsi (AUD-005, kontrak I25)", () => {
     await tty.ready()
     await tty.send(KEY.esc)
     expect(await p).toBe("deny")
+  })
+
+  test("kursor diparkir di baris opsi aktif (modal tidak membiarkan kursor liar)", async () => {
+    tty = installFakeTty({ columns: 100, rows: 24 })
+    const moves: { row: number; col: number }[] = []
+    setApprovalSink({
+      pushBlock: () => {},
+      repaint: () => {},
+      suspend: () => {},
+      resume: () => {},
+      paintRegion: () => {},
+      moveCursor: (row, col) => moves.push({ row, col }),
+      clearRegion: () => {},
+    })
+    const p = promptAsk({ name: "bash", args: { command: "ls" }, canAlways: true })
+    await tty.ready()
+    await tty.waitForOutput(() => moves.length > 0)
+    expect(moves.at(-1)!.row).toBeGreaterThan(0)
+    expect(moves.at(-1)!.col).toBeGreaterThan(0)
+    await tty.send("n")
+    await tty.send(KEY.enter)
+    expect(await p).toBe("deny")
+  })
+
+  test("sinonim `s` tanpa opsi Always diabaikan (bukan deny diam-diam)", async () => {
+    tty = installFakeTty({ columns: 100, rows: 24 })
+    setupSink()
+    const p = promptAsk({ name: "bash", args: { command: "ls" }, canAlways: false })
+    await tty.ready()
+    await tty.send("s") // quickMap.s = -1 → harus diabaikan
+    await tty.send(KEY.enter)
+    expect(await p).toBe("allow")
+  })
+})
+
+describe("ask_user modal: hint & echo", () => {
+  test("footer menampilkan Enter submit / Esc cancel", async () => {
+    tty = installFakeTty({ columns: 100, rows: 24 })
+    const paints: string[] = []
+    setApprovalSink({
+      pushBlock: () => {},
+      repaint: () => {},
+      suspend: () => {},
+      resume: () => {},
+      paintRegion: (lines) => paints.push(stripAnsi(lines.join("\n"))),
+      clearRegion: () => {},
+    })
+    const p = promptAskText("Apa warna langit?", ["biru"])
+    await tty.ready()
+    const frame = paints.at(-1) ?? ""
+    expect(frame).toMatch(/Enter (submit|kirim)/)
+    expect(frame).toMatch(/Esc (cancel|batal)/)
+    await tty.send("biru")
+    await tty.send(KEY.enter)
+    expect(await p).toBe("biru")
+  })
+
+  test("resize + wheel navigasi + batas minimum layar (<10 baris) di Layer 2", async () => {
+    tty = installFakeTty({ columns: 100, rows: 24 })
+    const paintedWidths: number[] = []
+    let latest = ""
+    setApprovalSink({
+      pushBlock: () => {},
+      repaint: () => {},
+      suspend: () => {},
+      resume: () => {},
+      paintRegion: (lines) => {
+        latest = stripAnsi(lines.join("\n"))
+        const border = lines[0]?.trim() ?? ""
+        if (border) paintedWidths.push(displayWidth(stripAnsi(border)))
+      },
+      clearRegion: () => {},
+    })
+    const p = promptAsk({ name: "bash", args: { command: "ls" }, canAlways: true })
+    await tty.ready()
+    expect(paintedWidths.at(-1)).toBe(popupBoxWidth(100))
+
+    // Resize menyempit -> modal repainted pada lebar baru.
+    tty.resize(50, 16)
+    await tty.send("", 40)
+    expect(paintedWidths.at(-1)).toBe(popupBoxWidth(50))
+
+    // Layar menciut di bawah 10 baris -> tampilkan peringatan dan tahan Enter buta.
+    tty.resize(50, 8)
+    await tty.send("", 40)
+    expect(latest.toLowerCase()).toContain("too small")
+    await tty.send(KEY.enter, 30) // harus tetap belum resolve!
+
+    // Dibesarkan kembali -> modal penuh kembali, wheel memilih Always + Enter.
+    tty.resize(80, 24)
+    await tty.send("", 40)
+    await tty.send(KEY.mouseWheelDownSgr, 20)
+    await tty.send(KEY.enter)
+    expect(await p).toBe("always")
+  })
+
+  test("MINICODE_ASCII=1 memakai glyphs.arrow pada echo keputusan & jawaban", async () => {
+    // Tetapkan env SETELAH installFakeTty agar harness tidak menyimpan "1" ke
+    // snapshot ambient lalu memulihkannya untuk file test berikutnya.
+    tty = installFakeTty({ columns: 80, rows: 24 })
+    const prev = process.env.MINICODE_ASCII
+    process.env.MINICODE_ASCII = "1"
+    try {
+      const blocks: string[][] = []
+      setApprovalSink({
+        pushBlock: (lines) => blocks.push(lines),
+        repaint: () => {},
+        suspend: () => {},
+        resume: () => {},
+      })
+      const p1 = promptAsk({ name: "bash", args: { command: "ls" } })
+      await tty.ready()
+      await tty.send("n")
+      await tty.send(KEY.enter)
+      await p1
+      const p2 = promptAskText("Pertanyaan?")
+      await tty.ready()
+      await tty.send("ok")
+      await tty.send(KEY.enter)
+      await p2
+      const echoText = stripAnsi(blocks.flat().join("\n"))
+      expect(echoText).toContain(glyphs.arrow)
+      expect(echoText).not.toContain("→")
+    } finally {
+      if (prev === undefined) delete process.env.MINICODE_ASCII
+      else process.env.MINICODE_ASCII = prev
+    }
   })
 })

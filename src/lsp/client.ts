@@ -1,8 +1,9 @@
 import { Buffer } from "node:buffer"
-import { type ChildProcess, spawn } from "node:child_process"
+import { type ChildProcess, spawn, spawnSync } from "node:child_process"
 import { extname, resolve as resolvePath } from "node:path"
 import { pathToFileURL } from "node:url"
 import { LIMITS } from "../constants.ts"
+import { resolveSpawnTarget, resolveTrustedExecutable } from "../lib/trusted-exec.ts"
 import { sanitizeSpawnEnv } from "../policy/scrub.ts"
 import type {
   ManagedChild,
@@ -91,6 +92,7 @@ class LspConnection {
   private stopping = false
   /** [P13.2] root workspace — dipakai lagi saat restart. */
   private rootPath = ""
+  private winCmdTree = false
 
   constructor(public entry: LspServerEntry) {}
 
@@ -110,11 +112,14 @@ class LspConnection {
     this.rootPath = rootPath
     this.stopping = false
     this.killSignal = new AbortController()
-    this.proc = spawn(this.entry.command, this.entry.args, {
+    const target = resolveSpawnTarget(this.entry.command, this.entry.args)
+    this.winCmdTree = target.windowsVerbatimArguments === true
+    this.proc = spawn(target.command, target.args, {
       stdio: ["pipe", "pipe", "pipe"],
       // env kredensial di-strip; env eksplisit config server menang setelahnya
       env: sanitizeSpawnEnv(process.env, this.entry.env),
       signal: this.killSignal.signal,
+      ...(target.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
     })
     this.proc.on("error", (err) => this.failAll(err))
     // [P13.2] Tulis ke server yang sudah mati menghasilkan EPIPE. Itu kondisi
@@ -331,20 +336,35 @@ class LspConnection {
     try {
       this.proc.stdin?.end()
     } catch {}
+    const p = this.proc
+    if (
+      this.winCmdTree &&
+      process.platform === "win32" &&
+      p.pid !== undefined &&
+      p.exitCode === null
+    ) {
+      try {
+        spawnSync(resolveTrustedExecutable("taskkill"), ["/pid", String(p.pid), "/T", "/F"], {
+          stdio: "ignore",
+          env: sanitizeSpawnEnv(process.env),
+        })
+      } catch {}
+    }
     this.killSignal.abort()
-    await new Promise<void>((r) => {
-      const p = this.proc!
-      const t = setTimeout(() => {
-        try {
-          p.kill("SIGKILL")
-        } catch {}
-        r()
-      }, 2_000)
-      p.once("exit", () => {
-        clearTimeout(t)
-        r()
+    if (p.exitCode === null && p.signalCode === null) {
+      await new Promise<void>((r) => {
+        const t = setTimeout(() => {
+          try {
+            p.kill("SIGKILL")
+          } catch {}
+          r()
+        }, 2_000)
+        p.once("exit", () => {
+          clearTimeout(t)
+          r()
+        })
       })
-    })
+    }
     this.proc = null
     this.started = false
     this.starting = undefined
@@ -457,9 +477,34 @@ export function findSymbolPosition(
   symbol: string,
 ): LspPositionResult["position"] | null {
   const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-  // prefer word-boundary match to avoid hitting comments/import substrings; fallback to plain indexOf
-  const re = new RegExp(`\\b${escaped}\\b`)
-  const m = re.exec(text)
+  const wordRe = new RegExp(`\\b${escaped}\\b`, "g")
+  const declRe = new RegExp(
+    `^\\s*(?:export\\s+)?(?:default\\s+)?(?:async\\s+)?(?:(?:function|class|interface|type|enum|const|let|var|def|fn|struct|impl|trait)\\s+|(?:public|private|protected|static|readonly|override|pub(?:\\([^)]*\\))?)\\s+)*${escaped}\\b`,
+  )
+  const isCommentLine = (trimmed: string): boolean =>
+    trimmed.startsWith("//") ||
+    trimmed.startsWith("/*") ||
+    trimmed.startsWith("*") ||
+    trimmed.startsWith("#")
+
+  // Prioritaskan baris deklarasi non-komentar, lalu kemunculan word-boundary
+  // non-komentar pertama, baru fallback ke pencarian umum agar tidak nyasar
+  // ke komentar atau import statement di atas file.
+  const lines = text.split("\n")
+  let firstNonComment: LspPositionResult["position"] | null = null
+  for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+    const line = lines[lineIdx]!
+    const trimmed = line.trimStart()
+    if (isCommentLine(trimmed) || trimmed.startsWith("import ")) continue
+    wordRe.lastIndex = 0
+    const m = wordRe.exec(line)
+    if (!m) continue
+    if (!firstNonComment) firstNonComment = { line: lineIdx, character: m.index }
+    if (declRe.test(line)) return { line: lineIdx, character: m.index }
+  }
+  if (firstNonComment) return firstNonComment
+
+  const m = new RegExp(`\\b${escaped}\\b`).exec(text)
   const idx = m?.index ?? text.indexOf(symbol)
   if (idx === -1) return null
   const before = text.slice(0, idx).split("\n")

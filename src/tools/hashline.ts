@@ -48,6 +48,10 @@ export function findHashlineHunk(
     for (let j = 0; j < searchLines.length; j++) {
       if (trimmedContentHashes[i + j] !== trimmedSearchHashes[j]) continue outer2
     }
+    // Verifikasi kesetaraan teks setelah trim untuk menutup potensi kolisi hash 32-bit.
+    for (let j = 0; j < searchLines.length; j++) {
+      if (contentLines[i + j]?.trim() !== searchLines[j]?.trim()) continue outer2
+    }
     return { start: i, end: i + searchLines.length }
   }
   return null

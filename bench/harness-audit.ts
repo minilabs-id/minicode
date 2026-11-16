@@ -17,6 +17,9 @@ import type { ModelProvider, ProviderEvent, StreamRequest } from "#minicore/core
 import type { Message } from "#minicore/core/types.ts"
 import { setupToolLayer } from "../src/app/tool-layer.ts"
 import { LIMITS } from "../src/constants.ts"
+import { ApprovalBroker } from "../src/daemon/approvals.ts"
+import { dispatchControl, IdempotencyStore } from "../src/daemon/control.ts"
+import { Telemetry } from "../src/daemon/telemetry.ts"
 import { inspectBashCommand } from "../src/policy/bash-guard.ts"
 import {
   composeBoundedSummary,
@@ -418,7 +421,59 @@ async function compactionMatrix(): Promise<AuditCheck[]> {
       detail: `len=${len} floor=${LIMITS.COMPACTION_SUMMARY_MAX_CHARS}`,
     })
   }
+  {
+    const strat = createLlmCompaction()
+    const msgs: Message[] = [{ role: "user", content: "cek" }]
+    for (let i = 0; i < 8; i++) {
+      msgs.push({
+        role: "assistant",
+        content: `step ${i}`,
+        toolCalls: [{ id: `mc-${i}`, name: "read_file", args: { path: `f${i}.ts` } }],
+      })
+      msgs.push({
+        role: "tool",
+        toolCallId: `mc-${i}`,
+        name: "read_file",
+        content: "x".repeat(12_000),
+      })
+    }
+    const trimmed = strat.microcompact?.({ messages: msgs } as never, { budgetTokens: 32_000 })
+    out.push({
+      id: "compaction/microcompact-small-window-active",
+      passed: Boolean(trimmed && trimmed !== msgs),
+      detail: "microcompact aktif di jendela 32k (tak terkunci ambang 20k statis)",
+    })
+  }
   return out
+}
+
+function controlAuthInvariant(root: string): AuditCheck[] {
+  const telemetry = new Telemetry()
+  const res = dispatchControl(
+    {
+      consumerId: "audit",
+      scopes: ["approve"],
+      op: "approval.decide",
+      idem: "audit-nosid",
+      args: { approvalId: "apr_missing", decision: "accept" },
+    },
+    {
+      incarnation: "inc-audit",
+      actions: null,
+      approvals: new ApprovalBroker({ incarnation: "inc-audit", propose: () => {}, cwd: root }),
+      telemetry,
+      storageOk: () => true,
+      shuttingDown: () => false,
+    },
+    new IdempotencyStore(),
+  )
+  return [
+    {
+      id: "control/approval-decide-requires-sid",
+      passed: !res.ok && res.refusal.code === "SESSION_MISMATCH",
+      detail: res.ok ? "LOLOS tanpa sid!" : `ditolak (${res.refusal.code})`,
+    },
+  ]
 }
 
 function fakeDetector(): AuditCheck[] {
@@ -455,6 +510,7 @@ export async function runAudit(root: string): Promise<AuditReport> {
     ...(await safetyMatrix(root)),
     ...guardCorpus(),
     ...budgetMatrix(),
+    ...controlAuthInvariant(root),
     ...(await scopeInvariant()),
     ...(await providerResilience()),
     ...(await compactionMatrix()),

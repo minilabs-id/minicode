@@ -141,13 +141,14 @@ export async function executeTurn(
         );
       }
       const before = s.store.messages.length;
+      const beforeTokens = contextTokens(s);
       await compactStore(s, signal);
       budgetCompactions++;
-      // The reason distinguishes the trigger and whether compaction
-      // actually shrank the store (no-op = nothing evictable in messages;
-      // reporters must tell that apart from fixed system+schema overhead,
-      // which compaction never touches).
-      reduced = s.store.messages.length < before;
+      const afterTokens = contextTokens(s);
+      // Ukur kemajuan nyata lewat penurunan token efektif ATAU penyusutan jumlah pesan:
+      // ringkasan isi pesan yang memadatkan payload tanpa mengubah panjang array
+      // tetap dihitung progres nyata.
+      reduced = afterTokens < beforeTokens || s.store.messages.length < before;
       s.events.emit({
         type: "context:compacted",
         reason: reduced ? `pressure:${pressure}` : `pressure:${pressure}:no-op`,

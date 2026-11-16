@@ -4,7 +4,7 @@
 import { expect, test } from "bun:test"
 import { stripAnsi, supportsUtf8 } from "../src/ui/render/theme.ts"
 import { displayWidth } from "../src/ui/render/width.ts"
-import { dialogBox } from "../src/ui/screens/dialog.ts"
+import { canRenderModal, dialogBox } from "../src/ui/screens/dialog.ts"
 
 // `dialogFrame` (backdrop selayar + kotak) dihapus sebagai kode mati (AUD-004);
 // produksi memakai `dialogBox` + `paintRegion`. Shorthand ini menjaga asersi
@@ -152,4 +152,16 @@ test("bodyTop: indeks body[0] = 1 border + 1 judul-bila-ada", () => {
   const bare = dialogBox({ title: "", body: ["a", "b"] }, 80, 24)
   expect(bare.bodyTop).toBe(1)
   expect(stripAnsi(bare.lines[bare.bodyTop]!)).toContain("a")
+})
+
+test("canRenderModal menegakkan batas minimum 20x10 dan footer ber-SGR tak di-dim ganda", () => {
+  expect(canRenderModal(20, 10)).toBe(true)
+  expect(canRenderModal(19, 10)).toBe(false)
+  expect(canRenderModal(20, 9)).toBe(false)
+  const styledFooter = "\x1b[36mEnter\x1b[39m ok  \x1b[36mEsc\x1b[39m close"
+  const out = frame({ title: "T", body: ["x"], footer: styledFooter }, 60, 12)
+  const footerLine = out[out.length - 2] ?? ""
+  // SGR pengenal footer dipertahankan tanpa dibungkus `\x1b[2m...\x1b[22m` paksa.
+  expect(footerLine).toContain("\x1b[36mEnter\x1b[39m")
+  expect(footerLine).not.toContain("\x1b[2m\x1b[36mEnter")
 })

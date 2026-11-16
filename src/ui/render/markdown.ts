@@ -6,7 +6,7 @@ import { highlightCode } from "./highlight.ts"
 import { type MarkdownTable, parseMarkdownBlocks } from "./markdown-table.ts"
 import { sanitizeAnsi } from "./sanitize.ts"
 import { renderMarkdownTable } from "./table-grid.ts"
-import { c } from "./theme.ts"
+import { c, glyphs } from "./theme.ts"
 
 export { renderMarkdownTable, renderMarkdownTableLines } from "./table-grid.ts"
 
@@ -105,6 +105,7 @@ export function decorateMarkdown(text: string): string {
         fenceChar = fence.char
         fenceLen = fence.len
         fenceLang = fence.lang
+        if (fenceLang) out.push(c.dim(`  ${glyphs.dot} ${fenceLang}`))
       } else {
         if (fence.char === fenceChar && fence.len >= fenceLen) {
           inFence = false
@@ -113,7 +114,8 @@ export function decorateMarkdown(text: string): string {
           fenceLang = ""
         } else {
           // fence di dalam fence dengan char/len berbeda → anggap konten
-          out.push(`  ${fenceLang ? highlightCode(line, fenceLang) : line}`)
+          const bar = fenceLang ? c.dim(glyphs.vLine) : glyphs.vLine
+          out.push(`  ${bar} ${fenceLang ? highlightCode(line, fenceLang) : line}`)
           continue
         }
       }
@@ -127,7 +129,8 @@ export function decorateMarkdown(text: string): string {
     // `npm run build -- --flag=*value*` kehilangan bintangnya karena dianggap
     // italic. Fence tanpa bahasa justru bentuk paling umum untuk perintah shell.
     if (inFence) {
-      out.push(`  ${fenceLang ? highlightCode(line, fenceLang) : line}`)
+      const bar = fenceLang ? c.dim(glyphs.vLine) : glyphs.vLine
+      out.push(`  ${bar} ${fenceLang ? highlightCode(line, fenceLang) : line}`)
       continue
     }
 

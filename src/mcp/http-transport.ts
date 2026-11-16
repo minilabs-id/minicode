@@ -20,6 +20,7 @@
 
 import { LIMITS } from "../constants.ts"
 import { isPrivateHostWithDns } from "../lib/net.ts"
+import { publicHttp } from "../lib/public-http.ts"
 
 /**
  * Kemampuan transport yang dipakai `McpConnection` setelah koneksi terbuka.
@@ -160,17 +161,21 @@ export class McpHttpTransport implements McpTransportLike {
     else signal?.addEventListener("abort", onAbort, { once: true })
     let res: Response
     try {
-      res = await fetch(this.url.toString(), {
+      res = await publicHttp.request(this.url, {
         method: "POST",
         headers: this.headers("application/json, text/event-stream"),
         body,
         signal: controller.signal,
-        redirect: "manual", // redirect ke host lain = permukaan SSRF
+        allowPrivateHost: this.allowPrivate,
       })
     } catch (e) {
       clearTimeout(timer)
       signal?.removeEventListener("abort", onAbort)
       const msg = (e as Error).message
+      if (msg.startsWith("blocked private host:")) {
+        this.blockedPrivate = true
+        throw new Error(`MCP http: private host rejected: ${this.url.hostname}`)
+      }
       throw new Error(
         `MCP http: ${method} failed: ${msg === "timeout" ? `timeout ${timeoutMs}ms` : msg}`,
       )
@@ -222,13 +227,16 @@ export class McpHttpTransport implements McpTransportLike {
     // request()/connect()) alih-alih mengirim lalu diam.
     void (async () => {
       if (!(await this.checkHost())) return
-      await fetch(this.url.toString(), {
-        method: "POST",
-        headers: this.headers("application/json, text/event-stream"),
-        body: JSON.stringify({ jsonrpc: "2.0", method, params }),
-        redirect: "manual",
-        signal: AbortSignal.timeout(LIMITS.MCP_HANDSHAKE_TIMEOUT_MS),
-      }).catch(() => {})
+      await publicHttp
+        .request(this.url, {
+          method: "POST",
+          headers: this.headers("application/json, text/event-stream"),
+          body: JSON.stringify({ jsonrpc: "2.0", method, params }),
+          allowPrivateHost: this.allowPrivate,
+          signal: AbortSignal.timeout(Math.min(LIMITS.MCP_HANDSHAKE_TIMEOUT_MS, 3_000)),
+        })
+        .then((r) => r.body?.cancel())
+        .catch(() => {})
     })()
   }
 
@@ -239,11 +247,15 @@ export class McpHttpTransport implements McpTransportLike {
     // itu bukan kegagalan bagi kita. Audit F7: cleanup TIDAK boleh jadi jalur
     // egress tanpa validasi host (blockedPrivate = host terbukti privat).
     if (this.sessionId && !this.blockedPrivate && (await this.checkHost())) {
-      await fetch(this.url.toString(), {
-        method: "DELETE",
-        headers: this.headers("application/json"),
-        signal: AbortSignal.timeout(LIMITS.MCP_HANDSHAKE_TIMEOUT_MS),
-      }).catch(() => {})
+      await publicHttp
+        .request(this.url, {
+          method: "DELETE",
+          headers: this.headers("application/json"),
+          allowPrivateHost: this.allowPrivate,
+          signal: AbortSignal.timeout(Math.min(LIMITS.MCP_HANDSHAKE_TIMEOUT_MS, 3_000)),
+        })
+        .then((r) => r.body?.cancel())
+        .catch(() => {})
     }
   }
 }
@@ -299,7 +311,7 @@ export async function readSseResponse(
       const { done, value } = await reader.read()
       if (done) break
       total += value.byteLength
-      if (total > LIMITS.MCP_OUTPUT_MAX_CHARS) {
+      if (total > LIMITS.MCP_HTTP_BODY_MAX_BYTES) {
         throw new Error("MCP http: aliran SSE melewati batas ukuran")
       }
       buffer += decoder.decode(value, { stream: true })
@@ -377,7 +389,7 @@ async function readCapped(res: Response): Promise<string> {
       const { done, value } = await reader.read()
       if (done) break
       out += decoder.decode(value, { stream: true })
-      if (out.length > LIMITS.MCP_OUTPUT_MAX_CHARS) {
+      if (out.length > LIMITS.MCP_HTTP_BODY_MAX_BYTES) {
         throw new Error("MCP http: balasan melewati batas ukuran")
       }
     }

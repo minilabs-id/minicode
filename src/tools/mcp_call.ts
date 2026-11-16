@@ -57,7 +57,7 @@ export const mcpCallTool: Tool = {
     properties: {
       server: {
         type: "string",
-        description: "ID MCP server (lihat dari mcp_list)",
+        description: "MCP server ID (see mcp_list)",
       },
       tool: {
         type: "string",
@@ -93,6 +93,7 @@ export const mcpCallTool: Tool = {
         : fenceUntrustedToolOutput(`mcp_call:${sid}.${tn}`, capped)
     } catch (e) {
       if (e instanceof McpCallOutcomeUnknownError) throw e
+      ctx.signal.throwIfAborted()
       return `[mcp] error: ${scrubSecrets((e as Error).message)}`
     }
   },
@@ -107,11 +108,11 @@ function notConnected(sid: string): string {
 export const mcpReadTool: Tool = {
   name: "mcp_read",
   description:
-    "Baca resource dari MCP server (spec resources/read). URI diambil dari mcp_list. Read-only.",
+    "Read a resource from a connected MCP server (resources/read). Get URIs from mcp_list. Read-only.",
   parameters: {
     type: "object",
     properties: {
-      server: { type: "string", description: "ID MCP server" },
+      server: { type: "string", description: "MCP server ID" },
       uri: { type: "string", description: "Resource URI, e.g. file:///x or db://table" },
     },
     required: ["server", "uri"],
@@ -129,6 +130,7 @@ export const mcpReadTool: Tool = {
       const capped = capMcpText(text)
       return isAlreadyFenced(capped) ? capped : fenceUntrustedToolOutput(`mcp_read:${sid}`, capped)
     } catch (e) {
+      ctx.signal.throwIfAborted()
       return `[mcp] error: ${scrubSecrets((e as Error).message)}`
     }
   },
@@ -141,11 +143,11 @@ export const mcpPromptTool: Tool = {
   parameters: {
     type: "object",
     properties: {
-      server: { type: "string", description: "ID MCP server" },
-      name: { type: "string", description: "Nama prompt (lihat mcp_list)" },
+      server: { type: "string", description: "MCP server ID" },
+      name: { type: "string", description: "Prompt name (see mcp_list)" },
       args: {
         type: "object",
-        description: "Argumen prompt (object key-value)",
+        description: "Prompt arguments (key-value object)",
         additionalProperties: true,
       },
     },
@@ -166,6 +168,7 @@ export const mcpPromptTool: Tool = {
         ? capped
         : fenceUntrustedToolOutput(`mcp_prompt:${sid}`, capped)
     } catch (e) {
+      ctx.signal.throwIfAborted()
       return `[mcp] error: ${scrubSecrets((e as Error).message)}`
     }
   },

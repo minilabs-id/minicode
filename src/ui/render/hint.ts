@@ -20,9 +20,12 @@ export function paintHint(item: HintItem): string {
   return `${c.accent(item.key)} ${c.dim(item.label)}`
 }
 
-/** Satu baris hint: `a add · d hapus · Esc tutup` (tanpa awalan/akhiran).
- * Tanpa pembungkus faint di seluruh baris: itu akan meredupkan KUNCI juga
- * (SGR 2 tak dibatalkan warna). Kunci = accent (lebih terang), label = dim. */
+/** Satu baris hint: `a tambah  d hapus  Esc batal` — pemisah HANYA spasi.
+ *
+ * Keputusan produk: grammar minimalis tanpa `·`, titik dua, atau label tambahan.
+ * Kunci berwarna accent (lebih terang), label dim; tanpa pembungkus faint di
+ * seluruh baris karena SGR 2 akan meredupkan kunci juga. ASCII fallback tetap
+ * ditanggung pemanggil lewat `glyphs` (mis. `glyphs.upDown`). */
 export function hintLine(items: readonly HintItem[]): string {
-  return items.map(paintHint).join(` ${c.faint("·")} `)
+  return items.map(paintHint).join("  ")
 }

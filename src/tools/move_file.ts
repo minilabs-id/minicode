@@ -1,8 +1,11 @@
-import { mkdir, rename, stat } from "node:fs/promises"
-import { dirname } from "node:path"
+import { lstat, mkdir, rename, stat } from "node:fs/promises"
+import { dirname, extname } from "node:path"
 import type { Tool } from "#minicore"
-import { resolveSafePath } from "../lib/safe-open.ts"
+import { LIMITS } from "../constants.ts"
+import { assertSafeWriteTarget, resolveSafePath, safeReadFile } from "../lib/safe-open.ts"
 import { trashFile } from "../lib/trash.ts"
+import { getConfiguredExts } from "../lsp/client.ts"
+import { appendLspDiagnostics } from "../policy/verifier.ts"
 import { contextUnrestricted, requireToolCwd } from "./context.ts"
 
 export const moveFileTool: Tool = {
@@ -31,19 +34,42 @@ export const moveFileTool: Tool = {
     const { abs: absFrom, real: realFrom } = await resolveSafePath(f, root, relaxed)
     const st = await stat(realFrom).catch(() => null)
     if (!st) throw new Error(`source not found: ${f}`)
-    const { abs: absTo } = await resolveSafePath(t, root, relaxed)
+    const { abs: absTo, real: realTo } = await resolveSafePath(t, root, relaxed)
+    await assertSafeWriteTarget(absTo, root, relaxed)
     await mkdir(dirname(absTo), { recursive: true, mode: 0o700 }).catch(() => {})
+
+    // Deteksi rename case-only (mis. foo.ts → Foo.ts di Windows NTFS) atau
+    // alias path ke berkas fisik yang sama sebelum trashFile, agar sumber
+    // tidak dipindahkan ke .trash sebelum rename dijalankan.
+    const fromLstat = await lstat(absFrom, { bigint: true }).catch(() => null)
+    const destLstat = await lstat(absTo, { bigint: true }).catch(() => null)
+    const sameInode =
+      fromLstat !== null &&
+      destLstat !== null &&
+      fromLstat.ino !== 0n &&
+      fromLstat.dev === destLstat.dev &&
+      fromLstat.ino === destLstat.ino
+    const sameWinCasePath =
+      process.platform === "win32" &&
+      absFrom.toLowerCase() === absTo.toLowerCase() &&
+      !destLstat?.isSymbolicLink()
+    const sameFileRename = sameInode || sameWinCasePath
+
     // S3 — dest yang sudah ada dibackup ke trash dulu (jangan timpa diam-diam).
-    // absTo sudah terverifikasi nyata oleh resolveSafePath, jadi tak perlu
-    // realpath ulang di sini.
+    // Pakai lstat agar symlink tujuan di-trash sebagai entry link, bukan targetnya.
     let backup = ""
-    const destStat = await stat(absTo).catch(() => null)
-    if (destStat) {
-      if (destStat.isDirectory()) throw new Error(`destination is a directory: ${t}`)
+    if (destLstat && !sameFileRename) {
+      if (destLstat.isDirectory()) throw new Error(`destination is a directory: ${t}`)
       const trashed = await trashFile(root, absTo)
       backup = ` (previous dest backed up to ${trashed})`
     }
     await rename(absFrom, absTo)
-    return `moved ${f} -> ${t}${backup}`
+    const base = `moved ${f} -> ${t}${backup}`
+    if (!st.isFile() || st.size > LIMITS.READ_FILE_MAX_BYTES) return base
+    const ext = extname(absTo).toLowerCase()
+    if (!getConfiguredExts().includes(ext)) return base
+    const text = await safeReadFile(absTo, root, relaxed).catch(() => null)
+    if (text === null) return base
+    return await appendLspDiagnostics(realTo, text, base, undefined, root)
   },
 }

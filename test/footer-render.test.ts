@@ -175,7 +175,8 @@ describe("footer render", () => {
     expect(stripAnsi(auto)).toBe("Auto")
     expect(stripAnsi(ask)).toBe("Ask")
     expect(build).toContain(c.success("Build"))
-    expect(discuss).toContain(c.warning("Discuss"))
+    // Discuss = default sesi baru: accent (bukan warning, yang terbaca alarm).
+    expect(discuss).toContain(c.accent("Discuss"))
     expect(auto).toContain(c.info("Auto"))
     expect(ask).toContain(c.info("Ask"))
     expect(c.success("Build")).not.toBe(c.info("Auto"))

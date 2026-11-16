@@ -83,7 +83,6 @@ describe("t()", () => {
     // tui.langLine), nama perintah (help.cMore), nilai dinamis (tui.modelSet,
     // tui.thinkingSet).
     const NEUTRAL = new Set([
-      "form.footerDefault",
       "st.model",
       "st.budget",
       // Label kop sesi: "Model" adalah istilah teknis yang sama di id.
@@ -97,6 +96,12 @@ describe("t()", () => {
       "tui.thinkingSet",
       "tui.modeLine",
       "tui.langLine",
+      // "Turn" adalah istilah produk yang dipakai konsisten di id/en.
+      "one.turnHead",
+      // "Tool" adalah istilah produk (bukan diterjemahkan menjadi Alat).
+      "appr.tool",
+      "app.welcomeTitle",
+      "app.welcomeCwd",
     ])
     const same = (Object.keys(en) as (keyof typeof en)[]).filter(
       (k) => id[k] === en[k] && !NEUTRAL.has(k),

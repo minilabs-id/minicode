@@ -21,7 +21,7 @@ import { setSubAgentSessionFactory } from "../src/tools/task.ts"
 import { formatError } from "../src/ui/assistant/simple.ts"
 import { type MsgKey, t } from "../src/ui/i18n/locale.ts"
 import { formatUsd } from "../src/ui/render/money.ts"
-import { c, glyphs } from "../src/ui/render/theme.ts"
+import { c } from "../src/ui/render/theme.ts"
 import { motionReduced } from "../src/ui/runtime/motion.ts"
 import {
   allowLocalConfig,
@@ -202,8 +202,16 @@ setSubAgentSessionFactory(async (spec) => {
   const { journal, ...coreSpec } = spec
   const contextWindowTokensForModel = coreSpec.provider.contextWindowTokensForModel
   const contextModelIdentity = coreSpec.provider.contextModelIdentity
+  let childJournalHandle: ReturnType<typeof attachMutationJournal> | null = null
   const session = await createMinicodeSession({
     ...coreSpec,
+    ...(journal
+      ? {
+          beforeToolEffect: async (call) => {
+            if (childJournalHandle !== null) await childJournalHandle.preflightIntent(call)
+          },
+        }
+      : {}),
     ...(contextWindowTokensForModel
       ? {
           contextWindowTokens: contextWindowTokensForModel(coreSpec.model),
@@ -226,7 +234,7 @@ setSubAgentSessionFactory(async (spec) => {
     session.events.on("turn:completed", () => {
       void childWrite.finally(() => childPresentation.dispose())
     })
-    attachMutationJournal(session, {
+    childJournalHandle = attachMutationJournal(session, {
       sessionId: journal.sessionId,
       cwd: spec.cwd,
       childOf: journal.parentSessionId,
@@ -568,7 +576,7 @@ try {
     const spaceIdx = prompt.indexOf(" ")
     const skillName = spaceIdx === -1 ? prompt.slice(1) : prompt.slice(1, spaceIdx)
     const skillArgs = spaceIdx === -1 ? "" : prompt.slice(spaceIdx + 1)
-    const skill = await findSkill(skillName, cwd)
+    const skill = await findSkill(skillName, cwd, { allowLocal })
     if (skill) {
       effectivePrompt = await renderSkill(skill, skillArgs)
       console.error(c.dim(`[loaded skill /${skill.name}]`))
@@ -811,7 +819,7 @@ if (enterRepl) {
     // Error provider biasanya sudah dirender ramah oleh event handler
     // (takePendingError) — cetak sekali saja, jangan dua blok error.
     const shown = ctx.uiState.takePendingError()
-    process.stderr.write(`\n${c.red(glyphs.cross)} ${shown ?? formatError(e)}\n`)
+    process.stderr.write(`\n${c.red("failed")} ${shown ?? formatError(e)}\n`)
     // Audit #04 P1: sama seperti REPL — turn gagal setelah delegasi
     // committed = efek anak tetap ada. One-shot tak punya retry loop, tapi
     // user yang menjalankan ulang manual butuh peringatan yang sama.

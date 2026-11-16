@@ -18,10 +18,11 @@ import {
   type DecoderState,
   toGraphemes,
 } from "../input/prompt-engine.ts"
+import { type HintItem, hintLine } from "../render/hint.ts"
 import { sanitizeAnsiLine } from "../render/sanitize.ts"
 import { c, glyphs, stripAnsi } from "../render/theme.ts"
-import { displayWidth, truncateToWidth } from "../render/width.ts"
-import { type AltScreen, SYNC_UPDATE_END, SYNC_UPDATE_START } from "../runtime/screen.ts"
+import { displayWidth, truncateToWidth, wrapByWidth } from "../render/width.ts"
+import type { AltScreen } from "../runtime/screen.ts"
 import { boxLeftPad, dialogBox, popupBoxWidth } from "./dialog.ts"
 import { createIdleTimer } from "./lifecycle.ts"
 
@@ -40,7 +41,8 @@ export interface FormField {
 export interface FormSpec {
   title: string
   fields: FormField[]
-  footer?: string
+  /** Override hint (mis. Enter = hapus pada dialog konfirmasi). */
+  footerHints?: readonly HintItem[]
 }
 
 export interface FormResult {
@@ -81,6 +83,31 @@ const dim = (s: string): string => c.dim(s)
 
 /** Lebar kotak form: `popupBoxWidth` — paritas picker/model/provider (AUD-006). */
 const formBoxWidth = (cols: number): number => popupBoxWidth(cols)
+
+/** Hint default mengikuti jenis field aktif: select/confirm butuh panah. */
+function defaultFooterHints(st: FieldState | undefined): HintItem[] {
+  // Select/confirm: panah adalah aksi utama; Tab tetap berlaku tetapi tidak
+  // diumumkan agar hint tetap satu baris di popup 48 kolom (80-col terminal).
+  if (st?.def.kind === "select") {
+    return [
+      { key: glyphs.leftRight, label: t("hint.select") },
+      { key: "Enter", label: t("hint.save") },
+      { key: "Esc", label: t("hint.cancel") },
+    ]
+  }
+  if (st?.def.kind === "confirm") {
+    return [
+      { key: `${glyphs.leftRight}/y/n`, label: t("hint.select") },
+      { key: "Enter", label: t("hint.save") },
+      { key: "Esc", label: t("hint.cancel") },
+    ]
+  }
+  return [
+    { key: "Tab", label: t("hint.move") },
+    { key: "Enter", label: t("hint.save") },
+    { key: "Esc", label: t("hint.cancel") },
+  ]
+}
 
 function toState(def: FormField): FieldState {
   if (def.kind === "select") {
@@ -176,9 +203,8 @@ export async function runForm(spec: FormSpec, screen: AltScreen): Promise<FormRe
       idle.reset()
     }
 
-    // Lebar konten = lebar kotak minus chrome border+padding (4).
-    const boxW = formBoxWidth(screen.cols || 80)
-    const width = () => boxW
+    // Lebar dinamis mengikuti terminal saat resize (tetap stabil saat error muncul/hilang).
+    const width = () => formBoxWidth(screen.cols || 80)
     const innerW = () => Math.max(8, width() - 4)
 
     // Baris nilai field aktif (indeks dalam body) untuk parkir kursor.
@@ -190,13 +216,17 @@ export async function runForm(spec: FormSpec, screen: AltScreen): Promise<FormRe
       let activeCol = -1
       fields.forEach((st, fi) => {
         const active = fi === idx
+        const marker = active ? c.accent(glyphs.arrow) : " "
+        const cleanLabel = sanitizeAnsiLine(st.def.label)
         if (st.def.kind === "text" || st.def.kind === "secret") {
           const shown =
             st.def.kind === "secret" ? glyphs.mask.repeat(toGraphemes(st.text).length) : st.text
-          // Scroll horizontal dalam KOLOM (bukan grapheme): CJK/emoji 2 kolom,
-          // jadi hitung lebar tampil, bukan jumlah unit. Gagal-di-kode-lama:
-          // kursor meleset 1 per glyph lebar + scroll prematur/terlambat.
-          const maxV = Math.max(8, w - displayWidth(sanitizeAnsiLine(st.def.label)) - 4)
+          const inlinePrefix = `${marker} ${cleanLabel}: `
+          const inlineRoom = w - displayWidth(stripAnsi(inlinePrefix))
+          // Tata letak bertumpuk saat label panjang menyisakan ruang < 20 kolom
+          // (mis. Base URL preset di wizard); pertahankan inline untuk label pendek.
+          const stacked = inlineRoom < 20
+          const maxV = stacked ? Math.max(8, w - 2) : Math.max(8, inlineRoom)
           const pts = toGraphemes(shown)
           let start = Math.max(0, Math.min(st.viewStart, st.cursor))
           if (st.cursor < start) start = st.cursor
@@ -204,32 +234,47 @@ export async function runForm(spec: FormSpec, screen: AltScreen): Promise<FormRe
             start++
           st.viewStart = start
           const vis = sliceByWidth(pts, start, maxV).join("")
-          const prefix = `${active ? c.accent("›") : " "} ${sanitizeAnsiLine(st.def.label)}: `
-          // Kolom kursor terminal = lebar tampil prefix + lebar tampil nilai
-          // sebelum kursor (BUKAN jumlah grapheme).
-          if (active) {
-            activeCol =
-              displayWidth(stripAnsi(prefix)) +
-              displayWidth(pts.slice(start, st.cursor).join("")) +
-              1
+          if (stacked) {
+            for (const hl of wrapByWidth(`${marker} ${cleanLabel}`, w)) body.push(cut(hl))
+            if (active) {
+              activeCol = 2 + displayWidth(pts.slice(start, st.cursor).join("")) + 1
+            }
+            body.push(cut(`  ${vis}`))
+          } else {
+            if (active) {
+              activeCol =
+                displayWidth(stripAnsi(inlinePrefix)) +
+                displayWidth(pts.slice(start, st.cursor).join("")) +
+                1
+            }
+            body.push(cut(`${inlinePrefix}${vis}`))
           }
-          body.push(cut(`${prefix}${vis}`))
           activeRow = active ? body.length - 1 : activeRow
         } else if (st.def.kind === "select") {
           const opts = st.def.options ?? []
           const cur = sanitizeAnsiLine(opts[st.selectIdx] ?? "")
-          const marker = active ? c.accent("›") : " "
+          const ctrl = `${dim(glyphs.chevronLeft)} ${cur} ${dim(glyphs.chevronRight)}`
+          const inline = `${marker} ${cleanLabel}: ${ctrl}`
           if (active) activeCol = -1 // select tanpa kursor ketik
-          body.push(
-            cut(`${marker} ${sanitizeAnsiLine(st.def.label)}: ${dim("‹")} ${cur} ${dim("›")}`),
-          )
+          if (displayWidth(stripAnsi(inline)) > w) {
+            for (const hl of wrapByWidth(`${marker} ${cleanLabel}`, w)) body.push(cut(hl))
+            body.push(cut(`  ${ctrl}`))
+          } else {
+            body.push(cut(inline))
+          }
           activeRow = active ? body.length - 1 : activeRow
         } else {
-          // Confirm: Ya/Tidak toggle.
-          const marker = active ? c.accent("›") : " "
+          // Confirm: Ya/Tidak toggle (panah/y-n — sama seperti select).
           const val = st.confirmed ? c.accent(t("form.yes")) : t("form.no")
+          const ctrl = `${dim(glyphs.chevronLeft)} ${val} ${dim(glyphs.chevronRight)}`
+          const inline = `${marker} ${cleanLabel}: ${ctrl}`
           if (active) activeCol = -1
-          body.push(cut(`${marker} ${sanitizeAnsiLine(st.def.label)}: ${val}`))
+          if (displayWidth(stripAnsi(inline)) > w) {
+            for (const hl of wrapByWidth(`${marker} ${cleanLabel}`, w)) body.push(cut(hl))
+            body.push(cut(`  ${ctrl}`))
+          } else {
+            body.push(cut(inline))
+          }
           activeRow = active ? body.length - 1 : activeRow
         }
         if (st.error) body.push(cut(c.error(`  ${sanitizeAnsiLine(st.error)}`)))
@@ -243,7 +288,7 @@ export async function runForm(spec: FormSpec, screen: AltScreen): Promise<FormRe
           // saja), draft tidak hilang tanpa jejak.
           footer: idleWarned
             ? c.error(t("form.idleWarning", { s: Math.ceil(IDLE_CANCEL_MS / 1000) }))
-            : (spec.footer ?? t("form.footerDefault")),
+            : hintLine(spec.footerHints ?? defaultFooterHints(fields[idx])),
           // Lebar beku (paritas picker/manager — tak bernapas saat error
           // muncul/hilang).
           minWidth: width(),
@@ -272,12 +317,12 @@ export async function runForm(spec: FormSpec, screen: AltScreen): Promise<FormRe
           const stripped = stripAnsi(box.lines[li] ?? "")
           const leftPad = boxLeftPad(stripped)
           const contentW = displayWidth(stripped) - leftPad
-          const raw = activeCol >= 0 ? leftPad + activeCol + 2 : leftPad + contentW + 1
+          const maxCol = leftPad + 2 + w + 1
+          const raw =
+            activeCol >= 0 ? Math.min(maxCol, leftPad + activeCol + 2) : leftPad + contentW + 1
           const col = Math.max(1, Math.min(screen.cols || 80, raw))
-          // Di dalam blok sync-update yang SAMA dengan paintRegion di atas
-          // (temuan audit TUI-007): kursor yang muncul di luar sync berpotensi
-          // tearing di emulator tanpa ?2026.
-          process.stdout.write(`${SYNC_UPDATE_START}\x1b[${row};${col}H\x1b[?25h${SYNC_UPDATE_END}`)
+          // Lewat screen.moveCursor agar RESET_ATTRS + `\x1b[6 q` + blok sync konsisten.
+          screen.moveCursor(row, col)
         }
       } catch {}
       return { activeRow, activeCol }
@@ -335,9 +380,9 @@ export async function runForm(spec: FormSpec, screen: AltScreen): Promise<FormRe
       const clean = ins
         .replace(/\r\n|\r/g, " ")
         .replace(/\t/g, " ")
-        // Kontrol dibuang (kecuali newline yang sudah jadi spasi).
+        // Kontrol C0 + C1 dibuang (kecuali newline yang sudah jadi spasi).
         // biome-ignore lint/suspicious/noControlCharactersInRegex: sanitasi input form
-        .replace(/[\u0000-\u001f\u007f]/g, "")
+        .replace(/[\u0000-\u001f\u007f-\u009f]/g, "")
       if (!clean) return
       const pts = toGraphemes(st.text)
       const at = Math.max(0, Math.min(st.cursor, pts.length))
@@ -384,7 +429,7 @@ export async function runForm(spec: FormSpec, screen: AltScreen): Promise<FormRe
         cur.error = null
         return true
       }
-      const initial = typeof cur.def.initial === "string" ? cur.def.initial : ""
+      const initial = typeof cur.def.initial === "string" ? sanitizeAnsiLine(cur.def.initial) : ""
       if (cur.text === initial) return false
       cur.text = initial
       cur.cursor = toGraphemes(initial).length

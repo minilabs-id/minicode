@@ -6,9 +6,11 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
+  callMcpTool,
   closeAll,
   computeMcpToolSchemaHash,
   connectAll,
+  extractMcpText,
   getMcpServerIds,
   McpSchemaPinRegistry,
   mcpConnectionAlive,
@@ -16,6 +18,7 @@ import {
   mcpSchemaPinRegistry,
   simulateMcpTransportFailure,
 } from "../src/mcp/client.ts"
+import { McpTransport } from "../src/mcp/transport.ts"
 
 setDefaultTimeout(30_000)
 
@@ -229,5 +232,44 @@ describe("P2.3 MCP pagination & multi-session", () => {
     expect(getMcpServerIds()).toContain("s")
     await closeAll()
     expect(getMcpServerIds()).not.toContain("s")
+  })
+
+  test("callMcpTool melakukan reconnect otomatis dan extractMcpText meringkas blok image", async () => {
+    const dir = workspace()
+    let calls = 0
+    const url = serveMcp((method) => {
+      if (method === "initialize")
+        return { protocolVersion: "2025-06-18", capabilities: { tools: {} } }
+      if (method === "tools/list") return { tools: [tool("snap")] }
+      if (method === "tools/call") {
+        calls++
+        return {
+          content: [
+            { type: "text", text: "ok" },
+            { type: "image", mimeType: "image/png", data: "AAAA".repeat(20) },
+          ],
+        }
+      }
+      return {}
+    })
+    await connectAll([{ id: "s", url, allowPrivateHost: true }], dir)
+    await simulateMcpTransportFailure("s")
+    const raw = await callMcpTool("s", "snap", { q: "x" }, new AbortController().signal)
+    expect(calls).toBe(1)
+    const text = extractMcpText(raw)
+    expect(text).toContain("ok")
+    expect(text).toContain("[image image/png, 80 base64 chars — binary skipped]")
+  })
+
+  test("McpTransport mendukung maxFrameBytes lebih besar untuk payload browser besar", async () => {
+    const t = new McpTransport({ maxFrameBytes: 2 * 1024 * 1024 })
+    const code = `process.stdin.once("data",()=>process.stdout.write(JSON.stringify({jsonrpc:"2.0",id:1,result:{ok:true,blob:"x".repeat(1200000)}})+"\\n"))`
+    await t.connect(process.execPath, ["-e", code])
+    try {
+      const res = (await t.request("tools/call", {}, 5000)) as { ok: boolean }
+      expect(res.ok).toBe(true)
+    } finally {
+      await t.close()
+    }
   })
 })

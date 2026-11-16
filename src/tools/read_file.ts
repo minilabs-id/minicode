@@ -4,7 +4,7 @@ import type { Tool } from "#minicore"
 import { LIMITS } from "../constants.ts"
 import { safeOpenRead } from "../lib/safe-open.ts"
 import { scrubSecrets } from "../policy/scrub.ts"
-import { contextUnrestricted, requireToolCwd } from "./context.ts"
+import { contextUnrestricted, requireToolCwd, sliceSafeChars } from "./context.ts"
 
 // defense-in-depth: also jail inside tool (permission layer is primary)
 
@@ -52,7 +52,7 @@ export function formatLines(
       const n = String(from + i).padStart(width, " ")
       const capped =
         line.length > LIMITS.READ_FILE_MAX_LINE_CHARS
-          ? `${line.slice(0, LIMITS.READ_FILE_MAX_LINE_CHARS)}… [line truncated]`
+          ? `${sliceSafeChars(line, LIMITS.READ_FILE_MAX_LINE_CHARS)}… [line truncated]`
           : line
       return `${n}: ${capped}`
     })
@@ -73,6 +73,7 @@ async function formatHandleRange(
   from: number,
   limit: number,
   signal: AbortSignal,
+  fileLabel: string,
 ): Promise<string> {
   const chunk = Buffer.alloc(64 * 1024)
   const decoder = new TextDecoder()
@@ -83,6 +84,7 @@ async function formatHandleRange(
   let totalLines = 0
   let position = 0
   let sawBytes = false
+  let checkedBinary = false
   let endedWithNewline = false
 
   const appendSegment = (segment: string): void => {
@@ -117,6 +119,12 @@ async function formatHandleRange(
     const { bytesRead } = await handle.read(chunk, 0, chunk.length, position)
     if (bytesRead === 0) break
     sawBytes = true
+    if (!checkedBinary) {
+      checkedBinary = true
+      if (chunk.subarray(0, Math.min(bytesRead, 8192)).includes(0)) {
+        throw new Error(`cannot read binary file (NUL byte detected): ${fileLabel}`)
+      }
+    }
     position += bytesRead
     consume(decoder.decode(chunk.subarray(0, bytesRead), { stream: true }))
   }
@@ -135,7 +143,7 @@ async function formatHandleRange(
     .map((raw, index) => {
       const capped =
         raw.length > LIMITS.READ_FILE_MAX_LINE_CHARS
-          ? `${raw.slice(0, LIMITS.READ_FILE_MAX_LINE_CHARS)}… [line truncated]`
+          ? `${sliceSafeChars(raw, LIMITS.READ_FILE_MAX_LINE_CHARS)}… [line truncated]`
           : raw
       return `${String(from + index).padStart(width, " ")}: ${capped}`
     })
@@ -209,9 +217,13 @@ export const readFileTool: Tool = {
         const pageLimit = Number.isFinite(rawLimit)
           ? Math.min(Math.max(1, Math.floor(rawLimit)), LIMITS.READ_FILE_MAX_LINE_LIMIT)
           : LIMITS.READ_FILE_DEFAULT_LINE_LIMIT
-        return scrubSecrets(await formatHandleRange(handle, from, pageLimit, ctx.signal))
+        return scrubSecrets(await formatHandleRange(handle, from, pageLimit, ctx.signal, p))
       }
-      raw = await handle.readFile("utf8")
+      const buf = await handle.readFile()
+      if (buf.subarray(0, 8192).includes(0)) {
+        throw new Error(`cannot read binary file (NUL byte detected): ${p}`)
+      }
+      raw = buf.toString("utf8")
     } finally {
       await handle.close().catch(() => {})
     }

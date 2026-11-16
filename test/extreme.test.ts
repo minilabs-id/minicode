@@ -582,7 +582,7 @@ test("19 skills frontmatter quotes + slug + $ARGUMENTS + recursive", async () =>
     `---\nname: "My Skill"\ndescription: 'Deploy it'\n---\nRun deploy for $ARGUMENTS`,
   )
   await writeFile(`${tmp}/.minicode/skills/nested/sub.md`, `---\nname: sub\n---\nbody {{args}}`)
-  const all = await loadSkills(tmp)
+  const all = await loadSkills(tmp, { allowLocal: true })
   expect(all.some((s) => s.name === "my-skill")).toBe(true)
   expect(all.some((s) => s.name === "sub")).toBe(true)
   const deploy = all.find((s) => s.name === "my-skill")!

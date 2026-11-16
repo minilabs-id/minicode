@@ -6,6 +6,7 @@ import {
   saveMcpServer,
 } from "../../src/config.ts"
 import { detectAndSave, removeProvider } from "../../src/providers/provision.ts"
+import { formatError } from "../../src/ui/render/errors.ts"
 import { sanitizeAnsiLine } from "../../src/ui/render/sanitize.ts"
 import { renderTable } from "../../src/ui/render/table.ts"
 import { c, glyphs } from "../../src/ui/render/theme.ts"
@@ -114,7 +115,7 @@ export async function handleConfig(
       cwd: getArg("--cwd"),
     })
     console.log(
-      `${c.green(glyphs.check)} Saved provider "${c.bold(sanitizeAnsiLine(entry.id))}" (${sanitizeAnsiLine(entry.providerHint ?? "?")}) models: ${entry.models
+      `${c.green("ok")} Saved provider "${c.bold(sanitizeAnsiLine(entry.id))}" (${sanitizeAnsiLine(entry.providerHint ?? "?")}) models: ${entry.models
         .slice(0, 5)
         .map((m) => sanitizeAnsiLine(m))
         .join(", ")}${entry.models.length > 5 ? " ..." : ""} (${entry.models.length} total)`,
@@ -156,7 +157,7 @@ export async function handleConfig(
     }
     await removeProvider(id, { global: !args.includes("--local"), cwd: getArg("--cwd") })
     console.log(
-      `${c.green(glyphs.check)} Removed provider ${sanitizeAnsiLine(id)} (${!args.includes("--local") ? "global" : "local"})`,
+      `${c.green("ok")} Removed provider ${sanitizeAnsiLine(id)} (${!args.includes("--local") ? "global" : "local"})`,
     )
     process.exit(0)
   } else if (sub === "context-window") {
@@ -258,7 +259,7 @@ ${c.bold(`Context windows — ${sanitizeAnsiLine(provider.id)}`)}
 
     const outcome = assignContextWindow(provider, model, value)
     if (!outcome.ok) {
-      console.error(`${c.red(glyphs.cross ?? "x")} ${outcome.error}`)
+      console.error(`${c.red("failed")} ${formatError(outcome.error)}`)
       process.exit(1)
     }
     const { saveProvider } = await import("../../src/providers/provision.ts")
@@ -266,10 +267,10 @@ ${c.bold(`Context windows — ${sanitizeAnsiLine(provider.id)}`)}
     const shown = sanitizeAnsiLine(model)
     const where = global ? "global" : "local"
     if (outcome.tokens === null) {
-      console.log(`${c.green(glyphs.check)} ${shown}: back to automatic detection (${where})`)
+      console.log(`${c.green("ok")} ${shown}: back to automatic detection (${where})`)
     } else {
       console.log(
-        `${c.green(glyphs.check)} ${shown}: ${describeContextWindow(outcome.tokens)} ` +
+        `${c.green("ok")} ${shown}: ${describeContextWindow(outcome.tokens)} ` +
           `(${outcome.tokens.toLocaleString("en-US")} tokens) — ${where}`,
       )
     }
@@ -296,7 +297,7 @@ ${c.bold(`Context windows — ${sanitizeAnsiLine(provider.id)}`)}
         process.exit(1)
       }
       console.log(
-        `${c.green(glyphs.check)} Removed stored key for ${c.bold(sanitizeAnsiLine(id))} — update config apiKey manually (provider stays disabled until re-set)`,
+        `${c.green("ok")} Removed stored key for ${c.bold(sanitizeAnsiLine(id))} — update config apiKey manually (provider stays disabled until re-set)`,
       )
       process.exit(0)
     }
@@ -332,7 +333,7 @@ ${c.bold(`Context windows — ${sanitizeAnsiLine(provider.id)}`)}
     }
     await saveProvider({ ...entry, apiKey: `keystore:${key}` }, { global, cwd: getArg("--cwd") })
     console.log(
-      `${c.green(glyphs.check)} Stored key for ${c.bold(sanitizeAnsiLine(id))} via ${backend} (${global ? "global" : "local"} config now references it)`,
+      `${c.green("ok")} Stored key for ${c.bold(sanitizeAnsiLine(id))} via ${backend} (${global ? "global" : "local"} config now references it)`,
     )
     process.exit(0)
   } else if (sub === "detect") {
@@ -349,13 +350,11 @@ ${c.bold(`Context windows — ${sanitizeAnsiLine(provider.id)}`)}
     const res = await detectModels(baseUrl, apiKey).catch((e) => {
       // Host mati total (bukan sekadar tanpa /models) — katakan begitu,
       // jangan "Detected 0 models" yang menyalahkan kredensial.
-      console.error(
-        `${c.red(glyphs.cross)} ${sanitizeAnsiLine((e as Error).message)} — check network and URL`,
-      )
+      console.error(`${c.red("failed")} ${formatError(e)} — check network and URL`)
       process.exit(1)
     })
     console.log(
-      `${c.green(glyphs.check)} Detected ${res.models.length} models (${sanitizeAnsiLine(res.providerHint)}):\n${res.models.map((m) => `  ${glyphs.dot} ${sanitizeAnsiLine(m)}`).join("\n")}`,
+      `${c.green("ok")} Detected ${res.models.length} models (${sanitizeAnsiLine(res.providerHint)}):\n${res.models.map((m) => `  ${glyphs.dot} ${sanitizeAnsiLine(m)}`).join("\n")}`,
     )
     process.exit(0)
   } else if (sub === "mcp") {
@@ -407,7 +406,7 @@ ${c.bold(`Context windows — ${sanitizeAnsiLine(provider.id)}`)}
           { global: !args.includes("--local"), cwd: getArg("--cwd") },
         )
         console.log(
-          `${c.green(glyphs.check)} Saved MCP server "${c.bold(sanitizeAnsiLine(id))}" (http): ${sanitizeAnsiLine(url)}`,
+          `${c.green("ok")} Saved MCP server "${c.bold(sanitizeAnsiLine(id))}" (http): ${sanitizeAnsiLine(url)}`,
         )
         process.exit(0)
       }
@@ -421,7 +420,7 @@ ${c.bold(`Context windows — ${sanitizeAnsiLine(provider.id)}`)}
         { global: !args.includes("--local"), cwd: getArg("--cwd") },
       )
       console.log(
-        `${c.green(glyphs.check)} Saved MCP server "${c.bold(sanitizeAnsiLine(id))}": ${sanitizeAnsiLine(command ?? "")} ${cmdArgs.map((a) => sanitizeAnsiLine(a)).join(" ")}`,
+        `${c.green("ok")} Saved MCP server "${c.bold(sanitizeAnsiLine(id))}": ${sanitizeAnsiLine(command ?? "")} ${cmdArgs.map((a) => sanitizeAnsiLine(a)).join(" ")}`,
       )
       process.exit(0)
     } else if (mcpSub === "list") {
@@ -457,7 +456,7 @@ ${c.bold(`Context windows — ${sanitizeAnsiLine(provider.id)}`)}
       }
       await removeMcpServer(id, { global: !args.includes("--local"), cwd: getArg("--cwd") })
       console.log(
-        `${c.green(glyphs.check)} Removed MCP server ${sanitizeAnsiLine(id)} (${!args.includes("--local") ? "global" : "local"})`,
+        `${c.green("ok")} Removed MCP server ${sanitizeAnsiLine(id)} (${!args.includes("--local") ? "global" : "local"})`,
       )
       process.exit(0)
     } else {
@@ -488,7 +487,7 @@ ${c.bold(`Context windows — ${sanitizeAnsiLine(provider.id)}`)}
         { global: !args.includes("--local"), cwd: getArg("--cwd") },
       )
       console.log(
-        `${c.green(glyphs.check)} Saved LSP server for ${c.bold(sanitizeAnsiLine(ext))}: ${sanitizeAnsiLine(command)} ${cmdArgs.map((a) => sanitizeAnsiLine(a)).join(" ")}`,
+        `${c.green("ok")} Saved LSP server for ${c.bold(sanitizeAnsiLine(ext))}: ${sanitizeAnsiLine(command)} ${cmdArgs.map((a) => sanitizeAnsiLine(a)).join(" ")}`,
       )
       process.exit(0)
     } else if (lspSub === "list") {
@@ -522,7 +521,7 @@ ${c.bold(`Context windows — ${sanitizeAnsiLine(provider.id)}`)}
       }
       await removeLspServer(ext, { global: !args.includes("--local"), cwd: getArg("--cwd") })
       console.log(
-        `${c.green(glyphs.check)} Removed LSP server for ${sanitizeAnsiLine(ext)} (${!args.includes("--local") ? "global" : "local"})`,
+        `${c.green("ok")} Removed LSP server for ${sanitizeAnsiLine(ext)} (${!args.includes("--local") ? "global" : "local"})`,
       )
       process.exit(0)
     } else {

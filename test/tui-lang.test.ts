@@ -65,8 +65,9 @@ function fakeSession(): FakeSession {
     allLoadedSkills: [],
     allowLocalConfig: false,
     usage: {
-      get: () => ({}),
-      getSession: () => ({ cost: undefined, totalTokens: 0 }),
+      get: () => ({ inputTokens: 0, outputTokens: 0, totalTokens: 0, cost: 0 }),
+      getSession: () => ({ inputTokens: 0, outputTokens: 0, totalTokens: 0, cost: 0 }),
+      modelUsed: () => ({}),
       reset: () => {},
     },
     budget: undefined,
@@ -172,6 +173,32 @@ describe("/lang end-to-end", () => {
     }
   })
 
+  test("/status tampil di jendela command, bukan transkrip", async () => {
+    tty = installFakeTty({ columns: 90, rows: 24 })
+    let runP: Promise<void> | null = runTui(fakeSession())
+    try {
+      await tty.ready()
+      await tty.waitForOutput((o) => o.includes("00.00.00"))
+      await tty.send("/status")
+      await tty.send(KEY.enter)
+      const frame = await tty.waitForScreen(
+        (f) =>
+          f.some((l) => l.includes("Status")) && f.some((l) => l.includes("Session lang-test")),
+      )
+      expect(frame.some((l) => l.includes("Esc cancel"))).toBe(true)
+      await tty.send(KEY.esc, 90)
+      await tty.waitForScreen((f) => f.some((l) => l.includes("minicode ›")))
+      // Output readout TIDAK boleh bocor ke transkrip chat.
+      expect(tty.screen().join("\n")).not.toContain("Session lang-test")
+      await tty.send("/exit")
+      await tty.send(KEY.enter)
+      await runP
+      runP = null
+    } finally {
+      await closeTuiIfRunning(tty, runP)
+    }
+  })
+
   test("/help ringkas memuat semua perintah terdaftar (satu sumber)", async () => {
     const { BUILTIN_COMMANDS } = await import("../cli/commands.ts")
     tty = installFakeTty({ columns: 80, rows: 24 })
@@ -181,10 +208,13 @@ describe("/lang end-to-end", () => {
       await tty.waitForOutput((o) => o.includes("00.00.00"))
       await tty.send("/help")
       await tty.send(KEY.enter)
+      // v7.18: hasil command tampil di jendela overlay, bukan transkrip.
       const out = await tty.waitForOutput((o) => o.includes("Commands:"))
       for (const b of BUILTIN_COMMANDS) expect(out, b.name).toContain(`/${b.name}`)
       for (const n of ["/mode", "/lang", "/compact", "/expand", "/minimize"])
         expect(out, n).toContain(n)
+      await tty.send(KEY.esc, 90)
+      await tty.waitForScreen((f) => f.some((l) => l.includes("minicode ›")))
       await tty.send("/exit")
       await tty.send(KEY.enter)
       await runP

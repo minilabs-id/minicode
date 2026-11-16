@@ -25,11 +25,17 @@ import {
 } from "../input/prompt-engine.ts"
 import { appendWrapped, shaveWrapped } from "../render/composer-wrap.ts"
 import { formatError } from "../render/errors.ts"
+import { listRow } from "../render/list.ts"
 import { sanitizeAnsi, sanitizeAnsiLine, stripSgr } from "../render/sanitize.ts"
-import { c, scrimMode, scrimSgr } from "../render/theme.ts"
+import { c, glyphs, scrimMode, scrimSgr } from "../render/theme.ts"
 import { chunkByWidth, displayWidth, escapeLength, truncateToWidth } from "../render/width.ts"
 import { motionReduced } from "../runtime/motion.ts"
-import { type AltScreen, forceRestoreScreenForSignal, openAltScreen } from "../runtime/screen.ts"
+import {
+  type AltScreen,
+  forceRestoreScreenForSignal,
+  openAltScreen,
+  registerScreenBackdrop,
+} from "../runtime/screen.ts"
 import type { Transcript, TranscriptPoint, TranscriptRow } from "./transcript.ts"
 
 export interface TuiStatusSnapshot {
@@ -75,8 +81,8 @@ const MAX_DROPDOWN_ROWS = 8
 const MIN_ROWS = 10
 const MIN_COLS = 20
 
-const PROMPT_FIRST = "minicode › "
-const PROMPT_CONT = "  · "
+const promptFirst = (): string => `minicode ${glyphs.arrow} `
+const promptCont = (): string => `  ${glyphs.dot} `
 const TIMER_TEXT = "00.00.00"
 const DOT_INTERVAL_MS = 200
 /** Badge job background berputar lebih pelan dari dots (tidak berkedip). */
@@ -251,6 +257,9 @@ export class TuiApp {
   private lastAbortAt = 0
   /** Hint "tekan lagi untuk keluar" tampil sekali setelah abort pertama. */
   private abortHintOn = false
+  /** Micro-toast 2 detik di slot footer saat mengganti mode/bahasa/salin. */
+  private statusToast = ""
+  private toastTimer: ReturnType<typeof setTimeout> | undefined
   private frames = 0
   /**
    * Kedalaman batch input. Selama >0 paint ditunda lalu digabung jadi SATU
@@ -287,6 +296,7 @@ export class TuiApp {
   /** True setelah releaseTerminal (spawn anak): paint/repaint ditahan. */
   private released = false
   private mouseMode: MouseMode = "off"
+  private releaseBackdrop: (() => void) | null = null
   private selection: SelectionState | null = null
   private lastLayout: FrameLayout | null = null
   /**
@@ -300,6 +310,7 @@ export class TuiApp {
     cursor: number
     cols: number
     editing: boolean
+    prompt: string
     layout: ComposerLayout
   } | null = null
   private onExit: (() => void) | null = null
@@ -532,9 +543,15 @@ export class TuiApp {
       clearTimeout(this.repaintTimer)
       this.repaintTimer = undefined
     }
+    if (this.toastTimer !== undefined) {
+      clearTimeout(this.toastTimer)
+      this.toastTimer = undefined
+    }
+    this.statusToast = ""
     this.stopActivityClock()
     this.stopWaitingClock()
     this.stopAutoScroll()
+    this.clearBackdrop()
     for (const unsubscribe of this.busUnsubs.splice(0)) {
       try {
         unsubscribe()
@@ -649,6 +666,17 @@ export class TuiApp {
       return
     }
     if (key.type === "wheelup" || key.type === "wheeldown") {
+      if (
+        !this.tooSmall() &&
+        !this.isBusy() &&
+        this.editing &&
+        this.state.menuOpen &&
+        this.state.line.startsWith("/") &&
+        this.host.listCommands(this.state.line).length > 0
+      ) {
+        this.applyEngine({ type: key.type === "wheelup" ? "up" : "down" })
+        return
+      }
       this.scrollBy(key.type === "wheelup" ? 0.5 : -0.5)
       return
     }
@@ -744,13 +772,33 @@ export class TuiApp {
       return
     }
     if (key.type === "tab") {
+      // Saat dropdown `/` sedang terbuka dan punya kandidat, Tab melengkapi
+      // command ke composer tanpa langsung submit; selain itu putar WorkMode.
+      const hasMenu =
+        this.editing &&
+        this.state.menuOpen &&
+        this.state.line.startsWith("/") &&
+        this.host.listCommands(this.state.line).length > 0
+      if (hasMenu) {
+        this.applyEngine(key)
+        return
+      }
       this.host.cycleWorkMode(1)
-      this.paintCurrent()
+      const wm = this.host.getStatus().footer.workMode
+      if (wm) {
+        const label = wm === "EXECUTE" ? "Build" : wm === "PLAN" ? "Plan" : "Discuss"
+        this.showToast(t("tui.workModeLine", { m: label }))
+      } else {
+        this.paintCurrent()
+      }
       return
     }
     if (key.type === "shift-tab") {
       this.host.togglePermissionMode()
-      this.paintCurrent()
+      const pm = this.host.getStatus().footer.mode
+      const label = pm ? `${pm[0]!.toUpperCase()}${pm.slice(1)}` : ""
+      if (label) this.showToast(t("tui.modeLine", { m: label }))
+      else this.paintCurrent()
       return
     }
     if (key.type === "ctrl-o") {
@@ -973,6 +1021,7 @@ export class TuiApp {
   resume(): void {
     if (this.released || this.suspended <= 0) return
     if (--this.suspended > 0) return
+    this.clearBackdrop()
     try {
       this.stdin?.setRawMode(true)
     } catch {}
@@ -993,6 +1042,7 @@ export class TuiApp {
    */
   releaseTerminal(): void {
     this.stopActivityClock()
+    this.clearBackdrop()
     try {
       if (this.onData) this.stdin?.removeListener("data", this.onData)
     } catch {}
@@ -1054,18 +1104,34 @@ export class TuiApp {
     return `${scrim}${s}${esc}[22m${esc}[0m`
   }
 
+  private clearBackdrop(): void {
+    try {
+      this.releaseBackdrop?.()
+    } catch {}
+    this.releaseBackdrop = null
+  }
+
   /** Layar redup sebagai backdrop popup: frame normal dibungkus faint. */
   private paintDimmed(): void {
     const screen = this.currentScreen
     if (!screen) return
     const cols = screen.cols
     const rows = screen.rows
-    const snap = this.host.getStatus()
-    const layout = this.buildLayout(rows, cols, snap)
-    this.lastLayout = layout
-    const dimmed = layout.frame.map((ln) => TuiApp.applyBackdropDim(ln))
-    screen.paint(dimmed)
+    const buildDimmed = (c: number, r: number): readonly string[] => {
+      const snap = this.host.getStatus()
+      const layout = this.buildLayout(r, c, snap)
+      if (c === cols && r === rows) this.lastLayout = layout
+      return layout.frame.map((ln) => TuiApp.applyBackdropDim(ln))
+    }
+    const dimmed = buildDimmed(cols, rows)
+    screen.paint([...dimmed])
     this.frames++
+    this.clearBackdrop()
+    this.releaseBackdrop = registerScreenBackdrop(
+      (c, r) => (c === cols && r === rows ? dimmed : buildDimmed(c, r)),
+      cols,
+      rows,
+    )
   }
 
   private isBusy(): boolean {
@@ -1301,8 +1367,25 @@ export class TuiApp {
     // Idle: prompt tetap tampil. Dulu baris kosong menggantikannya sehingga
     // setelah Esc/Enter-kosong layar terlihat mati (I13: prompt tampil saat
     // boot/idle) — audit 2026-11-12, MEDIUM-4.
-    if (!this.editing) return [chunkByWidth(PROMPT_FIRST, Math.max(10, cols))[0] ?? ""]
+    if (!this.editing) return [chunkByWidth(promptFirst(), Math.max(10, cols))[0] ?? ""]
     return this.composerLayout(cols).rows
+  }
+
+  /** Tampilkan pesan status singkat (micro-toast) di slot footer selama `ms` ms. */
+  showToast(text: string, ms = 2000): void {
+    const clean = sanitizeAnsiLine(text).trim()
+    if (!clean) return
+    this.statusToast = clean
+    if (this.toastTimer !== undefined) clearTimeout(this.toastTimer)
+    this.toastTimer = setTimeout(() => {
+      this.toastTimer = undefined
+      this.statusToast = ""
+      if (!this.quitRequested && this.suspended === 0 && !this.released) this.paintCurrent()
+    }, ms)
+    try {
+      ;(this.toastTimer as unknown as { unref?: () => void }).unref?.()
+    } catch {}
+    if (!this.quitRequested && this.suspended === 0 && !this.released) this.paintCurrent()
   }
 
   private composerHeight(cols: number, busy = this.busy): number {
@@ -1362,6 +1445,26 @@ export class TuiApp {
     }
   }
 
+  /** Parkir kursor untuk pemilik region modal (approval/ask_user). */
+  moveCursor(row: number, col: number): void {
+    if (!this.currentScreen || this.quitRequested) return
+    try {
+      this.currentScreen.moveCursor(row, col)
+    } catch (error) {
+      this.stopAfterRuntimeError(error)
+    }
+  }
+
+  /** Atur visibilitas kursor untuk pemilik region modal (read-only/progress). */
+  setCursorVisible(visible: boolean): void {
+    if (!this.currentScreen || this.quitRequested) return
+    try {
+      this.currentScreen.setCursorVisible(visible)
+    } catch (error) {
+      this.stopAfterRuntimeError(error)
+    }
+  }
+
   /** Hapus region popup (pasangan paintRegion); App akan repaint penuh saat resume. */
   clearRegion(): void {
     if (!this.currentScreen) return
@@ -1384,14 +1487,21 @@ export class TuiApp {
     const w = Math.max(10, cols)
     const line = this.state.line
     const cursor = this.state.cursor
+    const pf = promptFirst()
     const cached = this.composerCache
-    if (cached?.editing && cached.cols === w && cached.cursor === cursor && cached.line === line) {
+    if (
+      cached?.editing &&
+      cached.cols === w &&
+      cached.cursor === cursor &&
+      cached.line === line &&
+      cached.prompt === pf
+    ) {
       return cached.layout
     }
     const layout =
-      this.incrementalComposerLayout(cached, line, cursor, w) ??
+      (cached?.prompt === pf ? this.incrementalComposerLayout(cached, line, cursor, w) : null) ??
       this.layoutComposer(line, cursor, w)
-    this.composerCache = { line, cursor, cols: w, editing: true, layout }
+    this.composerCache = { line, cursor, cols: w, editing: true, prompt: pf, layout }
     return layout
   }
 
@@ -1440,11 +1550,13 @@ export class TuiApp {
    * potong per kolom, kursor di baris visual yang memuat targetWidth.
    */
   private layoutComposer(line: string, cursor: number, w: number): ComposerLayout {
+    const pf = promptFirst()
+    const pc = promptCont()
     // Prompt kosong SELALU satu baris utuh — sama dengan jalur lama. Tanpa
     // special-case, terminal sempit (w < lebar prefix) memecah prefix jadi dua
     // baris dan menggeser kursor; MIN_COLS membuatnya tak terjangkau di app,
     // tapi helper ini juga dipakai layout lain/test.
-    if (!line) return { rows: [PROMPT_FIRST], visIdx: 0, col: displayWidth(PROMPT_FIRST) + 1 }
+    if (!line) return { rows: [pf], visIdx: 0, col: displayWidth(pf) + 1 }
     // Kursor dinormalisasi ke batas grapheme supaya emoji tak terbelah saat
     // dihitung (targetWidth memakai teks sebelum kursor).
     const units = toGraphemes(line)
@@ -1453,8 +1565,7 @@ export class TuiApp {
     const beforeLines = before.split("\n")
     const logicalIdx = beforeLines.length - 1
     const lastLine = beforeLines[logicalIdx] ?? ""
-    const targetWidth =
-      displayWidth(logicalIdx === 0 ? PROMPT_FIRST : PROMPT_CONT) + displayWidth(lastLine)
+    const targetWidth = displayWidth(logicalIdx === 0 ? pf : pc) + displayWidth(lastLine)
 
     const rows: string[] = []
     const logical = line.split("\n")
@@ -1462,7 +1573,7 @@ export class TuiApp {
     let col = 1
     let cursorRowFound = false
     for (let li = 0; li < logical.length; li++) {
-      const prefix = li === 0 ? PROMPT_FIRST : PROMPT_CONT
+      const prefix = li === 0 ? pf : pc
       const full = `${prefix}${logical[li] ?? ""}`
       const wrapped = chunkByWidth(full, w)
       for (const row of wrapped) rows.push(row)
@@ -1507,7 +1618,9 @@ export class TuiApp {
     shown.forEach((h, i) => {
       const picked = start + i === this.state.sel
       const text = sanitizeAnsiLine(h).replace(/^\/+/, "")
-      out.push(picked ? c.accent(c.bold(text)) : text)
+      // Marker `›` + kolom marker tetap: seleksi terbaca tanpa warna dan
+      // label tak bergeser saat panah berpindah.
+      out.push(listRow(text, picked))
     })
     return out.map((l) => chunkByWidth(l, w)[0] ?? "")
   }
@@ -1558,22 +1671,32 @@ export class TuiApp {
     const targetRow = layout.composerOffset + relativeRow
     if (relativeRow < 0 || targetRow < 0) return false
     const w = Math.max(10, process.stdout.columns || 80)
+    const pf = promptFirst()
+    const pc = promptCont()
     const logical = this.state.line.split("\n")
     let rowIndex = 0
     let baseCodeUnits = 0
     for (let lineIndex = 0; lineIndex < logical.length; lineIndex++) {
       const line = logical[lineIndex] ?? ""
-      const prefix = lineIndex === 0 ? PROMPT_FIRST : PROMPT_CONT
+      const prefix = lineIndex === 0 ? pf : pc
       const rows = chunkByWidth(`${prefix}${line}`, w)
       if (targetRow < rowIndex + rows.length) {
-        const row = rows[targetRow - rowIndex] ?? ""
+        const localRow = targetRow - rowIndex
+        // Baris ter-wrap: jumlahkan panjang grapheme baris visual sebelumnya
+        // di baris logis yang sama supaya klik di baris lanjutan akurat.
+        let precedingGraphemes = 0
+        for (let ri = 0; ri < localRow; ri++) {
+          const prevPlain = stripSgr(sanitizeAnsi(rows[ri] ?? ""))
+          const prevBody =
+            ri === 0 && prevPlain.startsWith(prefix) ? prevPlain.slice(prefix.length) : prevPlain
+          precedingGraphemes += toGraphemes(prevBody).length
+        }
+        const row = rows[localRow] ?? ""
         const plain = stripSgr(sanitizeAnsi(row))
-        const body = plain.startsWith(prefix) ? plain.slice(prefix.length) : plain
-        const targetColumn = Math.max(
-          0,
-          key.x - 1 - (plain.startsWith(prefix) ? displayWidth(prefix) : 0),
-        )
-        const local = graphemeOffsetAtColumn(body, targetColumn)
+        const hasPrefix = localRow === 0 && plain.startsWith(prefix)
+        const body = hasPrefix ? plain.slice(prefix.length) : plain
+        const targetColumn = Math.max(0, key.x - 1 - (hasPrefix ? displayWidth(prefix) : 0))
+        const local = precedingGraphemes + graphemeOffsetAtColumn(body, targetColumn)
         const base = toGraphemes(this.state.line.slice(0, baseCodeUnits)).length
         this.state = { ...this.state, cursor: base + local }
         this.histIdx = -1
@@ -1710,9 +1833,9 @@ export class TuiApp {
     try {
       copied = this.host.copySelection(text)
     } catch {}
-    if (copied) this.transcript.pushInfo([c.muted(t("tui.selectionCopied"))])
-    else this.transcript.pushInfo([c.muted(t("tui.selectionCopyFailed"))])
-    this.paintCurrent()
+    const msg = t(copied ? "tui.selectionCopied" : "tui.selectionCopyFailed")
+    this.transcript.pushInfo([c.muted(msg)])
+    this.showToast(msg)
   }
 
   private buildLayout(rows: number, cols: number, snap: TuiStatusSnapshot): FrameLayout {
@@ -1750,7 +1873,9 @@ export class TuiApp {
         ? c.warning(truncateToWidth(t("app.abortHint"), width))
         : newCount > 0
           ? c.muted(truncateToWidth(t("app.newBelow", { n: newCount }), width))
-          : ""
+          : this.statusToast
+            ? c.accent(truncateToWidth(this.statusToast, width))
+            : ""
 
     const allMenu = this.menuRows(height, width, busy)
     const allComposer = this.composerRows(width, snap, busy, now)
@@ -1789,7 +1914,34 @@ export class TuiApp {
       const selected = this.selectedRange(row)
       return selected ? highlightColumns(row.text, selected.start, selected.end) : row.text
     })
+    // Zero-state welcome ringkas saat sesi masih kosong & idle: langsung memberi
+    // orientasi model/workspace/pintasan tanpa menyisipkan riwayat scrollback.
+    if (
+      this.transcript.total() === 0 &&
+      !busy &&
+      menu.length === 0 &&
+      !this.state.line &&
+      viewH >= 5 &&
+      width >= 24
+    ) {
+      const dot = glyphs.dot
+      const innerMax = Math.max(8, width - 4)
+      const model = sanitizeAnsiLine(snap.footer.model || t("tui.noModel"))
+      const cwdText = sanitizeAnsiLine(snap.footer.cwd || "")
+      const welcome = [
+        c.bold(c.accent(truncateToWidth(t("app.welcomeTitle", { dot, model }), innerMax))),
+        ...(cwdText
+          ? [c.dim(truncateToWidth(t("app.welcomeCwd", { cwd: cwdText }), innerMax))]
+          : []),
+        c.muted(truncateToWidth(t("app.welcomeHints", { dot }), innerMax)),
+      ]
+      const startRow = Math.max(0, Math.floor((body.length - welcome.length) / 2))
+      for (let wi = 0; wi < welcome.length && startRow + wi < body.length; wi++) {
+        body[startRow + wi] = `  ${welcome[wi]!}`
+      }
+    }
 
+    const pf = promptFirst()
     let shownComposer: string[]
     let cursorRow: number
     let cursorCol = 1
@@ -1806,7 +1958,13 @@ export class TuiApp {
       cursorRow = viewH + menu.length + 1
       // Kursor parkir tepat setelah prompt saat idle (bukan kolom 1) supaya
       // caret terlihat di tempat user akan mengetik.
-      if (!busy) cursorCol = displayWidth(PROMPT_FIRST) + 1
+      if (!busy) cursorCol = displayWidth(pf) + 1
+    }
+    if (!busy && composerOffset === 0 && shownComposer[0]?.startsWith(pf)) {
+      shownComposer = [
+        `${c.accent(pf)}${shownComposer[0]!.slice(pf.length)}`,
+        ...shownComposer.slice(1),
+      ]
     }
 
     const started = this.turnStartedAt || now

@@ -119,8 +119,9 @@ export const EXECUTION_PATHS: Readonly<Record<string, RegisteredPath>> = {
   },
   "src/mcp/http-transport.ts": {
     cls: "external-integration",
-    entry: "fetch (MCP HTTP)",
-    note: "Integrasi MCP jarak jauh.",
+    entry: "publicHttp.request (MCP HTTP IP-pinned)",
+    proof: "publicHttp.request",
+    note: "Integrasi MCP jarak jauh lewat jalur IP-pinned anti DNS-rebinding.",
   },
   "src/lsp/client.ts": {
     cls: "external-integration",
@@ -141,6 +142,12 @@ export const EXECUTION_PATHS: Readonly<Record<string, RegisteredPath>> = {
     cls: "external-integration",
     entry: "dpapiProtect/dpapiUnprotect (spawnSync)",
     note: "DPAPI Windows untuk secret provider.",
+  },
+  "src/policy/approval-binding.ts": {
+    cls: "external-integration",
+    entry: "captureGitDigest (spawnSync git rev-parse/status)",
+    proof: 'resolveTrustedExecutable("git")',
+    note: "Baca state git (HEAD/status) untuk verifikasi approval binding git_commit/git_push. Tanpa efek samping.",
   },
   "src/policy/context.ts": {
     cls: "external-integration",
@@ -243,6 +250,18 @@ export const EXECUTION_PATHS: Readonly<Record<string, RegisteredPath>> = {
     entry: "fetchWithTimeout/fetchWithRetry (fetch)",
     proof: "export async function",
     note: "Utilitas network; dipakai provider + web tools.",
+  },
+  "src/lib/public-http.ts": {
+    cls: "external-integration",
+    entry: "fetchPinnedUrl (IP-pinned fetch/https.request)",
+    proof: "fetch(",
+    note: "Transport HTTP/HTTPS ter-pin DNS untuk web_fetch dan McpHttpTransport.",
+  },
+  "src/lib/process-tree.ts": {
+    cls: "external-integration",
+    entry: "killProcessTree (spawnSync taskkill)",
+    proof: "spawnSync",
+    note: "Penghentian subtree proses di Windows untuk bash dan hooks.",
   },
   "src/lib/trusted-exec.ts": {
     cls: "external-integration",

@@ -5,6 +5,7 @@
 // negotiation, event SSE terpotong antar chunk, session header, dan penolakan
 // redirect. Mock fetch akan melewatkan justru bagian yang rawan.
 import { afterEach, describe, expect, test } from "bun:test"
+import { publicHttp } from "../src/lib/public-http.ts"
 import { McpHttpTransport, readJsonResponse, readSseResponse } from "../src/mcp/http-transport.ts"
 
 type Handler = (req: Request) => Response | Promise<Response>
@@ -374,6 +375,52 @@ describe("MCP http: keamanan", () => {
     await t.close()
     await new Promise((r) => setTimeout(r, 100))
     expect(hits).toBe(0)
+  })
+
+  test("IP-pinned publicHttp.request dipakai McpHttpTransport & close() tidak mengikuti redirect", async () => {
+    const methods: string[] = []
+    let redirectFollowed = false
+    const evilTarget = Bun.serve({
+      port: 0,
+      fetch() {
+        redirectFollowed = true
+        return new Response("pwned")
+      },
+    })
+    try {
+      const url = serve(async (req) => {
+        methods.push(req.method)
+        if (req.method === "DELETE") {
+          return new Response("", {
+            status: 307,
+            headers: { location: `http://127.0.0.1:${evilTarget.port}/steal` },
+          })
+        }
+        const body = (await req.json()) as { id: number }
+        return new Response(jsonRpc(body.id, {}), {
+          headers: { "content-type": "application/json", "mcp-session-id": "s-pinned" },
+        })
+      })
+      let pinnedCalls = 0
+      const origReq = publicHttp.request
+      publicHttp.request = (async (...args: Parameters<typeof origReq>) => {
+        pinnedCalls++
+        return origReq(...args)
+      }) as typeof origReq
+      try {
+        const t = mk(url)
+        await t.connect()
+        await t.request("initialize")
+        await t.close()
+        expect(pinnedCalls).toBeGreaterThanOrEqual(2)
+        expect(methods).toEqual(["POST", "DELETE"])
+        expect(redirectFollowed).toBe(false)
+      } finally {
+        publicHttp.request = origReq
+      }
+    } finally {
+      evilTarget.stop(true)
+    }
   })
 })
 

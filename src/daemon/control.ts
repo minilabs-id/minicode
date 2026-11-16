@@ -273,6 +273,7 @@ function runOp(op: ControlOp, req: ControlRequest, deps: ControlDeps): ControlOu
     }
 
     case "approval.decide": {
+      if (!sid) return refuse("SESSION_MISMATCH", "args.sid wajib diisi")
       const approvalId = typeof args.approvalId === "string" ? args.approvalId : ""
       const decisionRaw = typeof args.decision === "string" ? args.decision : ""
       if (!approvalId) return refuse("SESSION_MISMATCH", "args.approvalId wajib diisi")
@@ -282,7 +283,7 @@ function runOp(op: ControlOp, req: ControlRequest, deps: ControlDeps): ControlOu
       // [RC-2] Cek kepemilikan session SEBELUM mutasi DB: baca baris tanpa menulis,
       // tolak mismatch SESSION_MISMATCH tanpa membangunkan waiter/mengubah state.
       const existing = deps.approvals.read(approvalId)
-      if (sid && existing && existing.sid !== sid) {
+      if (existing && existing.sid !== sid) {
         // Approval milik sesi lain: menolaknya menggagalkan keputusan yang
         // sebenarnya valid, jadi jangan — laporkan kecocokan yang salah saja.
         return refuse("SESSION_MISMATCH", "approval bukan milik sesi yang disebut", {

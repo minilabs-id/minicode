@@ -173,6 +173,8 @@ const DEFAULT_BASH_ALLOWLIST = [
   "git log*",
   "git branch*",
   "git show*",
+  "git rev-parse*",
+  "git ls-files*",
   "bun test*",
   "bun x tsc*",
   "bun run *",
@@ -211,8 +213,10 @@ const DEFAULT_BASH_ALLOWLIST = [
   "wc *",
   "grep *",
   "rg *",
+  "findstr *",
   "find *",
   "which *",
+  "where *",
   // Menjalankan berkas skrip Node (mis. `node server.js`) — bukan REPL polos
   // (pola `*` butuh argumen) dan bukan eval inline (diblokir bash-guard).
   // Subsumes `node --version` (versi lama) sehingga entri itu tak lagi khusus.
@@ -659,6 +663,10 @@ export function createPermissionHandler(
       return "bash-guard internal error — command refused (fail-closed)"
     }
   }
+  function codeRunMissingSandbox(): boolean {
+    const sb = process.env.MINICODE_SANDBOX ?? ""
+    return sb !== "os" && sb !== "docker" && sb !== "bwrap" && sb !== "seatbelt"
+  }
 
   // Jawaban prompt yang dilaporkan ke observability. "headless" = jalur
   // tanpa prompt (mantan early-return noTty): pemanggil memetakan ke
@@ -743,6 +751,11 @@ export function createPermissionHandler(
       if (NO_PROMPT_TOOLS.has(call.name)) return "allow"
       const list = await getAllowlist()
       if (matchAllowlist(call, list)) return "allow"
+      if (call.name === "code_run" && codeRunMissingSandbox()) {
+        // Tolak sebelum prompt [y/n] agar operator tidak diminta menyetujui
+        // tool yang langsung gagal karena MINICODE_SANDBOX belum aktif.
+        return deny(call, "code_run needs sandbox (os|docker)")
+      }
       if (call.name === "bash") {
         const cmd = (args?.cmd as string) ?? ""
         const br = bashDenyReason(cmd)
@@ -791,9 +804,7 @@ export function createPermissionHandler(
       if (FILE_WRITE_TOOLS.has(call.name)) return "allow"
       if (INTERNAL_WRITE_TOOLS.has(call.name)) return "allow"
       if (call.name === "code_run") {
-        const sb = process.env.MINICODE_SANDBOX ?? ""
-        if (sb !== "os" && sb !== "docker" && sb !== "bwrap" && sb !== "seatbelt")
-          return deny(call, "code_run needs sandbox (os|docker)")
+        if (codeRunMissingSandbox()) return deny(call, "code_run needs sandbox (os|docker)")
         return "allow"
       }
       if (call.name === "bash") {
@@ -1048,7 +1059,7 @@ export function createPermissionHandler(
     // kalau sidik jari diambil SETELAH prompt, kita memverifikasi state yang
     // tidak pernah dilihat user.
     const capturedBinding: ApprovalBinding | null = approvalBindings
-      ? captureApprovalBinding(call.name, call.args, root)
+      ? captureApprovalBinding(call.name, call.args, root, call.id)
       : null
     emitApprovalSafe({
       kind: "requested",

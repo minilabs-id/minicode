@@ -67,7 +67,7 @@ test("instruksi: skill di luar workspace via symlink/JUNCTION tidak dimuat", asy
     if (linked.length === 0) return // tanpa kapabilitas link: lewati
     invalidateSkillCache()
     try {
-      const skills = await loadSkills(dir)
+      const skills = await loadSkills(dir, { allowLocal: true })
       expect(skills.some((s) => s.name === "evil")).toBe(false)
       const sys = await buildSystemPrompt({ cwd: dir })
       expect(sys).not.toContain("pwned")
@@ -90,10 +90,10 @@ test("instruksi: skill normal tetap dimuat (guard tak over-block)", async () => 
     writeFileSync(join(dir, ".minicode", "skills", "sub", "dalam.md"), "isi dalam")
     invalidateSkillCache()
     try {
-      const skills = await loadSkills(dir)
+      const skills = await loadSkills(dir, { allowLocal: true })
       expect(skills.some((s) => s.name === "review")).toBe(true)
       expect(skills.some((s) => s.name === "dalam")).toBe(true)
-      const found = await findSkill("/review", dir)
+      const found = await findSkill("/review", dir, { allowLocal: true })
       expect(found?.name).toBe("review")
       // renderSkill substitusi murni — tak mengeksekusi referensi skill lain.
       const rendered = await renderSkill(found!, "/lain argumen")
@@ -251,7 +251,7 @@ test("instruksi: project A tak bocor ke project B", async () => {
       const sysB = await buildSystemPrompt({ cwd: b })
       expect(sysB).toContain("RAHASIA-B-UNIK-9")
       expect(sysB).not.toContain("RAHASIA-A-UNIK-8")
-      const skillsB = await loadSkills(b)
+      const skillsB = await loadSkills(b, { allowLocal: true })
       expect(skillsB.some((s) => s.name === "milik-a")).toBe(false)
     } finally {
       invalidateSkillCache()

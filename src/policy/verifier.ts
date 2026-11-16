@@ -14,6 +14,40 @@ export interface VerifyResult {
   command: string
   /** [Fase 3 / LOOP-INV-12] Kode keluar proses verifier (0 = lulus). Opsional demi back-compat. */
   exitCode?: number
+  /** True bila proses verifier dipotong timeout internal runner (bukan assertion gagal). */
+  timedOut?: boolean
+}
+
+const TEST_OUTPUT_NOISE_RE =
+  /^\s*(?:\(fail\)|Expected:|Received:|at\s+.*:\d+:\d+|\d+\s*\||\^|expect\()/
+
+/**
+ * Klasifikasikan penyebab kegagalan verifier secara ketat agar teks assertion
+ * test fungsional (mis. pesan error yang kebetulan menyebut kata "network" atau
+ * "permission denied") tidak salah diklasifikasikan sebagai TRANSIENT_ENV /
+ * PERMISSION_OR_EXTERNAL_BLOCKER di lapisan ACE.
+ */
+export function classifyVerifyFailure(input: {
+  ok: boolean
+  output?: string
+  timedOut?: boolean
+}): { transient: boolean; permissionBlocked: boolean } {
+  if (input.ok) return { transient: false, permissionBlocked: false }
+  const raw = String(input.output ?? "")
+  const infraLines = raw
+    .split(/\r?\n/)
+    .filter((line) => !TEST_OUTPUT_NOISE_RE.test(line))
+    .join("\n")
+  const transient =
+    input.timedOut === true ||
+    /\b(?:ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|ESOCKETTIMEDOUT)\b|\bsocket hang up\b|\bHTTP\s*(?:429|503)\b/i.test(
+      infraLines,
+    )
+  const permissionBlocked =
+    /\b(?:EACCES|EPERM)\b|operation not permitted|EACCES:.*permission denied|permission denied:\s*\//i.test(
+      infraLines,
+    )
+  return { transient, permissionBlocked }
 }
 
 /**
@@ -53,11 +87,25 @@ export async function runVerify(
     // kegagalan verifikasi — lempar agar self-heal/REPL berhenti, bukan
     // memperbaiki.
     if (signal?.aborted) signal.throwIfAborted()
-    const err = e as { stdout?: string; stderr?: string; message?: string; code?: unknown }
+    const err = e as {
+      stdout?: string
+      stderr?: string
+      message?: string
+      code?: unknown
+      killed?: boolean
+      signal?: string | null
+    }
     const rawOut = `${err.stdout ?? ""}${err.stderr ? `\n${err.stderr}` : ""}`.trim() || String(e)
     const output = scrubSecrets(rawOut)
     const exitCode = typeof err.code === "number" && Number.isFinite(err.code) ? err.code : 1
-    return { ok: false, output: output.slice(0, 8000), command, exitCode }
+    const timedOut = err.killed === true && (err.signal === "SIGTERM" || err.signal === "SIGKILL")
+    return {
+      ok: false,
+      output: output.slice(0, 8000),
+      command,
+      exitCode,
+      ...(timedOut ? { timedOut: true } : {}),
+    }
   }
 }
 // Deteksi perintah verify yang masuk akal untuk proyek di `cwd`.

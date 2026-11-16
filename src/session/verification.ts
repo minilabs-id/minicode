@@ -1487,18 +1487,8 @@ export async function checkWorkspaceIntegrity(
 }
 
 // ── [Fase 6A / ACE-02] Anti-Reward-Hacking Tamper Guard ──────────────────────
-//
-// Verifikasi yang jujur mensyaratkan evaluator TIDAK ikut berubah selama agen
-// bekerja. Dua jalur curang yang paling murah:
-//   1. menyentuh skrip gate/evaluator (`bench/eval-gate.ts`,
-//      `scripts/telemetry-gate.ts`) atau mengganti script test/verify di
-//      `package.json`, dan
-//   2. menyuntik `.skip(` / `.todo(` baru ke file `test/**/*.test.ts` yang
-//      sedang dimodifikasi agar test yang gagal berhenti dieksekusi.
-//
-// Deteksi ini SANGAT konservatif pada arah yang aman (fail-closed): tanpa
-// baseline yang bisa dibaca, file gate dianggap tersentuh. Baseline diambil
-// dari parameter eksplisit (test hermetik) atau `git show HEAD:<path>`.
+// Tolak klaim selesai bila permukaan evaluator/gate/test dimanipulasi selama sesi
+// (fail-closed terhadap `HEAD` / baseline pra-sesi).
 
 export interface EvaluationTamperingReport {
   readonly tampered: boolean
@@ -1513,11 +1503,166 @@ export interface EvaluationTamperingOptions {
   readonly baselineContentByFile?: ReadonlyMap<string, string>
 }
 
-const EVALUATOR_GATE_FILES = new Set(["bench/eval-gate.ts", "scripts/telemetry-gate.ts"])
+const EVALUATOR_GATE_FILES = new Set([
+  "bench/eval-gate.ts",
+  "bench/harness-audit.ts",
+  "scripts/telemetry-gate.ts",
+  "scripts/coverage-gate.ts",
+  "scripts/pack-budget.ts",
+  "tsconfig.json",
+  "biome.json",
+])
 const SKIP_TODO_RE = /\.(?:skip|skipIf|only|todo|fails)\s*\(/g
+const ASSERTION_CALL_RE = /\b(?:expect|assert(?:\.[A-Za-z_]+)?)\s*\(/g
+const TAUTOLOGY_RE =
+  /\bexpect\s*\(\s*(?:true|false|1|0|"[^"]*"|'[^']*')\s*\)\s*\.(?:toBe|toEqual|toStrictEqual)\s*\(\s*(?:true|false|1|0|"[^"]*"|'[^']*')\s*\)/g
+const EVALUATION_SCAN_ROOTS = [
+  "test",
+  "bench",
+  "scripts",
+  "package.json",
+  "tsconfig.json",
+  "biome.json",
+  ".github",
+] as const
+
+/** Baseline status git pra-sesi per (root::sessionId) agar edit user sebelum sesi tak jadi false-positive. */
+const sessionEvaluationBaselines = new Map<string, Map<string, string>>()
+
+function sessionBaselineKey(sessionId: string, workspaceRoot: string): string {
+  return `${resolve(workspaceRoot)}::${sessionId}`
+}
+
+function isProtectedEvaluatorSurface(rel: string): boolean {
+  return EVALUATOR_GATE_FILES.has(rel) || rel.startsWith(".github/workflows/")
+}
 
 function countSkipTodo(text: string): number {
   return (text.match(SKIP_TODO_RE) ?? []).length
+}
+
+function countAssertions(text: string): number {
+  return (text.match(ASSERTION_CALL_RE) ?? []).length
+}
+
+function countTautologies(text: string): number {
+  return (text.match(TAUTOLOGY_RE) ?? []).length
+}
+
+function listDirtyEvaluationPaths(root: string): string[] {
+  if (!isGitRepo(root)) return []
+  try {
+    const r = spawnSync(
+      resolveTrustedExecutable("git"),
+      [
+        ...GIT_SAFE_BASE,
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+        "--",
+        ...EVALUATION_SCAN_ROOTS,
+      ],
+      {
+        cwd: root,
+        encoding: "utf8",
+        timeout: GIT_OBSERVE_TIMEOUT_MS,
+        maxBuffer: INTEGRITY_MAX_BYTES,
+      },
+    )
+    if (r.status !== 0 || typeof r.stdout !== "string") return []
+    const out: string[] = []
+    for (const rawLine of r.stdout.split(/\r?\n/)) {
+      if (rawLine.length < 4) continue
+      let p = rawLine.slice(3).trim()
+      const arrow = p.indexOf(" -> ")
+      if (arrow !== -1) p = p.slice(arrow + 4).trim()
+      if ((p.startsWith('"') && p.endsWith('"')) || (p.startsWith("'") && p.endsWith("'"))) {
+        p = p.slice(1, -1)
+      }
+      if (p) out.push(p.replace(/\\/g, "/"))
+    }
+    return out
+  } catch {
+    return []
+  }
+}
+
+async function hashWorkspaceRel(root: string, rel: string): Promise<string> {
+  try {
+    const raw = await safeReadFile(resolve(root, rel), root)
+    return createHash("sha256").update(raw, "utf8").digest("hex")
+  } catch {
+    return "MISSING"
+  }
+}
+
+/**
+ * Rekam sidik jari permukaan evaluator/test yang sudah kotor SEBELUM sesi
+ * dimulai, sehingga perubahan lokal sah milik developer tidak memicu false-positive
+ * EVALUATOR_TAMPER_ATTEMPT saat `--verify` berjalan.
+ */
+export async function captureSessionEvaluationBaseline(
+  sessionId: string,
+  workspaceRoot: string,
+): Promise<void> {
+  const root = resolve(workspaceRoot)
+  const key = sessionBaselineKey(sessionId, root)
+  const baseline = new Map<string, string>()
+  for (const rel of listDirtyEvaluationPaths(root)) {
+    baseline.set(rel, await hashWorkspaceRel(root, rel))
+  }
+  sessionEvaluationBaselines.set(key, baseline)
+}
+
+/**
+ * Kumpulkan SEMUA file dimutasi milik sesi ini — menggabungkan jurnal induk,
+ * jurnal seluruh child sub-agent (`delegate_task`), dan perubahan in-session pada
+ * permukaan evaluator/test melalui `bash`/`code_run` (terdeteksi lewat git status).
+ */
+export async function collectSessionModifiedFiles(
+  sessionId: string,
+  workspaceRoot: string,
+  parentRecords?: readonly JournalRecord[],
+): Promise<string[]> {
+  const root = resolve(workspaceRoot)
+  let records = parentRecords
+  if (!records) {
+    const loaded = await loadJournal(sessionId, root).catch(() => null)
+    if (loaded?.status === "valid") records = loaded.records
+  }
+  const combined = new Set<string>(records ? collectModifiedFilesFromJournal(records) : [])
+  if (records) {
+    const childIds = new Set<string>()
+    for (const r of records) {
+      if (r.tool === "delegate_task" && typeof r.childSessionId === "string" && r.childSessionId) {
+        childIds.add(r.childSessionId)
+      }
+    }
+    for (const cid of [...childIds].slice(0, 20)) {
+      const childLoaded = await loadJournal(cid, root).catch(() => null)
+      if (childLoaded?.status === "valid") {
+        for (const p of collectModifiedFilesFromJournal(childLoaded.records)) {
+          combined.add(p)
+        }
+      }
+    }
+  }
+  const dirtyPaths = listDirtyEvaluationPaths(root)
+  if (dirtyPaths.length > 0) {
+    const baseline = sessionEvaluationBaselines.get(sessionBaselineKey(sessionId, root))
+    for (const rel of dirtyPaths) {
+      if (!baseline) {
+        combined.add(rel)
+        continue
+      }
+      const prevHash = baseline.get(rel)
+      const nowHash = await hashWorkspaceRel(root, rel)
+      if (prevHash === undefined || prevHash !== nowHash) {
+        combined.add(rel)
+      }
+    }
+  }
+  return [...combined]
 }
 
 function verificationScriptsFingerprint(text: string): string | null {
@@ -1576,8 +1721,8 @@ export async function detectEvaluationTampering(
     if (!rel || rel.startsWith("..") || isAbsolute(rel) || seen.has(rel)) continue
     seen.add(rel)
 
-    // 1. Skrip gate/evaluator kritis tidak boleh berubah sama sekali.
-    if (EVALUATOR_GATE_FILES.has(rel)) {
+    // 1. Skrip gate/evaluator kritis & workflow CI tidak boleh berubah sama sekali.
+    if (isProtectedEvaluatorSurface(rel)) {
       offending.push(rel)
       continue
     }
@@ -1602,8 +1747,9 @@ export async function detectEvaluationTampering(
       continue
     }
 
-    // 3. File test: hanya `.skip(`/`.todo(` BARU yang dihitung manipulasi.
-    if (rel.startsWith("test/") && rel.endsWith(".test.ts")) {
+    // 3. Berkas test & helper (`test/**/*.ts`): deteksi .skip/.todo baru,
+    // penghapusan assertion (`expect`/`assert`), atau assertion tautologi.
+    if (rel.startsWith("test/") && rel.endsWith(".ts")) {
       let current: string
       try {
         current = await safeReadFile(abs, root)
@@ -1611,9 +1757,13 @@ export async function detectEvaluationTampering(
         continue
       }
       const baselineText = opts.baselineContentByFile?.get(rel) ?? gitBaselineContent(root, rel)
-      // Tanpa baseline di git (file baru): semua skip/todo dianggap baru.
-      const beforeCount = baselineText == null ? 0 : countSkipTodo(baselineText)
-      if (countSkipTodo(current) > beforeCount) offending.push(rel)
+      const beforeSkip = baselineText == null ? 0 : countSkipTodo(baselineText)
+      const beforeAsserts = baselineText == null ? 0 : countAssertions(baselineText)
+      const beforeTaut = baselineText == null ? 0 : countTautologies(baselineText)
+      const skipAdded = countSkipTodo(current) > beforeSkip
+      const assertsDropped = beforeAsserts > 0 && countAssertions(current) < beforeAsserts
+      const tautologyAdded = countTautologies(current) > beforeTaut
+      if (skipAdded || assertsDropped || tautologyAdded) offending.push(rel)
     }
   }
 

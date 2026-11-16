@@ -131,6 +131,27 @@ export function createOpenAICompatProvider(config: OpenAICompatConfig): ModelPro
       // the accumulated tool calls and the finish event only once, otherwise
       // the kernel would see (and execute) the same tool call twice.
       let finished = false;
+      const flushCalls = function* (): Generator<ProviderEvent> {
+        for (const index of order) {
+          const acc = calls.get(index) as unknown as { id: string; name: string; args: string; _extra?: unknown };
+          if (!acc || !acc.name) continue;
+          // Argumen kosong ("") pada tool tanpa parameter harus menjadi {}, bukan ""
+          // (sejajar sse-bounds.ts), supaya validateArgs tidak menolak "expected an object".
+          let args: unknown = {};
+          if (acc.args.trim()) {
+            try {
+              args = JSON.parse(acc.args);
+            } catch {
+              args = { raw: acc.args };
+            }
+          }
+          // Args stay clean (the executor rejects unknown properties);
+          // provider metadata is filed in the side-map by call id.
+          const callId = acc.id || `call_${index}`;
+          if (acc._extra != null) stashProviderMeta(callId, acc._extra);
+          yield { type: "tool_call", id: callId, name: acc.name, args };
+        }
+      };
       for await (const chunk of sse(response.body, signal)) {
         const usage = chunk.usage as {
           prompt_tokens?: number;
@@ -226,23 +247,7 @@ export function createOpenAICompatProvider(config: OpenAICompatConfig): ModelPro
         }
         if (!finished && first.finish_reason) {
           finished = true;
-          for (const index of order) {
-            const acc = calls.get(index) as unknown as { id: string; name: string; args: string; _extra?: unknown };
-            if (!acc) continue;
-            let args: unknown = acc.args;
-            if (acc.args) {
-              try {
-                args = JSON.parse(acc.args);
-              } catch {
-                args = { raw: acc.args };
-              }
-            }
-            // Args stay clean (the executor rejects unknown properties);
-            // provider metadata is filed in the side-map by call id.
-            const callId = acc.id || `call_${index}`
-            if (acc._extra != null) stashProviderMeta(callId, acc._extra);
-            yield { type: "tool_call", id: callId, name: acc.name, args };
-          }
+          yield* flushCalls();
           // P6: content_filter (OpenAI safety filter) must not be invisible as
           // a plain "stop" — surface it as an extension event so observers can
           // distinguish a blocked response from a normal completion.
@@ -253,9 +258,12 @@ export function createOpenAICompatProvider(config: OpenAICompatConfig): ModelPro
         }
       }
       // Provider quirky bisa berakhir tanpa finish_reason (mis. [DONE] langsung).
-      // Emit finish("stop") agar kernel tidak menganggap stream terputus.
+      // Jika sudah ada tool delta terakumulasi, flush dulu + finish("tool_calls")
+      // agar tool call tidak hilang diam-diam.
       if (!finished) {
-        yield { type: "finish", reason: "stop" };
+        const hasCalls = order.some((index) => Boolean(calls.get(index)?.name));
+        yield* flushCalls();
+        yield { type: "finish", reason: hasCalls ? "tool_calls" : "stop" };
       }
     },
   };

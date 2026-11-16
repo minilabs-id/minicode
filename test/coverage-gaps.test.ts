@@ -67,10 +67,14 @@ afterAll(
               log.push(`rmSync after GC FAIL: ${(er2 as Error).message}`)
             }
           }
-          fs.writeFileSync(
-            "C:/Users/zo/.gemini/antigravity/brain/f1cc1403-b0ca-429f-babc-28613d39de82/scratch/diag.txt",
-            `cwd=${process.cwd()}\n${log.join("\n")}\n`,
-          )
+          // Diagnostik cleanup bersifat best-effort: tulis ke tmpdir (path
+          // scratch agen lama bisa tak ada dan justru menggagalkan test).
+          try {
+            fs.writeFileSync(
+              join(tmpdir(), "minicode-coverage-gaps-diag.txt"),
+              `cwd=${process.cwd()}\n${log.join("\n")}\n`,
+            )
+          } catch {}
         }
         if ((code !== "EBUSY" && code !== "EPERM") || attempt === 9) throw error
         await Bun.sleep(Math.min(50 * 2 ** attempt, 1_000))

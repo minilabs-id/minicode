@@ -26,6 +26,7 @@ const CLEAR_ALL = "\x1b[2J"
  * tersembunyi yang membuat terminal "berantakan" setelah Ctrl+D). */
 const RESET_ATTRS = "\x1b[0m"
 const SHOW_CURSOR = "\x1b[?25h"
+const HIDE_CURSOR = "\x1b[?25l"
 // Reset scroll-region — unconditional + idempoten: region aktif peninggalan
 // akan memotong paint fullscreen; tulis SEBELUM enter dan SESUDAH exit agar
 // buffer utama kembali steril apa pun yang terjadi di dalam.
@@ -45,8 +46,36 @@ const EXIT_SEQUENCE = RESET_ATTRS + SHOW_CURSOR + SYNC_END + EXIT + RESET_REGION
 export const SYNC_UPDATE_START = SYNC_START
 export const SYNC_UPDATE_END = SYNC_END
 
+export type ScreenBackdrop = (cols: number, rows: number) => readonly string[]
+
 let depth = 0
 let exitHookInstalled = false
+// Penanda perubahan region (paintRegion/clearRegion) lintas handle: memastikan
+// `paint()` berikutnya pada handle induk (mis. TuiApp.resume) melakukan diff
+// ulang penuh dan tidak melewatkan sel yang ditimpa popup (krusial saat NO_COLOR=1).
+let regionEpoch = 0
+let backdropState: { fn: ScreenBackdrop; cols: number; rows: number } | null = null
+
+/**
+ * Daftarkan penyedia latar redup aktif selama popup komposit hidup: region
+ * yang menyusut/dibersihkan atau ter-resize mengisi ulang sel di luar kotak
+ * dengan backdrop redup tanpa memancarkan `ESC[2J` penuh.
+ */
+export function registerScreenBackdrop(
+  fn: ScreenBackdrop | null,
+  initialCols = 0,
+  initialRows = 0,
+): () => void {
+  if (!fn) {
+    backdropState = null
+    return () => {}
+  }
+  const entry = { fn, cols: initialCols, rows: initialRows }
+  backdropState = entry
+  return () => {
+    if (backdropState === entry) backdropState = null
+  }
+}
 
 function installExitHook(): void {
   if (exitHookInstalled) return
@@ -81,6 +110,8 @@ export interface AltScreen {
    * merakit ulang frame penuh hanya membuang kerja.
    */
   moveCursor(row: number, col: number): void
+  /** Sembunyikan/tampilkan kursor secara atomik dalam blok sync. */
+  setCursorVisible(visible: boolean): void
   /**
    * Lukis REGION TANPA clear: popup di atas konten pemilik layar (App TUI).
    * Tiap baris ditulis di `topRow+i` (1-based) setelah hapus-baris; baris di
@@ -110,6 +141,7 @@ function nullScreen(): AltScreen {
     rows: process.stdout.rows || NULL_ROWS,
     paint: () => {},
     moveCursor: () => {},
+    setCursorVisible: () => {},
     paintRegion: () => {},
     clearRegion: () => {},
     close: () => {},
@@ -162,6 +194,7 @@ export function openAltScreen(): AltScreen {
   let lastFrame: string[] | null = null
   let lastCells: Cell[][] | null = null
   let lastCols = 0
+  let lastRegionEpoch = regionEpoch
   return {
     ok: true,
     // Getter LIVE (bukan snapshot saat open) — resize di tengah modal wajib
@@ -187,6 +220,7 @@ export function openAltScreen(): AltScreen {
       const drifted = consumeScreenDrift()
       if (
         !drifted &&
+        lastRegionEpoch === regionEpoch &&
         lastFrame &&
         lastCells &&
         lastFrame.length === lines.length &&
@@ -208,6 +242,7 @@ export function openAltScreen(): AltScreen {
         lastFrame = lines.slice()
         lastCells = lines.map((line) => parseCells(line))
         lastCols = cols
+        lastRegionEpoch = regionEpoch
       }
       // Reset atribut sebelum kursor: run diff bisa berakhir dengan warna
       // aktif, dan kursor yang ditampilkan mewarisi atribut itu.
@@ -229,7 +264,15 @@ export function openAltScreen(): AltScreen {
       // Sync block + reset atribut: kursor tak boleh mewarisi warna run
       // sebelumnya, dan perpindahan kursor tak perlu menyentuh satu sel pun.
       process.stdout.write(
-        `${SYNC_START}${RESET_ATTRS}\x1b[?25l\x1b[${r};${c}H\x1b[6 q\x1b[?25h${SYNC_END}`,
+        `${SYNC_START}${RESET_ATTRS}${HIDE_CURSOR}\x1b[${r};${c}H\x1b[6 q${SHOW_CURSOR}${SYNC_END}`,
+      )
+    },
+    setCursorVisible(visible: boolean): void {
+      if (closed) return
+      process.stdout.write(
+        visible
+          ? `${SYNC_START}${RESET_ATTRS}${SHOW_CURSOR}${SYNC_END}`
+          : `${SYNC_START}${HIDE_CURSOR}${SYNC_END}`,
       )
     },
     paintRegion(lines: string[], topRow: number): void {
@@ -237,16 +280,27 @@ export function openAltScreen(): AltScreen {
       // Melukis nol baris = no-op murni (bukan clear): pemanggil yang ingin
       // menghapus memakai clearRegion() eksplisit.
       if (!lines.length) return
+      const cols = this.cols
+      const rows = this.rows
       const top = Math.max(1, Math.floor(topRow) || 1)
       const h = lines.length
+      // Bila backdrop aktif dan ukuran layar berubah, reflow seluruh baris di
+      // luar kotak dalam SATU tulis sync agar tepi baru ikut redup (tanpa 2J).
+      const resizedBackdrop =
+        backdropState !== null && (backdropState.cols !== cols || backdropState.rows !== rows)
       // Union region lama + baru: kotak yang menyusut/bergeser (filter,
       // notice hilang) harus menghapus sisa bingkainya sendiri — pemilik
       // layar tak tahu geometri popup.
-      let clearTop = top
-      let clearBottom = top + Math.max(0, h - 1)
+      let clearTop = resizedBackdrop ? 1 : top
+      let clearBottom = resizedBackdrop ? rows : top + Math.max(0, h - 1)
       if (lastRegion) {
         clearTop = Math.min(clearTop, lastRegion.top)
         clearBottom = Math.max(clearBottom, lastRegion.top + lastRegion.height - 1)
+      }
+      const backdropRows = backdropState ? backdropState.fn(cols, rows) : null
+      if (backdropState && resizedBackdrop) {
+        backdropState.cols = cols
+        backdropState.rows = rows
       }
       let out = SYNC_START
       for (let r = clearTop; r <= clearBottom; r++) {
@@ -254,18 +308,20 @@ export function openAltScreen(): AltScreen {
         // Baris diasumsi satu-baris-tersanitasi dari dialogBox (tanpa \n —
         // \n akan menggeser kursor dan merusak baris berikut; split defensif).
         // Clamp ke lebar layar: baris lebih lebar memicu auto-wrap dan
-        // menggeser seluruh region (AUD-009).
-        const row = truncateToWidth(
-          i >= 0 && i < h ? ((lines[i] ?? "").split("\n")[0] ?? "") : "",
-          this.cols,
-        )
+        // menggeser seluruh region (AUD-009). Baris di luar kotak memulihkan
+        // backdrop redup bila ada (bukan meninggalkan lubang hitam kosong).
+        const raw =
+          i >= 0 && i < h ? ((lines[i] ?? "").split("\n")[0] ?? "") : (backdropRows?.[r - 1] ?? "")
+        const row = truncateToWidth(raw, cols)
         out += `\x1b[${r};1H\x1b[2K${row}`
       }
       out += SYNC_END
       process.stdout.write(out)
       lastRegion = h > 0 ? { top, height: h } : null
       // Region menimpa isi frame di luar pelacakan diff; paksa paint berikutnya
-      // clear penuh agar sisa popup tidak tertinggal sebagai baris hantu.
+      // (termasuk handle induk via regionEpoch) clear penuh agar tak ada sel
+      // terlewat (termasuk saat NO_COLOR=1).
+      regionEpoch++
       lastFrame = null
       lastCells = null
       lastCols = 0
@@ -274,14 +330,19 @@ export function openAltScreen(): AltScreen {
       if (closed) return
       if (!lastRegion) return
       try {
+        const cols = this.cols
+        const rows = this.rows
+        const backdropRows = backdropState ? backdropState.fn(cols, rows) : null
         let out = SYNC_START
         for (let r = lastRegion.top; r < lastRegion.top + lastRegion.height; r++) {
-          out += `\x1b[${r};1H\x1b[2K`
+          const bg = backdropRows ? truncateToWidth(backdropRows[r - 1] ?? "", cols) : ""
+          out += `\x1b[${r};1H\x1b[2K${bg}`
         }
         out += SYNC_END
         process.stdout.write(out)
       } catch {}
       lastRegion = null
+      regionEpoch++
       // Area popup sudah dihapus, tetapi isi frame di bawahnya tidak lagi
       // tercermin di `lastCells`; paint berikutnya harus penuh.
       lastFrame = null
@@ -316,6 +377,7 @@ export function altScreenDepth(): number {
  * Node TIDAK jalan pada sinyal fatal default.
  */
 export function forceRestoreScreenForSignal(): void {
+  backdropState = null
   if (depth > 0) {
     try {
       process.stdout.write(EXIT_SEQUENCE)
@@ -331,6 +393,8 @@ export function forceRestoreScreenForSignal(): void {
  */
 export function resetAltScreenDepth(): void {
   depth = 0
+  regionEpoch = 0
+  backdropState = null
   resetInteractiveScreenHoldForTest()
 }
 

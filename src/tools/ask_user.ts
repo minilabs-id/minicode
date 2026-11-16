@@ -1,5 +1,6 @@
 import type { Tool } from "#minicore"
 import type { ApprovalEventHook, ApprovalHookEvent } from "../presentation/events.ts"
+import { sliceSafeChars } from "./context.ts"
 
 // Tanya user di tengah run — untuk pilihan yang tidak bisa diputuskan model
 // sendiri (ambiguitas kebutuhan, kredensial, "lanjut/tidak").
@@ -10,19 +11,6 @@ import type { ApprovalEventHook, ApprovalHookEvent } from "../presentation/event
 // yang aman sendiri, bukan mengarang jawaban user.
 
 export type AskTextFn = (question: string, options?: string[]) => Promise<string | null>
-
-/**
- * Potong tanpa membelah pasangan surrogate: `slice` mentah menyisakan surrogate
- * tinggi yatim → U+FFFD (AUD-010). Lapisan tool tak boleh impor src/ui.
- */
-function sliceSafeChars(s: string, max: number): string {
-  if (s.length <= max) return s
-  let end = max
-  const code = s.charCodeAt(end - 1)
-  // Surrogate tinggi di posisi terakhir = pasangannya ikut terpotong; mundur 1.
-  if (code >= 0xd800 && code <= 0xdbff) end -= 1
-  return s.slice(0, Math.max(0, end))
-}
 
 let askTextFn: AskTextFn | undefined
 

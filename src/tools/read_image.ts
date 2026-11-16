@@ -11,6 +11,35 @@ import { contextUnrestricted, requireToolCwd } from "./context.ts"
 // vendor tokens.ts — angka lain (BASH_OUTPUT×5) melanggar intent anti-korup.
 const IMAGE_B64_MAX_CHARS = 4096 * 4 - 200
 
+function detectImageMime(ext: string, buf: Buffer): string {
+  if (ext === "jpg" || ext === "jpeg") return "image/jpeg"
+  if (ext === "webp") return "image/webp"
+  if (ext === "gif") return "image/gif"
+  if (ext === "png") return "image/png"
+  // Fallback ke magic bytes bila ekstensi tidak dikenal/absen.
+  if (buf.length >= 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
+    return "image/png"
+  }
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) {
+    return "image/jpeg"
+  }
+  if (
+    buf.length >= 6 &&
+    (buf.subarray(0, 6).toString("ascii") === "GIF87a" ||
+      buf.subarray(0, 6).toString("ascii") === "GIF89a")
+  ) {
+    return "image/gif"
+  }
+  if (
+    buf.length >= 12 &&
+    buf.subarray(0, 4).toString("ascii") === "RIFF" &&
+    buf.subarray(8, 12).toString("ascii") === "WEBP"
+  ) {
+    return "image/webp"
+  }
+  return "image/png"
+}
+
 export const readImageTool: Tool = {
   name: "read_image",
   description:
@@ -18,7 +47,7 @@ export const readImageTool: Tool = {
   parameters: {
     type: "object",
     properties: {
-      path: { type: "string", description: "path image relatif" },
+      path: { type: "string", description: "relative image file path" },
     },
     required: ["path"],
     additionalProperties: false,
@@ -59,21 +88,14 @@ export const readImageTool: Tool = {
       const estB64 = Math.ceil((buf.byteLength * 4) / 3) + 30
       if (estB64 > IMAGE_B64_MAX_CHARS)
         throw new Error(
-          `image too large: base64 ~${estB64} chars exceeds the ${IMAGE_B64_MAX_CHARS}-char context limit — compress first (e.g. via code_run sharp)`,
+          `image too large: base64 ~${estB64} chars exceeds the ${IMAGE_B64_MAX_CHARS}-char context limit — compress or resize it first`,
         )
     } finally {
       await handle.close().catch(() => {})
     }
     const b64 = buf.toString("base64")
-    const ext = p.split(".").pop()?.toLowerCase() ?? "png"
-    const mime =
-      ext === "jpg" || ext === "jpeg"
-        ? "image/jpeg"
-        : ext === "webp"
-          ? "image/webp"
-          : ext === "gif"
-            ? "image/gif"
-            : "image/png"
+    const ext = p.split(".").pop()?.toLowerCase() ?? ""
+    const mime = detectImageMime(ext, buf)
     const tokens = estimateImageTokens(buf.byteLength)
     // S4 — kirim utuh + laporkan bytes (dulu slice 200k diam-diam → gambar korup).
     // File sudah di-cap (READ_FILE_MAX_BYTES + IMAGE_B64_MAX_CHARS) di atas,

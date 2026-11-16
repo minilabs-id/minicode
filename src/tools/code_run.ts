@@ -26,7 +26,7 @@ export function shSingleQuote(s: string): string {
 export const codeRunTool: Tool = {
   name: "code_run",
   description:
-    "Run a code snippet (python -c / node -e) inside the configured sandbox (docker or OS sandbox, network-isolated). Requires MINICODE_SANDBOX=os|docker with a working backend; refuses otherwise. Python needs an image containing python3.",
+    "Run a code snippet (python -c / node -e) inside the configured sandbox (Docker, Linux bwrap, or macOS seatbelt — network-isolated). Requires MINICODE_SANDBOX=os|docker with an available backend (unavailable natively on Windows without Docker); refuses otherwise. Python needs an image/environment containing python3.",
   parameters: {
     type: "object",
     properties: {

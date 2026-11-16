@@ -13,6 +13,7 @@ import {
   clearSubAgentSessionFactory,
   delegateTaskTool,
   getSubAgentProvider,
+  setSubAgentGovernance,
   setSubAgentParentRouting,
   setSubAgentSessionFactory,
 } from "../src/tools/task.ts"
@@ -215,5 +216,27 @@ describe("sub-agent mewarisi mode allowlist parent", () => {
     } as never
     await delegateTaskTool.execute({ prompt: "x" }, ctx)
     expect(seen?.permissionMode).toBe("auto")
+  })
+
+  test("parent meneruskan restrictBash & allowLocalConfig live via setSubAgentGovernance", async () => {
+    process.env.OPENAI_API_KEY = process.env.OPENAI_API_KEY || "sk-test-hermetic"
+    let seen: { restrictBash?: boolean; allowLocalConfig?: boolean } | undefined
+    setSubAgentSessionFactory(async (spec) => {
+      seen = spec
+      return {
+        events: { on: () => () => {} },
+        run: async () => ({ finalText: "ok", usage: { steps: 1 } }),
+      }
+    })
+    setSubAgentGovernance(() => ({ restrictBash: true, allowLocalConfig: true }))
+    const ctx = {
+      signal: new AbortController().signal,
+      cwd: process.cwd(),
+      emit: () => {},
+      state: { model: "prov::m1" },
+    } as never
+    await delegateTaskTool.execute({ prompt: "x" }, ctx)
+    expect(seen?.restrictBash).toBe(true)
+    expect(seen?.allowLocalConfig).toBe(true)
   })
 })

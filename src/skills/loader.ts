@@ -154,32 +154,43 @@ async function loadSkillAssets(
   return out
 }
 
-let skillsCache: { cwd: string; at: number; skills: Skill[] } | undefined
+let skillsCache: { key: string; at: number; skills: Skill[] } | undefined
 const SKILLS_CACHE_TTL_MS = 5 * 60 * 1000
 
-export async function loadSkills(cwd = process.cwd()): Promise<Skill[]> {
+export interface LoadSkillsOptions {
+  /** Izinkan pemuatan skill lokal `<cwd>/.minicode/skills` (butuh `--allow-local-config`). */
+  allowLocal?: boolean
+}
+
+export async function loadSkills(
+  cwd = process.cwd(),
+  opts: LoadSkillsOptions = {},
+): Promise<Skill[]> {
   // cache in-memory 5 menit — loadSkills dipanggil berulang (setup, REPL, one-shot)
   const now = Date.now()
-  const key = resolve(cwd)
-  if (skillsCache && skillsCache.cwd === key && now - skillsCache.at < SKILLS_CACHE_TTL_MS) {
+  const allowLocal = opts.allowLocal === true
+  const cacheKey = `${resolve(cwd)}::local=${allowLocal ? 1 : 0}`
+  if (skillsCache && skillsCache.key === cacheKey && now - skillsCache.at < SKILLS_CACHE_TTL_MS) {
     return skillsCache.skills
   }
   const skills: Skill[] = []
   await loadDir(GLOBAL_SKILLS, skills)
-  const localSkills: Skill[] = []
-  await loadDir(resolve(cwd, LOCAL_SKILLS), localSkills, resolve(cwd, LOCAL_SKILLS))
-  if (localSkills.length > 0) {
-    try {
-      process.stderr.write(
-        `[warn] skills: loaded ${localSkills.length} project skill(s) from ${LOCAL_SKILLS} (untrusted repo instructions)\n`,
-      )
-    } catch {}
-    skills.push(...localSkills)
+  if (allowLocal) {
+    const localSkills: Skill[] = []
+    await loadDir(resolve(cwd, LOCAL_SKILLS), localSkills, resolve(cwd, LOCAL_SKILLS))
+    if (localSkills.length > 0) {
+      try {
+        process.stderr.write(
+          `[warn] skills: loaded ${localSkills.length} project skill(s) from ${LOCAL_SKILLS} (untrusted repo instructions)\n`,
+        )
+      } catch {}
+      skills.push(...localSkills)
+    }
   }
   // local overrides global by name
   const map = new Map<string, Skill>()
   for (const s of skills) map.set(s.name, s)
-  skillsCache = { cwd: key, at: now, skills: [...map.values()] }
+  skillsCache = { key: cacheKey, at: now, skills: [...map.values()] }
   return skillsCache.skills
 }
 
@@ -191,8 +202,12 @@ export async function renderSkill(skill: Skill, args: string): Promise<string> {
   return skill.body.replace(/\{\{args\}\}/g, args).replace(/\$ARGUMENTS/g, args)
 }
 
-export async function findSkill(name: string, cwd = process.cwd()): Promise<Skill | undefined> {
-  const all = await loadSkills(cwd)
+export async function findSkill(
+  name: string,
+  cwd = process.cwd(),
+  opts: LoadSkillsOptions = {},
+): Promise<Skill | undefined> {
+  const all = await loadSkills(cwd, opts)
   return all.find((s) => s.name === name || s.name === name.replace(/^\//, ""))
 }
 

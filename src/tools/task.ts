@@ -43,7 +43,7 @@ const pool = new Pool(LIMITS.SUB_AGENT_POOL_SIZE)
 
 // Harness-P2: scope read-only bersama untuk sub-agen explore DAN sesi utama
 // (--tool-scope explore). Satu daftar, satu makna: scoping per fase (pelajaran
-// Vercel: tool minimum per fase, bukan semua 37 sekaligus). Diuji oleh
+// Vercel: tool minimum per fase, bukan semua 38 sekaligus). Diuji oleh
 // test/harness-p2 + audit invariant bench/harness-audit.
 // [Fase 2 / TOOL-01] Diimpor dari registry kontrak tool — dulu daftar manual
 // di sini yang harus disinkronkan dengan tool-layer.
@@ -91,11 +91,17 @@ export interface SubAgentSpec {
    * (live, ikut /model mid-session); opsional agar factory lama tetap jalan.
    */
   model?: string
-  /** [Fase 7 / LOOP-INV-15] Konfigurasi NoProgressDetector anak. Default =
-   *  aktif (createMinicodeSession aktif secara default); field ini
-   *  memungkinkan factory menurunkan ambang thrashing read-only karena anak
-   *  explore/plan memang read-only (stagnasi = perulangan grep/glob). */
+  /**
+   * [Fase 7 / LOOP-INV-15] Konfigurasi NoProgressDetector anak. Default =
+   * aktif (createMinicodeSession aktif secara default); field ini
+   * memungkinkan factory menurunkan ambang thrashing read-only karena anak
+   * explore/plan memang read-only (stagnasi = perulangan grep/glob).
+   */
   noProgress?: NoProgressOptions
+  /** Warisan pengetatan bash-allowlist dari parent saat restrictBash aktif. */
+  restrictBash?: boolean
+  /** Warisan opt-in local config dari parent (fail-closed default false). */
+  allowLocalConfig?: boolean
 }
 
 /** Subset struktural sesi yang dibutuhkan tool ini — tanpa tipe lapisan app. */
@@ -138,8 +144,9 @@ export function clearSubAgentSessionFactory(): void {
   parentRouting = {}
   childExecutionRunner = undefined
   parentRunIdFn = () => null
-  // P12 S2.2 — reset WorkMode induk agar test terisolasi (pola reset lain).
+  // P12 S2.2 — reset WorkMode & governance induk agar test terisolasi.
   subAgentWorkModeFn = () => undefined
+  subAgentGovernanceFn = () => ({})
 }
 
 /**
@@ -196,6 +203,26 @@ export function subAgentWorkMode(): WorkMode {
     return subAgentWorkModeFn() ?? "EXECUTE"
   } catch {
     return "EXECUTE"
+  }
+}
+
+export interface SubAgentGovernance {
+  readonly restrictBash?: boolean
+  readonly allowLocalConfig?: boolean
+}
+
+let subAgentGovernanceFn: () => SubAgentGovernance = () => ({})
+
+/** Suntikkan governance live dari composition root agar anak mewarisi restrictBash & allowLocalConfig. */
+export function setSubAgentGovernance(fn: () => SubAgentGovernance): void {
+  subAgentGovernanceFn = fn
+}
+
+export function subAgentGovernance(): SubAgentGovernance {
+  try {
+    return subAgentGovernanceFn() ?? {}
+  } catch {
+    return {}
   }
 }
 
@@ -509,6 +536,7 @@ export const delegateTaskTool: Tool = {
           return observedSummary
         }
 
+        const gov = subAgentGovernance()
         const session = await factory({
           provider,
           tools: verifiedSubTools,
@@ -519,6 +547,8 @@ export const delegateTaskTool: Tool = {
           // dipasang di createMinicodeSession oleh factory). EXECUTE = perilaku
           // lama (tanpa ceiling tambahan).
           workMode: childWorkMode,
+          ...(gov.restrictBash ? { restrictBash: true } : {}),
+          ...(gov.allowLocalConfig ? { allowLocalConfig: true } : {}),
           maxSteps: cap,
           timeoutMs: LIMITS.SUB_AGENT_TIMEOUT_MS,
           // [Fase 7 / LOOP-INV-15] NoProgressDetector anak EKSPLISIT (bukan

@@ -6,9 +6,10 @@ import { LIMITS } from "../constants.ts"
 import { isIgnored, loadIgnoreMatchers } from "../lib/ignore.ts"
 import { safeReadFile } from "../lib/safe-open.ts"
 import { resolveTrustedExecutable } from "../lib/trusted-exec.ts"
-import { isPathOutsideRoot, isSensitive } from "../policy/jail.ts"
+import { isCwdOutsideRoot, isPathOutsideRoot, isSensitive } from "../policy/jail.ts"
 import { sanitizeSpawnEnv, scrubSecrets } from "../policy/scrub.ts"
 import { contextUnrestricted, requireToolCwd } from "./context.ts"
+import { globToRegExp } from "./glob.ts"
 
 async function walkGrep(
   dir: string,
@@ -20,18 +21,31 @@ async function walkGrep(
   includeRe?: RegExp | null,
   ignoreMatchers: ((rel: string) => boolean)[] = [],
   relaxed = false,
+  includeDotfiles = false,
 ) {
   if (signal.aborted) throw new Error("aborted")
   if (out.length >= limit) return
   const entries = await readdir(dir, { withFileTypes: true }).catch(() => [])
   for (const e of entries) {
     if (out.length >= limit) break
-    if (e.name.startsWith(".") || e.name === "node_modules" || e.name === ".git") continue
+    if (e.name === "node_modules" || e.name === ".git") continue
+    if (!includeDotfiles && e.name.startsWith(".")) continue
     const full = join(dir, e.name)
     const rel = relative(root, full).replace(/\\/g, "/")
     if (isIgnored(rel, ignoreMatchers)) continue
     if (e.isDirectory()) {
-      await walkGrep(full, re, out, root, limit, signal, includeRe, ignoreMatchers, relaxed)
+      await walkGrep(
+        full,
+        re,
+        out,
+        root,
+        limit,
+        signal,
+        includeRe,
+        ignoreMatchers,
+        relaxed,
+        includeDotfiles,
+      )
     } else {
       if (includeRe && !includeRe.test(rel) && !includeRe.test(e.name)) continue
       if (/\.(png|jpg|jpeg|gif|webp|pdf|zip|exe|dll|bin)$/i.test(e.name)) continue
@@ -70,12 +84,9 @@ async function walkGrep(
 
 function includeToRegExp(include: string): RegExp | null {
   if (!include) return null
-  let esc = include.replace(/[.+^${}()|[\]\\]/g, "\\$&")
-  esc = esc.replace(/\*\*/g, "§§")
-  esc = esc.replace(/\*/g, "[^/]*")
-  esc = esc.replace(/§§/g, ".*")
-  esc = esc.replace(/\?/g, ".")
-  return new RegExp(`^${esc}$`)
+  // Pakai parser glob yang sama dengan glob.ts agar brace expansion `{ts,tsx}`
+  // konsisten antara mesin ripgrep (--glob) dan walker fallback JS.
+  return globToRegExp(include)
 }
 
 // ── ripgrep ──
@@ -139,6 +150,8 @@ function runRipgrep(
   signal: AbortSignal,
   include?: string,
   relaxed = false,
+  ignoreCase = false,
+  includeDotfiles = false,
 ): Promise<string[]> {
   const args = [
     "--no-config", // config ripgrep dapat menjalankan --pre pada berkas workspace
@@ -155,9 +168,9 @@ function runRipgrep(
     "!.git/**",
     "--glob",
     "!node_modules/**",
-    "--glob",
-    "!.*/**",
   ]
+  if (!includeDotfiles) args.push("--glob", "!.*/**")
+  if (ignoreCase) args.push("-i")
   if (include) args.push("--glob", include)
   args.push("--regexp", pattern, "--", ".")
 
@@ -238,41 +251,59 @@ function runRipgrep(
 export const grepTool: Tool = {
   name: "grep",
   description:
-    "Search a regex across files. Returns file:line: content, capped (100/500 matches) with a refine hint. Skips .git, node_modules, and dotfiles; does not follow symlinks. Use for locating symbols or patterns before reading files.",
+    "Search a regex across files. Returns file:line: content, capped (100/500 matches) with a refine hint. Skips .git, node_modules, and dotfiles by default; does not follow symlinks. Use for locating symbols or patterns before reading files.",
   parameters: {
     type: "object",
     properties: {
       pattern: { type: "string", description: "regex pattern (e.g. log.*Error)" },
       cwd: { type: "string", description: "root directory (default: workspace root)" },
-      include: { type: "string", description: "file glob filter (e.g. *.ts)" },
+      include: { type: "string", description: "file glob filter (e.g. *.ts or *.{ts,tsx})" },
       limit: { type: "number" },
+      caseInsensitive: {
+        type: "boolean",
+        description: "ignore case when matching (default false)",
+      },
+      includeDotfiles: {
+        type: "boolean",
+        description: "include dotfiles/dotdirs like .github (default false)",
+      },
     },
     required: ["pattern"],
     additionalProperties: false,
   },
-  async execute({ pattern, cwd, include, limit }, ctx) {
+  async execute({ pattern, cwd, include, limit, caseInsensitive, includeDotfiles }, ctx) {
     const sessionRoot = requireToolCwd(ctx)
     const relaxed = contextUnrestricted(ctx)
     const rawRoot = (cwd as string) ?? "."
     const root = resolve(sessionRoot, rawRoot)
-    if (!relaxed && isPathOutsideRoot(root, sessionRoot))
+    if (
+      !relaxed &&
+      (isPathOutsideRoot(root, sessionRoot) || isCwdOutsideRoot(rawRoot, sessionRoot))
+    )
       throw new Error(`cwd outside workspace: ${rawRoot}`)
     const rawLim = limit as number | undefined
     const lim = Number.isFinite(rawLim)
       ? Math.min(Math.max(Math.floor(rawLim!), 1), LIMITS.SEARCH_MAX_LIMIT)
       : LIMITS.SEARCH_DEFAULT_LIMIT
-    const pat = pattern as string
+    const rawPat = pattern as string
+    const inlineIgnoreCase = rawPat.startsWith("(?i)")
+    const pat = inlineIgnoreCase ? rawPat.slice(4) : rawPat
+    const ignoreCase = caseInsensitive === true || inlineIgnoreCase
     // Validasi regex di JS lebih dulu: pesan errornya jelas dan berlaku untuk
-    // kedua jalur. Sintaks yang JS terima praktis selalu diterima rg juga.
+    // kedua jalur. Prefix `(?i)` dikonversi ke flag `i` agar sintaks umum PCRE
+    // tidak ditolak oleh JS RegExp sebelum mencapai ripgrep.
     let re: RegExp
     try {
-      re = new RegExp(pat)
+      re = new RegExp(pat, ignoreCase ? "i" : "")
     } catch (e) {
       throw new Error(`invalid regex: ${(e as Error).message}`)
     }
 
     const noMatch = () =>
-      `no matches for /${pat}/ in ${rawRoot}${include ? ` (include ${include})` : ""}`
+      `no matches for /${rawPat}/ in ${rawRoot}${include ? ` (include ${include})` : ""}`
+    const st = await stat(root).catch(() => null)
+    if (!st?.isDirectory()) return noMatch()
+    const withDotfiles = includeDotfiles === true
 
     // Minta satu lebih agar tahu pasti apakah hasil terpotong (temuan #02:
     // limit-hit diam-diam tampak lengkap). Tampilkan tetap `lim`.
@@ -286,6 +317,8 @@ export const grepTool: Tool = {
           ctx.signal,
           include as string | undefined,
           relaxed,
+          ignoreCase,
+          withDotfiles,
         )
         if (hits.length === 0) return noMatch()
         // runRipgrep tandai timeout via suffix khusus di elemen terakhir (bila timedOut)
@@ -302,7 +335,18 @@ export const grepTool: Tool = {
     const incRe = include ? includeToRegExp(include as string) : null
     const ignoreMatchers = await loadIgnoreMatchers(root)
     const out: string[] = []
-    await walkGrep(root, re, out, root, want, ctx.signal, incRe, ignoreMatchers, relaxed)
+    await walkGrep(
+      root,
+      re,
+      out,
+      root,
+      want,
+      ctx.signal,
+      incRe,
+      ignoreMatchers,
+      relaxed,
+      withDotfiles,
+    )
     return out.length === 0 ? noMatch() : withCapMark(out, lim)
   },
 }

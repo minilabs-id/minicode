@@ -7,7 +7,8 @@ import {
   pricingOverlayMeta,
   syncPricing,
 } from "../../src/policy/pricing.ts"
-import { c, glyphs } from "../../src/ui/render/theme.ts"
+import { formatError } from "../../src/ui/render/errors.ts"
+import { c } from "../../src/ui/render/theme.ts"
 
 const PRICING_HELP = `minicode pricing — price table for cost estimation
 
@@ -29,11 +30,11 @@ export async function handlePricing(args: string[]): Promise<never> {
     try {
       const res = await syncPricing()
       console.log(
-        `${c.green(glyphs.check)} saved ${res.count} models (${Math.round(res.bytes / 1024)} KB)\n  ${c.dim(res.path)}`,
+        `${c.green("ok")} saved ${res.count} models (${Math.round(res.bytes / 1024)} KB)\n  ${c.dim(res.path)}`,
       )
       process.exit(0)
     } catch (e) {
-      console.error(`${c.red(glyphs.cross)} failed: ${(e as Error).message}`)
+      console.error(c.red(`failed: ${formatError(e)}`))
       console.error(c.dim("  built-in price table is still used — nothing is broken"))
       process.exit(1)
     }
@@ -87,7 +88,7 @@ export async function handlePricing(args: string[]): Promise<never> {
       await readFile(pricingCachePath(), "utf8")
       const { rm } = await import("node:fs/promises")
       await rm(pricingCachePath(), { force: true })
-      console.log(`${c.green(glyphs.check)} pricing cache cleared`)
+      console.log(`${c.green("ok")} pricing cache cleared`)
     } catch {
       console.log("(no pricing cache)")
     }

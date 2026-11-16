@@ -1,8 +1,9 @@
 import { spawn, spawnSync } from "node:child_process"
-import { resolve } from "node:path"
+import { join, resolve } from "node:path"
 import { LIMITS } from "../constants.ts"
 import { resolveTrustedExecutable } from "../lib/trusted-exec.ts"
 import { sanitizeSpawnEnv } from "../policy/scrub.ts"
+import { allocateEmptyMaskFile, discoverSandboxMaskTargets } from "./mask.ts"
 
 let osSandboxOk: boolean | null = null
 let osSandboxType: "seatbelt" | "bwrap" | "none" | null = null
@@ -65,8 +66,92 @@ export interface OsSandboxOptions {
   network?: "none" | "bridge"
 }
 
-// Seatbelt profile minimal (deny network, restrict writes outside cwd)
-// bwrap: bubblewrap with --ro-bind / --bind cwd, --unshare-net, --die-with-parent
+function escapeSeatbelt(s: string): string {
+  return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')
+}
+
+/** Susun profil macOS Seatbelt dengan penolakan `.minicode/` dan berkas `.env*` sensitif. */
+export function buildSeatbeltProfile(
+  absCwd: string,
+  envFiles: readonly string[] = [],
+  opts: { network?: "none" | "bridge" } = {},
+): string {
+  const escapedAbs = escapeSeatbelt(absCwd)
+  const deniedPaths = new Set<string>([
+    ...envFiles.map((rel) => join(absCwd, rel)),
+    ...([".env", ".env.local", ".env.production", ".env.development", ".env.test"] as const).map(
+      (f) => join(absCwd, f),
+    ),
+  ])
+  const envDenyRules = [...deniedPaths]
+    .sort()
+    .map((p) => `(deny file-read* file-write* (literal "${escapeSeatbelt(p)}"))`)
+    .join("\n")
+  const escapedMinicode = escapeSeatbelt(join(absCwd, ".minicode"))
+  return `(version 1)
+(deny default)
+(allow process-exec)
+(allow file-read* file-write* (subpath "${escapedAbs}"))
+(deny file-read* file-write* (subpath "${escapedMinicode}"))
+${envDenyRules}
+(allow file-read* (subpath "/usr") (subpath "/bin") (subpath "/private/tmp"))
+(allow sysctl-read)
+${opts.network === "bridge" ? "(allow network*)" : "(deny network*)"}
+`
+}
+
+/** Susun argumen `bwrap` dengan isolasi namespace penuh dan masking `.minicode/` & `.env*`. */
+export function buildBwrapArgs(
+  command: string,
+  absCwd: string,
+  opts: OsSandboxOptions,
+  mask: {
+    hasMinicode: boolean
+    envFiles: readonly string[]
+    emptyMaskPath: string | null
+  },
+): string[] {
+  const args = [
+    "--ro-bind",
+    "/usr",
+    "/usr",
+    "--ro-bind",
+    "/bin",
+    "/bin",
+    "--ro-bind",
+    "/lib",
+    "/lib",
+    "--ro-bind-try",
+    "/lib64",
+    "/lib64",
+    "--proc",
+    "/proc",
+    "--dev",
+    "/dev",
+    "--tmpfs",
+    "/tmp",
+    "--bind",
+    absCwd,
+    absCwd,
+  ]
+  if (mask.hasMinicode) {
+    args.push("--tmpfs", join(absCwd, ".minicode"))
+  }
+  if (mask.emptyMaskPath) {
+    for (const rel of mask.envFiles) {
+      args.push("--ro-bind", mask.emptyMaskPath, join(absCwd, rel))
+    }
+  }
+  args.push("--chdir", absCwd, "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--new-session")
+  if (opts.network !== "bridge") {
+    args.push("--unshare-net")
+  }
+  args.push("--die-with-parent", "--cap-drop", "ALL", "sh", "-c", command)
+  return args
+}
+
+// Seatbelt profile minimal (deny network, restrict writes outside cwd + .env/.minicode)
+// bwrap: bubblewrap with --ro-bind / --bind cwd, namespace unshare + masking
 export function runInOsSandbox(
   command: string,
   cwd: string,
@@ -87,61 +172,23 @@ export function runInOsSandbox(
   const abs = resolve(cwd)
   const sanitizedEnv = sanitizeSpawnEnv(process.env, opts.env) as Record<string, string>
   const timeout = opts.timeoutMs ?? LIMITS.DOCKER_TIMEOUT_MS
+  const targets = discoverSandboxMaskTargets(abs)
 
   if (type === "seatbelt") {
-    // macOS seatbelt - simple deny network profile (escape \ dan " pada path)
-    const escapedAbs = abs.replace(/\\/g, "\\\\").replace(/"/g, '\\"')
-    const profile = `(version 1)
-(deny default)
-(allow process-exec)
-(allow file-read* file-write* (subpath "${escapedAbs}"))
-(allow file-read* (subpath "/usr") (subpath "/bin") (subpath "/private/tmp"))
-(allow sysctl-read)
-(deny network*)
-`
-    // Use sandbox-exec with inline profile via stdin? sandbox-exec needs file, write tmp
+    const profile = buildSeatbeltProfile(abs, targets.envFiles, { network: opts.network })
     const args = ["-p", profile, "sh", "-c", command]
     return runSpawn("sandbox-exec", args, abs, sanitizedEnv, timeout, opts.signal)
   }
   if (type === "bwrap") {
-    const args = [
-      "--ro-bind",
-      "/usr",
-      "/usr",
-      "--ro-bind",
-      "/bin",
-      "/bin",
-      "--ro-bind",
-      "/lib",
-      "/lib",
-      "--ro-bind-try",
-      "/lib64",
-      "/lib64",
-      "--proc",
-      "/proc",
-      "--dev",
-      "/dev",
-      "--tmpfs",
-      "/tmp",
-      "--bind",
-      abs,
-      abs,
-      "--chdir",
-      abs,
-      "--unshare-net",
-      "--die-with-parent",
-      "--cap-drop",
-      "ALL",
-      "sh",
-      "-c",
-      command,
-    ]
-    // best-effort: if network bridge requested, omit --unshare-net
-    if (opts.network === "bridge") {
-      const idx = args.indexOf("--unshare-net")
-      if (idx !== -1) args.splice(idx, 1)
-    }
-    return runSpawn("bwrap", args, abs, sanitizedEnv, timeout, opts.signal)
+    const emptyMask = allocateEmptyMaskFile(targets.envFiles.length > 0)
+    const args = buildBwrapArgs(command, abs, opts, {
+      hasMinicode: targets.hasMinicode,
+      envFiles: targets.envFiles,
+      emptyMaskPath: emptyMask.path,
+    })
+    return runSpawn("bwrap", args, abs, sanitizedEnv, timeout, opts.signal).finally(() =>
+      emptyMask.cleanup(),
+    )
   }
   return Promise.resolve({ code: null, output: "[os-sandbox] unknown type" })
 }

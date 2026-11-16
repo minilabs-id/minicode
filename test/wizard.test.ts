@@ -55,9 +55,9 @@ describe("wizard: pemilihan gateway", () => {
     const p = runSetupWizard()
     await tty.ready(3000)
     const out = visible(tty)
-    // Picker gateway hanya menampilkan opsi; judul dan prompt nomor tidak ada.
+    // Picker gateway menampilkan step [1/3] + opsi; prompt nomor tidak ada.
     expect(out).toContain("OpenAI")
-    expect(out).not.toContain("Select gateway")
+    expect(out).toContain("Minicode setup [1/3]")
     expect(out).not.toMatch(/Choice \[1-\d+\]/)
     // Penanda seleksi picker ada.
     expect(out).toMatch(/\u203a/)
@@ -72,20 +72,20 @@ describe("wizard: pemilihan gateway", () => {
     await tty.ready(3000)
     await tty.send(KEY.esc, 60)
     expect(await p).toBe(false)
-    expect(visible(tty)).toContain("Setup canceled")
+    expect(visible(tty)).toContain("Setup cancelled")
   })
 
-  test("daftar gateway tanpa judul; hint aksi minimalis di dasar kotak", async () => {
+  test("daftar gateway berjudul step; hint aksi minimalis di dasar kotak", async () => {
     tty = installFakeTty()
     isolateHome()
     const p = runSetupWizard()
     await tty.ready(3000)
     const out = visible(tty)
     expect(out).toContain("OpenAI")
-    expect(out).not.toContain("Select gateway")
-    // Kontrak baru (audit UI 2026-11): hint satu baris "kunci label" selalu
-    // tampil di dasar picker — tanpa judul, tanpa footer dekoratif.
-    expect(out).toContain("Esc close")
+    // v7.16: wizard opt-in showTitle agar step [1/3] tidak hilang.
+    expect(out).toContain("Minicode setup [1/3]")
+    // Hint satu baris "kunci label" tanpa separator dekoratif.
+    expect(out).toContain("Esc cancel")
     await tty.send(KEY.esc, 60)
     await p
   })
@@ -134,15 +134,14 @@ describe("wizard: pemilihan gateway", () => {
 })
 
 describe("wizard: tampilan", () => {
-  test("daftar awal ringkas tanpa heading", async () => {
+  test("daftar awal menampilkan judul step [1/3]", async () => {
     tty = installFakeTty()
     isolateHome()
     const p = runSetupWizard()
     await tty.ready(3000)
     const out = visible(tty)
     expect(out).toContain("OpenAI")
-    expect(out).not.toContain("Minicode setup")
-    expect(out).not.toContain("Select gateway")
+    expect(out).toContain("Minicode setup [1/3]")
     await tty.send(KEY.esc, 60)
     await p
   })

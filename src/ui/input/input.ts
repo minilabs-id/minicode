@@ -247,6 +247,7 @@ export async function askLine(opts: AskLineOptions = {}): Promise<string | null>
       process.stdin.setRawMode(true)
       process.stdin.resume()
     } catch (e) {
+      endScreen()
       reject(e)
       return
     }
@@ -869,12 +870,12 @@ export async function askSecret(
             process.stdout.write(`${"\b \b".repeat(removed)}`)
           }
         } else if (k.type === "char") {
-          // Sekuens kontrol dari paste dibuang — secret tidak boleh
-          // mengandung newline/C0 (Enter adalah satu-satunya terminasi).
+          // Sekuens kontrol dari paste dibuang (C0 + C1) — secret tidak boleh
+          // mengandung newline/C0/C1 (Enter adalah satu-satunya terminasi).
           const clean = k.ch
             .replace(/\r\n|\r|\n|\t/g, "")
             // biome-ignore lint/suspicious/noControlCharactersInRegex: membuang kontrol dari paste
-            .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "")
+            .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "")
           if (clean) {
             secret += clean
             process.stdout.write(glyphs.mask.repeat(toGraphemes(clean).length))

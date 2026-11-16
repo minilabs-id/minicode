@@ -70,7 +70,7 @@ export interface ToolContractMetadata {
 const C = (m: ToolContractMetadata): ToolContractMetadata => m
 
 /**
- * Registry 37 tool bawaan. Urutan di sini adalah urutan tampilan/derivasi;
+ * Registry 38 tool bawaan. Urutan di sini adalah urutan tampilan/derivasi;
  * tidak ada konsumen yang boleh mengandalkan urutan selain derivasi daftar.
  */
 export const TOOL_CONTRACTS: readonly ToolContractMetadata[] = [

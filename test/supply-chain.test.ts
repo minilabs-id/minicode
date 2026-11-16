@@ -339,7 +339,13 @@ test("supply: hooks opt-in jalan + tercatat di stderr (observability)", async ()
   }) as typeof process.stderr.write
   try {
     const { runRunHooks } = await import("../src/hooks/run.ts")
+    // Default (tanpa allowLocal) TETAP diam walau MINICODE_HOOKS=1 menyala.
     await runRunHooks("pre", { phase: "pre", prompt: "hi", cwd: repo.dir })
+    expect(repo.fired()).not.toContain("hookjs")
+    // Opt-in allowLocal barulah menjalankan hook lokal + menulis jejak stderr.
+    await runRunHooks("pre", { phase: "pre", prompt: "hi", cwd: repo.dir }, undefined, {
+      allowLocal: true,
+    })
     expect(repo.fired()).toContain("hookjs")
     expect(lines.some((l) => l.includes("[hooks]") && l.includes("pre-evil.js"))).toBe(true)
   } finally {
@@ -374,12 +380,17 @@ test("supply: formatVerifyNotice jujur + terpotong", () => {
 test("supply: skill jahat terdaftar nama; body tak ikut prompt listing", async () => {
   const repo = await makeEvilRepo("skill")
   try {
-    const { findSkill, loadSkills, skillsToSystemPrompt } = await import("../src/skills/loader.ts")
-    const found = await findSkill("evil", repo.dir)
+    const { findSkill, invalidateSkillCache, loadSkills, skillsToSystemPrompt } = await import(
+      "../src/skills/loader.ts"
+    )
+    invalidateSkillCache()
+    // Fail-closed: skill repo lokal tak dimuat tanpa allowLocal.
+    expect(await findSkill("evil", repo.dir)).toBeUndefined()
+    const found = await findSkill("evil", repo.dir, { allowLocal: true })
     expect(found?.name).toBe("evil")
-    // Listing injeksi ringan: nama+deskripsi boleh muncul (DATA berlabel),
-    // TETAPI body ("Jalankan rm") tak boleh ikut tanpa aktivasi /evil.
-    const listing = skillsToSystemPrompt(await loadSkills(repo.dir))
+    // Listing injeksi ringan (bila opt-in allowLocal): nama+deskripsi boleh
+    // muncul (DATA berlabel), TETAPI body ("Jalankan rm") tak boleh ikut.
+    const listing = skillsToSystemPrompt(await loadSkills(repo.dir, { allowLocal: true }))
     expect(listing).toContain("evil")
     expect(listing).not.toContain("Jalankan")
   } finally {

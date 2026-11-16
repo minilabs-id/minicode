@@ -337,19 +337,96 @@ export const gitCommitTool: Tool = {
         const args = ["commit", "--no-verify", "-m", msg]
         if (files.length === 0 && all === true) args.push("-a")
         const out = await runGit(args, resolvedCwd, ctx.signal, indexEnv)
+        const firstLine = msg.split("\n")[0]?.trim()
+        // runGit mengembalikan "(exit 0)" saat stdout+stderr kosong (lihat baris 82).
+        const isCleanGitOut = (s: string): boolean => !s || /^\(exit \d+\)$/.test(s)
         if (/nothing to commit|no changes added/i.test(out)) {
           try {
-            const subject = (
-              await runGit(["log", "-1", "--format=%s"], resolvedCwd, ctx.signal).catch(() => "")
-            ).trim()
-            if (subject && subject === msg.split("\n")[0]?.trim()) {
-              const head = await runGit(["log", "--oneline", "-1"], resolvedCwd, ctx.signal).catch(
-                () => "",
-              )
-              return `already committed (retry aman — tanpa commit baru):\n${out}${head ? `\n\nHEAD: ${head}` : ""}`
+            if (files.length > 0) {
+              // Hanya klaim "already committed" bila file target bersih sekarang,
+              // benar-benar tersentuh di HEAD, DAN subjek commit terakhir atas
+              // file tersebut cocok — mencegah false positive saat staging gagal.
+              const pending = (
+                await runGit(
+                  ["status", "--porcelain", "--", ...files],
+                  resolvedCwd,
+                  ctx.signal,
+                ).catch(() => "DIRTY")
+              ).trim()
+              const inHead = (
+                await runGit(
+                  [
+                    "--literal-pathspecs",
+                    "diff-tree",
+                    "--root",
+                    "--no-renames",
+                    "--no-commit-id",
+                    "--name-only",
+                    "-r",
+                    "HEAD",
+                    "--",
+                    ...files,
+                  ],
+                  resolvedCwd,
+                  ctx.signal,
+                ).catch(() => "")
+              ).trim()
+              const subject = (
+                await runGit(
+                  ["log", "-1", "--format=%s", "--", ...files],
+                  resolvedCwd,
+                  ctx.signal,
+                ).catch(() => "")
+              ).trim()
+              if (
+                isCleanGitOut(pending) &&
+                !isCleanGitOut(inHead) &&
+                subject &&
+                subject === firstLine
+              ) {
+                const head = await runGit(
+                  ["log", "--oneline", "-1"],
+                  resolvedCwd,
+                  ctx.signal,
+                ).catch(() => "")
+                return `already committed (retry aman — tanpa commit baru):\n${out}${head ? `\n\nHEAD: ${head}` : ""}`
+              }
+            } else {
+              const trackedDirty = (
+                await runGit(
+                  ["status", "--porcelain", "--untracked-files=no"],
+                  resolvedCwd,
+                  ctx.signal,
+                ).catch(() => "DIRTY")
+              ).trim()
+              const subject = (
+                await runGit(["log", "-1", "--format=%s"], resolvedCwd, ctx.signal).catch(() => "")
+              ).trim()
+              if (isCleanGitOut(trackedDirty) && subject && subject === firstLine) {
+                const head = await runGit(
+                  ["log", "--oneline", "-1"],
+                  resolvedCwd,
+                  ctx.signal,
+                ).catch(() => "")
+                return `already committed (retry aman — tanpa commit baru):\n${out}${head ? `\n\nHEAD: ${head}` : ""}`
+              }
             }
           } catch {}
-          return `nothing to commit:\n${out}`
+          let untrackedHint = ""
+          if (files.length === 0 && all === true) {
+            const untracked = (
+              await runGit(
+                ["ls-files", "--others", "--exclude-standard"],
+                resolvedCwd,
+                ctx.signal,
+              ).catch(() => "")
+            ).trim()
+            if (!isCleanGitOut(untracked)) {
+              untrackedHint =
+                "\n(note: `all: true` only stages modified tracked files; pass `paths` explicitly to commit untracked files)"
+            }
+          }
+          return `nothing to commit:\n${out}${untrackedHint}`
         }
         let indexWarning = ""
         const newHead = await runGit(

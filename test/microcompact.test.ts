@@ -6,6 +6,7 @@
 // 3. Tool kontrol-sesi (tak dapat dipulihkan) tak pernah dipangkas.
 // 4. Pemangkasan hanya terjadi bila hematnya berarti (gating tiga syarat).
 import { describe, expect, test } from "bun:test"
+import { createLlmCompaction } from "../src/policy/compaction.ts"
 import {
   applyMicrocompact,
   MICROCOMPACT_RECOVERABLE_TOOLS,
@@ -250,5 +251,19 @@ describe("applyMicrocompact: instruksi sentinel sadar-mutasi", () => {
       const r = applyMicrocompact(messages, { estimateTokens: est, keepRecent: 5 })
       expect(r.clearedCount).toBeGreaterThan(0)
     }
+  })
+
+  test("createLlmCompaction.microcompact menyusutkan jendela 32k (skala budgetTokens)", () => {
+    // 8 tool result * 12k char (~3k token/hasil = ~24k token) pada jendela 32k:
+    // keepRecent=5 menyisakan 3 kandidat (~9k token saving < 20k konstanta keras).
+    const messages = buildTurns(8, { toolName: "read_file", payloadChars: 12_000 })
+    const strategy = createLlmCompaction()
+    const trimmed = strategy.microcompact!({ messages } as never, { budgetTokens: 32_000 })
+    expect(trimmed).not.toBe(messages)
+    const prunedCount = trimmed.filter(
+      (m) => m.role === "tool" && String(m.content).startsWith(MICROCOMPACT_SENTINEL_PREFIX),
+    ).length
+    // keepRecent=5 + 1 hasil pada batch assistant terakhir = 2 kandidat lama dipangkas.
+    expect(prunedCount).toBe(2)
   })
 })

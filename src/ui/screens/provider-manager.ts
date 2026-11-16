@@ -9,12 +9,15 @@ import {
   type DecodedKey,
   type DecoderState,
 } from "../input/prompt-engine.ts"
+import { formatError } from "../render/errors.ts"
 import { hintLine } from "../render/hint.ts"
-import { cleanUntrusted, sanitizeAnsiLine } from "../render/sanitize.ts"
-import { c, glyphs, stripAnsi } from "../render/theme.ts"
-import { truncateToWidth } from "../render/width.ts"
+import { listRow } from "../render/list.ts"
+import { type NoticeKind, paintNoticeLines } from "../render/notice.ts"
+import { sanitizeAnsiLine } from "../render/sanitize.ts"
+import { c, glyphs } from "../render/theme.ts"
+import { displayWidth, truncateToWidth, wrapByWidth } from "../render/width.ts"
 import { type AltScreen, openAltScreen } from "../runtime/screen.ts"
-import { boxLeftPad, dialogBox, popupBoxWidth } from "./dialog.ts"
+import { canRenderModal, dialogBox, popupBoxWidth } from "./dialog.ts"
 import { runForm, validateRequired, validateUrl } from "./form.ts"
 import { createIdleTimer } from "./lifecycle.ts"
 import { runPicker } from "./picker.ts"
@@ -82,6 +85,7 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
   // baru. Pengecualian sadar: "Detecting models…" (progres jaringan saat
   // popup tersuspend — tanpa itu tunggu terasa hang).
   let notice: string | null = null
+  let noticeKind: NoticeKind = "info"
 
   async function reload() {
     providers = await opts.loadRows()
@@ -90,22 +94,21 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
   }
 
   return new Promise<void>((resolve) => {
+    const width = () => Math.max(8, providerBoxWidth() - 4)
+    const renderedNoticeLines = (): string[] =>
+      notice ? paintNoticeLines(noticeKind, notice).flatMap((l) => wrapByWidth(l, width())) : []
     // Ukuran mengikuti terminal sungguhan; satu baris border atas/bawah dan
     // kemungkinan notice tetap masuk ke perhitungan tinggi.
     const visibleRows = () => {
       const rows = process.stdout.rows || 24
-      // Chrome tetap: 2 border + 1 baris hint aksi; notice (transient)
-      // menyusutkan daftar satu baris — paritas model-manager, agar hint
-      // tak pernah jadi korban potong atas dialogBox.
-      const fixed = 3 + (notice ? 1 : 0)
+      // Chrome tetap: 2 border + 1 judul + 1 footer (dipin `dialogBox`);
+      // notice (transient) menyusutkan daftar agar kotak tetap ringkas.
+      const fixed = 4 + renderedNoticeLines().length
       return Math.max(1, Math.min(rows - fixed, 14))
     }
-    // Lebar konten = lebar kotak (dibekukan saat mount) dikurangi chrome
-    // dialog (lihat picker.ts).
-    const width = () => Math.max(8, providerBoxWidth() - 4)
 
-    // Isi popup ringkas: nama provider dan hasil aksi sementara.
-    const bodyLines = (): string[] => {
+    // Isi popup ringkas: nama provider + jumlah model redup dan status aktif.
+    const bodyLines = (): { lines: string[]; footer: string } => {
       const v = visibleRows()
       if (sel < scroll) scroll = sel
       if (sel >= scroll + v) scroll = sel - v + 1
@@ -119,40 +122,36 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
         for (let i = 0; i < rows.length; i++) {
           const it = rows[i]!
           const picked = i === sel - scroll
-          // Nama provider dan status aktif cukup untuk memilih tanpa memenuhi
-          // daftar dengan URL dan jumlah model.
           const aktif = opts.currentModel?.startsWith(`${it.id}::`)
             ? ` (${t("common.active")})`
             : ""
-          const label = `${truncateToWidth(sanitizeAnsiLine(it.id), Math.max(8, w - 4 - aktif.length), "…")}${aktif}`
-          if (picked) lines.push(`  ${c.accent("›")} ${c.accent(c.bold(label))}`)
-          else lines.push(`   ${dim(label)}`)
+          const countTag = it.models > 0 && w >= 28 ? ` (${it.models})` : ""
+          const suffix = `${countTag}${aktif}`
+          const nameBudget = Math.max(8, w - 4 - displayWidth(suffix))
+          const label = `${truncateToWidth(sanitizeAnsiLine(it.id), nameBudget, glyphs.ellipsis)}${suffix}`
+          lines.push(listRow(label, picked))
         }
       }
-      // Struk transient (jalur legacy maupun modal).
-      if (notice) lines.push(cut(dim(sanitizeAnsiLine(notice))))
-      // Hint aksi minimalis (kunci terang, label redup) — paritas /model.
-      lines.push(
-        cut(
-          hintLine([
-            { key: "Enter", label: t("hint.select") },
-            { key: "a", label: t("hint.add") },
-            { key: "e", label: t("hint.edit") },
-            { key: "d", label: t("hint.delete") },
-            { key: "Esc", label: t("hint.close") },
-          ]),
-        ),
-      )
-      return lines
+      // Struk transient (jalur modal — notice dapat di-clip tanpa memotong footer).
+      for (const line of renderedNoticeLines()) lines.push(cut(line))
+      const footer = hintLine([
+        { key: "Enter", label: t("hint.select") },
+        { key: "a", label: t("hint.add") },
+        { key: "e", label: t("hint.edit") },
+        { key: "d", label: t("hint.delete") },
+        { key: "Esc", label: t("hint.cancel") },
+      ])
+      return { lines, footer }
     }
 
     const render = () => {
-      // Popup komposit: HANYA region kotak (tanpa clear) di atas konten
-      // Lebar beku (min=max, paritas picker/model).
+      const { lines, footer } = bodyLines()
+      // Popup komposit: HANYA region kotak (tanpa clear) di atas konten.
       const box = dialogBox(
         {
-          title: "",
-          body: bodyLines(),
+          title: t("out.titleProviders"),
+          body: lines,
+          footer,
           minWidth: providerBoxWidth(),
           maxWidth: providerBoxWidth(),
         },
@@ -160,20 +159,14 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
         screen.rows,
       )
       screen.paintRegion(box.lines, box.topRow)
-      // Parkir kursor di baris item aktif (paritas picker/form). Indeks via
-      // box.bodyTop — tebak manual meleset tiap judul berubah.
-      const itemRow = Math.min(Math.max(0, sel - scroll), Math.max(0, visibleRows() - 1))
-      const li = Math.min(box.lines.length - 1, box.bodyTop + itemRow)
-      const row = box.topRow + li
-      try {
-        const leftPad = boxLeftPad(stripAnsi(box.lines[li] ?? ""))
-        process.stdout.write(`\x1b[${row};${Math.max(1, leftPad + 1)}H\x1b[?25h`)
-      } catch {}
+      // Daftar murni (tanpa input ketik) — sembunyikan kursor supaya bersih.
+      screen.setCursorVisible(false)
     }
 
     // Popup butuh layar mampu; selain itu tolak BERSUARA + batal.
     const screen: AltScreen = openAltScreen()
-    const useModal = screen.ok && (process.stdout.rows || 24) >= 10
+    const useModal =
+      screen.ok && canRenderModal(process.stdout.columns || 80, process.stdout.rows || 24)
     if (!useModal) {
       try {
         console.log(`⚠ ${t("gate.tuiProvider")}`)
@@ -214,7 +207,14 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
     const suspend = () => {
       idle.clear()
       attached = false
-      process.stdout.write("\x1b[0m\x1b[?25h")
+      // Hapus region kotak induk sebelum sub-popup tampil agar bingkai tak
+      // tertinggal terpotong; saat exit final `done` sudah true.
+      if (!done) {
+        try {
+          screen.clearRegion()
+        } catch {}
+        screen.setCursorVisible(false)
+      }
       // setRawMode dibungkus try/catch: di Windows handle bisa rusak dan
       // melempar — tanpa ini suspend melempar lalu Promise tak pernah settle.
       // TANPA pause — stdin mengalir seumur proses (lihat cleanup askLine).
@@ -286,8 +286,9 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
         try {
           await fn()
         } catch (e) {
-          // Pesan controller/jaringan = input tak terpercaya: sanitasi.
-          notice = `${glyphs.cross} ${sanitizeAnsiLine((e as Error).message)}`
+          // Formatter kanonik: redaksi credential + saran tindakan.
+          notice = formatError(e)
+          noticeKind = "error"
         } finally {
           busy = false
           await reload().catch(() => {})
@@ -316,6 +317,9 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
             try {
               void runPicker({
                 title: t("prov.addTitle"),
+                // Jendela command: judul tampil seragam dengan window lain.
+                showTitle: true,
+                screen,
                 items: [
                   ...opts.presets.map((p) => ({ name: p.label, provider: "", value: p.id })),
                   { name: t("prov.customUrl"), provider: "", value: CUSTOM },
@@ -330,6 +334,7 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
           })
           if (picked == null) {
             notice = t("common.canceled")
+            noticeKind = "info"
             return
           }
           const preset = picked === CUSTOM ? undefined : opts.presets.find((p) => p.id === picked)
@@ -373,10 +378,12 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
           const form = await runForm({ title: t("prov.addTitle"), fields }, screen)
           if (form.cancelled || !form.values) {
             notice = t("common.canceled")
+            noticeKind = "info"
             return
           }
           if (duplicate && form.values.overwrite !== "y") {
             notice = t("common.canceled")
+            noticeKind = "info"
             return
           }
           const baseUrl = (form.values.url ?? "").trim()
@@ -385,16 +392,22 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
           // Progres terlihat: render notice DULU (masih suspend = tanpa
           // listener ganda), baru await jaringan.
           notice = t("ntc.detecting")
+          noticeKind = "info"
           render()
           const res = await withWatchdog(() => opts.onAdd({ preset, baseUrl, apiKey, scope }))
-          // Hasil dari jaringan/config — sanitasi sebelum tampil.
-          if (res.ok) notice = `${glyphs.check} ${sanitizeAnsiLine(res.ok)}`
-          else if (res.err) notice = `${glyphs.cross} ${sanitizeAnsiLine(res.err)}`
+          // Hasil dari jaringan/config — formatter kanonik (redaksi + sanitasi).
+          if (res.ok) {
+            notice = res.ok
+            noticeKind = "success"
+          } else if (res.err) {
+            notice = formatError(res.err)
+            noticeKind = "error"
+          }
         } catch (e) {
-          // Pesan error jaringan/controller = input tak-terpercaya: tanpa
-          // sanitasi, body provider bisa menyuntik `ESC[2J` ke popup dan
-          // menghapus layar TUI (audit 2026-11-12, MEDIUM-2).
-          notice = `${glyphs.cross} ${sanitizeAnsiLine((e as Error).message)}`
+          // Body provider bisa menyuntik `ESC[2J`; formatError menyanitasi +
+          // meredaksi credential sebelum dirender.
+          notice = formatError(e)
+          noticeKind = "error"
         } finally {
           busy = false
           await reload().catch(() => {})
@@ -425,17 +438,27 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
                 kind: "confirm",
               },
             ],
-            footer: t("prov.deleteFooter"),
+            footerHints: [
+              { key: `${glyphs.leftRight}/y/n`, label: t("hint.select") },
+              { key: "Enter", label: t("hint.delete") },
+              { key: "Esc", label: t("hint.cancel") },
+            ],
           },
           screen,
         )
         if (form.cancelled || form.values?.ok !== "y") {
           notice = t("common.canceled")
+          noticeKind = "info"
           return
         }
         const res = await withWatchdog(() => opts.onDelete(target))
-        if (res.ok) notice = `${glyphs.check} ${sanitizeAnsiLine(res.ok)}`
-        else if (res.err) notice = `${glyphs.cross} ${sanitizeAnsiLine(res.err)}`
+        if (res.ok) {
+          notice = res.ok
+          noticeKind = "success"
+        } else if (res.err) {
+          notice = formatError(res.err)
+          noticeKind = "error"
+        }
       })
     }
 
@@ -447,6 +470,7 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
         const defaults = await opts.onEditDefaults(target)
         if (!defaults) {
           notice = t("ntc.notFound")
+          noticeKind = "error"
           return
         }
         // Form edit dalam popup (prefill defaults). Batal di mana pun =
@@ -465,12 +489,12 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
               // Key kosong = pertahankan lama (tanpa validate required).
               { id: "key", label: t("prov.keyKeepLabel"), kind: "secret", initial: "" },
             ],
-            footer: t("form.footerDefault"),
           },
           screen,
         )
         if (form.cancelled || !form.values) {
           notice = t("common.canceled")
+          noticeKind = "info"
           return
         }
         // Key kosong = pertahankan lama (placeholder [****] memberi tahu).
@@ -478,12 +502,19 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
         const apiKey = (form.values.key ?? "").trim() || defaults.apiKey
         if (baseUrl === defaults.baseUrl && apiKey === defaults.apiKey) {
           notice = t("ntc.noChange")
+          noticeKind = "info"
         } else {
           notice = t("ntc.detecting")
+          noticeKind = "info"
           render()
           const res = await withWatchdog(() => opts.onEditSave(target, { baseUrl, apiKey }))
-          if (res.ok) notice = `${glyphs.check} ${sanitizeAnsiLine(res.ok)}`
-          else if (res.err) notice = `${glyphs.cross} ${sanitizeAnsiLine(res.err)}`
+          if (res.ok) {
+            notice = res.ok
+            noticeKind = "success"
+          } else if (res.err) {
+            notice = formatError(res.err)
+            noticeKind = "error"
+          }
         }
       })
     }
@@ -497,16 +528,20 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
     // Jalur tunggal key (sinkron + flush lone-ESC 50ms). True = selesai.
     const handleProviderKeys = (keys: DecodedKey[]): boolean => {
       if (busy || done) return true
+      if (!keys.length) return false
       // Struk lama dibersihkan tiap keypress baru (transient, bukan arsip).
       notice = null
+      noticeKind = "info"
       try {
         for (const d of keys) {
           switch (d.key.type) {
             case "up":
+            case "wheelup":
               sel = Math.max(0, sel - 1)
               render()
               break
             case "down":
+            case "wheeldown":
               // Daftar kosong: jangan biarkan sel=-1 (Enter lalu salah tutup).
               sel = providers.length ? Math.min(providers.length - 1, sel + 1) : 0
               render()
@@ -609,7 +644,7 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
 
     const onResize = () => render()
 
-    process.stdout.write("\x1b[?25l")
+    screen.setCursorVisible(false)
     try {
       process.stdin.setRawMode(true)
       process.stdin.resume()
@@ -627,11 +662,7 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
       } catch {}
       try {
         // Pesan setup gagal (bisa memuat body jaringan) = teks tak-terpercaya.
-        console.log(
-          `⚠ ${t("prov.failOpen", {
-            msg: cleanUntrusted(String((e as Error)?.message ?? e), !!process.stdout.isTTY),
-          })}`,
-        )
+        console.log(`⚠ ${t("prov.failOpen", { msg: formatError(e) })}`)
       } catch {}
       try {
         resolve()

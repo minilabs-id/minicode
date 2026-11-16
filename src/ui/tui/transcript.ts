@@ -56,6 +56,8 @@ export interface ApprovalSink {
   resume(): void
   /** Lukis kotak modal di atas transkrip (popup komposit). Opsional: sink warisan (mock/test) boleh tanpa. */
   paintRegion?(lines: string[], topRow: number): void
+  /** Parkir kursor di baris aktif modal. Opsional. */
+  moveCursor?(row: number, col: number): void
   /** Hapus kotak modal sebelum resume. Opsional. */
   clearRegion?(): void
 }
@@ -108,6 +110,8 @@ export interface TranscriptRow {
   displayStart: number
   displayEnd: number
   selectable: boolean
+  /** Teks tampil polos saat transformasi markdown inline mengubah kolom vs sumber. */
+  plainBody?: string
 }
 
 export interface TranscriptViewport {
@@ -169,10 +173,23 @@ function formatElapsed(ms: number): string {
   return `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, "0")}m`
 }
 
-type FenceState = "outside" | "inside" | "boundary"
+type FenceState = "outside" | "inside" | "boundary" | `open:${string}`
+
+function clampCodeUnitBoundary(s: string, index: number): number {
+  const idx = Math.max(0, Math.min(index, s.length))
+  if (idx > 0 && idx < s.length) {
+    const code = s.charCodeAt(idx)
+    if (code >= 0xdc00 && code <= 0xdfff) return idx - 1
+  }
+  return idx
+}
 
 function renderAssistantLine(line: string, fenceState: FenceState): string | null {
   if (fenceState === "boundary") return null
+  if (fenceState.startsWith("open:")) {
+    const lang = fenceState.slice(5)
+    return lang ? c.dim(`  ${glyphs.dot} ${lang}`) : null
+  }
   if (fenceState === "inside") return line
   if (!/(?:\*{1,2}|`|^#{1,6}\s|~~|\[[^\]]+\]\()/.test(line)) return line
   const heading = /^(#{1,6})\s+(.*)$/.exec(line)
@@ -603,13 +620,19 @@ export class Transcript {
     const rows = sanitizeAnsi(prompt).split("\n")
     const [first, ...rest] = rows
     this.commit()
+    // Jeda visual lembut sebelum prompt user berikutnya agar batas giliran
+    // terbaca cepat di transkrip panjang (baris awal sesi tidak diberi jeda).
+    if (this.lines.length > 0 && this.lines[this.lines.length - 1] !== "") {
+      this.append("", { kind: "system" })
+    }
+    const arrow = glyphs.arrow
     this.appendWithSource(
-      `${c.accent("minicode")} ${c.muted("›")} ${first ?? ""}`,
+      `${c.accent("minicode")} ${c.muted(arrow)} ${first ?? ""}`,
       { kind: "user" },
       first ?? "",
-      "minicode › ",
+      `minicode ${arrow} `,
     )
-    for (const r of rest) this.appendWithSource(`  ${r}`, { kind: "user" }, r, "  · ")
+    for (const r of rest) this.appendWithSource(`  ${r}`, { kind: "user" }, r, "  ")
   }
 
   pushError(message: string): void {
@@ -705,27 +728,108 @@ export class Transcript {
         sourceBase += source.length + 1
         continue
       }
+      const isBoundaryHeader = markdown && fenceState.startsWith("open:")
       const renderedRows = rendered === "" ? [""] : wrapByWidth(rendered, w)
-      const sourceRows = sourcePrefix || source ? wrapByWidth(`${sourcePrefix}${source}`, w) : [""]
-      let offset = sourceBase
-      const count = Math.max(renderedRows.length, sourceRows.length)
-      for (let rowIndex = 0; rowIndex < count; rowIndex++) {
+      const plainRenderedFull = stripSgr(sanitizeAnsi(rendered))
+      const expectedExact = `${sourcePrefix}${source}`
+      const exactMatch = !isBoundaryHeader && (!markdown || plainRenderedFull === expectedExact)
+      const prefixTrimmed = sourcePrefix.trimEnd()
+      const rowBodies: Array<{
+        text: string
+        plainBody: string
+        displayStart: number
+        displayEnd: number
+      }> = []
+      for (let rowIndex = 0; rowIndex < renderedRows.length; rowIndex++) {
         const renderedRow = renderedRows[rowIndex] ?? ""
-        const rawSourceRow = sourceRows[rowIndex] ?? ""
-        const sourceRow =
-          sourcePrefix && rowIndex === 0 && rawSourceRow.startsWith(sourcePrefix)
-            ? rawSourceRow.slice(sourcePrefix.length)
-            : rawSourceRow
-        out.push({
+        const plainRendered = stripSgr(sanitizeAnsi(renderedRow))
+        let rowDisplayStart = 0
+        let plainBody = plainRendered
+        if (sourcePrefix && rowIndex === 0) {
+          if (plainRendered.startsWith(sourcePrefix)) {
+            rowDisplayStart = displayWidth(sourcePrefix)
+            plainBody = plainRendered.slice(sourcePrefix.length)
+          } else if (
+            prefixTrimmed &&
+            plainRendered.startsWith(prefixTrimmed) &&
+            plainRendered.length <= sourcePrefix.length
+          ) {
+            // Terminal sempit memecah tepat di ujung chrome prefix ("minicode ›").
+            rowDisplayStart = displayWidth(plainRendered)
+            plainBody = ""
+          }
+        }
+        rowBodies.push({
           text: renderedRow,
-          sourceId: selectable ? sourceId : -1,
-          sourceStart: offset,
-          sourceEnd: offset + sourceRow.length,
-          displayStart: 0,
+          plainBody,
+          displayStart: rowDisplayStart,
           displayEnd: displayWidth(renderedRow),
-          selectable: selectable && sourceId >= 0,
         })
-        offset += sourceRow.length
+      }
+
+      const rowSelectable = selectable && sourceId >= 0 && !isBoundaryHeader
+      if (exactMatch) {
+        let cursorInSource = 0
+        for (let rowIndex = 0; rowIndex < rowBodies.length; rowIndex++) {
+          const item = rowBodies[rowIndex]!
+          if (
+            rowIndex > 0 &&
+            item.plainBody.length > 0 &&
+            source.slice(cursorInSource).startsWith(" ") &&
+            !item.plainBody.startsWith(" ") &&
+            source.slice(cursorInSource + 1).startsWith(item.plainBody)
+          ) {
+            cursorInSource += 1
+          }
+          const start = sourceBase + cursorInSource
+          const remaining = Math.max(0, source.length - cursorInSource)
+          const take =
+            rowIndex === rowBodies.length - 1
+              ? remaining
+              : Math.min(item.plainBody.length, remaining)
+          cursorInSource += take
+          const end = sourceBase + cursorInSource
+          out.push({
+            text: item.text,
+            sourceId: rowSelectable ? sourceId : -1,
+            sourceStart: start,
+            sourceEnd: end,
+            displayStart: item.displayStart,
+            displayEnd: item.displayEnd,
+            selectable: rowSelectable,
+          })
+        }
+      } else {
+        // Inline markdown mengubah panjang tampilan vs sumber (`**bold**`,
+        // `[label](url)`, heading `## `): petakan proporsional ke kolom visual
+        // agar highlight seleksi dan copy tidak meleset di baris yang sama.
+        const colWidths = rowBodies.map((item) => Math.max(0, item.displayEnd - item.displayStart))
+        const totalCols = colWidths.reduce((sum, v) => sum + v, 0)
+        let prevPos = 0
+        let accCols = 0
+        for (let rowIndex = 0; rowIndex < rowBodies.length; rowIndex++) {
+          const item = rowBodies[rowIndex]!
+          accCols += colWidths[rowIndex]!
+          const nextPos =
+            isBoundaryHeader || !rowSelectable
+              ? 0
+              : rowIndex === rowBodies.length - 1 || totalCols === 0
+                ? source.length
+                : clampCodeUnitBoundary(source, Math.round((accCols / totalCols) * source.length))
+          const start = sourceBase + prevPos
+          const end = sourceBase + Math.max(prevPos, nextPos)
+          prevPos = Math.max(prevPos, nextPos)
+          out.push({
+            text: item.text,
+            sourceId: rowSelectable ? sourceId : -1,
+            sourceStart: start,
+            sourceEnd: end,
+            displayStart: item.displayStart,
+            displayEnd: item.displayEnd,
+            selectable: rowSelectable,
+            ...(rowSelectable ? { plainBody: item.plainBody } : {}),
+          })
+        }
       }
       sourceBase += source.length + 1
     }
@@ -744,12 +848,17 @@ export class Transcript {
       base += row.length + 1
     }
     const plainRows = renderedRows.map((row) => stripSgr(sanitizeAnsi(row)))
-    const horizontal = plainRows.some((row) => /^[\s─━┌┐└┘├┤┬┴┼]+$/.test(row))
+    // Border Unicode (─/box drawing) DAN fallback ASCII (`+---+`) harus
+    // dikenali. Tanpa varian ASCII, baris `+---+` dianggap data: ia menjadi
+    // selectable dengan offset yang salah dan seleksi tabel kehilangan teks.
+    const isBorderRow = (row: string): boolean =>
+      /^[\s─━┌┐└┘├┤┬┴┼]+$/.test(row) || /^[\s+-]+$/.test(row)
+    const horizontal = plainRows.some(isBorderRow)
     const fields = Math.max(1, table.headers.length)
     let logicalIndex = 0
     return renderedRows.map((row, index) => {
       const plain = plainRows[index] ?? ""
-      const isBorder = /^[\s─━┌┐└┘├┤┬┴┼]+$/.test(plain)
+      const isBorder = isBorderRow(plain)
       let range = ranges[0] ?? { start: 0, end: 0 }
       if (horizontal) {
         if (!isBorder) range = ranges[logicalIndex] ?? range
@@ -785,7 +894,7 @@ export class Transcript {
         open = true
         char = fence.char
         len = fence.len
-        return "boundary"
+        return fence.lang ? `open:${fence.lang}` : "boundary"
       }
       if (open && fence && fence.char === char && fence.len >= len) {
         open = false
@@ -1101,6 +1210,17 @@ export class Transcript {
     const source = this.sourceTexts.get(row.sourceId)
     if (source === undefined) return null
     const relative = Math.max(0, column - row.displayStart)
+    if (
+      row.plainBody !== undefined &&
+      source.slice(row.sourceStart, row.sourceEnd) !== row.plainBody
+    ) {
+      const bodyCols = Math.max(0, row.displayEnd - row.displayStart)
+      if (bodyCols === 0 || relative === 0) return { id: row.sourceId, offset: row.sourceStart }
+      if (relative >= bodyCols) return { id: row.sourceId, offset: row.sourceEnd }
+      const span = row.sourceEnd - row.sourceStart
+      const rawOffset = row.sourceStart + Math.round((relative / bodyCols) * span)
+      return { id: row.sourceId, offset: clampCodeUnitBoundary(source, rawOffset) }
+    }
     return {
       id: row.sourceId,
       offset: offsetAtColumn(source, row.sourceStart, row.sourceEnd, relative),
@@ -1115,7 +1235,16 @@ export class Transcript {
     const source = this.sourceTexts.get(row.sourceId)
     if (source === undefined) return 0
     const clamped = Math.max(row.sourceStart, Math.min(offset, row.sourceEnd))
-    return displayWidth(source.slice(row.sourceStart, clamped))
+    if (
+      row.plainBody !== undefined &&
+      source.slice(row.sourceStart, row.sourceEnd) !== row.plainBody
+    ) {
+      const span = row.sourceEnd - row.sourceStart
+      const bodyCols = Math.max(0, row.displayEnd - row.displayStart)
+      const ratio = span <= 0 ? 0 : (clamped - row.sourceStart) / span
+      return row.displayStart + Math.round(ratio * bodyCols)
+    }
+    return row.displayStart + displayWidth(source.slice(row.sourceStart, clamped))
   }
 
   comparePoints(left: TranscriptPoint, right: TranscriptPoint): number {
@@ -1675,7 +1804,7 @@ export class Transcript {
       .filter(Boolean)
       .join(", ")
     const statPart = stats ? ` · ${stats}` : ""
-    const line = `  ${glyphs.check} ${fold.length} tool${fold.length > 1 ? "s" : ""}${namePart}${statPart}`
+    const line = `  ${t("panel.tools", { n: fold.length })}${namePart}${statPart}`
     this.append(line, { kind: "activity" })
   }
 

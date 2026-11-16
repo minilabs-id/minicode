@@ -6,6 +6,7 @@ import { loadConfig, type MinicodeConfig } from "../src/config.ts"
 import { GATEWAY_PRESETS } from "../src/providers/presets.ts"
 import { detectAndSave, removeProvider } from "../src/providers/provision.ts"
 import { t } from "../src/ui/i18n/locale.ts"
+import { formatError } from "../src/ui/render/errors.ts"
 import {
   type ProviderActionResult,
   type ProviderRow,
@@ -34,9 +35,16 @@ export async function runProviderManager(opts: {
     return
   }
 
-  // Router runtime gagal dimuat ulang (config IO) — jangan lapor sukses palsu:
-  // tanpa pesan, user mengira pilihan langsung berlaku padahal butuh restart.
-  const warnReloadFail = () => process.stderr.write(`[warn] ${t("prov.reloadFail")}\n`)
+  // Simpan kegagalan muat-ulang agar ditampilkan sebagai notice di dalam kotak
+  // Layer 2 (bukan menulis mentah ke stderr saat popup masih terbuka).
+  const reloadSuffix = async (): Promise<string> => {
+    try {
+      await reloadProviders(opts.cwd, { allowLocal: opts.allowLocalConfig })
+      return ""
+    } catch {
+      return ` (${t("prov.reloadFail")})`
+    }
+  }
 
   await runProviderManagerView({
     initialRows: rowsFrom(await loadConfig(opts.cwd, { allowLocal: opts.allowLocalConfig })),
@@ -60,19 +68,19 @@ export async function runProviderManager(opts: {
           fallbackModels,
           allowLocal: opts.allowLocalConfig,
         })
-        await reloadProviders(opts.cwd, { allowLocal: opts.allowLocalConfig }).catch(warnReloadFail)
+        const warn = await reloadSuffix()
         return {
-          ok: t("ntc.saved", { id: entry.id, n: entry.models.length, scope }),
+          ok: `${t("ntc.saved", { id: entry.id, n: entry.models.length, scope })}${warn}`,
         }
       } catch (e) {
-        return { err: t("prov.detectFail", { msg: (e as Error).message.slice(0, 80) }) }
+        return { err: t("prov.detectFail", { msg: formatError(e) }) }
       }
     },
     onDelete: async (row): Promise<ProviderActionResult> => {
       await removeProvider(row.id, { global: true })
       if (opts.cwd) await removeProvider(row.id, { global: false, cwd: opts.cwd })
-      await reloadProviders(opts.cwd, { allowLocal: opts.allowLocalConfig }).catch(warnReloadFail)
-      return { ok: t("prov.deleted", { id: row.id }) }
+      const warn = await reloadSuffix()
+      return { ok: `${t("prov.deleted", { id: row.id })}${warn}` }
     },
     onEditDefaults: async (row) => {
       const cfg = await loadConfig(opts.cwd, { allowLocal: opts.allowLocalConfig })
@@ -93,16 +101,16 @@ export async function runProviderManager(opts: {
           fallbackModels: cur.models,
           allowLocal: opts.allowLocalConfig,
         })
-        await reloadProviders(opts.cwd, { allowLocal: opts.allowLocalConfig }).catch(warnReloadFail)
-        return { ok: t("ntc.updated", { id: entry.id, n: entry.models.length }) }
+        const warn = await reloadSuffix()
+        return { ok: `${t("ntc.updated", { id: entry.id, n: entry.models.length })}${warn}` }
       } catch (e) {
         await detectAndSave(cur.baseUrl, cur.apiKey, cur.id, {
           global: true,
           cwd: opts.cwd,
           fallbackModels: cur.models,
         }).catch(() => {})
-        await reloadProviders(opts.cwd, { allowLocal: opts.allowLocalConfig }).catch(warnReloadFail)
-        return { err: t("prov.updateFail", { msg: (e as Error).message.slice(0, 80) }) }
+        const warn = await reloadSuffix()
+        return { err: `${t("prov.updateFail", { msg: formatError(e) })}${warn}` }
       }
     },
   })

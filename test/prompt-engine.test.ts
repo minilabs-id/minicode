@@ -82,12 +82,18 @@ test("tab picks selected item and closes menu", () => {
   s = applyKey(s, { type: "char", ch: "/" }, hints).state
   s = applyKey(s, { type: "char", ch: "m" }, hints).state
   expect(s.menuOpen).toBe(true)
-  // Tab kini HANYA putar mode (cycle `auto→ask→plan→allowlist`) via `onKey`
-  // di REPL, bukan melengkapi. Completion via ↑/↓ + Enter. Tanpa ini Tab
-  // saat mengetik tidak bisa ganti mode (keluhan nyata).
   const r = applyKey(s, { type: "tab" }, hints)
-  expect(r.state.line).toBe("/m")
-  expect(r.state.menuOpen).toBe(true)
+  expect(r.action).toBe("render")
+  expect(r.state.line).toBe("/models")
+  expect(r.state.cursor).toBe("/models".length)
+  expect(r.state.menuOpen).toBe(false)
+})
+
+test("tab on closed menu returns none so caller can cycle mode", () => {
+  const s = { line: "hello", cursor: 5, sel: -1, menuOpen: false }
+  const r = applyKey(s, { type: "tab" }, hints)
+  expect(r.action).toBe("none")
+  expect(r.state).toEqual(s)
 })
 
 test("enter picks selected item, submits", () => {
@@ -372,10 +378,11 @@ test("kursor: tab melengkapi lalu memindah kursor ke ujung", () => {
   let s = createState()
   s = applyKey(s, { type: "char", ch: "/" }, hints).state
   s = applyKey(s, { type: "char", ch: "m" }, hints).state
-  // Tab kini putar mode via onKey, bukan melengkapi di engine.
   const tabbed = applyKey(s, { type: "tab" }, hints)
-  expect(tabbed.state.line).toBe("/m")
-  expect(tabbed.state.cursor).toBe("/m".length)
+  expect(tabbed.action).toBe("render")
+  expect(tabbed.state.line).toBe("/models")
+  expect(tabbed.state.cursor).toBe("/models".length)
+  expect(tabbed.state.menuOpen).toBe(false)
 })
 
 test("tab menghormati seleksi, bukan selalu item pertama", () => {
@@ -384,9 +391,11 @@ test("tab menghormati seleksi, bukan selalu item pertama", () => {
   s = applyKey(s, { type: "char", ch: "m" }, hints).state
   s = applyKey(s, { type: "down" }, hints).state // sel=0 -> /models
   s = applyKey(s, { type: "down" }, hints).state // sel=1 -> /model
-  // Tab kini putar mode, bukan melengkapi — baris tetap "/m".
   const r = applyKey(s, { type: "tab" }, hints)
-  expect(r.state.line).toBe("/m")
+  expect(r.action).toBe("render")
+  expect(r.state.line).toBe("/model")
+  expect(r.state.cursor).toBe("/model".length)
+  expect(r.state.menuOpen).toBe(false)
 })
 
 test("decodeKey: home/end/delete dalam bentuk CSI dan VT", () => {
@@ -719,4 +728,28 @@ test("createKeyStreamPump: sekuens utuh sinkron, lone-ESC flush via timer", asyn
   await new Promise((r) => setTimeout(r, 60))
   expect(got2).toEqual(["up"])
   pump2.dispose()
+})
+
+test("Alt+Enter, Shift+Enter (CSI-u), dan modifyOtherKeys didekode sebagai ctrl-j (newline)", () => {
+  const altEnter = decodeKeysStream(new Uint8Array([0x1b, 0x0d]), createDecoderState())
+  expect(altEnter.map((d) => d.key.type)).toEqual(["ctrl-j"])
+  expect(decodeKeys(new TextEncoder().encode("\x1b\r")).map((d) => d.key.type)).toEqual(["ctrl-j"])
+  const shiftCsiU = decodeKeysStream(new TextEncoder().encode("\x1b[13;2u"), createDecoderState())
+  expect(shiftCsiU.map((d) => d.key.type)).toEqual(["ctrl-j"])
+  const modOtherKeys = decodeKeysStream(
+    new TextEncoder().encode("\x1b[27;2;13~"),
+    createDecoderState(),
+  )
+  expect(modOtherKeys.map((d) => d.key.type)).toEqual(["ctrl-j"])
+})
+
+test("bracketed paste tanpa terminator berhenti di batas ukuran tanpa mengunci input", () => {
+  const st = createDecoderState()
+  const huge = new Uint8Array(6 + 520 * 1024)
+  huge.set(new TextEncoder().encode("\x1b[200~"), 0)
+  huge.fill(0x61, 6)
+  const keys = decodeKeysStream(huge, st)
+  expect(keys.length).toBe(1)
+  expect(keys[0]?.key.type).toBe("char")
+  expect(st.pending.length).toBe(0)
 })

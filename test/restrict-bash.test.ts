@@ -44,6 +44,10 @@ test("restrictBash (fallback no-sandbox) pakai daftar developer yang lebih luas"
   expect(await decide("auto", true, "make")).toBe("allow")
   expect(await decide("auto", true, "node server.js")).toBe("allow")
   expect(await decide("auto", true, "npm install")).toBe("allow")
+  expect(await decide("auto", true, 'findstr /n /c:"fail" log.txt')).toBe("allow")
+  expect(await decide("auto", true, "where bun")).toBe("allow")
+  expect(await decide("auto", true, "git rev-parse HEAD")).toBe("allow")
+  expect(await decide("auto", true, "git ls-files src")).toBe("allow")
 })
 
 test("restrictBash developer: inline-eval, publish, tulis-shell tetap ditolak", async () => {

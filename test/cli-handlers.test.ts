@@ -255,7 +255,10 @@ describe("skills", () => {
   test("list menampilkan skill dalam tabel sejajar", async () => {
     writeSkill("alpha", "skill pertama")
     writeSkill("beta", "skill kedua dengan deskripsi yang jauh lebih panjang dari yang pertama")
-    const r = await runDispatch(["skills", "list", "--cwd", tmp])
+    // Tanpa --allow-local-config, skill lokal di repo tidak dimuat (fail-closed).
+    const hidden = await runDispatch(["skills", "list", "--cwd", tmp])
+    expect(hidden.out).not.toContain("/alpha")
+    const r = await runDispatch(["skills", "list", "--cwd", tmp, "--allow-local-config"])
     const rows = r.out.split("\n").filter((l) => l.includes("/alpha") || l.includes("/beta"))
     expect(rows.length).toBe(2)
     // Batas keras kolom: kedua baris sama lebar meski deskripsi beda panjang.
@@ -264,7 +267,7 @@ describe("skills", () => {
 
   test("show menampilkan isi skill", async () => {
     writeSkill("gamma", "skill ketiga")
-    const r = await runDispatch(["skills", "show", "gamma", "--cwd", tmp])
+    const r = await runDispatch(["skills", "show", "gamma", "--cwd", tmp, "--allow-local-config"])
     expect(r.code).toBe(0)
     expect(r.out).toContain("Isi skill gamma")
   })

@@ -38,6 +38,8 @@ import { t } from "../src/ui/i18n/locale.ts"
 import { loadHistory } from "../src/ui/input/input.ts"
 import { formatUsd } from "../src/ui/render/money.ts"
 import { c, glyphs } from "../src/ui/render/theme.ts"
+import { canRenderModal, dialogBox, popupBoxWidth } from "../src/ui/screens/dialog.ts"
+import { runOutputWindow } from "../src/ui/screens/output-window.ts"
 // [Area A · PROMPT 06] State UI milik SESI ini. TUI + printer linier sesi yang
 // sama berbagi state (satu instance), sesi lain di proses yang sama tak
 // tersentuh. Absen = instance default (fixture tes partial).
@@ -65,11 +67,17 @@ const WORK_MODE_CYCLE = ["DISCUSS", "PLAN", "EXECUTE"] as const
 const DRIVER_COMMANDS = [
   "/compact",
   "/thinking",
-  "/expand [id]",
+  "/expand",
   "/minimize",
   "/fold",
   "/mode",
   "/work-mode",
+  "/lang",
+  "/clear",
+  "/copy",
+  "/history",
+  "/undo",
+  "/redo",
 ]
 
 function fmtCtx(n: number): string | undefined {
@@ -423,9 +431,71 @@ export async function runTui(ctx: CliSession): Promise<void> {
     return { lines, shouldExit, handled }
   }
 
+  /** Judul jendela hasil command — satu sumber untuk semua readout. */
+  function commandWindowTitle(q: string): string {
+    const name = (q.trim().split(/\s+/)[0] ?? "").replace(/^\/+/, "").toLowerCase()
+    switch (name) {
+      case "help":
+        return t("out.titleHelp")
+      case "status":
+      case "cost":
+      case "usage":
+        return t("out.titleStatus")
+      case "context":
+        return t("ctx.title")
+      case "history":
+        return t("out.titleHistory")
+      case "sync":
+        return t("out.titleSync")
+      case "init":
+        return t("out.titleInit")
+      case "expand":
+        return t("out.titleExpand")
+      case "scheduler":
+        return t("sched.title")
+      case "sessions":
+      case "resume":
+        return t("sess.title")
+      case "model":
+      case "models":
+        return t("out.titleModels")
+      case "provider":
+      case "providers":
+        return t("out.titleProviders")
+      default:
+        return t("out.titleCommand")
+    }
+  }
+
+  /**
+   * Output command readout tampil sebagai JENDELA di atas chat, bukan dicetak
+   * ke transkrip. Bila layar tak mampu, fallback ke transkrip agar data tidak
+   * hilang. App dibekukan selama jendela hidup (pola popupBuiltin).
+   */
+  async function showCommandOutput(title: string, lines: string[]): Promise<boolean> {
+    if (!lines.length) return true
+    app.suspend()
+    let opened = false
+    try {
+      opened = await runOutputWindow({
+        title,
+        lines,
+        onCopy: (text) => writeClipboardOsc52(text),
+      })
+    } catch {
+      opened = false
+    } finally {
+      app.resume()
+    }
+    if (!opened) transcript.pushInfo(lines)
+    return opened
+  }
+
   async function delegateBuiltin(q: string, recordOutput = true): Promise<{ quit?: boolean }> {
     const { lines, shouldExit } = await runBuiltin(q, recordOutput)
-    if (recordOutput && lines.length) transcript.pushInfo(lines)
+    if (recordOutput && lines.length) {
+      await showCommandOutput(commandWindowTitle(q), lines)
+    }
     return shouldExit ? { quit: true } : {}
   }
 
@@ -437,9 +507,13 @@ export async function runTui(ctx: CliSession): Promise<void> {
    * kembali; transkrip tidak mengarsipkan pilihan UI yang sudah selesai.
    */
   async function popupBuiltin(q: string): Promise<{ quit?: boolean }> {
+    let lines: string[] = []
+    let shouldExit = false
     app.suspend()
     try {
-      return await delegateBuiltin(q, false)
+      const res = await runBuiltin(q, true)
+      lines = res.lines
+      shouldExit = res.shouldExit
     } catch (e) {
       // Spawn anak gagal (terminal sudah dilepas onBeforeSpawn): hidupkan
       // kembali atau keluar bersih — jangan biarkan TUI mati tanpa layar.
@@ -448,6 +522,12 @@ export async function runTui(ctx: CliSession): Promise<void> {
     } finally {
       app.resume()
     }
+    const clean = lines.filter((l) => l.trim().length > 0)
+    if (clean.length > 0) {
+      if (clean.length <= 3) transcript.pushInfo(clean)
+      else await showCommandOutput(commandWindowTitle(q), lines)
+    }
+    return shouldExit ? { quit: true } : {}
   }
 
   async function runTurn(prompt: string): Promise<void> {
@@ -493,16 +573,16 @@ export async function runTui(ctx: CliSession): Promise<void> {
     ) {
       warned80 = true
       transcript.pushInfo([
-        c.muted(t("tui.budget80", { spent: formatUsd(sess.cost), budget: formatUsd(budget) })),
+        c.warning(t("tui.budget80", { spent: formatUsd(sess.cost), budget: formatUsd(budget) })),
       ])
     }
   }
 
   /**
-   * /help ringkas (≤6 baris): daftar perintah muat viewport tanpa
-   * membanjiri transkrip. Detail penuh = `/help tombol` (delegasi).
+   * /help ringkas: daftar perintah per grup, ditampilkan di jendela output
+   * command (bukan transkrip). Detail penuh = `/help tombol` (delegasi).
    */
-  function helpConcise(): void {
+  async function helpConcise(): Promise<void> {
     // Grup kurasi (sengaja bukan dump flat dari registry): label + baris pendek
     // per kategori supaya /help mudah dipindai. Sumber daftarnya SATU —
     // `HELP_GROUPS` di `cli/commands.ts` — karena sebelumnya grup di sini dan
@@ -510,7 +590,7 @@ export async function runTui(ctx: CliSession): Promise<void> {
     // meninggalkan sisi lain basi (persis yang terjadi pada `/context`).
     const group = (label: string, names: readonly string[]): string =>
       `  ${label.padEnd(9)}${names.map((n) => `/${n}`).join(" ")}`
-    transcript.pushInfo([
+    await showCommandOutput(t("out.titleHelp"), [
       t("help.cHead"),
       ...HELP_GROUPS.map((g) => group(t(g.key), g.names)),
       t("help.cKeys"),
@@ -562,11 +642,11 @@ export async function runTui(ctx: CliSession): Promise<void> {
     const args = spaceIdx === -1 ? "" : line.slice(spaceIdx + 1).trim()
 
     if (name === "") {
-      helpConcise()
+      await helpConcise()
       return
     }
     if (name === "help" && !args) {
-      helpConcise()
+      await helpConcise()
       return
     }
     if (name === "exit" || name === "quit") return { quit: true }
@@ -589,6 +669,9 @@ export async function runTui(ctx: CliSession): Promise<void> {
       } else {
         togglePermissionMode()
       }
+      const modeLabel = mode ? `${mode[0]!.toUpperCase()}${mode.slice(1)}` : ""
+      transcript.pushInfo([c.muted(t("tui.modeLine", { m: mode }))])
+      if (modeLabel) app.showToast(t("tui.modeLine", { m: modeLabel }))
       return
     }
     // [mode-architecture] /work-mode = WorkMode (operating mode) SAJA.
@@ -614,6 +697,9 @@ export async function runTui(ctx: CliSession): Promise<void> {
         return
       }
       workModeControl.setWorkMode(next)
+      const label = displayWorkMode(next)
+      transcript.pushInfo([c.muted(t("tui.workModeLine", { m: label }))])
+      app.showToast(t("tui.workModeLine", { m: label }))
       return
     }
     // /unrestric — full akses tanpa gerbang (jail + bash-guard + sandbox/allowlist).
@@ -666,16 +752,24 @@ export async function runTui(ctx: CliSession): Promise<void> {
         const { saveLang } = await import("../src/config.ts")
         await saveLang(next)
       } catch {}
+      transcript.pushInfo([c.muted(t("tui.langLine", { v: next }))])
+      app.showToast(t("tui.langLine", { v: next }))
       return
     }
     if (name === "compact") {
       const next = args === "" ? undefined : args === "on" || args === "1"
-      ui.setCompactMode(next)
+      const compact = ui.setCompactMode(next)
+      transcript.pushInfo([
+        c.muted(t("tui.compactLine", { v: t(compact ? "state.compact" : "state.expanded") })),
+      ])
       return
     }
     if (name === "thinking") {
       const next = args === "" ? undefined : args === "on" || args === "1"
-      ui.setReasoningVisible(next)
+      const visible = ui.setReasoningVisible(next)
+      transcript.pushInfo([
+        c.muted(t("tui.thinkingSet", { v: t(visible ? "state.expanded" : "state.minimized") })),
+      ])
       return
     }
     if (name === "fold") {
@@ -684,18 +778,20 @@ export async function runTui(ctx: CliSession): Promise<void> {
       // sekarang mengontrol panel. i18n key sama (folded/expanded).
       const next = args === "" ? undefined : args === "on" || args === "1"
       const on = ui.setActivityPanel(next)
-      transcript.pushInfo([c.muted(t("tui.activityFold", { v: on ? "folded" : "expanded" }))])
+      transcript.pushInfo([
+        c.muted(t("tui.activityFold", { v: t(on ? "state.expanded" : "state.folded") })),
+      ])
       return
     }
     if (name === "expand") {
       const sections = args ? ctx.expandContent(args) : ctx.expandAllContent()
       const views = args ? [] : ui.collapsedSectionsSnapshot()
-      if (!args) ui.clearCollapsedSections()
       if (!sections.length && !views.length) {
         transcript.pushInfo([c.muted(t("tui.expandEmpty"))])
         return
       }
       const lines: string[] = []
+      const dash = glyphs.hLine.repeat(2)
       for (const s of sections) {
         if (s.meta.source === "retention") {
           lines.push(c.muted(t("tui.expandRetention")))
@@ -703,14 +799,14 @@ export async function runTui(ctx: CliSession): Promise<void> {
         }
         const label = args ?? s.ref?.toolCallId ?? t("tui.expandContent")
         const src = s.meta.source === "durable" ? ` [${t("tui.expandDurable")}]` : ""
-        lines.push(c.muted(`  ── ${label}${src} ──`))
+        lines.push(c.muted(`  ${dash} ${label}${src} ${dash}`))
         for (const ln of s.text.split("\n")) lines.push(`    ${ln}`)
       }
       for (const view of views) {
-        lines.push(c.muted(`  ── ${view.label} ──`))
+        lines.push(c.muted(`  ${dash} ${view.label} ${dash}`))
         for (const ln of view.text.split("\n")) lines.push(`    ${ln}`)
       }
-      transcript.pushInfo(lines)
+      await showCommandOutput(t("out.titleExpand"), lines)
       return
     }
     if (name === "minimize") {
@@ -725,6 +821,7 @@ export async function runTui(ctx: CliSession): Promise<void> {
       }
       ui.setSectionMinimized("tool", next)
       ui.setSectionMinimized("answer", next)
+      transcript.pushInfo([c.muted(t(next ? "tui.sectionsMin" : "tui.sectionsExp"))])
       return
     }
     if (name === "undo") {
@@ -752,7 +849,7 @@ export async function runTui(ctx: CliSession): Promise<void> {
     if (name === "providers" || name === "provider") return popupBuiltin("/provider")
     if (name === "history") {
       const lines = (await loadHistory()).slice(-20)
-      transcript.pushInfo(lines.length ? lines : [t("tui.historyEmpty")])
+      await showCommandOutput(t("out.titleHistory"), lines.length ? lines : [t("tui.historyEmpty")])
       return
     }
     if (name === "resume" && !args) return popupBuiltin("/sessions")
@@ -762,11 +859,58 @@ export async function runTui(ctx: CliSession): Promise<void> {
     // /model dengan filter) dibungkus suspend; yang murni cetak langsung.
     const MODAL = new Set(["model", "provider", "sessions", "resume"])
     if (MODAL.has(name)) return popupBuiltin(line)
+    if (name === "sync") {
+      // Tampilkan progres "Syncing models…" langsung di kotak Layer 2 selama
+      // probe jaringan berjalan, lalu transisi ke jendela hasil tanpa kedip.
+      app.suspend()
+      const paintSyncProgress = () => {
+        const cols = process.stdout.columns || 80
+        const rows = process.stdout.rows || 24
+        if (!canRenderModal(cols, rows)) return
+        const w = popupBoxWidth(cols)
+        const box = dialogBox(
+          {
+            title: t("out.titleSync"),
+            body: [c.muted(t("cmd.syncing"))],
+            minWidth: w,
+            maxWidth: w,
+          },
+          cols,
+          rows,
+        )
+        app.paintRegion(box.lines, box.topRow)
+        app.setCursorVisible(false)
+      }
+      const onResize = () => paintSyncProgress()
+      process.stdout.on("resize", onResize)
+      let syncLines: string[] = []
+      try {
+        paintSyncProgress()
+        ;({ lines: syncLines } = await runBuiltin("/sync"))
+      } finally {
+        process.stdout.removeListener("resize", onResize)
+        app.clearRegion()
+      }
+      try {
+        const nonBlank = syncLines.filter((l) => l.trim().length > 0)
+        const out =
+          nonBlank.length > 1 && nonBlank[0]?.trim() === t("cmd.syncing")
+            ? nonBlank.slice(1)
+            : syncLines
+        if (out.length) await showCommandOutput(t("out.titleSync"), out)
+      } finally {
+        app.resume()
+      }
+      return
+    }
     const { lines, shouldExit, handled } = await runBuiltin(line)
     if (shouldExit) return { quit: true }
     // handled tanpa cetakan = murni modal (tak ada yang perlu ke transkrip).
     if (handled) {
-      if (lines.length) transcript.pushInfo(lines)
+      // Readout command (/help full, /status, /context, /sync, /init,
+      // /scheduler) tampil sebagai jendela di atas chat, bukan dicetak ke
+      // transkrip. Fallback transkrip bila layar tak mampu.
+      if (lines.length) await showCommandOutput(commandWindowTitle(line), lines)
       return
     }
     // handleBuiltinCommand tak menangani → skill atau unknown (paritas REPL).
@@ -847,11 +991,15 @@ export async function runTui(ctx: CliSession): Promise<void> {
     },
     toggleCompact: () => {
       const compact = ui.setCompactMode()
-      transcript.pushInfo([c.muted(t("tui.toolCall", { v: compact ? "compact" : "expanded" }))])
+      transcript.pushInfo([
+        c.muted(t("tui.compactLine", { v: t(compact ? "state.compact" : "state.expanded") })),
+      ])
     },
     toggleReasoning: () => {
       const vis = ui.setReasoningVisible()
-      transcript.pushInfo([c.muted(t("tui.thinkingSet", { v: vis ? "expanded" : "minimized" }))])
+      transcript.pushInfo([
+        c.muted(t("tui.thinkingSet", { v: t(vis ? "state.expanded" : "state.minimized") })),
+      ])
     },
   }
 
@@ -867,11 +1015,14 @@ export async function runTui(ctx: CliSession): Promise<void> {
     try {
       if (resumedJobs.has(id)) return
       resumedJobs.add(id)
+      if (autoResumeEnabled) {
+        transcript.pushInfo([c.muted(t("tui.bgFinished", { id, code: code ?? "?" }))])
+      }
       app.repaint()
       if (!autoResumeEnabled) return
-      // Abort-aware: jangan menyela turn berjalan atau memulai saat quitting.
-      transcript.pushInfo([c.muted(t("tui.bgFinished", { id, code: code ?? "?" }))])
-      if (abort !== null) return
+      // Abort-aware & modal-aware: jangan menyela turn berjalan atau membuka
+      // turn baru saat popup masih aktif.
+      if (abort !== null || app.isSuspended()) return
       void runTurn(t("tui.bgFinishedAuto", { id, code: code ?? "?" })).catch(() => {})
     } catch {}
   })
@@ -882,6 +1033,7 @@ export async function runTui(ctx: CliSession): Promise<void> {
       suspend: () => app.suspend(),
       resume: () => app.resume(),
       paintRegion: (lines, topRow) => app.paintRegion(lines, topRow),
+      moveCursor: (row, col) => app.moveCursor(row, col),
       clearRegion: () => app.clearRegion(),
     })
     const res = await app.run()

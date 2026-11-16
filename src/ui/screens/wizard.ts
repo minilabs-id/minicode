@@ -4,11 +4,15 @@
 // ketikan di luar popup.
 import { formatError } from "../assistant/simple.ts"
 import { t } from "../i18n/locale.ts"
+import { createDecoderState, createKeyStreamPump } from "../input/prompt-engine.ts"
+import { hintLine } from "../render/hint.ts"
 import { sanitizeAnsiLine } from "../render/sanitize.ts"
-import { c, glyphs } from "../render/theme.ts"
+import { c } from "../render/theme.ts"
+import { wrapByWidth } from "../render/width.ts"
 import { openAltScreen } from "../runtime/screen.ts"
-import { dialogBox } from "./dialog.ts"
-import { runForm, validateUrl } from "./form.ts"
+import { canRenderModal, dialogBox, popupBoxWidth } from "./dialog.ts"
+import { IDLE_CANCEL_MS, IDLE_WARN_MS, runForm, validateUrl } from "./form.ts"
+import { createIdleTimer } from "./lifecycle.ts"
 import { runPicker } from "./picker.ts"
 import { withTimeout } from "./watchdog.ts"
 
@@ -33,14 +37,74 @@ export interface SetupWizardViewOptions {
   onSubmit(baseUrl: string, apiKey: string): Promise<string>
 }
 
-/** Lebar kotak wizard TETAP (paritas picker/form/manager — tak bernapas antar langkah). */
-const WIZARD_BOX_W = 64
+/** Tunggu tombol tutup (Enter/Esc/Ctrl+C/Ctrl+D) pada dialog error wizard. */
+async function waitForWizardDismiss(renderErr: () => void): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let done = false
+    let onData!: (chunk: Buffer) => void
+    let onResize!: () => void
+    const idle = createIdleTimer({
+      cancelMs: IDLE_WARN_MS + IDLE_CANCEL_MS,
+      onCancel: () => finish(),
+    })
+    const finish = () => {
+      if (done) return
+      done = true
+      idle.dispose()
+      try {
+        pump.dispose()
+      } catch {}
+      try {
+        process.stdin.removeListener("data", onData)
+      } catch {}
+      try {
+        process.stdout.removeListener("resize", onResize)
+      } catch {}
+      try {
+        process.stdin.setRawMode(false)
+      } catch {}
+      resolve()
+    }
+    const pump = createKeyStreamPump({
+      state: createDecoderState(),
+      onKeys: (keys) => {
+        for (const d of keys) {
+          const k = d.key.type
+          if (k === "enter" || k === "esc" || k === "ctrl-c" || k === "ctrl-d") {
+            finish()
+            return true
+          }
+        }
+        idle.reset()
+        return false
+      },
+    })
+    onData = (chunk: Buffer) => {
+      idle.reset()
+      try {
+        pump.push(new Uint8Array(chunk))
+      } catch {
+        finish()
+      }
+    }
+    onResize = () => {
+      try {
+        renderErr()
+      } catch {}
+    }
+    try {
+      process.stdin.setRawMode(true)
+      process.stdin.resume()
+      process.stdin.on("data", onData)
+      process.stdout.on("resize", onResize)
+      idle.reset()
+      renderErr()
+    } catch {
+      finish()
+    }
+  })
+}
 
-/**
- * Tunggu tanpa menahan process hidup (unref): jeda sukses/gagal wizard tak
- * boleh menahan exit bila stdin sudah ditutup. Gagal-di-kode-lama: timer
- * polos menahan event-loop 1.2/2.5 dtk.
- */
 function sleepUnref(ms: number): Promise<void> {
   return new Promise((r) => {
     const timer = setTimeout(r, ms)
@@ -59,7 +123,12 @@ function sleepUnref(ms: number): Promise<void> {
 export async function runSetupWizardView(opts: SetupWizardViewOptions): Promise<boolean> {
   if (!process.stdin.isTTY) return false
   const screen = openAltScreen()
-  if (!screen.ok) return false
+  if (!screen.ok || !canRenderModal(process.stdout.columns || 80, process.stdout.rows || 24)) {
+    try {
+      screen.close()
+    } catch {}
+    return false
+  }
   let exitMsg: string | null = null
   try {
     const CUSTOM = "\u0000custom"
@@ -73,6 +142,9 @@ export async function runSetupWizardView(opts: SetupWizardViewOptions): Promise<
       title: t("wiz.gateway"),
       items,
       filterable: true,
+      // Step [1/3] butuh judul; picker biasa tetap tanpa judul (kontrak v7.8).
+      showTitle: true,
+      screen,
       onPick: (v) => {
         picked = v
       },
@@ -146,49 +218,66 @@ export async function runSetupWizardView(opts: SetupWizardViewOptions): Promise<
       }
     }
 
+    const statusWidth = popupBoxWidth(screen.cols || 80)
     // Progres sebagai baris dalam kotak (bukan spinner liar di bawah popup).
     const box = dialogBox(
       {
         title: t("wiz.title"),
         body: [c.muted(t("wiz.detecting"))],
-        minWidth: WIZARD_BOX_W,
-        maxWidth: WIZARD_BOX_W,
+        minWidth: statusWidth,
+        maxWidth: statusWidth,
       },
       screen.cols,
       screen.rows,
     )
     screen.paintRegion(box.lines, box.topRow)
+    screen.setCursorVisible(false)
     try {
       const message = await withTimeout(() => opts.onSubmit(targetUrl, apiKey), 60_000)
       // Pesan dari jaringan (nama model/gateway) — sanitasi sebelum tampil.
       screen.clearRegion()
+      const doneWidth = popupBoxWidth(screen.cols || 80)
       const doneBox = dialogBox(
         {
           title: t("wiz.title"),
-          body: [`${glyphs.check} ${sanitizeAnsiLine(message)}`, "", t("wiz.done")],
-          minWidth: WIZARD_BOX_W,
-          maxWidth: WIZARD_BOX_W,
+          body: [sanitizeAnsiLine(message), "", t("wiz.done")],
+          minWidth: doneWidth,
+          maxWidth: doneWidth,
         },
         screen.cols,
         screen.rows,
       )
       screen.paintRegion(doneBox.lines, doneBox.topRow)
+      screen.setCursorVisible(false)
       await sleepUnref(1200)
       return true
     } catch (e) {
       screen.clearRegion()
-      const errBox = dialogBox(
-        {
-          title: t("wiz.title"),
-          body: [c.error(`${glyphs.cross} ${t("wiz.detectFail", { msg: formatError(e) })}`)],
-          minWidth: WIZARD_BOX_W,
-          maxWidth: WIZARD_BOX_W,
-        },
-        screen.cols,
-        screen.rows,
-      )
-      screen.paintRegion(errBox.lines, errBox.topRow)
-      await sleepUnref(2500)
+      const errRaw = t("wiz.detectFail", { msg: formatError(e) })
+      const renderErr = () => {
+        const w = popupBoxWidth(screen.cols || 80)
+        const innerW = Math.max(10, Math.min(w - 4, (screen.cols || 80) - 6))
+        const wrapped = errRaw
+          .split("\n")
+          .flatMap((line) => (line.trim() ? wrapByWidth(c.error(line), innerW) : [""]))
+        const errBox = dialogBox(
+          {
+            title: t("wiz.title"),
+            body: wrapped,
+            footer: hintLine([
+              { key: "Enter", label: t("hint.close") },
+              { key: "Esc", label: t("hint.cancel") },
+            ]),
+            minWidth: w,
+            maxWidth: w,
+          },
+          screen.cols,
+          screen.rows,
+        )
+        screen.paintRegion(errBox.lines, errBox.topRow)
+        screen.setCursorVisible(false)
+      }
+      await waitForWizardDismiss(renderErr)
       return false
     }
   } finally {

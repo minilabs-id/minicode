@@ -629,3 +629,40 @@ test("openai-compat thought_signature: args bersih, echo via side-map", async ()
   // arguments yang dikirim tidak mengandung kunci siluman
   expect(tc.function.arguments).toBe(JSON.stringify({ path: "a.txt" }))
 })
+
+test("openai-compat argumen kosong menjadi {} dan tool call tetap flush tanpa finish_reason", async () => {
+  const origFetch = globalThis.fetch
+  const chunks = [
+    `data: ${JSON.stringify({
+      choices: [
+        {
+          delta: {
+            tool_calls: [{ index: 0, id: "c0", function: { name: "git_status", arguments: "" } }],
+          },
+        },
+      ],
+    })}\n\n`,
+    "data: [DONE]\n\n",
+  ]
+  ;(globalThis as unknown as { fetch: unknown }).fetch = async () =>
+    new Response(chunks.join(""), {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    }) as unknown as Response
+  try {
+    const p = createOpenAICompatProvider({ apiKey: "k", baseUrl: "https://x/v1", models: ["m"] })
+    const evs: Array<{ type: string; args?: unknown; reason?: string }> = []
+    for await (const ev of p.stream(
+      { messages: [{ role: "user", content: "status" }], model: "m" },
+      new AbortController().signal,
+    )) {
+      evs.push(ev as { type: string; args?: unknown; reason?: string })
+    }
+    const call = evs.find((e) => e.type === "tool_call")
+    const fin = evs.find((e) => e.type === "finish")
+    expect(call?.args).toEqual({})
+    expect(fin?.reason).toBe("tool_calls")
+  } finally {
+    globalThis.fetch = origFetch
+  }
+})

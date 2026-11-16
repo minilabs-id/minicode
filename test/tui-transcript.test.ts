@@ -1,6 +1,7 @@
 // Unit Transcript: koleksi event → baris logis → viewport.
 import { describe, expect, test } from "bun:test"
 import type { UiPresentationActivity, UiPresentationSnapshot } from "../src/ui/contract.ts"
+import { glyphs } from "../src/ui/render/theme.ts"
 import { displayWidth } from "../src/ui/render/width.ts"
 import { Transcript } from "../src/ui/tui/transcript.ts"
 import { createFakeBus } from "./helpers/tui-harness.ts"
@@ -180,7 +181,7 @@ describe("Transcript", () => {
     t.pushError("gagal <x>")
     t.pushInfo(["satu", "dua"])
     const out = t.view(40, 6, 0).join("\n")
-    expect(out).toContain("minicode › tanya")
+    expect(out).toContain(`minicode ${glyphs.arrow} tanya`)
     expect(out).toContain("gagal <x>")
     expect(out).toContain("dua")
     t.clear()
@@ -401,5 +402,63 @@ describe("Transcript.replayHistory (resume)", () => {
     const out = t.view(120, 8, 0).join("\n")
     expect(out).toContain("write_file")
     expect(out).toContain("a.ts")
+  })
+})
+
+describe("Transcript UI audit regressions (Fase 3.2-3.4)", () => {
+  test("pushUser menyisipkan jeda antar-turn bila transkrip tidak kosong dan patuh MINICODE_ASCII=1", () => {
+    const prevAscii = process.env.MINICODE_ASCII
+    const prevWt = process.env.WT_SESSION
+    process.env.WT_SESSION = "1"
+    process.env.MINICODE_ASCII = "1"
+    try {
+      const { t } = setup()
+      t.pushInfo(["jawaban"])
+      t.pushUser("pertanyaan dua")
+      const rows = t.view(40, 4, 0)
+      expect(rows).toContain("")
+      expect(rows.some((l) => l.includes("minicode > pertanyaan dua"))).toBe(true)
+      expect(rows.some((l) => l.includes("›"))).toBe(false)
+    } finally {
+      if (prevAscii === undefined) delete process.env.MINICODE_ASCII
+      else process.env.MINICODE_ASCII = prevAscii
+      if (prevWt === undefined) delete process.env.WT_SESSION
+      else process.env.WT_SESSION = prevWt
+    }
+  })
+
+  test("code fence berbahasa menampilkan tag bahasa redup dan membiarkan kode utuh", () => {
+    const { bus, t } = setup()
+    bus.emit("provider:text", { text: "```ts\nconst a = 1\n```" })
+    bus.emit("turn:completed", {})
+    const out = t.view(60, 4, 0).join("\n")
+    expect(out).toContain(`${glyphs.dot} ts`)
+    expect(out).toContain("const a = 1")
+  })
+
+  test("mouse selection pada baris user memperhitungkan displayStart chrome prefix", () => {
+    const { t } = setup()
+    t.pushUser("hello world")
+    const rows = t.viewport(60, 4, 0).rows
+    const prompt = rows.find((r) => r.text.includes("minicode"))!
+    expect(prompt.displayStart).toBe(11)
+    const start = t.pointAt(prompt, 11)!
+    const end = t.pointAt(prompt, 16)!
+    expect(t.selectionText(start, end)).toBe("hello")
+    expect(t.columnAtOffset(prompt, start.offset)).toBe(11)
+    expect(t.columnAtOffset(prompt, end.offset)).toBe(16)
+  })
+
+  test("mouse selection pada baris markdown inline selaras dengan kolom tampilan", () => {
+    const { bus, t } = setup()
+    bus.emit("provider:text", { text: "Use **bold** end" })
+    bus.emit("turn:completed", {})
+    const rows = t.viewport(60, 4, 0).rows
+    const mdRow = rows.find((r) => r.text.includes("Use"))!
+    expect(mdRow.displayEnd).toBe(12)
+    const start = t.pointAt(mdRow, 0)!
+    const end = t.pointAt(mdRow, 12)!
+    expect(t.selectionText(start, end)).toBe("Use **bold** end")
+    expect(t.columnAtOffset(mdRow, end.offset)).toBe(12)
   })
 })

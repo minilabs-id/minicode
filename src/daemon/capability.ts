@@ -107,7 +107,14 @@ export function verifyCapability(
   } catch {
     return { ok: false, reason: "MALFORMED" }
   }
-  if (payload?.v !== 1 || !Array.isArray(payload.scopes)) return { ok: false, reason: "MALFORMED" }
+  if (
+    payload?.v !== 1 ||
+    !Array.isArray(payload.scopes) ||
+    typeof payload.n !== "string" ||
+    payload.n.length === 0 ||
+    typeof payload.who !== "string"
+  )
+    return { ok: false, reason: "MALFORMED" }
   if (payload.inc !== opts.incarnation) return { ok: false, reason: "STALE_INCARNATION" }
   const now = opts.now ?? Date.now()
   if (typeof payload.exp !== "number" || payload.exp <= now) return { ok: false, reason: "EXPIRED" }

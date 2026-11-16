@@ -30,9 +30,10 @@ export const submitResultTool: Tool = {
     properties: {
       result: {
         type: "object",
-        description: "hasil akhir terstruktur (object JSON, bukan string)",
+        additionalProperties: true,
+        description: "final structured result (JSON object, not string)",
       },
-      summary: { type: "string", description: "ringkasan satu baris untuk log" },
+      summary: { type: "string", description: "one-line summary for logs" },
     },
     required: ["result"],
     additionalProperties: false,

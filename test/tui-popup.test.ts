@@ -3,6 +3,7 @@
 // yang melukis frame penuh (paint + clear) menghapus transkrip di belakang.
 import { afterEach, describe, expect, test } from "bun:test"
 import { stripAnsi, supportsUtf8 } from "../src/ui/render/theme.ts"
+import { resetAltScreenDepth } from "../src/ui/runtime/screen.ts"
 import { runPicker } from "../src/ui/screens/picker.ts"
 import { TuiApp, type TuiHost } from "../src/ui/tui/app.ts"
 import { Transcript } from "../src/ui/tui/transcript.ts"
@@ -12,9 +13,13 @@ let tty: ReturnType<typeof installFakeTty> | null = null
 afterEach(() => {
   tty?.restore()
   tty = null
+  resetAltScreenDepth()
 })
 
-function setup(footerExtra: Record<string, unknown> = {}) {
+function setup(
+  footerExtra: Record<string, unknown> = {},
+  listCommands: (prefix: string) => string[] = () => [],
+) {
   tty = installFakeTty({ columns: 70, rows: 16 })
   const bus = createFakeBus()
   const transcript = new Transcript(bus as never)
@@ -24,7 +29,7 @@ function setup(footerExtra: Record<string, unknown> = {}) {
       footer: { mode: "auto", model: "m", cwd: "/", context: "1k", ...footerExtra } as never,
       busy: false,
     }),
-    listCommands: () => [],
+    listCommands,
     submit: async () => {},
     copySelection: () => true,
     abort: () => {},
@@ -185,6 +190,62 @@ describe("popup komposit", () => {
     await tty!.waitForOutput((o) => o.includes("◷ 1"), 5000)
     // Clock menunggu (400 ms) memutar frame — badge berubah tanpa turn baru.
     await tty!.waitForOutput((o) => /[◶◵◴]/.test(o), 5000)
+    await tty!.send(KEY.ctrlD)
+    await runP
+  })
+
+  test("NO_COLOR=1: resume tetap memulihkan baris transkrip yang tertutup popup", async () => {
+    const prev = process.env.NO_COLOR
+    process.env.NO_COLOR = "1"
+    try {
+      const { transcript, app } = setup()
+      const runP = app.run()
+      await tty!.ready()
+      await tty!.waitForOutput((o) => o.includes("00.00.00"))
+      transcript.pushInfo(Array.from({ length: 14 }, (_, i) => `row-nocolor-${i}`))
+      await tty!.send("x")
+      await tty!.waitForScreen((f) => f.some((l) => l.includes("row-nocolor-10")))
+      app.suspend()
+      const p = runPicker({
+        title: "NoColor",
+        items: [{ name: "opt-1", provider: "", value: "1" }],
+        onPick: () => {},
+        onCancel: () => {},
+      })
+      await tty!.waitForOutput((o) => o.includes("opt-1"))
+      await tty!.send(KEY.esc, 90)
+      await p
+      app.resume()
+      const after = tty!.screen().join("\n")
+      expect(after).toContain("row-nocolor-10")
+      expect(after).not.toContain("opt-1")
+      await tty!.send(KEY.backspace)
+      await tty!.send(KEY.ctrlD)
+      await runP
+    } finally {
+      if (prev === undefined) delete process.env.NO_COLOR
+      else process.env.NO_COLOR = prev
+    }
+  })
+
+  test("wheel saat dropdown `/` terbuka memilih menu tanpa menggulir transkrip", async () => {
+    const { transcript, app } = setup({}, (prefix) =>
+      ["/help", "/model", "/status"].filter((c) => c.startsWith(prefix)),
+    )
+    const runP = app.run()
+    await tty!.ready()
+    await tty!.waitForOutput((o) => o.includes("00.00.00"))
+    transcript.pushInfo(Array.from({ length: 24 }, (_, i) => `chat-line-${i}`))
+    await tty!.send("/")
+    await tty!.waitForScreen((f) => f.some((l) => l.includes("model")))
+    await tty!.send(KEY.mouseWheelDownSgr)
+    await tty!.send(KEY.mouseWheelDownSgr)
+    await tty!.send(KEY.tab)
+    const afterTab = tty!.screen().join("\n")
+    // Wheel menggeser sorotan menu (/help -> /model), dan transkrip tetap di ekor.
+    expect(afterTab).toContain("/model")
+    expect(afterTab).toContain("chat-line-23")
+    await tty!.send(KEY.esc, 90)
     await tty!.send(KEY.ctrlD)
     await runP
   })

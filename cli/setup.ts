@@ -51,6 +51,7 @@ import {
   buildBaselineNote,
   buildVerifySnippet,
   checkBaseline,
+  classifyVerifyFailure,
   detectVerifyCommand,
   formatVerifyNotice,
   runVerify,
@@ -179,8 +180,9 @@ import {
 import { collectOperationalState } from "../src/session/runtime-header.ts"
 import { snapshotTree } from "../src/session/shadow-git.ts"
 import {
+  captureSessionEvaluationBaseline,
   checkWorkspaceIntegrity,
-  collectModifiedFilesFromJournal,
+  collectSessionModifiedFiles,
   detectEvaluationTampering,
 } from "../src/session/verification.ts"
 import type { Skill } from "../src/skills/loader.ts"
@@ -204,6 +206,7 @@ import { setAskApprovalHook, setAskTextFn } from "../src/tools/ask_user.ts"
 import { killAllBackgroundJobs } from "../src/tools/bash.ts"
 import {
   setSubAgentExecutionRunner,
+  setSubAgentGovernance,
   setSubAgentParentRouting,
   setSubAgentParentRunId,
   setSubAgentWorkMode,
@@ -1306,6 +1309,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       cfg,
       prompt,
       cwd,
+      allowLocalConfig: allowLocalConfig === true,
       // RAG retrieval tak boleh menulis access_count di mode tanpa-mutasi.
       // [mode-architecture] PermissionMode readonly/plan tak lagi ada sebagai sumbu
       // persetujuan; ceiling tanpa-mutasi kini diekspresikan via WorkMode
@@ -1956,6 +1960,10 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   // (hanya PM, bukan WorkMode) membuat delegate_task melahirkan anak tanpa
   // ceiling WorkMode.
   setSubAgentWorkMode(() => workModeControl?.getWorkMode() ?? effectiveWorkMode)
+  setSubAgentGovernance(() => ({
+    restrictBash,
+    allowLocalConfig: allowLocalConfig === true,
+  }))
 
   let permissions: PermissionControl | undefined
   let noProgressDetector: NoProgressDetector | null = null
@@ -2536,6 +2544,9 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     ? (process.env.MINICODE_VERIFY_CMD ?? cfg.verifyCommand ?? detectVerifyCommand(cwd) ?? "")
     : ""
   const verifyActive = verifyCommand.length > 0
+  if (verifyActive) {
+    await captureSessionEvaluationBaseline(sessionId, cwd ?? process.cwd()).catch(() => {})
+  }
   // Sumber bukti completion untuk domain task (INV-003). Menyimpan hasil
   // verify TERAKHIR: pada saat `todo_write` berjalan, verify untuk turn ini
   // BELUM pernah jalan (verify terjadi setelah turn selesai), jadi bukti yang
@@ -2592,17 +2603,19 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     let integrityDetail = ""
     let tamperReason = ""
     const loaded = await loadJournal(sessionId, effectiveRoot).catch(() => null)
-    if (loaded?.status === "valid") {
-      const modified = collectModifiedFilesFromJournal(loaded.records)
-      if (modified.length > 0) {
-        const integrity = await checkWorkspaceIntegrity(modified, effectiveRoot)
-        integrityOk = integrity.ok
-        if (!integrity.ok) integrityDetail = integrity.summary
-        // [Fase 6A / ACE-02] Evaluator/gate yang disentuh membatalkan seluruh
-        // klaim verifikasi (fail-closed) — tidak ada jalan "hijau" via curang.
-        const tamper = await detectEvaluationTampering(modified, effectiveRoot)
-        if (tamper.tampered) tamperReason = tamper.reason
-      }
+    const modified = await collectSessionModifiedFiles(
+      sessionId,
+      effectiveRoot,
+      loaded?.status === "valid" ? loaded.records : undefined,
+    )
+    if (modified.length > 0) {
+      const integrity = await checkWorkspaceIntegrity(modified, effectiveRoot)
+      integrityOk = integrity.ok
+      if (!integrity.ok) integrityDetail = integrity.summary
+      // [Fase 6A / ACE-02] Evaluator/gate yang disentuh membatalkan seluruh
+      // klaim verifikasi (fail-closed) — tidak ada jalan "hijau" via curang.
+      const tamper = await detectEvaluationTampering(modified, effectiveRoot)
+      if (tamper.tampered) tamperReason = tamper.reason
     }
     const effectiveOk = result.ok && integrityOk && tamperReason === ""
     const effectiveOutput = !integrityOk
@@ -2628,14 +2641,13 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     // consequence deterministik. `repeatedFailureCount` memakai streak
     // SEBELUM percobaan ini (kontrak evaluateConsequence).
     const tampered = tamperReason.length > 0
-    const transient =
-      !effectiveOk &&
-      /ECONN|ETIMEDOUT|timed? ?out|rate.?limit|429|503|network|EAI_AGAIN|socket hang up/i.test(
-        effectiveOutput,
-      )
-    const permissionBlocked =
-      !effectiveOk &&
-      /permission denied|EACCES|EPERM|operation not permitted/i.test(effectiveOutput)
+    const { transient, permissionBlocked } = effectiveOk
+      ? { transient: false, permissionBlocked: false }
+      : classifyVerifyFailure({
+          ok: false,
+          output: effectiveOutput,
+          timedOut: result.timedOut,
+        })
     const failureType: AceFailureType = effectiveOk ? null : transient ? "timeout" : "functional"
     const repeatedBefore = verifyFailureStreak
     verifyFailureStreak = effectiveOk ? 0 : verifyFailureStreak + 1
@@ -2752,7 +2764,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       }
       return
     }
-    await runRunHooks(phase, ctx, signal)
+    await runRunHooks(phase, ctx, signal, { allowLocal: allowLocalConfig === true })
   }
 
   /**

@@ -10,7 +10,7 @@ import type { UiPresentationActivity } from "../contract.ts"
 import { t } from "../i18n/locale.ts"
 import { activityGroup } from "./activity-group.ts"
 import { sanitizeAnsiLine, stripSgr } from "./sanitize.ts"
-import { c } from "./theme.ts"
+import { c, glyphs } from "./theme.ts"
 import { truncateToWidth } from "./width.ts"
 /** Satu grup teragregasi (dipakai renderer + /expand buffer). */
 export interface ActivityGroupView {
@@ -105,7 +105,9 @@ export function groupLine(g: ActivityGroupView): string {
   const names = g.names.map((n) => sanitizeAnsiLine(n)).join(", ")
   const more = Math.max(0, g.nameTotal - g.names.length)
   if (names)
-    parts.push(`· ${truncateToWidth(names, MAX_PANEL_LABEL, "…")}${more > 0 ? ` +${more}` : ""}`)
+    parts.push(
+      `${glyphs.dot} ${truncateToWidth(names, MAX_PANEL_LABEL, glyphs.ellipsis)}${more > 0 ? ` +${more}` : ""}`,
+    )
   return groupPaint(g)(parts.join(" "))
 }
 

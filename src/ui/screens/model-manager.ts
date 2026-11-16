@@ -8,12 +8,15 @@ import {
   type DecoderState,
   toGraphemes,
 } from "../input/prompt-engine.ts"
+import { formatError } from "../render/errors.ts"
 import { hintLine } from "../render/hint.ts"
+import { listRow, tailFilterWindow } from "../render/list.ts"
+import { type NoticeKind, paintNoticeLines } from "../render/notice.ts"
 import { cleanUntrusted, sanitizeAnsiLine } from "../render/sanitize.ts"
 import { c, glyphs, stripAnsi } from "../render/theme.ts"
-import { displayWidth, truncateToWidth } from "../render/width.ts"
+import { displayWidth, truncateToWidth, wrapByWidth } from "../render/width.ts"
 import { type AltScreen, openAltScreen } from "../runtime/screen.ts"
-import { boxLeftPad, dialogBox, popupBoxWidth } from "./dialog.ts"
+import { boxLeftPad, canRenderModal, dialogBox, popupBoxWidth } from "./dialog.ts"
 import { runForm } from "./form.ts"
 import { createIdleTimer } from "./lifecycle.ts"
 import { runPicker } from "./picker.ts"
@@ -61,6 +64,7 @@ export function filterModelRows(rows: ModelRow[], q: string): ModelRow[] {
 
 /** Lebar kotak /model: `popupBoxWidth` (AUD-006, satu sumber width+maxWidth). */
 const modalBoxWidth = (): number => popupBoxWidth(process.stdout.columns || 80)
+const MODAL_MAX_HEIGHT = 15
 
 export async function runModelManagerView(opts: ModelManagerViewOptions): Promise<void> {
   let rows = opts.initialRows // Mode cari: ketikan apa pun langsung jadi query. Hapus = tombol Del.
@@ -82,26 +86,23 @@ export async function runModelManagerView(opts: ModelManagerViewOptions): Promis
   // redup DALAM popup, bukan console.log ke scrollback. Dibersihkan tiap
   // keypress baru — terlihat sampai tombol berikut ditekan.
   let notice: string | null = null
+  let noticeKind: NoticeKind = "info"
 
   return new Promise<void>((resolve) => {
+    const width = () => Math.max(8, modalBoxWidth() - 4)
+    const renderedNoticeLines = (): string[] =>
+      notice ? paintNoticeLines(noticeKind, notice).flatMap((l) => wrapByWidth(l, width())) : []
     const visibleRows = () => {
-      const rows = process.stdout.rows || 24
-      // Chrome tetap: 2 border + 1 baris pencarian + 1 baris hint aksi;
-      // struk notice (transient) menyusutkan daftar satu baris agar tak
-      // pernah menyingkirkan hint/marker "… more" (dialogBox memotong body
-      // dari atas). Semua angka pas dengan `room = rows − 2` di dialogBox.
-      const fixed = 4 + (notice ? 1 : 0)
+      const rows = Math.min(process.stdout.rows || 24, MODAL_MAX_HEIGHT)
+      // Chrome tetap: 2 border + 1 judul + 1 pencarian + 1 footer (dipin `dialogBox`);
+      // notice menyusutkan daftar agar kotak tetap ringkas dan hint tak hilang.
+      const fixed = 5 + renderedNoticeLines().length
       return Math.max(1, Math.min(rows - fixed, 8))
     }
-    // Lantai lebar tak boleh melebihi terminal. Lebar konten = lebar kotak
-    // tetap dikurangi chrome dialog (border+padding = 4) agar sepakat dengan
-    // dialogBox (tanpa potong ulang). innerMax dialog = cols−6, jadi konten
-    // = cols−6 juga (dulu cols−4 → potong-ganda 2 kolom di terminal sempit).
-    const width = () => Math.max(8, modalBoxWidth() - 4)
 
-    // Isi MINIMAL dialog /model (tanpa judul/footer/hitungan/penanda —
-    // seleksi murni warna). Search selalu tampil, daftar tanpa `›`.
-    const bodyLinesModal = (): string[] => {
+    // Isi MINIMAL dialog /model; footer dipin lewat `spec.footer` agar aman
+    // dari pemotongan saat notice error panjang membungkus banyak baris.
+    const bodyLinesModal = (): { lines: string[]; footer: string; filterShown: string } => {
       const list = viewRows()
       const v = visibleRows()
       if (sel < scroll) scroll = sel
@@ -110,7 +111,9 @@ export async function runModelManagerView(opts: ModelManagerViewOptions): Promis
       const cut = (s: string) => truncateToWidth(s, w)
       const view = list.slice(scroll, scroll + v)
       const lines: string[] = []
-      lines.push(cut(`${dim(">")} ${c.brightCyan(sanitizeAnsiLine(filter ?? ""))}█`))
+      const filterBudget = Math.max(4, w - 3 - displayWidth(glyphs.caret))
+      const filterShown = tailFilterWindow(filter ?? "", filterBudget)
+      lines.push(cut(`${dim(">")} ${c.brightCyan(filterShown)}${c.accent(glyphs.caret)}`))
       if (!list.length) {
         lines.push(cut(dim(`  ${filter == null ? t("model.empty") : t("model.noMatch")}`)))
       } else {
@@ -122,67 +125,64 @@ export async function runModelManagerView(opts: ModelManagerViewOptions): Promis
           // nama yang dipotong, status yang selamat.
           const active = row.active ? ` (${t("common.active")})` : ""
           const nameBudget = Math.max(8, w - 4 - displayWidth(active))
-          const label = `${truncateToWidth(`${sanitizeAnsiLine(row.id)}${badge}`, nameBudget, "…")}${active}`
-          // Penanda › paritas picker/provider-manager — aksesibilitas visual
-          // (warna saja tak cukup untuk sebagian pengguna).
-          if (picked) lines.push(`  ${c.accent("›")} ${c.accent(c.bold(label))}`)
-          else lines.push(`    ${dim(label)}`)
+          const label = `${truncateToWidth(`${sanitizeAnsiLine(row.id)}${badge}`, nameBudget, glyphs.ellipsis)}${active}`
+          // Kolom marker dipakai bersama (listRow): label tak bergeser saat
+          // seleksi berpindah dan marker `›` tidak hilang tanpa warna.
+          lines.push(listRow(label, picked))
         }
       }
-      if (notice) lines.push(cut(dim(sanitizeAnsiLine(notice))))
-      // Hint aksi minimalis (kunci terang, label redup) — satu sumber dengan
-      // picker/form agar seluruh jendela /model konsisten. Sengaja TANPA
-      // judul/footer dekoratif (kontrak v7.8); ini baris body terakhir.
-      lines.push(
-        cut(
-          hintLine([
-            { key: "↑↓", label: t("hint.move") },
-            { key: "Enter", label: t("hint.select") },
-            { key: "Tab", label: t("hint.effort") },
-            { key: "Del", label: t("hint.delete") },
-            { key: "Esc", label: t("hint.close") },
-          ]),
-        ),
-      )
-      return lines
+      for (const line of renderedNoticeLines()) lines.push(cut(line))
+      // Hint akurat per mode: saat filter aktif, Esc keluar dari pencarian
+      // (bukan menutup) dan Del mengedit query (jangan iklankan Del delete).
+      const escLabel = filter == null ? t("hint.cancel") : t("hint.back")
+      const footer = hintLine([
+        { key: glyphs.upDown, label: t("hint.move") },
+        { key: "Enter", label: t("hint.select") },
+        { key: "Tab", label: t("hint.effort") },
+        ...(filter == null ? [{ key: "Del", label: t("hint.delete") }] : []),
+        { key: "Esc", label: escLabel },
+      ])
+      return { lines, footer, filterShown }
     }
 
     const render = () => {
-      // Region kotak di atas transkrip; lebar beku (min=max).
+      const { lines, footer, filterShown } = bodyLinesModal()
+      // Region kotak di atas transkrip; lebar mengikuti terminal saat resize.
       const box = dialogBox(
         {
-          title: "",
-          body: bodyLinesModal(),
+          title: t("out.titleModels"),
+          body: lines,
+          footer,
           minWidth: modalBoxWidth(),
           maxWidth: modalBoxWidth(),
-          maxHeight: 14,
+          maxHeight: MODAL_MAX_HEIGHT,
         },
         screen.cols,
         screen.rows,
       )
       screen.paintRegion(box.lines, box.topRow)
-      // Parkir kursor di posisi ketik query (tepat sebelum penanda █ di
-      // baris search body[0]): kolom = padding + border + spasi + "> " +
-      // lebar filter + 1. Parkir di ujung baris (padding void) terlihat
-      // rusak — kursor melayang jauh dari █.
+      // Parkir kursor tepat sebelum caret di dalam kotak dan blok sync-update.
       try {
         const li = Math.min(box.lines.length - 1, box.bodyTop)
         const row = box.topRow + li
         const leftPad = boxLeftPad(stripAnsi(box.lines[li] ?? ""))
+        const maxCol = leftPad + 2 + width() + 1
         const col = Math.max(
           1,
           Math.min(
             screen.cols || 80,
-            leftPad + 2 + 2 + displayWidth(sanitizeAnsiLine(filter ?? "")) + 1,
+            maxCol,
+            leftPad + 4 + displayWidth(stripAnsi(filterShown)) + 1,
           ),
         )
-        process.stdout.write(`\x1b[${row};${col}H\x1b[?25h`)
+        screen.moveCursor(row, col)
       } catch {}
     }
 
     // Popup butuh layar mampu; selain itu tolak BERSUARA + batal.
     const screen: AltScreen = openAltScreen()
-    const useModal = screen.ok && (process.stdout.rows || 24) >= 10
+    const useModal =
+      screen.ok && canRenderModal(process.stdout.columns || 80, process.stdout.rows || 24)
     if (!useModal) {
       try {
         console.log(`⚠ ${t("gate.tuiModel")}`)
@@ -215,7 +215,14 @@ export async function runModelManagerView(opts: ModelManagerViewOptions): Promis
     const suspend = () => {
       idle.clear()
       attached = false
-      process.stdout.write("\x1b[0m\x1b[?25h")
+      // Hapus kotak induk sebelum sub-modal (effort picker / form konfirmasi)
+      // tampil agar bingkai tidak tumpang-tindih; saat finish `done` sudah true.
+      if (!done) {
+        try {
+          screen.clearRegion()
+        } catch {}
+        screen.setCursorVisible(false)
+      }
       // TANPA pause — stdin mengalir seumur proses (lihat cleanup askLine).
       try {
         process.stdin.setRawMode(false)
@@ -290,9 +297,10 @@ export async function runModelManagerView(opts: ModelManagerViewOptions): Promis
         try {
           await fn()
         } catch (e) {
-          // Pesan error dari controller/jaringan = input tak terpercaya:
-          // sanitasi (tanpa ini ESC[2J dari pesan merusak layar).
-          notice = `${glyphs.cross} ${sanitizeAnsiLine((e as Error).message)}`
+          // Formatter kanonik: redaksi credential + saran tindakan. Notice
+          // error dirender merah oleh paintNoticeLines (bukan teks redup).
+          notice = formatError(e)
+          noticeKind = "error"
         } finally {
           busy = false
           await loadRowsSafe()
@@ -335,15 +343,21 @@ export async function runModelManagerView(opts: ModelManagerViewOptions): Promis
                 kind: "confirm",
               },
             ],
-            footer: t("model.deleteFooter"),
+            footerHints: [
+              { key: `${glyphs.leftRight}/y/n`, label: t("hint.select") },
+              { key: "Enter", label: t("hint.delete") },
+              { key: "Esc", label: t("hint.cancel") },
+            ],
           },
           screen,
         )
         if (!form.cancelled && form.values?.ok === "y") {
           rows = await withWatchdog(() => opts.onDelete(row.id))
-          notice = `${glyphs.check} ${t("ntc.deleted", { id: row.id })}`
+          notice = t("ntc.deleted", { id: row.id })
+          noticeKind = "success"
         } else {
           notice = t("common.canceled")
+          noticeKind = "info"
           rows = await withWatchdog(() => opts.loadRows())
         }
         clampSel()
@@ -366,6 +380,8 @@ export async function runModelManagerView(opts: ModelManagerViewOptions): Promis
         try {
           void runPicker({
             title: t("effort.title"),
+            showTitle: true,
+            screen,
             items: options.map((name) => ({ name, provider: "", value: name })),
             onPick: (v) => resolvePick(v),
             onCancel: () => resolvePick(null),
@@ -389,9 +405,11 @@ export async function runModelManagerView(opts: ModelManagerViewOptions): Promis
       typeof process.stdin.getMaxListeners === "function" ? process.stdin.getMaxListeners() : 10
     const handleManagerKeys = (keys: DecodedKey[]): boolean => {
       if (busy || done) return true
+      if (!keys.length) return false
       try {
         // Struk lama dibersihkan tiap keypress baru (transient, bukan arsip).
         notice = null
+        noticeKind = "info"
         for (const item of keys) {
           // Mode cari: semua ketikan masuk ke query, Esc keluar dari mode
           // cari — bukan tutup manager.
@@ -441,8 +459,8 @@ export async function runModelManagerView(opts: ModelManagerViewOptions): Promis
             finish()
             return true
           }
-          if (item.key.type === "up") sel = Math.max(0, sel - 1)
-          else if (item.key.type === "down") {
+          if (item.key.type === "up" || item.key.type === "wheelup") sel = Math.max(0, sel - 1)
+          else if (item.key.type === "down" || item.key.type === "wheeldown") {
             const n = viewRows().length
             sel = n ? Math.min(n - 1, sel + 1) : 0
           } else if (item.key.type === "home") {
@@ -484,8 +502,8 @@ export async function runModelManagerView(opts: ModelManagerViewOptions): Promis
                 // Pilih model yang gagal HARUS terlihat dan kembali ke daftar
                 // untuk retry (pola resume() seperti a/d/e provider-manager),
                 // bukan menutup manager dan kehilangan konteks daftar.
-                // Pesan controller = input tak terpercaya: sanitasi.
-                notice = `${glyphs.cross} ${sanitizeAnsiLine((e as Error).message)}`
+                notice = formatError(e)
+                noticeKind = "error"
                 busy = false
                 await loadRowsSafe()
                 resume()
@@ -508,17 +526,20 @@ export async function runModelManagerView(opts: ModelManagerViewOptions): Promis
                   // user menekan Tab, layar tak berubah, dan itu terbaca sebagai
                   // "minicode macet". Nyatakan alasannya, tetap di daftar.
                   notice = t("effort.noThinking")
+                  noticeKind = "info"
                 } else if (picked) {
                   await withWatchdog(() => opts.onSetEffort!(row.id, picked))
                   // Notice terlihat di daftar (manager tetap terbuka) —
                   // inilah kehidupan baru `effort.saved` setelah A5.
                   notice = t("effort.saved", { effort: picked })
+                  noticeKind = "success"
                 }
                 busy = false
                 await loadRowsSafe()
                 resume()
               } catch (e) {
-                notice = `${glyphs.cross} ${sanitizeAnsiLine((e as Error).message)}`
+                notice = formatError(e)
+                noticeKind = "error"
                 busy = false
                 await loadRowsSafe()
                 resume()
@@ -556,7 +577,7 @@ export async function runModelManagerView(opts: ModelManagerViewOptions): Promis
 
     const onResize = () => render()
 
-    process.stdout.write("\x1b[?25l")
+    screen.setCursorVisible(false)
     try {
       process.stdin.setRawMode(true)
       process.stdin.resume()

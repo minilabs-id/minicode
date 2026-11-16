@@ -219,7 +219,7 @@ describe.serial("provider-manager: add (a)", () => {
     await waitFor(() => {
       const t = tty
       if (!t) throw new Error("tty gone")
-      return visible(t).includes("Canceled")
+      return visible(t).includes("Cancelled")
     })
     expect(existsSync(localConfigPath())).toBe(false)
     await mgr.close()
@@ -240,7 +240,7 @@ describe.serial("provider-manager: add (a)", () => {
     await waitFor(() => {
       const t = tty
       if (!t) throw new Error("tty gone")
-      return visible(t).includes("Canceled")
+      return visible(t).includes("Cancelled")
     })
     expect(existsSync(localConfigPath())).toBe(false)
     await mgr.close()
@@ -259,7 +259,7 @@ describe.serial("provider-manager: add (a)", () => {
     await waitFor(() => {
       const t = tty
       if (!t) throw new Error("tty gone")
-      return visible(t).includes("Canceled")
+      return visible(t).includes("Cancelled")
     })
     // Manager is still alive: Esc can still close it (if process died, this
     // would never complete).
@@ -275,14 +275,14 @@ describe.serial("provider-manager: add (a)", () => {
     await tty.waitForOutput((o) => o.includes("Base URL"))
     await tty.send("X") // kotori prefill
     await tty.send(KEY.ctrlC, 150)
-    // Tekan-1: prefill dikembalikan, form TETAP terbuka (tanpa "Canceled").
-    expect(visible(tty)).not.toContain("Canceled")
+    // Tekan-1: prefill dikembalikan, form TETAP terbuka (tanpa "Cancelled").
+    expect(visible(tty)).not.toContain("Cancelled")
     await tty.send(KEY.ctrlC, 90)
     // Tekan-2: batal total, manager tetap hidup.
     await waitFor(() => {
       const t = tty
       if (!t) throw new Error("tty gone")
-      return visible(t).includes("Canceled")
+      return visible(t).includes("Cancelled")
     })
     await mgr.close()
   })
@@ -315,7 +315,7 @@ describe.serial("provider-manager: add (a)", () => {
     await waitFor(() => {
       const t = tty
       if (!t) throw new Error("tty gone")
-      return visible(t).includes("Canceled")
+      return visible(t).includes("Cancelled")
     })
     expect((await readConfig(globalPath)).providers).toHaveLength(0)
     await mgr.close()
@@ -346,7 +346,7 @@ describe.serial("provider-manager: add (a)", () => {
     await t.send(KEY.tab)
     await t.send(KEY.tab)
     await t.send(KEY.enter)
-    await waitFor(() => visible(t).includes("Canceled"))
+    await waitFor(() => visible(t).includes("Cancelled"))
     const cfg = JSON.parse(await readFile(globalPath, "utf8")) as {
       providers: { id: string; apiKey: string }[]
     }
@@ -401,7 +401,7 @@ describe.serial("provider-manager: add (a)", () => {
     await waitFor(() => {
       const t = tty
       if (!t) throw new Error("tty gone")
-      return visible(t).includes("Canceled")
+      return visible(t).includes("Cancelled")
     })
     await mgr.close()
   })
@@ -466,7 +466,7 @@ describe.serial("provider-manager: delete (d)", () => {
     await waitFor(() => {
       const t = tty
       if (!t) throw new Error("tty gone")
-      return visible(t).includes("Canceled")
+      return visible(t).includes("Cancelled")
     })
     expect((await readConfig(localConfigPath())).providers).toHaveLength(1)
     await mgr.close()
@@ -482,7 +482,7 @@ describe.serial("provider-manager: delete (d)", () => {
     await waitFor(() => {
       const t = tty
       if (!t) throw new Error("tty gone")
-      return visible(t).includes("Canceled")
+      return visible(t).includes("Cancelled")
     })
     expect((await readConfig(localConfigPath())).providers).toHaveLength(1)
     await mgr.close()
@@ -762,7 +762,7 @@ describe("provider-manager view: aksi gantung → watchdog pulih", () => {
     await tty.waitForOutput((o) => o.includes("Delete provider"), 2000)
     await tty.send("y")
     await tty.send(KEY.enter)
-    await tty.waitForOutput((o) => o.includes("timed out"), 5000)
+    await tty.waitForOutput((o) => /timeout|timed out|batas waktu/i.test(o), 5000)
     // UI pulih: Esc menutup normal (kode lama: gantung selamanya).
     await tty.waitForListener(2000)
     await tty.send(KEY.esc, 30)

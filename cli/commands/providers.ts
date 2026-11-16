@@ -4,7 +4,7 @@ import { loadConfig, type MinicodeConfig } from "../../src/config.ts"
 import { refreshProviderModels } from "../../src/providers/provision.ts"
 import { sanitizeAnsiLine } from "../../src/ui/render/sanitize.ts"
 import { renderTable } from "../../src/ui/render/table.ts"
-import { c, glyphs } from "../../src/ui/render/theme.ts"
+import { c } from "../../src/ui/render/theme.ts"
 
 interface TraceRow {
   model?: string
@@ -152,14 +152,11 @@ export async function handleProviders(
   if (firstArg === "sync") {
     console.log("Syncing model list from providers…")
     const { updated, failed } = await refreshProviderModels({ cwd: cwdArg, allowLocal })
+    // Kata status eksplisit: warna saja tak terbaca di pipe/NO_COLOR.
     for (const r of updated)
-      console.log(
-        `  ${c.green(glyphs.check)} ${sanitizeAnsiLine(r.id)}: ${r.from} -> ${r.to} model`,
-      )
+      console.log(`  ${c.green("ok")} ${sanitizeAnsiLine(r.id)}: ${r.from} -> ${r.to} model`)
     for (const f of failed)
-      console.log(
-        `  ${c.red(glyphs.cross)} ${sanitizeAnsiLine(f.id)}: ${sanitizeAnsiLine(f.reason)}`,
-      )
+      console.log(`  ${c.red("failed")} ${sanitizeAnsiLine(f.id)}: ${sanitizeAnsiLine(f.reason)}`)
     if (!updated.length && !failed.length) {
       const cfgHere = await loadConfig(cwdArg, { allowLocal })
       if (cfgHere.providers.length === 0)

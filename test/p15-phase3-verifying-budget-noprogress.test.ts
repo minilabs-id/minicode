@@ -26,6 +26,7 @@
 // Hermetik: direktori temp, FakeProvider lokal, tanpa jaringan.
 
 import { afterEach, describe, expect, test } from "bun:test"
+import { spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -33,6 +34,7 @@ import { join } from "node:path"
 import type { EventBus, Tool } from "#minicore"
 import { FakeProvider, finish, text, tool, toolCall } from "#minicore/test/fakes.ts"
 import { createMinicodeSession } from "../src/app/session.ts"
+import { resolveTrustedExecutable } from "../src/lib/trusted-exec.ts"
 import { createCalibratedEstimator, minicodeEstimator } from "../src/policy/context.ts"
 import {
   canonicalArgsHash,
@@ -45,12 +47,15 @@ import {
   maxTurnsExceededError,
   watchBudgetLimit,
 } from "../src/policy/usage.ts"
-import { runVerify } from "../src/policy/verifier.ts"
+import { classifyVerifyFailure, runVerify } from "../src/policy/verifier.ts"
 import { appendMutationIntent, appendMutationTerminal, hashArgs } from "../src/session/journal.ts"
 import { loadSessionUsageSummary, saveSession } from "../src/session/persistence.ts"
 import {
+  captureSessionEvaluationBaseline,
   checkWorkspaceIntegrity,
   collectModifiedFilesFromJournal,
+  collectSessionModifiedFiles,
+  detectEvaluationTampering,
 } from "../src/session/verification.ts"
 import { resetTaskStoreHandles, TaskStore } from "../src/task/store.ts"
 import { beginSessionTasksVerification, settleSessionVerifyingTasks } from "../src/task/sync.ts"
@@ -747,5 +752,141 @@ describe("LOOP-G19 & LOOP-G27 — detektor deterministik No-Progress & Oscillati
     expect(String(activeToolMsgs[2]!.content)).toContain(
       "[LOOP_GUARD kind=NO_PROGRESS reason=READ_ONLY_THRASHING count=2]",
     )
+  })
+
+  test("Audit P2: web_search & failed bash tidak me-reset READ_ONLY_THRASHING; bash file oscillation terlacak", async () => {
+    const det = createNoProgressDetector({ maxConsecutiveReadCalls: 3, getPosture: () => "active" })
+    expect(det.evaluateBeforeCall({ name: "read_file", args: { path: "a.ts" } }).allowed).toBe(true)
+    expect(det.evaluateBeforeCall({ name: "web_search", args: { query: "q" } }).allowed).toBe(true)
+    expect(det.evaluateBeforeCall({ name: "bash", args: { cmd: "false" } }).allowed).toBe(true)
+    det.recordOutcome({ name: "bash", args: { cmd: "false" }, isError: true, content: "exit 1" })
+    expect(
+      det.evaluateBeforeCall({ name: "web_fetch", args: { url: "https://ex.com" } }).allowed,
+    ).toBe(true)
+    const blocked = det.evaluateBeforeCall({ name: "grep", args: { pattern: "x" } })
+    expect(blocked.allowed).toBe(false)
+    if (!blocked.allowed) expect(blocked.reason).toBe("READ_ONLY_THRASHING")
+
+    // Osilasi file via bash ikut terlacak lewat pre/post snapshot
+    const dir = tempDir()
+    const oscPath = join(dir, "osc-bash.txt")
+    writeFileSync(oscPath, "V1", "utf8")
+    const detOsc = createNoProgressDetector({ maxOscillations: 2 })
+    // Seed tracker dengan V1 -> V2 via mutasi tool biasa
+    await detOsc.beforeToolEffectCheck(
+      { id: "w1", name: "write_file", args: { path: "osc-bash.txt", content: "V2" } },
+      dir,
+    )
+    writeFileSync(oscPath, "V2", "utf8")
+    await detOsc.completePostMutation(
+      { id: "w1", name: "write_file", args: { path: "osc-bash.txt" } },
+      dir,
+    )
+    // Revert ke V1 lewat bash (cicilan 1)
+    await detOsc.beforeToolEffectCheck(
+      { id: "b1", name: "bash", args: { cmd: "echo V1 > osc-bash.txt" } },
+      dir,
+    )
+    writeFileSync(oscPath, "V1", "utf8")
+    await detOsc.completePostMutation(
+      { id: "b1", name: "bash", args: { cmd: "echo V1 > osc-bash.txt" } },
+      dir,
+    )
+    // Flip lagi ke V2
+    await detOsc.beforeToolEffectCheck(
+      { id: "b2", name: "bash", args: { cmd: "echo V2 > osc-bash.txt" } },
+      dir,
+    )
+    writeFileSync(oscPath, "V2", "utf8")
+    await detOsc.completePostMutation(
+      { id: "b2", name: "bash", args: { cmd: "echo V2 > osc-bash.txt" } },
+      dir,
+    )
+    // Revert ke V1 kedua kalinya via bash -> osilasi terdeteksi & panggilan berikutnya ditolak!
+    await detOsc.beforeToolEffectCheck(
+      { id: "b3", name: "bash", args: { cmd: "echo V1 > osc-bash.txt" } },
+      dir,
+    )
+    writeFileSync(oscPath, "V1", "utf8")
+    const v = await detOsc.completePostMutation(
+      { id: "b3", name: "bash", args: { cmd: "echo V1 > osc-bash.txt" } },
+      dir,
+    )
+    expect(v.allowed).toBe(false)
+    if (!v.allowed) expect(v.reason).toBe("WORKSPACE_REVERT_CYCLE")
+  })
+
+  test("Audit P2: collectSessionModifiedFiles menangkap anak + bash-edited tests; tamper detect assertion drop", async () => {
+    const dir = tempDir()
+    mkdirSync(join(dir, "test"), { recursive: true })
+    mkdirSync(join(dir, "scripts"), { recursive: true })
+    writeFileSync(
+      join(dir, "test", "sample.test.ts"),
+      `test("x", () => {\n  expect(1 + 1).toBe(2)\n  expect("a").toBe("a")\n})\n`,
+      "utf8",
+    )
+    writeFileSync(join(dir, "scripts", "coverage-gate.ts"), "export const min = 87\n", "utf8")
+    const git = resolveTrustedExecutable("git")
+    spawnSync(git, ["init"], { cwd: dir, stdio: "ignore" })
+    spawnSync(git, ["config", "user.email", "t@example.com"], { cwd: dir, stdio: "ignore" })
+    spawnSync(git, ["config", "user.name", "t"], { cwd: dir, stdio: "ignore" })
+    spawnSync(git, ["add", "."], { cwd: dir, stdio: "ignore" })
+    spawnSync(git, ["commit", "-m", "init"], { cwd: dir, stdio: "ignore" })
+
+    await captureSessionEvaluationBaseline("sid-p", dir)
+    // Simulasikan edit child journal
+    await appendMutationIntent({
+      session: "sid-p",
+      tool: "delegate_task",
+      cwd: dir,
+      childSessionId: "sub-child-1",
+    })
+    const childIntent = await appendMutationIntent({
+      session: "sub-child-1",
+      tool: "write_file",
+      cwd: dir,
+      paths: ["scripts/coverage-gate.ts"],
+    })
+    await appendMutationTerminal(
+      "sub-child-1",
+      dir,
+      childIntent.id,
+      childIntent.seq,
+      "write_file",
+      "committed",
+    )
+    // Simulasikan bash melemahkan assertion test tanpa catatan di journal file parent
+    writeFileSync(
+      join(dir, "test", "sample.test.ts"),
+      `test("x", () => {\n  expect(true).toBe(true)\n})\n`,
+      "utf8",
+    )
+    const modified = await collectSessionModifiedFiles("sid-p", dir)
+    expect(modified).toContain("test/sample.test.ts")
+    expect(modified).toContain("scripts/coverage-gate.ts")
+    const tamper = await detectEvaluationTampering(modified, dir)
+    expect(tamper.tampered).toBe(true)
+    expect(tamper.offendingFiles).toContain("test/sample.test.ts")
+    expect(tamper.offendingFiles).toContain("scripts/coverage-gate.ts")
+  })
+
+  test("Audit P2: classifyVerifyFailure tidak tertipu kata network/permission di assertion gagal test", () => {
+    const testAssertFail = classifyVerifyFailure({
+      ok: false,
+      output: [
+        "(fail) api > rejects private network URL",
+        'Expected: "permission denied"',
+        'Received: "ok"',
+      ].join("\n"),
+    })
+    expect(testAssertFail.transient).toBe(false)
+    expect(testAssertFail.permissionBlocked).toBe(false)
+
+    const realNetFail = classifyVerifyFailure({
+      ok: false,
+      output: "error: ECONNREFUSED 127.0.0.1:443",
+    })
+    expect(realNetFail.transient).toBe(true)
+    expect(classifyVerifyFailure({ ok: false, output: "", timedOut: true }).transient).toBe(true)
   })
 })

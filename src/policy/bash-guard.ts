@@ -239,7 +239,7 @@ export function decodeAnsiCQuotes(cmd: string): string {
 
 export function stripCommandWrappers(cmd: string): string {
   const WRAPPER =
-    /(^|[;&|]\s*)(?:command|exec|builtin|eval|nice(?:\s+-n\s*-?\d+)?|nohup|time|timeout\s+[\d.]+[smhd]?|stdbuf(?:\s+-\S+)*|env(?=\s+[A-Za-z_][A-Za-z0-9_]*=)|setsid|ionice(?:\s+-\S+)*|xargs(?:\s+-\S+)*|sudo(?:\s+-\S+)*|doas)\s+/gi
+    /(^|[;&|\n]\s*)(?:command|exec|builtin|eval|nice(?:\s+-n\s*-?\d+)?|nohup|time|timeout\s+[\d.]+[smhd]?|stdbuf(?:\s+-\S+)*|env(?=\s+[A-Za-z_][A-Za-z0-9_]*=)|setsid|ionice(?:\s+-\S+)*|xargs(?:\s+-\S+)*|sudo(?:\s+-\S+)*|doas)\s+/gi
   // Wrapper privilese/konteks (audit 2026-09-16 B2): `su -c 'env'`,
   // `runuser -u x -- printenv`, `cmd /c set` menyembunyikan perintah
   // sebenarnya dari aturan konten yang ter-anchor ke awal (ENV_DUMP dkk).
@@ -248,7 +248,7 @@ export function stripCommandWrappers(cmd: string): string {
   // 'cat /etc/shadow'` tetap kena SENSITIVE_TARGET. Jangkar awal mencegah
   // strip di tengah perintah (`echo su -c env` tak tersentuh).
   const WRAPPER_SHELL =
-    /(^|[;&|]\s*)(?:(?:su|runuser|gosu|chroot|nsenter)(?:\s+(?:-[^\s;|]+|--[^\s;|]*|\/[^\s;|]*|[^-;\s|/][^;\s|]*))*\s+|cmd(?:\.exe)?(?:\s+\/[a-zA-Z]+)*\s+\/c\s+|powershell(?:\.exe)?(?:\s+-(?:Command|c|EncodedCommand|enc|ec))?\s+|pwsh(?:\.exe)?(?:\s+-(?:Command|c|EncodedCommand|enc|ec))?\s+)/gi
+    /(^|[;&|\n]\s*)(?:(?:su|runuser|gosu|chroot|nsenter)(?:\s+(?:-[^\s;|]+|--[^\s;|]*|\/[^\s;|]*|[^-;\s|/][^;\s|]*))*\s+|cmd(?:\.exe)?(?:\s+\/[a-zA-Z]+)*\s+\/c\s+|powershell(?:\.exe)?(?:\s+-(?:Command|c|EncodedCommand|enc|ec))?\s+|pwsh(?:\.exe)?(?:\s+-(?:Command|c|EncodedCommand|enc|ec))?\s+)/gi
   let out = cmd
   for (let pass = 0; pass < 4; pass++) {
     const next = out.replace(WRAPPER, "$1").replace(WRAPPER_SHELL, "$1")
@@ -408,7 +408,7 @@ const ENV_SECRET_REF =
 
 /** Flag upload berkas pada klien HTTP — jalur exfiltrasi paling langsung. */
 const UPLOAD_FLAG =
-  /\b(?:curl|wget|http|httpie|nc|ncat|socat)\b[^\n]*(?:-F\s*\S*=@|--form\s*\S*=@|-d\s*@|--data(?:-binary|-raw)?\s*@|-T\s+|--upload-file|--post-file=|-b\s*@)/i
+  /\b(?:curl|wget|http|httpie|nc|ncat|socat)\b[^\n]*(?:-F\s*\S*=@|--form\s*\S*=@|(?:-d|--data(?:-binary|-raw|-ascii)?)(?:\s*=\s*|\s*)@|(?:-T|--upload-file|--post-file)(?:=|\s+)|-T[./~]|-b\s*@)/i
 
 /** Upload DATA dari variabel bare (`-d $X`, bukan `@file` yang sudah ditahan
  * UPLOAD_FLAG): bentuk exfiltrasi terakhir yang lolos — nama var arbitrer
@@ -446,7 +446,7 @@ const GIT_EXEC_ENV = /(?:^|[;&|\n]\s*)GIT_(?:PAGER|SSH|ASKPASS|EDITOR|DIR|WORK_T
  * memperluas allowlist ke bahasa baru membuka jalur kode-inline pada bahasa itu.
  */
 const INLINE_INTERPRETER =
-  /\b(?:pyw?|python[\d.]*|pypy[\d.]*|sh|bash|dash|zsh|ksh|node|deno|bun|perl|ruby|php|Rscript|lua|luajit|julia|elixir|escript|erl|groovy|scala|tclsh|dotnet|swift|swiftc|dart|java|raku)(?:\.exe)?\b\s+(?:-\w*\s+)*(?:-c|-e|-E|--eval|-eval|--print|-p|--command|-r|--execute|--require|--import|--loader)\b/i
+  /(?:^|[;&|\n(\s/\\])(?:pyw?|python[\d.]*|pypy[\d.]*|sh|bash|dash|zsh|ksh|node|deno|bun|perl|ruby|php|Rscript|lua|luajit|julia|elixir|escript|erl|groovy|scala|tclsh|dotnet|swift|swiftc|dart|java|raku)(?:\.exe)?\b\s+(?:--[A-Za-z0-9_-]+(?:=[^\s;&|]+)?\s+|-(?:W|X|I|M)\s+[^\s;&|]+\s+|-[A-Za-z0-9]+\s+){0,8}(?:-c|-e|-E|--eval|-eval|--print|-p|--command|-r|--execute|--require|--import|--loader)\b/i
 // Residual jujur (audit 2026-09-16 B3): eksekusi via stdin/redirect TANPA
 // flag inline (`bash -s < skrip`, `python3 < prog`, `... | python3 -`) tidak
 // ditahan — menahan `| python3 -` mematahkan pipeline sah, dan `bash berkas`
@@ -621,7 +621,10 @@ const STATIC_DENY: [RegExp, string][] = [
     /\b(?:powershell|pwsh)(\.exe)?\b[^\n]*\s-e\w*\s+[A-Za-z0-9+/]{60,}={0,2}/i,
     "encoded powershell payload",
   ],
-  [/>\s*\/dev\/(?:sda|nvme|hd[a-z])/i, "raw device write"],
+  [
+    />\s*\/dev\/(?:sd[a-z]\d*|nvme\d+n\d+(?:p\d+)?|hd[a-z]\d*|vd[a-z]\d*|xvd[a-z]\d*|mmcblk\d+(?:p\d+)?|disk\d+(?:s\d+)?)/i,
+    "raw device write",
+  ],
   [/\b(?:del|erase)\b[^\n]*\/[sfaq]/i, "windows recursive delete"],
   [/\brmdir\b[^\n]*\/s/i, "windows recursive rmdir"],
   [/\bRemove-Item\b[^\n]*-Recurse/i, "powershell recursive delete"],
@@ -907,12 +910,20 @@ export function inspectBashCommand(rawCmd: string, cwd?: string): BashVerdict {
     const readerTargets = (() => {
       const out: string[] = []
       const re =
-        /\b(?:cat|bat|less|more|head|tail|nl|od|xxd|strings|type|Get-Content|gc|certutil|tac|findstr|fc|comp|cp|copy|mv|move|scp|rsync|tar|zip|gzip|base64|openssl|awk|sed|grep|egrep|fgrep|rg|cut|sort|uniq|tee|dd|install|xcopy|robocopy|Out-File|Set-Content|Add-Content|New-Item|Copy-Item|Move-Item)\b\s+([^\n;&|]+)/gi
+        /\b(cat|bat|less|more|head|tail|nl|od|xxd|strings|type|Get-Content|gc|certutil|tac|findstr|fc|comp|cp|copy|mv|move|scp|rsync|tar|zip|gzip|base64|openssl|awk|sed|grep|egrep|fgrep|rg|cut|sort|uniq|tee|dd|install|xcopy|robocopy|Out-File|Set-Content|Add-Content|New-Item|Copy-Item|Move-Item)\b\s+([^\n;&|]+)/gi
+      const WIN_SWITCH_CMDS = /^(?:findstr|fc|comp|copy|xcopy|robocopy|sort)$/i
       for (const m of norm.matchAll(re)) {
-        const args = m[1]!.split(/\s+/)
+        const cmdName = m[1]!
+        const isWinSwitchCmd = process.platform === "win32" || WIN_SWITCH_CMDS.test(cmdName)
+        const args = m[2]!.split(/\s+/)
         for (const a of args) {
           if (!a) continue
           if (a.startsWith("-")) continue
+          // Flag cmd.exe Windows berawalan `/` (mis. `findstr /n /c:err log.txt`,
+          // `copy /y`, `fc /b`) bukan path root POSIX — lewati agar tidak ditolak
+          // sebagai `outside workspace`, sambil tetap menjaga `/etc/...` atau `/f:...`.
+          if (isWinSwitchCmd && /^\/[a-zA-Z]{1,2}$/.test(a)) continue
+          if (/^findstr$/i.test(cmdName) && /^\/c:/i.test(a)) continue
           const t = a.trim()
           if (!t) continue
           out.push(t)

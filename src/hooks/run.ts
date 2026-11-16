@@ -2,6 +2,8 @@ import { spawn } from "node:child_process"
 import { existsSync, readdirSync } from "node:fs"
 import { homedir } from "node:os"
 import { join, resolve } from "node:path"
+import { killProcessTree, signalProcessGroupGraceful } from "../lib/process-tree.ts"
+import { isRealPathOutsideRoot } from "../policy/jail.ts"
 import { sanitizeSpawnEnv } from "../policy/scrub.ts"
 
 export interface RunHookCtx {
@@ -9,6 +11,11 @@ export interface RunHookCtx {
   prompt?: string
   cwd?: string
   result?: unknown
+}
+
+export interface RunHooksOptions {
+  /** Izinkan hook lokal `<cwd>/.minicode/hooks` (hanya bila `--allow-local-config`). */
+  allowLocal?: boolean
 }
 
 /**
@@ -35,20 +42,36 @@ export function shouldRunHooks(
   return permissionMode !== "plan" && permissionMode !== "readonly"
 }
 
-// 6.4 — hooks global opt-in: ~/.minicode/hooks/{pre,post}*.js dan
-// .minicode/hooks/{pre,post}*.js. Berjalan sebagai node script terpisah
-// dengan konteks di env MINICODE_HOOK_CTX (JSON). Opt-in via MINICODE_HOOKS=1
-// supaya tidak mengubah perilaku default (aman, tanpa efek samping).
-export function findRunHooks(cwd?: string): { pre: string[]; post: string[] } {
-  const dirs: string[] = [join(homedir(), ".minicode", "hooks")]
-  if (cwd) dirs.push(resolve(cwd, ".minicode", "hooks"))
+// 6.4 — hooks global opt-in: ~/.minicode/hooks/{pre,post}*.js, dan lokal
+// .minicode/hooks/{pre,post}*.js (fail-closed: lokal butuh allowLocal=true
+// agar menyalakan MINICODE_HOOKS=1 global tak mengeksekusi JS repo asing).
+// Berjalan sebagai node script terpisah dengan konteks di env MINICODE_HOOK_CTX.
+export function findRunHooks(
+  cwd?: string,
+  opts: RunHooksOptions = {},
+): { pre: string[]; post: string[] } {
+  const dirs: { dir: string; jail: boolean }[] = [
+    { dir: join(homedir(), ".minicode", "hooks"), jail: false },
+  ]
+  if (cwd && opts.allowLocal === true) {
+    dirs.push({ dir: resolve(cwd, ".minicode", "hooks"), jail: true })
+  }
   const out = { pre: [] as string[], post: [] as string[] }
-  for (const dir of dirs) {
+  for (const { dir, jail } of dirs) {
     if (!existsSync(dir)) continue
-    for (const f of readdirSync(dir)) {
+    let entries: string[]
+    try {
+      entries = readdirSync(dir)
+    } catch {
+      continue
+    }
+    for (const f of entries) {
       if (!f.endsWith(".js")) continue
-      if (f.includes("pre")) out.pre.push(join(dir, f))
-      else if (f.includes("post")) out.post.push(join(dir, f))
+      const full = join(dir, f)
+      // Symlink di dalam .minicode/hooks tak boleh lolos keluar direktori hook.
+      if (jail && isRealPathOutsideRoot(full, dir)) continue
+      if (f.startsWith("pre")) out.pre.push(full)
+      else if (f.startsWith("post")) out.post.push(full)
     }
   }
   return out
@@ -58,15 +81,15 @@ export async function runRunHooks(
   phase: "pre" | "post",
   ctx: RunHookCtx,
   signal?: AbortSignal,
+  opts: RunHooksOptions = {},
 ): Promise<void> {
   if (process.env.MINICODE_HOOKS !== "1") return
-  // Hook = arbitrary Node.js di luar permission system (berjalan di SEMUA
-  // mode bila opt-in) — karenanya: tanpa secret di env (baca dari berkas bila
-  // perlu), dan hormati pembatalan sesi (lewati sisa hook bila aborted).
-  // MINICODE_HOOK_CTX sendiri memuat prompt user apa adanya — prompt yang
-  // ditempeli kredensial akan terlihat hook; itu inheren dari desain.
+  // Hook = arbitrary Node.js di luar permission system (berjalan di EXECUTE
+  // bila opt-in) — karenanya: tanpa secret di env (baca dari berkas bila
+  // perlu), hormati pembatalan sesi secara instan, dan tree-kill saat timeout.
   if (signal?.aborted) return
-  const hooks = findRunHooks(ctx.cwd)
+  const hooks = findRunHooks(ctx.cwd, opts)
+  const baseKillEnv = sanitizeSpawnEnv(process.env)
   for (const file of hooks[phase]) {
     if (signal?.aborted) return
     // Audit #10 P2 observability: hook adalah eksekusi di luar permission
@@ -79,25 +102,38 @@ export async function runRunHooks(
       const p = spawn(process.execPath, [file], {
         env: sanitizeSpawnEnv(process.env, { MINICODE_HOOK_CTX: JSON.stringify(ctx) }),
         stdio: "ignore",
+        detached: process.platform !== "win32",
       })
-      const timer = setTimeout(() => {
-        try {
-          p.kill("SIGTERM")
-          setTimeout(() => {
-            try {
-              p.kill("SIGKILL")
-            } catch {}
-          }, 1000)
-        } catch {}
-      }, 5000)
-      p.on("error", () => {
+      let settled = false
+      let killTimer: ReturnType<typeof setTimeout> | undefined
+      const cleanup = (): void => {
+        if (settled) return
+        settled = true
         clearTimeout(timer)
+        if (killTimer) clearTimeout(killTimer)
+        signal?.removeEventListener("abort", onAbort)
         res()
-      })
-      p.on("exit", () => {
-        clearTimeout(timer)
-        res()
-      })
+      }
+      const terminateHook = (): void => {
+        if (settled) return
+        if (process.platform === "win32") {
+          killProcessTree(p, { env: baseKillEnv })
+          return
+        }
+        signalProcessGroupGraceful(p.pid, p)
+        killTimer = setTimeout(() => {
+          killProcessTree(p, { env: baseKillEnv })
+        }, 1000)
+        killTimer.unref?.()
+      }
+      const onAbort = (): void => {
+        killProcessTree(p, { env: baseKillEnv })
+      }
+      const timer = setTimeout(terminateHook, 5000)
+      signal?.addEventListener("abort", onAbort, { once: true })
+      if (signal?.aborted) onAbort()
+      p.on("error", cleanup)
+      p.on("close", cleanup)
     })
   }
 }

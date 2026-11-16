@@ -17,6 +17,19 @@ import {
 import { requireToolCwd } from "./context.ts"
 import { subAgentWorkMode } from "./task.ts"
 
+/**
+ * Resolusi kredensial embedding secara konsisten antara jalur baca (`read_memory`)
+ * dan jalur tulis (`write_memory`), sehingga endpoint `AGENT_BASE_URL` selalu
+ * berpasangan dengan API key yang sama.
+ */
+function resolveEmbeddingAuth(): { baseUrl: string; apiKey: string } {
+  return {
+    baseUrl: process.env.AGENT_BASE_URL ?? "https://api.openai.com/v1",
+    apiKey:
+      process.env.OPENAI_API_KEY ?? process.env.DEEPSEEK_API_KEY ?? process.env.AGENT_API_KEY ?? "",
+  }
+}
+
 export const readMemoryTool: Tool = {
   name: "read_memory",
   description:
@@ -47,12 +60,7 @@ export const readMemoryTool: Tool = {
     // hybrid search — use cwd + try embedding via env (consistent with cli RAG)
     let hits: { text: string; score: number; createdAt: number; id?: string }[] = []
     try {
-      const baseUrl = process.env.AGENT_BASE_URL ?? "https://api.openai.com/v1"
-      const apiKey =
-        process.env.OPENAI_API_KEY ??
-        process.env.DEEPSEEK_API_KEY ??
-        process.env.AGENT_API_KEY ??
-        ""
+      const { baseUrl, apiKey } = resolveEmbeddingAuth()
       hits = await searchHybrid(q, {
         topK: (topK as number) ?? 5,
         cwd,
@@ -153,12 +161,7 @@ export function createWriteMemoryTool(runtimeSessionId?: string): Tool {
         if (typeof sessionId !== "string" || !sessionId) {
           throw new Error("validation=provisional requires sessionId for later promotion")
         }
-        const baseUrl = process.env.AGENT_BASE_URL ?? "https://api.openai.com/v1"
-        const apiKey =
-          process.env.DEEPSEEK_API_KEY ??
-          process.env.OPENAI_API_KEY ??
-          process.env.AGENT_API_KEY ??
-          ""
+        const { baseUrl, apiKey } = resolveEmbeddingAuth()
         const tagArr = Array.isArray(tags) ? (tags as string[]) : undefined
         const id = await recordCandidateLesson(sessionId, t, {
           cwd,
@@ -207,12 +210,7 @@ export function createWriteMemoryTool(runtimeSessionId?: string): Tool {
       // persis di titik ini → menghasilkan entri file-only (split-brain arah 1).
       invokeMemoryWriteFaultForTest("after_file_before_vector")
 
-      const baseUrl = process.env.AGENT_BASE_URL ?? "https://api.openai.com/v1"
-      const apiKey =
-        process.env.DEEPSEEK_API_KEY ??
-        process.env.OPENAI_API_KEY ??
-        process.env.AGENT_API_KEY ??
-        ""
+      const { baseUrl, apiKey } = resolveEmbeddingAuth()
       let added = false
       if (apiKey) {
         try {

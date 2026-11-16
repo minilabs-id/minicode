@@ -20,7 +20,7 @@
 // efek menunggu (jendela await yang nyata antara izin dan eksekusi).
 
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { FakeProvider, finish, text, toolCall } from "#minicore/test/fakes.ts"
@@ -28,6 +28,7 @@ import { createMinicodeSession } from "../src/app/session.ts"
 import {
   ApprovalBindingStore,
   captureApprovalBinding,
+  fingerprintTarget,
   verifyApprovalBinding,
 } from "../src/policy/approval-binding.ts"
 import { canPersistAlways, createPermissionHandler } from "../src/policy/permission.ts"
@@ -295,6 +296,50 @@ describe("Area B: TOCTOU target ditolak di BATAS EKSEKUSI (lapis-2, integrasi ke
     await session.run("edit a.ts")
     expect(readFileSync(file, "utf8")).toContain("const baru = 2")
   })
+
+  test("approval basi / pergantian mode saat ask membatalkan SEBELUM beforeToolEffect menulis jurnal", async () => {
+    const dir = ws()
+    const file = join(dir, "a.ts")
+    writeFileSync(file, "const lama = 1\n", "utf8")
+
+    let beforeEffectCalled = 0
+    let permCtl: { setMode: (m: "auto" | "ask") => void } | undefined
+    const provider = new FakeProvider([
+      {
+        events: [
+          toolCall(
+            "edit",
+            { path: file, oldString: "const lama = 1", newString: "const baru = 2" },
+            "call-shift",
+          ),
+          finish("tool_calls"),
+        ],
+      },
+      { events: [text("selesai"), finish("stop")] },
+    ])
+    const session = await createMinicodeSession({
+      provider,
+      tools: [editTool],
+      cwd: dir,
+      permissionMode: "ask",
+      onPermissions: (ctl) => {
+        permCtl = ctl
+      },
+      ask: async () => {
+        // User memindahkan mode saat prompt masih terbuka → authorizationVersion naik
+        permCtl?.setMode("auto")
+        return "allow"
+      },
+      beforeToolEffect: async () => {
+        beforeEffectCalled++
+      },
+    })
+
+    const res = await session.run("edit a.ts")
+    expect(beforeEffectCalled).toBe(0)
+    expect(readFileSync(file, "utf8")).toBe("const lama = 1\n")
+    expect(JSON.stringify(res.steps)).toContain("authorization changed")
+  })
 })
 
 describe("Area B: izin tak lintas operasi / tak lintas sesi", () => {
@@ -346,6 +391,42 @@ describe("Area B: izin tak lintas operasi / tak lintas sesi", () => {
     expect(verdict.kind).toBe("stale")
     // Tak ada binding → tak ada yang bisa diverifikasi (tak ada bukti basi).
     expect(verifyApprovalBinding(undefined).kind).toBe("no-binding")
+  })
+
+  test("fingerprintTarget mendeteksi symlink tanpa mengikuti isi target secara diam-diam", () => {
+    const dir = ws()
+    const realTarget = join(dir, "target.txt")
+    const otherTarget = join(dir, "other.txt")
+    const linkPath = join(dir, "link.txt")
+    writeFileSync(realTarget, "sama", "utf8")
+    writeFileSync(otherTarget, "sama", "utf8")
+    let linked = false
+    try {
+      symlinkSync(realTarget, linkPath)
+      linked = true
+    } catch {}
+    if (!linked) return
+    const fp1 = fingerprintTarget(linkPath)
+    expect(fp1.startsWith("symlink:")).toBe(true)
+    rmSync(linkPath)
+    symlinkSync(otherTarget, linkPath)
+    const fp2 = fingerprintTarget(linkPath)
+    expect(fp2).not.toBe(fp1)
+  })
+
+  test("ApprovalBindingStore.take mencocokkan callId pada call paralel identik", () => {
+    const dir = ws()
+    const file = join(dir, "a.ts")
+    writeFileSync(file, "isi\n", "utf8")
+    const store = new ApprovalBindingStore(dir)
+    const args = { path: file, content: "x" }
+    const b1 = captureApprovalBinding("write_file", args, dir, "id-1")
+    const b2 = captureApprovalBinding("write_file", args, dir, "id-2")
+    store.grant(b1)
+    store.grant(b2)
+    expect(store.take("write_file", b1.argsHash, "id-2")?.callId).toBe("id-2")
+    expect(store.take("write_file", b1.argsHash, "id-1")?.callId).toBe("id-1")
+    expect(store.size).toBe(0)
   })
 })
 

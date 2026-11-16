@@ -13,7 +13,7 @@ import {
 import { type MsgKey, t } from "../src/ui/i18n/locale.ts"
 import { formatUsd } from "../src/ui/render/money.ts"
 import { sanitizeAnsiLine } from "../src/ui/render/sanitize.ts"
-import { glyphs } from "../src/ui/render/theme.ts"
+import { c } from "../src/ui/render/theme.ts"
 import { padToWidth } from "../src/ui/render/width.ts"
 
 // SEMUA output = PLAIN TEXT tanpa ANSI.
@@ -158,6 +158,13 @@ export const DRIVER_HELP_COMMANDS: BuiltinCommand[] = [
   { name: "clear", descKey: "help.desc.clear" },
   { name: "copy", args: "[n]", descKey: "help.desc.copy" },
   { name: "history", descKey: "help.desc.history" },
+  // View commands ditangani driver TUI; terdaftar di sini agar `/help full`
+  // dan `/help` ringkas memakai permukaan yang SAMA (grup View tak kosong).
+  { name: "compact", args: "[on|off]", descKey: "help.desc.compact" },
+  { name: "thinking", args: "[on|off]", descKey: "help.desc.thinking" },
+  { name: "expand", args: "[id]", descKey: "help.desc.expand" },
+  { name: "minimize", args: "[on|off]", descKey: "help.desc.minimize" },
+  { name: "fold", args: "[on|off]", descKey: "help.desc.fold" },
   // [PHASE 6AB] Help-only, not in the dropdown: the scheduler is off in every
   // default session, so advertising it in completion would put a command that
   // always answers "not enabled" one keystroke away. It stays fully discoverable
@@ -230,13 +237,16 @@ function statusLines(ctx: CommandContext): string[] {
     ? ctx.currentModel.slice(0, ctx.currentModel.indexOf("::"))
     : undefined
   const provider = ctx.usage.modelUsed().provider ?? pinned ?? ctx.providerHint ?? "-"
+  // Nilai mode memakai bentuk produk yang sama dengan footer (title case):
+  // BUILD/AUTO di runtime, `Build`/`Auto` di layar.
+  const titleCase = (v: string): string => v.charAt(0).toUpperCase() + v.slice(1).toLowerCase()
   return [
     t("st.session", { id: ctx.sessionId }),
     t("st.model", { v: ctx.currentModel ?? "default" }),
     t("st.provider", { v: provider }),
     t("st.tools", { v: ctx.toolsCount }),
-    t("st.workMode", { v: ctx.workMode ?? "DISCUSS" }),
-    t("st.permissionMode", { v: ctx.permissionMode ?? "auto" }),
+    t("st.workMode", { v: titleCase(ctx.workMode ?? "DISCUSS") }),
+    t("st.permissionMode", { v: titleCase(ctx.permissionMode ?? "auto") }),
     t("st.context", { v: ctx.getContextTokens().toLocaleString() }),
     t("st.turn", { v: last.totalTokens.toLocaleString() }),
     t("st.input", { v: u.inputTokens.toLocaleString() }),
@@ -291,11 +301,11 @@ async function resumeById(target: string, ctx: CommandContext): Promise<boolean>
   }
   // Anak stdio-inherit memakai terminal yang sama; App TUI sudah suspend
   // (input dilepas) oleh pemanggil popup, dan proses ini exit mengikuti anak.
+  const { spawn } = await import("node:child_process")
+  const { waitChildExit } = await import("./auto-update.ts")
   try {
     ctx.onBeforeSpawn?.()
   } catch {}
-  const { spawn } = await import("node:child_process")
-  const { waitChildExit } = await import("./auto-update.ts")
   const entryPath = resolvePath(import.meta.dir, "index.ts")
   const child = spawn(
     process.execPath,
@@ -629,10 +639,16 @@ export async function handleBuiltinCommand(
         // id provider datang dari probe jaringan (tak-terpercaya): paritas
         // dengan `minicode providers sync` yang sudah menyaring ANSI.
         for (const r of updated) {
-          console.log(`  ${glyphs.check} ${sanitizeAnsiLine(r.id)}: ${r.from} → ${r.to}`)
+          // Status = kata + warna (bukan warna/glyph saja) agar terbaca juga
+          // saat NO_COLOR atau terminal tanpa UTF-8.
+          console.log(
+            `  ${c.success(t("ts.statusCompleted"))} ${sanitizeAnsiLine(r.id)}: ${r.from} → ${r.to}`,
+          )
         }
         for (const f of failed) {
-          console.log(`  ${glyphs.cross} ${sanitizeAnsiLine(f.id)}: ${sanitizeAnsiLine(f.reason)}`)
+          console.log(
+            `  ${c.error(t("ts.statusFailed"))} ${sanitizeAnsiLine(f.id)}: ${sanitizeAnsiLine(f.reason)}`,
+          )
         }
         // "Restart" hanya jujur bila ADA model baru — tanpa updated, restart
         // tak mengubah apa pun (sebelumnya selalu dicetak, menyesatkan saat
@@ -656,8 +672,11 @@ export async function handleBuiltinCommand(
           // ID di DEPAN (truncasi memakan ekor — ekor berisi tanggal/cwd,
           // id adalah info terpenting dan harus selamat).
           const shortDir = (d: string): string => basename(d) || "(cwd)"
+          let pickedId: string | null = null
           await runPicker({
             title: t("sess.title"),
+            // Jendela command: judul konsisten dengan /model, /provider, dll.
+            showTitle: true,
             items: rows.map((r) => ({
               name: `${r.id} · ${new Date(r.created_at).toLocaleString()} · ${r.cwd ? shortDir(r.cwd) : "(cwd)"}`,
               provider: "",
@@ -665,16 +684,19 @@ export async function handleBuiltinCommand(
             })),
             filterable: true,
             onPick: (id) => {
-              void resumeById(id, ctx)
+              pickedId = id
             },
             onCancel: () => {},
           })
+          if (pickedId) await resumeById(pickedId, ctx)
           return { handled: true }
         }
         console.log(`\n${t("sess.listHead")}`)
-        rows.forEach((r, i) => {
+        // Tanpa indeks: pemilihan selalu lewat id (`/sessions <id>`), jadi
+        // angka `[i]` hanya menawarkan affordance yang tidak bisa dipakai.
+        rows.forEach((r) => {
           console.log(
-            `  [${i}] ${r.id.padEnd(14)} ${new Date(r.created_at).toLocaleString().padEnd(24)} ${r.cwd || "(cwd)"}`,
+            `  - ${r.id.padEnd(14)} ${new Date(r.created_at).toLocaleString().padEnd(24)} ${r.cwd || "(cwd)"}`,
           )
         })
         console.log(t("sess.listHint"))
@@ -692,11 +714,11 @@ export async function handleBuiltinCommand(
       // → handled:false → sunyi total di TUI (tidak tercatat, tidak spawn).
       if (!args) return { handled: false }
       const rows = listSessions(ctx.cwd).slice(0, 25)
-      if (rows.length > 0) {
-        if (await resumeById(args, ctx)) console.log("")
+      if (rows.length === 0) {
+        console.log(`\n${t("cmd.noSessions")}\n`)
         return { handled: true }
       }
-      console.log("")
+      if (await resumeById(args, ctx)) console.log("")
       return { handled: true }
     }
 

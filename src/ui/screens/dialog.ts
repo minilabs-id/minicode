@@ -34,6 +34,17 @@ interface BoxChars {
   v: string
 }
 
+export const MIN_MODAL_COLS = 20
+export const MIN_MODAL_ROWS = 10
+
+/** Syarat minimum dimensi terminal agar kotak Layer 2 muat bersih dan terbaca. */
+export function canRenderModal(
+  cols: number = process.stdout.columns || 80,
+  rows: number = process.stdout.rows || 24,
+): boolean {
+  return cols >= MIN_MODAL_COLS && rows >= MIN_MODAL_ROWS
+}
+
 /** Lebar kotak popup: skala dari layar; pemanggil membekukan saat mount. */
 export function popupBoxWidth(cols: number): number {
   const safeCols = Math.max(10, cols)
@@ -147,7 +158,14 @@ export function dialogBox(spec: DialogSpec, cols: number, rows: number): DialogB
     boxed.push(
       `${box.v} ${padToWidth(cut(t("dlg.more", { n: spec.body.length - shown })), innerW)} ${box.v}`,
     )
-  if (footer != null) boxed.push(`${box.v} ${padToWidth(c.dim(cut(footer)), innerW)} ${box.v}`)
+  if (footer != null) {
+    // Jangan bungkus footer ber-SGR (hintLine / status berwarna) dengan `c.dim`,
+    // karena `\x1b[2m` meredupkan tombol pertama lalu reset `\x1b[22m` mematikan
+    // dim di pertengahan baris (hint.ts).
+    const clippedFooter = cut(footer)
+    const styledFooter = clippedFooter.includes("\x1b[") ? clippedFooter : c.dim(clippedFooter)
+    boxed.push(`${box.v} ${padToWidth(styledFooter, innerW)} ${box.v}`)
+  }
   boxed.push(row(box.bl, bar, box.br))
 
   const topRow = Math.max(1, Math.floor((r0 - boxed.length) / 2) + 1)

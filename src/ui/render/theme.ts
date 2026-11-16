@@ -19,11 +19,16 @@ const isWindows = process.platform === "win32"
 export function supportsUtf8(): boolean {
   if (process.env.MINICODE_ASCII === "1") return false
   if (!isWindows) return true
+  const term = (process.env.TERM ?? "").toLowerCase()
+  const locale = `${process.env.LC_ALL ?? ""} ${process.env.LANG ?? ""}`
   return (
     process.env.WT_SESSION != null ||
     process.env.TERM_PROGRAM != null ||
-    (process.env.LANG?.includes("UTF-8") ?? false) ||
-    (process.env.LC_ALL?.includes("UTF-8") ?? false)
+    process.env.ConEmuANSI === "ON" ||
+    process.env.ANSICON != null ||
+    process.env.MSYSTEM != null ||
+    /(?:xterm|screen|tmux|kitty|alacritty|wezterm|vt\d)/i.test(term) ||
+    /utf-?8/i.test(locale)
   )
 }
 
@@ -105,30 +110,74 @@ function wrap(open: number | string, close: number | string): Paint {
   return (s: string) => `${o}${s}${cl}`
 }
 
-/** Warna dari kode SGR mentah (mis. "38;2;137;209;133" atau "39"). */
-function paintFrom(code: string): Paint {
-  if (colorLevel() === 0) return identity
+/** Warna token sesuai level terminal: 16 / 256 / truecolor. */
+function paintToken(token: ColorToken): Paint {
+  const level = colorLevel()
+  if (level === 0) return identity
+  const code = level === 1 ? token.c16 : level === 2 ? token.c256 : token.rgb
   return (s: string) => `\x1b[${code}m${s}\x1b[39m`
 }
 
+/** Token + bold (untuk accent judul/terpilih). */
+function paintTokenBold(token: ColorToken): Paint {
+  const level = colorLevel()
+  if (level === 0) return identity
+  const code = level === 1 ? token.c16 : level === 2 ? token.c256 : token.rgb
+  return (s: string) => `\x1b[1;${code}m${s}\x1b[39m`
+}
+
 // ── Token palet tunggal (VS Code Dark+ inspired) ──
+//
+// Tiap token punya representasi 16-warna, 256-warna, dan truecolor. Sebelumnya
+// semua token semantik selalu memancarkan `38;2;...` walau terminal hanya
+// mengaku 16 warna — level deteksi jadi tidak bermakna dan warna status bisa
+// hilang/diabaikan. `paintToken` memilih representasi sesuai `colorLevel()`.
+interface ColorToken {
+  /** SGR 16-warna (mis. "32"). */
+  c16: string
+  /** SGR 256-warna (mis. "38;5;114"). */
+  c256: string
+  /** SGR truecolor (mis. "38;2;137;209;133"). */
+  rgb: string
+}
+
 const TOKENS = {
-  success: "38;2;137;209;133",
-  error: "38;2;244;135;113",
-  warning: "38;2;204;167;0",
-  info: "38;2;117;190;255",
-  accent: "38;2;74;144;226",
+  success: { c16: "32", c256: "38;5;114", rgb: "38;2;137;209;133" },
+  error: { c16: "31", c256: "38;5;210", rgb: "38;2;244;135;113" },
+  warning: { c16: "33", c256: "38;5;178", rgb: "38;2;204;167;0" },
+  info: { c16: "36", c256: "38;5;75", rgb: "38;2;117;190;255" },
+  accent: { c16: "94", c256: "38;5;69", rgb: "38;2;74;144;226" },
   // String literal kode (VS Code Dark+ `string` #CE9178) — sengaja terpisah dari
   // `success` (green): string harus tampak jingga-salm ala VS Code, sementara
   // status sukses tetap hijau. Alias lama `green` tetap menyasar success.
-  string: "38;2;206;145;120",
+  string: { c16: "33", c256: "38;5;173", rgb: "38;2;206;145;120" },
   // Thinking/reasoning: abu-kebiruan yang tetap terbaca nyaman (bukan `dim` yang
   // meredupkan seluruh teks) — jelas sekunder dari jawaban model tapi tak silau.
-  thinking: "38;2;135;146;160",
+  thinking: { c16: "90", c256: "38;5;246", rgb: "38;2;135;146;160" },
   // Faint: abu gelap untuk garis footer — lebih redup dari `gray` (bright-black)
   // dan dari `muted` (dim). Dipakai elemen yang harus ada tapi hampir tak
   // terlihat, seperti separator baris dasar.
-  faint: "38;2;72;72;72",
+  faint: { c16: "90", c256: "38;5;238", rgb: "38;2;72;72;72" },
+} satisfies Record<string, ColorToken>
+
+const GRAY_TOKEN: ColorToken = { c16: "90", c256: "38;5;245", rgb: "90" }
+const ACCENT_ALT_TOKEN: ColorToken = { c16: "95", c256: "38;5;141", rgb: TOKENS.info.rgb }
+const MAGENTA_TOKEN: ColorToken = { c16: "35", c256: "38;5;141", rgb: "35" }
+const WHITE_TOKEN: ColorToken = { c16: "37", c256: "37", rgb: "37" }
+const BRIGHT_YELLOW_TOKEN: ColorToken = {
+  c16: "93",
+  c256: "38;5;179",
+  rgb: "38;2;215;186;125",
+}
+const BRIGHT_MAGENTA_TOKEN: ColorToken = {
+  c16: "95",
+  c256: "38;5;176",
+  rgb: "38;2;197;134;192",
+}
+const BRIGHT_CYAN_TOKEN: ColorToken = {
+  c16: "96",
+  c256: "38;5;80",
+  rgb: "38;2;78;201;176",
 }
 
 // ── Slot warna ──
@@ -166,39 +215,36 @@ interface Palette {
 const paletteCache = new Map<string, Palette>()
 
 function buildPalette(): Palette {
-  const truecolor = hasTruecolorEnv()
   const mono = colorLevel() === 0
-  // Aksen: 16-color fallback saat truecolor tak tersedia.
-  const accent = truecolor ? paintFrom(TOKENS.accent) : wrap(94, 39)
   return {
-    success: paintFrom(TOKENS.success),
-    error: paintFrom(TOKENS.error),
-    warning: paintFrom(TOKENS.warning),
-    info: paintFrom(TOKENS.info),
-    accent,
-    accentAlt: truecolor ? paintFrom(TOKENS.info) : wrap(95, 39),
-    accentBold: truecolor ? paintFrom(`1;${TOKENS.accent}`) : wrap(94, 39),
+    success: paintToken(TOKENS.success),
+    error: paintToken(TOKENS.error),
+    warning: paintToken(TOKENS.warning),
+    info: paintToken(TOKENS.info),
+    accent: paintToken(TOKENS.accent),
+    accentAlt: paintToken(ACCENT_ALT_TOKEN),
+    accentBold: paintTokenBold(TOKENS.accent),
     // Saat mono, `gray` memakai dim (SGR 2) alih-alih bright-black (SGR 90):
     // 90 adalah warna, dan mono adalah jalur aksesibilitas yang seharusnya
     // monokrom. Dim tetap memberi hierarki visual tanpa memakai kanal warna.
-    gray: mono ? attr(2, 22) : wrap(90, 39),
+    gray: mono ? attr(2, 22) : paintToken(GRAY_TOKEN),
     // Faint: garis footer hampir tak terlihat. Mono (aksesibilitas) jatuh ke
     // dim agar tetap ada hierarki tanpa kanal warna.
-    faint: mono ? attr(2, 22) : paintFrom(TOKENS.faint),
+    faint: mono ? attr(2, 22) : paintToken(TOKENS.faint),
     // Alias legacy: dipetakan ke token, bukan hex hardcoded.
-    red: paintFrom(TOKENS.error),
-    green: paintFrom(TOKENS.success),
-    yellow: paintFrom(TOKENS.warning),
-    cyan: paintFrom(TOKENS.info),
-    blue: accent,
-    magenta: mono ? identity : wrap(35, 39),
-    white: mono ? identity : wrap(37, 39),
+    red: paintToken(TOKENS.error),
+    green: paintToken(TOKENS.success),
+    yellow: paintToken(TOKENS.warning),
+    cyan: paintToken(TOKENS.info),
+    blue: paintToken(TOKENS.accent),
+    magenta: mono ? identity : paintToken(MAGENTA_TOKEN),
+    white: mono ? identity : paintToken(WHITE_TOKEN),
     // Slot syntax highlight — saat mono semuanya jadi teks biasa.
-    brightYellow: mono ? identity : truecolor ? wrap("38;2;215;186;125", 39) : wrap(93, 39),
-    brightMagenta: mono ? identity : truecolor ? wrap("38;2;197;134;192", 39) : wrap(95, 39),
-    brightCyan: mono ? identity : truecolor ? wrap("38;2;78;201;176", 39) : wrap(96, 39),
-    string: paintFrom(TOKENS.string),
-    thinking: paintFrom(TOKENS.thinking),
+    brightYellow: mono ? identity : paintToken(BRIGHT_YELLOW_TOKEN),
+    brightMagenta: mono ? identity : paintToken(BRIGHT_MAGENTA_TOKEN),
+    brightCyan: mono ? identity : paintToken(BRIGHT_CYAN_TOKEN),
+    string: paintToken(TOKENS.string),
+    thinking: paintToken(TOKENS.thinking),
   }
 }
 
@@ -355,6 +401,27 @@ export const glyphs = {
   get prompt() {
     return supportsUtf8() ? "❯" : ">"
   },
+  /** Pasangan kunci panah untuk hint — ASCII fallback agar kill-switch tetap utuh. */
+  get upDown() {
+    return supportsUtf8() ? "↑↓" : "Up/Down"
+  },
+  get leftRight() {
+    return supportsUtf8() ? "←→" : "Left/Right"
+  },
+  /** Chevron pemilih nilai (form select) dengan fallback ASCII. */
+  get chevronLeft() {
+    return supportsUtf8() ? "‹" : "<"
+  },
+  get chevronRight() {
+    return supportsUtf8() ? "›" : ">"
+  },
+  /** Caret blok di baris pencarian. */
+  get caret() {
+    return supportsUtf8() ? "█" : "#"
+  },
+  get down() {
+    return supportsUtf8() ? "↓" : "v"
+  },
   get dot() {
     return supportsUtf8() ? "·" : "."
   },
@@ -398,6 +465,13 @@ export const glyphs = {
   get unlock() {
     return supportsUtf8() ? "○" : "[OPEN]"
   },
+  /** Garis horizontal & vertikal konsisten untuk divider dan penanda blok kode. */
+  get hLine() {
+    return supportsUtf8() ? "─" : "-"
+  },
+  get vLine() {
+    return supportsUtf8() ? "│" : "|"
+  },
 }
 
 // ── Section separator ──
@@ -410,12 +484,12 @@ export function section(title: string): string {
   // per kolom — tanpa ini dashes jatuh ke 4 dan total label+4 tetap meluap.
   const label =
     displayWidth(` ${clean} `) > Math.max(4, width - 4)
-      ? truncateToWidth(` ${clean} `, Math.max(4, width - 4), "…")
+      ? truncateToWidth(` ${clean} `, Math.max(4, width - 4), glyphs.ellipsis)
       : ` ${clean} `
   // Lebar pemisah dihitung per KOLOM terminal: CJK/emoji bisa 2 kolom.
   // Clamp agar garis tak memicu wrap sendiri di terminal sempit.
   const dashes = Math.min(Math.max(4, width - displayWidth(label)), Math.max(4, width - 4))
-  return c.dim(label + "─".repeat(dashes))
+  return c.dim(label + glyphs.hLine.repeat(dashes))
 }
 
 export function getTerminalWidth(): number {

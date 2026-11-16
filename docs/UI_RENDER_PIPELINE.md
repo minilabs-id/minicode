@@ -96,7 +96,15 @@ renderer ini.
 Tahap I — view murni vs controller: `src/ui/screens/` (props + callback,
 tanpa IO) digerakkan `cli/` (`tui.ts`, `commands.ts`, `wizard.ts`,
 `model-manager.ts`, `provider-manager.ts`, `src/ui/approval/prompt.ts` via DI `ask`,
-`setupWhenEmpty`, `setSubAgentSessionFactory`).
+`setupWhenEmpty`, `setSubAgentSessionFactory`). Readout command (`/help`,
+`/status`, `/context`, `/history`, `/expand`, `/sync`, `/scheduler`) dirender
+`output-window.ts` sebagai jendela ber-scroll di atas chat (v7.18–v7.19, reflow saat
+resize, counter judul, scroll wheel/`j`/`k`/`Space`, dan salin `c` opsional); jendela
+interaktif command (`/model`, `/provider`, `/sessions`, picker) berbagi
+`dialogBox`/`hintLine` (dan `listRow` untuk daftar) yang sama serta mendukung scroll mouse
+wheel. TUI fullscreen menampilkan zero-state welcome ringkas saat transkrip kosong/idle,
+`Tab` pada dropdown `/` untuk autocomplete, jeda antar-turn dan label bahasa fence redup,
+serta fallback glyph `MINICODE_ASCII=1` konsisten hingga garis tabel dan ellipsis.
 
 ## 2. Kontrak Event → UI
 

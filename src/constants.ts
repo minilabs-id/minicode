@@ -22,8 +22,10 @@ export const LIMITS = {
   /** Batas untuk meminta daemon Docker menghapus container yang timeout/abort. */
   DOCKER_CLEANUP_TIMEOUT_MS: 5_000,
   MCP_OUTPUT_MAX_CHARS: 100_000,
-  /** Batas frame JSON-RPC stdio sebelum decode/parse; satu respons tools/list bisa besar. */
+  /** Batas frame JSON-RPC stdio default (diuji kontrak); koneksi MCP produksi dapat memberi pagu lebih besar untuk screenshot/DOM. */
   MCP_STDIO_FRAME_MAX_BYTES: 1_048_576,
+  /** Batas respons mentah MCP (HTTP body & stdio koneksi produksi = 8 MiB) agar screenshot/snapshot browser tidak terpotong atau meng-kill server. */
+  MCP_HTTP_BODY_MAX_BYTES: 8_388_608,
   MCP_REQUEST_TIMEOUT_MS: 30_000,
   TASK_SUB_AGENT_MAX_TOKENS: 2_000,
   /** Context & memory */
@@ -195,7 +197,7 @@ export const LIMITS = {
   DETECT_MODELS_TIMEOUT_MS: 4_000,
   DETECT_GLOBAL_TIMEOUT_MS: 6_000,
   DETECT_ATTEMPT_TIMEOUT_MS: 2_500,
-  MCP_HANDSHAKE_TIMEOUT_MS: 3_000,
+  MCP_HANDSHAKE_TIMEOUT_MS: 15_000,
   /** OAuth device flow: request pendek, tapi poll bisa berlangsung menit. */
   OAUTH_REQUEST_TIMEOUT_MS: 15_000,
   /** Pricing dari models.dev — cache agar tidak menembak jaringan tiap run. */

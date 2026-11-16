@@ -72,6 +72,10 @@ export interface DaemonServerDeps {
   maxQueuePerSubscription?: number
   /** Seam uji: batas antrean per identitas konsumen logis (lihat host). */
   maxQueuePerConsumer?: (consumerId: string) => number | undefined
+  /** Batas koneksi pra-handshake bersamaan (anti-slowloris). Default 32. */
+  maxPendingHandshakes?: number
+  /** Batas waktu menunggu `hello` setelah TCP tersambung. Default 5000 ms. */
+  preAuthTimeoutMs?: number
   /** Dipanggil saat daemon menerima koneksi (diagnostik). */
   onConnection?: (info: { remote: string; consumer: string }) => void
 }
@@ -81,6 +85,7 @@ interface Conn {
   socket: Socket
   decoder: FrameDecoder
   state: "new" | "ready"
+  authTimer: ReturnType<typeof setTimeout> | null
   /**
    * Identitas logis (dari capability `who`) untuk offset durable, idempotensi,
    * dan label wire. Stabil lintas reconnect.
@@ -106,12 +111,15 @@ let connSeq = 0
 // kendali). Scope live = identitas logis + id koneksi, sehingga dua koneksi
 // konsumen yang sama tidak pernah berbagi kunci langganan.
 const CONSUMER_SCOPE_SEP = String.fromCharCode(1)
+const DEFAULT_MAX_PENDING_HANDSHAKES = 32
+const DEFAULT_PRE_AUTH_TIMEOUT_MS = 5_000
 
 export class DaemonServer {
   readonly #deps: DaemonServerDeps
   readonly #subs: SubscriptionRegistry
   readonly #conns = new Map<number, Conn>()
   readonly #liveUnsub = new Map<string, () => void>()
+  readonly #revokedNonces = new Map<string, number>()
   #server: Server | null = null
   #port = 0
   #closing = false
@@ -154,12 +162,26 @@ export class DaemonServer {
   }
 
   #onConnection(socket: Socket): void {
+    const maxPending = this.#deps.maxPendingHandshakes ?? DEFAULT_MAX_PENDING_HANDSHAKES
+    let pendingCount = 0
+    for (const c of this.#conns.values()) {
+      if (!c.closed && c.state === "new") pendingCount++
+    }
+    if (pendingCount >= maxPending) {
+      this.#deps.telemetry.inc("connections.rejected")
+      try {
+        socket.destroy()
+      } catch {}
+      return
+    }
     this.#deps.telemetry.inc("connections.opened")
+    const preAuthMs = this.#deps.preAuthTimeoutMs ?? DEFAULT_PRE_AUTH_TIMEOUT_MS
     const conn: Conn = {
       id: ++connSeq,
       socket,
       decoder: new FrameDecoder(),
       state: "new",
+      authTimer: null,
       consumerId: null,
       subscriptionScope: null,
       scopes: [],
@@ -167,6 +189,13 @@ export class DaemonServer {
       paused: false,
       closed: false,
     }
+    conn.authTimer = setTimeout(() => {
+      if (conn.closed || conn.state !== "new") return
+      this.#deps.telemetry.inc("connections.rejected")
+      this.#sendError(conn, "PROTOCOL_ERROR", "timeout menunggu handshake hello")
+      this.#halt(conn, "PROTOCOL_ERROR")
+    }, preAuthMs)
+    conn.authTimer.unref?.()
     this.#conns.set(conn.id, conn)
 
     socket.on("data", (chunk: Buffer) => {
@@ -197,6 +226,10 @@ export class DaemonServer {
   #teardown(conn: Conn): void {
     if (conn.closed) return
     conn.closed = true
+    if (conn.authTimer) {
+      clearTimeout(conn.authTimer)
+      conn.authTimer = null
+    }
     this.#deps.telemetry.inc("connections.closed")
     // Tutup HANYA langganan milik koneksi ini. Memakai consumerId logis di sini
     // akan ikut memutus koneksi lain yang memakai identitas konsumen sama.
@@ -330,6 +363,17 @@ export class DaemonServer {
       return
     }
     const payload: CapabilityPayload = check.payload
+    this.#pruneRevoked(Date.now())
+    if (this.#revokedNonces.has(payload.n)) {
+      this.#deps.telemetry.inc("connections.rejected")
+      this.#sendError(conn, "INVALID_CAPABILITY", "capability telah dicabut")
+      this.#teardown(conn)
+      return
+    }
+    if (conn.authTimer) {
+      clearTimeout(conn.authTimer)
+      conn.authTimer = null
+    }
     conn.state = "ready"
     conn.scopes = payload.scopes
     conn.consumerId = sanitizeLabel(payload.who, 120) || `consumer-${conn.id}`
@@ -651,6 +695,19 @@ export class DaemonServer {
       // Koneksi yang menolak menutup diri tidak boleh menahan shutdown.
       setTimeout(() => resolve(), 500).unref?.()
     })
+  }
+
+  /** Cabut nonce capability yang bocor sebelum masa berlaku `exp` habis. */
+  revokeCapabilityNonce(nonce: string, expMs = Date.now() + 24 * 60 * 60 * 1000): void {
+    if (!nonce) return
+    this.#pruneRevoked(Date.now())
+    this.#revokedNonces.set(nonce, expMs)
+  }
+
+  #pruneRevoked(now: number): void {
+    for (const [n, exp] of this.#revokedNonces) {
+      if (exp <= now) this.#revokedNonces.delete(n)
+    }
   }
 
   get startedAt(): number {

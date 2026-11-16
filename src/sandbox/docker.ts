@@ -4,6 +4,7 @@ import { resolve } from "node:path"
 import { LIMITS } from "../constants.ts"
 import { resolveTrustedExecutable } from "../lib/trusted-exec.ts"
 import { sanitizeSpawnEnv } from "../policy/scrub.ts"
+import { allocateEmptyMaskFile, discoverSandboxMaskTargets } from "./mask.ts"
 
 let dockerOk: boolean | null = null
 
@@ -86,24 +87,26 @@ function removeContainer(name: string, env: NodeJS.ProcessEnv): Promise<boolean>
   })
 }
 
-// Run command di dalam container ephemeral, terisolasi (--network none,
-// memori/CPU cap), mount workspace read-write. Return { code, output }.
-export function runInDocker(
+/** Susun argumen `docker run` termasuk masking `.minicode/` & `.env*` sensitif. */
+export function buildDockerRunArgs(
   command: string,
   cwd: string,
-  opts: DockerRunOptions = {},
-): Promise<{ code: number | null; output: string }> {
-  if (opts.signal?.aborted) {
-    return Promise.resolve({ code: null, output: "[docker] aborted before container start" })
-  }
+  opts: DockerRunOptions,
+  mask: {
+    containerName: string
+    hasMinicode: boolean
+    envFiles: readonly string[]
+    emptyMaskHostPath: string | null
+  },
+): string[] {
   const image = opts.image ?? process.env.MINICODE_SANDBOX_IMAGE ?? "node:22-alpine"
   const mount = workspaceMount(cwd)
-  const containerName = `minicode-${randomUUID()}`
+  const net = opts.network === "bridge" ? "bridge" : "none"
   const args = [
     "run",
     "--rm",
     "--name",
-    containerName,
+    mask.containerName,
     "-i",
     "--read-only",
     "--cap-drop",
@@ -116,10 +119,22 @@ export function runInDocker(
     "/tmp",
     "-v",
     `${mount}:${mount}`,
+  ]
+  // Sembunyikan state minicode (.minicode/) dan rahasia workspace (.env*) di dalam container.
+  if (mask.hasMinicode) {
+    args.push("--tmpfs", `${mount}/.minicode:ro,size=64k`)
+  }
+  if (mask.emptyMaskHostPath) {
+    const emptyMount = workspaceMount(mask.emptyMaskHostPath)
+    for (const rel of mask.envFiles) {
+      args.push("-v", `${emptyMount}:${mount}/${rel}:ro`)
+    }
+  }
+  args.push(
     "-w",
     mount,
     "--network",
-    "none",
+    net,
     "--memory",
     opts.memory ?? process.env.MINICODE_SANDBOX_MEMORY ?? "512m",
     "--cpus",
@@ -130,7 +145,29 @@ export function runInDocker(
     "sh",
     "-c",
     command,
-  ]
+  )
+  return args
+}
+
+// Run command di dalam container ephemeral, terisolasi (--network none default,
+// memori/CPU cap, masking .env/.minicode), mount workspace read-write. Return { code, output }.
+export function runInDocker(
+  command: string,
+  cwd: string,
+  opts: DockerRunOptions = {},
+): Promise<{ code: number | null; output: string }> {
+  if (opts.signal?.aborted) {
+    return Promise.resolve({ code: null, output: "[docker] aborted before container start" })
+  }
+  const containerName = `minicode-${randomUUID()}`
+  const targets = discoverSandboxMaskTargets(cwd)
+  const emptyMask = allocateEmptyMaskFile(targets.envFiles.length > 0)
+  const args = buildDockerRunArgs(command, cwd, opts, {
+    containerName,
+    hasMinicode: targets.hasMinicode,
+    envFiles: targets.envFiles,
+    emptyMaskHostPath: emptyMask.path,
+  })
 
   return new Promise((resolveResult) => {
     // env selalu disanitasi dari hasil merge final — secret (API_KEY/TOKEN/...)
@@ -175,6 +212,7 @@ export function runInDocker(
       settled = true
       clearTimeout(t)
       signal?.removeEventListener("abort", onAbort)
+      emptyMask.cleanup()
       const marker = truncated ? "\n… [output truncated]" : ""
       const output = (out + (err ? `\n[stderr]\n${err}` : "")).trim() + marker + suffix
       resolveResult({ code, output })

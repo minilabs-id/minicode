@@ -1,15 +1,20 @@
-import { spawn, spawnSync } from "node:child_process"
+import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { resolve as resolvePath } from "node:path"
 import type { Tool, ToolContext } from "#minicore"
 import { LIMITS } from "../constants.ts"
+import {
+  killProcessTree,
+  signalProcessGroup,
+  signalProcessGroupGraceful,
+} from "../lib/process-tree.ts"
 import { isCwdOutsideRoot, isPathOutsideRoot } from "../policy/jail.ts"
 import { contextUnrestricted, requireToolCwd } from "./context.ts"
 
-// re-export untuk backward compat (helper kini terpusat di policy/scrub)
 export { SECRET_ENV_RE, sanitizeSpawnEnv, stripSecretsEnv } from "../policy/scrub.ts"
+// re-export untuk backward compat (helper kini terpusat di policy/scrub & lib/process-tree)
+export { signalProcessGroupGraceful }
 
-import { resolveTrustedExecutable } from "../lib/trusted-exec.ts"
 import { sandboxExplicitFallbackAllowed, sandboxStrict } from "../policy/sandbox-policy.ts"
 import { sanitizeSpawnEnv, scrubSecrets } from "../policy/scrub.ts"
 import { dockerAvailable, runInDocker } from "../sandbox/docker.ts"
@@ -140,90 +145,8 @@ function reapFinishedJobs(): void {
   }
 }
 
-/**
- * Sinyal ke SELURUH grup proses (POSIX). Butuh spawn `detached:true` agar
- * shell jadi group leader — tanpa itu `-pid` bukan grup yang valid dan
- * group-kill jadi tak mungkin (cucu selamat). true = sinyal sampai ke grup.
- */
-function signalProcessGroup(p: ReturnType<typeof spawn>, signal: NodeJS.Signals): boolean {
-  if (process.platform === "win32" || p.pid === undefined) return false
-  try {
-    process.kill(-p.pid, signal)
-    return true
-  } catch {
-    return false
-  }
-}
-
-/**
- * [Fase 2 / LOOP-INV-10] Eskalasi AWAL yang sopan: SIGTERM ke seluruh process
- * group, bukan hanya shell induk.
- *
- * Kenapa penting: `p.kill("SIGTERM")` hanya menyentuh shell wrapper. Cucu
- * (`node -e`, dev server) tetap hidup, menahan pipe, dan baru mati 2 detik
- * kemudian oleh SIGKILL grup — padahal banyak proses menangani SIGTERM dengan
- * flush/cleanup yang benar bila sinyalnya sampai. Helper ini dipakai sebelum
- * timer eskalasi `killTree` (SIGKILL), di jalur timeout DAN abort.
- *
- * `opts` adalah seam deterministik untuk test: perilaku POSIX dapat diuji di
- * Windows tanpa benar-benar mengirim sinyal ke proses nyata.
- */
-export function signalProcessGroupGraceful(
-  pid: number | undefined,
-  fallback: { kill: (signal?: NodeJS.Signals | number) => boolean },
-  opts: {
-    platform?: NodeJS.Platform
-    killGroup?: (pid: number, signal: NodeJS.Signals) => boolean
-  } = {},
-): "group" | "fallback" {
-  const platform = opts.platform ?? process.platform
-  if (platform !== "win32" && typeof pid === "number" && pid > 0) {
-    const killGroup =
-      opts.killGroup ??
-      ((target: number, signal: NodeJS.Signals): boolean => process.kill(target, signal))
-    try {
-      // Negatif = process group id (shell adalah group leader karena detached).
-      if (killGroup(-pid, "SIGTERM")) return "group"
-    } catch {
-      // Grup sudah hilang / ESRCH: jatuh ke sinyal proses tunggal di bawah.
-    }
-  }
-  try {
-    fallback.kill("SIGTERM")
-  } catch {}
-  return "fallback"
-}
-
-/**
- * Bunuh proses + seluruh subtree-nya. Di Windows `p.kill()` hanya membunuh
- * wrapper `cmd.exe` — cucu seperti `node -e "while(true){}"` tetap hidup,
- * menahan pipe stdio sehingga event `close` tidak pernah datang (hang
- * selamanya walau timeout sudah lewat). `taskkill /T` menutup tree-nya.
- */
 function killTree(p: ReturnType<typeof spawn>): void {
-  try {
-    if (process.platform === "win32" && p.pid !== undefined) {
-      // F-23: resolve absolut dari PATH terpercaya — spawn dengan cwd
-      // workspace bisa mengeksekusi taskkill.bat repo (hijack CWD Windows).
-      // Env juga disanitasi: proses ini berjalan di timeout dengan hak penuh.
-      const r = spawnSync(
-        resolveTrustedExecutable("taskkill"),
-        ["/pid", String(p.pid), "/T", "/F"],
-        {
-          stdio: "ignore",
-          env: sanitizeSpawnEnv(process.env),
-        },
-      )
-      if (r.status === 0) return
-    } else if (signalProcessGroup(p, "SIGKILL")) {
-      // POSIX: bunuh seluruh grup proses (shell wrapper + cucu seperti
-      // `node -e`). Spawn memakai detached:true agar shell jadi group leader.
-      return
-    }
-  } catch {}
-  try {
-    p.kill("SIGKILL")
-  } catch {}
+  killProcessTree(p, { env: sanitizeSpawnEnv(process.env) })
 }
 
 /**
@@ -256,10 +179,19 @@ function startBackground(
   relaxed = false,
 ): string {
   reapFinishedJobs()
-  const live = [...jobs.values()].filter((j) => !j.done).length
-  if (live >= LIMITS.BASH_BACKGROUND_MAX_JOBS) {
+  // Isolasi kuota per pemilik sesi agar satu sesi tidak menghabiskan slot sesi lain,
+  // tetap dibatasi backstop global proses agar jumlah anak OS terkendali.
+  const ownerLive = [...jobs.values()].filter((j) => !j.done && j.ownerSid === ownerSid).length
+  if (ownerLive >= LIMITS.BASH_BACKGROUND_MAX_JOBS) {
     throw new Error(
-      `too many background jobs (${live}/${LIMITS.BASH_BACKGROUND_MAX_JOBS}) — stop one with bash_kill first`,
+      `too many background jobs (${ownerLive}/${LIMITS.BASH_BACKGROUND_MAX_JOBS}) — stop one with bash_kill first`,
+    )
+  }
+  const totalLive = [...jobs.values()].filter((j) => !j.done).length
+  const totalCap = LIMITS.BASH_BACKGROUND_MAX_JOBS * 4
+  if (totalLive >= totalCap) {
+    throw new Error(
+      `too many active background jobs (${totalLive}/${totalCap}) — stop one with bash_kill first`,
     )
   }
   const id = `bg_${randomUUID().slice(0, 8)}`
@@ -360,8 +292,11 @@ function makeBashTool(ownerSid: string | null): Tool {
       // Unrestricted: default timeout jauh lebih lega; timeoutMs eksplisit
       // tetap menang.
       const timeout =
-        timeoutMs ??
-        (relaxed ? LIMITS.UNRESTRICTED_BASH_TIMEOUT_MS : LIMITS.BASH_DEFAULT_TIMEOUT_MS)
+        typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0
+          ? timeoutMs
+          : relaxed
+            ? LIMITS.UNRESTRICTED_BASH_TIMEOUT_MS
+            : LIMITS.BASH_DEFAULT_TIMEOUT_MS
 
       if (background === true) {
         // Sandbox tidak diterapkan di jalur background: container/namespace
@@ -535,7 +470,7 @@ function makeBashOutputTool(ownerSid: string | null): Tool {
     parameters: {
       type: "object",
       properties: {
-        id: { type: "string", description: "job id dari bash background:true" },
+        id: { type: "string", description: "job id from bash with background:true" },
       },
       required: ["id"],
       additionalProperties: false,

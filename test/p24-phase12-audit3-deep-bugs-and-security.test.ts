@@ -175,6 +175,88 @@ describe("p24: Audit #3 deep bugs & security", () => {
     if (!out.ok) expect(out.refusal.code).toBe("SESSION_MISMATCH")
     // Status tetap requested (PENDING) — belum termutasi.
     expect(getApproval("apr_rc2", cwd)?.state).toBe("requested")
+
+    // Tanpa args.sid juga wajib ditolak (tidak boleh meng-approve sesi lain).
+    const noSid = dispatchControl(
+      {
+        consumerId: "c",
+        scopes: ["approve"],
+        op: "approval.decide",
+        idem: "i-rc2-nosid",
+        args: { approvalId: "apr_rc2", decision: "accept" },
+      },
+      deps,
+      new IdempotencyStore(),
+    )
+    expect(noSid.ok).toBe(false)
+    if (!noSid.ok) expect(noSid.refusal.code).toBe("SESSION_MISMATCH")
+    expect(getApproval("apr_rc2", cwd)?.state).toBe("requested")
+  })
+
+  test("DaemonServer: timeout pra-handshake memutus koneksi idle & revokeCapabilityNonce menolak token bocor", async () => {
+    const { createConnection } = await import("node:net")
+    const { randomBytes } = await import("node:crypto")
+    const { DaemonServer } = await import("../src/daemon/server.ts")
+    const { Telemetry } = await import("../src/daemon/telemetry.ts")
+    const { ApprovalBroker } = await import("../src/daemon/approvals.ts")
+    const { IdempotencyStore } = await import("../src/daemon/control.ts")
+    const { mintCapability } = await import("../src/daemon/capability.ts")
+    const { encodeFrame } = await import("../src/daemon/framing.ts")
+    const cwd = tempDir("p24-srv-")
+    const secret = randomBytes(32)
+    const telemetry = new Telemetry()
+    const server = new DaemonServer({
+      incarnation: "inc-srv",
+      secret,
+      host: "127.0.0.1",
+      port: 0,
+      cwd,
+      feeds: { get: () => undefined, known: () => [] },
+      approvals: new ApprovalBroker({ incarnation: "inc-srv", propose: () => {}, cwd }),
+      control: {
+        actions: null,
+        idem: new IdempotencyStore(),
+        telemetry,
+        storageOk: () => true,
+        shuttingDown: () => false,
+      },
+      telemetry,
+      preAuthTimeoutMs: 60,
+    })
+    const { port } = await server.start()
+    try {
+      // 1. Koneksi diam tanpa hello diputus otomatis sesudah preAuthTimeoutMs
+      await new Promise<void>((resolve) => {
+        const sock = createConnection({ host: "127.0.0.1", port })
+        sock.resume()
+        sock.once("error", () => resolve())
+        sock.once("close", () => resolve())
+      })
+      expect(telemetry.snapshot()["connections.rejected"]).toBeGreaterThanOrEqual(1)
+
+      // 2. Token yang nonce-nya dicabut ditolak walau signature & exp valid
+      const cap = mintCapability(secret, {
+        incarnation: "inc-srv",
+        scopes: ["subscribe"],
+        ttlMs: 60_000,
+        who: "tester",
+      })
+      const payload = JSON.parse(Buffer.from(cap.split(".")[0]!, "base64url").toString("utf8")) as {
+        n: string
+      }
+      server.revokeCapabilityNonce(payload.n)
+      const msg = await new Promise<string>((resolve) => {
+        const sock = createConnection({ host: "127.0.0.1", port }, () => {
+          sock.write(encodeFrame({ t: "hello", protocol: 1, cap }))
+        })
+        const chunks: Buffer[] = []
+        sock.on("data", (d) => chunks.push(Buffer.isBuffer(d) ? d : Buffer.from(d)))
+        sock.once("close", () => resolve(Buffer.concat(chunks).toString("utf8")))
+      })
+      expect(msg).toContain("INVALID_CAPABILITY")
+    } finally {
+      await server.close()
+    }
   })
 
   test("XP-1: boundary workspace via relative() menangani root drive / root", () => {

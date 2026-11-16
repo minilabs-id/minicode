@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { dirname, resolve } from "node:path"
 import type { Tool, ToolContext } from "#minicore"
 import { LIMITS } from "../constants.ts"
-import { scrubSecrets } from "../policy/scrub.ts"
+import { fenceUntrustedToolOutput, isAlreadyFenced, scrubSecrets } from "../policy/scrub.ts"
 import { McpHttpTransport, type McpTransportLike } from "./http-transport.ts"
 import { McpTransport } from "./transport.ts"
 
@@ -65,6 +65,28 @@ function sortObjectKeys(obj: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {}
   for (const k of Object.keys(obj).sort()) out[k] = obj[k]!
   return out
+}
+
+/**
+ * Normalisasi `inputSchema` dari server MCP agar provider LLM yang ketat
+ * (OpenAI/Gemini) tidak menolak tool saat server mengirim skema kosong atau
+ * tanpa `type: "object"`/`properties`. Tidak menyentuh objek asli agar pin SHA-256 utuh.
+ */
+export function normalizeMcpInputSchema(schema: unknown): Tool["parameters"] {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+    return { type: "object", properties: {}, additionalProperties: true }
+  }
+  const obj = schema as Record<string, unknown>
+  const typeVal = typeof obj.type === "string" && obj.type ? obj.type : "object"
+  if (typeVal === "object" && (!obj.properties || typeof obj.properties !== "object")) {
+    return {
+      ...obj,
+      type: "object",
+      properties: {},
+      ...(obj.additionalProperties === undefined ? { additionalProperties: true } : {}),
+    } as Tool["parameters"]
+  }
+  return { ...obj, type: typeVal } as Tool["parameters"]
 }
 
 /** P2.3: sleep yang dapat dibatalkan oleh signal sesi/koneksi. */
@@ -316,7 +338,9 @@ class McpConnection {
       this.stdio = null
       return this.http
     }
-    this.stdio = new McpTransport()
+    // Beri ruang frame stdio 8 MiB agar screenshot/snapshot browser MCP tidak
+    // memicu SIGKILL pada server (uji unit McpTransport() tetap pakai default 1 MiB).
+    this.stdio = new McpTransport({ maxFrameBytes: LIMITS.MCP_HTTP_BODY_MAX_BYTES })
     this.http = null
     return this.stdio
   }
@@ -380,27 +404,10 @@ class McpConnection {
     }
 
     let handshakeOk = false
-    // `server/discover` adalah ekstensi non-standar; hanya masuk akal untuk
-    // stdio lokal. Server HTTP mengikuti spec → langsung `initialize`.
-    if (this.kind === "stdio") {
-      try {
-        const disc = (await this.transport.request(
-          "server/discover",
-          {
-            _meta: {
-              "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-              "io.modelcontextprotocol/clientInfo": { name: "minicode", version: "0.1.0" },
-              "io.modelcontextprotocol/clientCapabilities": { tools: {} },
-            },
-          },
-          2_000,
-        )) as Record<string, unknown>
-        if (disc?.capabilities) handshakeOk = true
-      } catch {
-        // jatuh ke initialize di bawah
-      }
-    }
-    if (!handshakeOk) {
+    // Standar MCP mewajibkan `initialize` sebagai pesan pertama; mengirim
+    // `server/discover` lebih dulu membuang 2 dtk timeout dan membuat server
+    // ketat (Playwright/Puppeteer/SDK resmi) menutup koneksi.
+    try {
       await this.transport.request(
         "initialize",
         {
@@ -417,6 +424,32 @@ class McpConnection {
       // wajib per spec: notification initialized setelah initialize
       this.transport.notify("notifications/initialized", {})
       handshakeOk = true
+    } catch (initErr) {
+      const msg = (initErr as Error)?.message ?? ""
+      if (
+        this.kind === "stdio" &&
+        !this.transport.isClosed &&
+        /method not found|-32601/i.test(msg)
+      ) {
+        try {
+          const disc = (await this.transport.request(
+            "server/discover",
+            {
+              _meta: {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientInfo": { name: "minicode", version: "0.1.0" },
+                "io.modelcontextprotocol/clientCapabilities": { tools: {} },
+              },
+            },
+            2_000,
+          )) as Record<string, unknown>
+          if (disc?.capabilities) handshakeOk = true
+        } catch {
+          throw initErr
+        }
+      } else {
+        throw initErr
+      }
     }
     if (!handshakeOk) throw new Error("handshake failed")
 
@@ -579,11 +612,7 @@ class McpConnection {
         return {
           name: `${serverId}.${t.name}`,
           description: t.description ?? `MCP tool from ${serverId}`,
-          parameters: (t.inputSchema ?? {
-            type: "object",
-            properties: {},
-            additionalProperties: true,
-          }) as Tool["parameters"],
+          parameters: normalizeMcpInputSchema(t.inputSchema),
           async execute(input: Record<string, unknown>, _ctx: ToolContext): Promise<string> {
             // P2.3: pastikan koneksi hidup; reconnect bounded bila transport
             // mati. Discovery dijalankan ulang, jadi verifikasi memakai definisi
@@ -603,7 +632,10 @@ class McpConnection {
             _ctx.signal.throwIfAborted()
             const result = await conn.callTool(t.name, input ?? {}, _ctx.signal)
             const content = extractMcpText(result)
-            return capMcpText(content)
+            const capped = capMcpText(content)
+            return isAlreadyFenced(capped)
+              ? capped
+              : fenceUntrustedToolOutput(`${serverId}.${t.name}`, capped)
           },
         }
       })
@@ -629,7 +661,7 @@ async function ensureConnection(serverId: string, signal?: AbortSignal): Promise
   return conn
 }
 
-/** Normalisasi konten tool MCP (string | blok {text} campuran) → teks. */
+/** Normalisasi konten tool MCP (string | blok {text} | image | resource) → teks. */
 export function extractMcpText(result: unknown): string {
   if (result == null) return ""
   const r = result as { content?: unknown }
@@ -637,8 +669,26 @@ export function extractMcpText(result: unknown): string {
   return r.content
     .map((c) => {
       if (typeof c === "string") return c
-      if (c && typeof c === "object" && typeof (c as { text?: unknown }).text === "string") {
-        return (c as { text: string }).text
+      if (c && typeof c === "object") {
+        const obj = c as {
+          type?: unknown
+          text?: unknown
+          data?: unknown
+          mimeType?: unknown
+          resource?: { text?: unknown; blob?: unknown; mimeType?: unknown; uri?: unknown }
+        }
+        if (typeof obj.text === "string") return obj.text
+        // Blok image/audio (mis. screenshot Playwright MCP): jangan serialize base64
+        // raksasa menjadi JSON teks yang lalu dipotong tengah di 16 KB.
+        if ((obj.type === "image" || obj.type === "audio") && typeof obj.data === "string") {
+          return `[${obj.type} ${String(obj.mimeType ?? "application/octet-stream")}, ${obj.data.length} base64 chars — binary skipped]`
+        }
+        if (obj.type === "resource" && obj.resource) {
+          if (typeof obj.resource.text === "string") return obj.resource.text
+          if (typeof obj.resource.blob === "string") {
+            return `[binary ${String(obj.resource.mimeType ?? "application/octet-stream")}, ${obj.resource.blob.length} base64 chars — skipped]`
+          }
+        }
       }
       return JSON.stringify(c)
     })
@@ -717,8 +767,7 @@ export async function callMcpTool(
   args: Record<string, unknown>,
   signal?: AbortSignal,
 ): Promise<unknown> {
-  const conn = activeConnections.get(serverId)
-  if (!conn) throw new Error(`MCP server ${serverId} not connected`)
+  const conn = await ensureConnection(serverId, signal)
   // F8.2: verify skema ulang saat pemanggilan. Tool yang skemanya berubah
   // tanpa persetujuan ditolak fail-closed sebelum request dikirim ke server.
   const tool = conn.tools.find((t) => t.name === toolName)
@@ -735,8 +784,7 @@ export async function readMcpResource(
   uri: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  const conn = activeConnections.get(serverId)
-  if (!conn) throw new Error(`MCP server ${serverId} not connected`)
+  const conn = await ensureConnection(serverId, signal)
   return conn.readResource(uri, signal)
 }
 
@@ -746,8 +794,7 @@ export async function getMcpPrompt(
   args: Record<string, unknown>,
   signal?: AbortSignal,
 ): Promise<string> {
-  const conn = activeConnections.get(serverId)
-  if (!conn) throw new Error(`MCP server ${serverId} not connected`)
+  const conn = await ensureConnection(serverId, signal)
   return conn.getPrompt(name, args, signal)
 }
 

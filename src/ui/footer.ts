@@ -82,7 +82,10 @@ export function paintWorkMode(workMode?: string, _style: ModeLabelStyle = "full"
   const value = workModeValue(workMode)
   const normalized = sanitizeAnsiLine(workMode || "DISCUSS").toUpperCase()
   const labelWidth = displayWidth(sanitizeAnsiLine(value))
-  const colorValue = normalized === "DISCUSS" || normalized === "PLAN" ? c.warning : c.success
+  // Discuss = default sesi baru, jadi TIDAK boleh tampak seperti peringatan.
+  // Plan tetap kuning (postur rencana), Build hijau (akses penuh).
+  const colorValue =
+    normalized === "DISCUSS" ? c.accent : normalized === "PLAN" ? c.warning : c.success
   return `${colorValue(value)}${" ".repeat(Math.max(0, WORK_MODE_VALUE_WIDTH - labelWidth))}`
 }
 
@@ -304,11 +307,11 @@ function buildFooterLine(s: FooterStatus, cols: number): string {
     const baseWidth = displayWidth(modeOnly)
     const contextBudget = target - baseWidth - 2
     if (contextBudget > 0) {
-      const shortenedContext = truncateToWidth(context, contextBudget, "…")
+      const shortenedContext = truncateToWidth(context, contextBudget, glyphs.ellipsis)
       const withContext = `${spark} ${shortWorkValue} ${c.gray(shortenedContext)} ${[permissionValue, strictValue].filter(Boolean).join(" ")}`
       if (displayWidth(withContext) <= target) return withContext
     }
   }
   if (displayWidth(modeOnly) <= target) return modeOnly
-  return truncateToWidth(modeOnly, target, "…")
+  return truncateToWidth(modeOnly, target, glyphs.ellipsis)
 }

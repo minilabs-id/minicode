@@ -293,9 +293,12 @@ export function applyKey(
       return { state: { ...state, sel: (state.sel + 1) % n }, action: "render" }
     }
     case "tab": {
-      // TUI menangani Tab sebagai siklus Work Mode sebelum editor generik.
-      // Picker command memilih item dengan ↑/↓ lalu Enter.
-      return { state, action: "none" }
+      if (!state.menuOpen) return { state, action: "none" }
+      // Lengkapi item terpilih (atau saran teratas jika sel=-1) tanpa langsung
+      // mengeksekusi agar operator masih bisa menambah argumen atau Enter.
+      const pick = pickSelected(state.line) ?? hints(state.line)[0]
+      if (!pick) return { state, action: "none" }
+      return { state: completeTo(pick), action: "render" }
     }
     case "enter": {
       const pick = pickSelected(state.line)
@@ -413,6 +416,8 @@ export function createDecoderState(): DecoderState {
 
 // Bound incomplete control sequences independently of bracketed paste payloads.
 const MAX_CONTROL_SEQUENCE_BYTES = 64
+/** Batas aman payload bracketed paste bila terminator ESC[201~ tidak kunjung tiba. */
+const MAX_PASTE_BYTES = 512 * 1024
 
 function isCsiParam(b: number): boolean {
   return b >= 0x30 && b <= 0x3f
@@ -480,6 +485,7 @@ function asciiKey(b: number): DecodedKey | null {
  * di `state.pending` untuk chunk berikutnya. Key dikembalikan berurutan.
  */
 export function decodeKeysStream(chunk: Uint8Array, state: DecoderState): DecodedKey[] {
+  const pendingCount = state.pending.length
   const buf = state.pending.concat([...chunk])
   const out: DecodedKey[] = []
   let i = 0
@@ -527,7 +533,16 @@ export function decodeKeysStream(chunk: Uint8Array, state: DecoderState): Decode
             break
           }
         }
-        if (term === -1) break // penutup belum tiba — tahan
+        if (term === -1) {
+          // Batas defensif bila terminal crash sebelum mengirim penutup ESC[201~:
+          // jangan tahan buffer tanpa batas sampai membekukan seluruh input.
+          if (buf.length - (i + 6) > MAX_PASTE_BYTES) {
+            out.push({ key: { type: "char", ch: decodeUtf8(buf.slice(i + 6)) }, width: 0 })
+            i = buf.length
+            continue
+          }
+          break // penutup belum tiba — tahan
+        }
         out.push({ key: { type: "char", ch: decodeUtf8(buf.slice(i + 6, term)) }, width: 0 })
         i = term + 6
         continue
@@ -614,6 +629,14 @@ export function decodeKeysStream(chunk: Uint8Array, state: DecoderState): Decode
         // (especially Ctrl+C, Enter, or ESC starting a fresh sequence).
         out.push({ key: { type: "ignore" }, width: j - i })
         i = j
+        continue
+      }
+      // Alt+Enter: ESC + CR (`\x1b\r`) → sisip newline, bukan batal/Esc.
+      // Hanya cocokkan bila tiba dalam chunk yang SAMA (`i >= pendingCount`),
+      // bukan `Esc` yang masih menunggu timer 50ms lalu diikuti `Enter` cepat.
+      if (n1 === 0x0d && i >= pendingCount) {
+        out.push({ key: { type: "ctrl-j" }, width: 2 })
+        i += 2
         continue
       }
       // ESC + byte lain: ESC tunggal (lengkap, tidak menunggu apa pun).
@@ -854,9 +877,16 @@ export function decodeKey(s: string, i: number): DecodedKey | null {
       // Tanpa cabang eksplisit ini ia jatuh ke catch-all "esc" di bawah,
       // sehingga tipe "shift-tab" tidak pernah dihasilkan decodeKeys.
       if (kind === "Z") return { key: { type: "shift-tab" }, width: 3 }
+      // Shift+Enter / Alt+Enter modern: CSI-u (`\x1b[13;2u` / `\x1b[13;3u`) atau
+      // modifyOtherKeys (`\x1b[27;2;13~` / `\x1b[27;3;13~`) → sisip newline.
+      const csiWidth = scanCsi(s, i)
+      if (/^(?:13;[23]u|27;[23];13~)$/.test(s.slice(i + 2, i + csiWidth))) {
+        return { key: { type: "ctrl-j" }, width: csiWidth }
+      }
       // ESC [ … lainnya -> konsumsi saja
-      return { key: { type: "ignore" }, width: scanCsi(s, i) }
+      return { key: { type: "ignore" }, width: csiWidth }
     }
+    if (s[i + 1] === "\r") return { key: { type: "ctrl-j" }, width: 2 }
     return { key: { type: "esc" }, width: 1 }
   }
   if (code === 0x01) return { key: { type: "home" }, width: 1 } // Ctrl+A

@@ -1,9 +1,15 @@
-import { type ChildProcess, spawn } from "node:child_process"
+import { type ChildProcess, spawn, spawnSync } from "node:child_process"
 import { LIMITS } from "../constants.ts"
+import { resolveSpawnTarget, resolveTrustedExecutable } from "../lib/trusted-exec.ts"
 import { sanitizeSpawnEnv } from "../policy/scrub.ts"
 
 export class McpTransport {
+  private readonly maxFrameBytes: number
+  constructor(opts: { maxFrameBytes?: number } = {}) {
+    this.maxFrameBytes = opts.maxFrameBytes ?? LIMITS.MCP_STDIO_FRAME_MAX_BYTES
+  }
   private proc: ChildProcess | null = null
+  private winCmdTree = false
   private stdoutFrame = Buffer.alloc(0)
   private pending = new Map<
     string | number,
@@ -28,11 +34,14 @@ export class McpTransport {
   async connect(command: string, args: string[], env: Record<string, string> = {}): Promise<void> {
     if (this.proc) throw new Error("transport already connected")
 
-    this.proc = spawn(command, args, {
+    const target = resolveSpawnTarget(command, args)
+    this.winCmdTree = target.windowsVerbatimArguments === true
+    this.proc = spawn(target.command, target.args, {
       stdio: ["pipe", "pipe", "pipe"],
       // env kredensial di-strip; env eksplisit config server menang setelahnya
       env: sanitizeSpawnEnv(process.env, env),
       signal: this.killSignal.signal,
+      ...(target.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
     })
 
     this.proc.on("error", (err) => this.failAll(err))
@@ -101,6 +110,22 @@ export class McpTransport {
     try {
       this.proc?.stdin?.end()
     } catch {}
+    // Untuk shim .cmd/.bat di Windows, bunuh seluruh subtree SEBELUM killSignal.abort()
+    // karena abort() hanya menghentikan wrapper cmd.exe dan meninggalkan anak (node/Chromium).
+    if (
+      this.winCmdTree &&
+      process.platform === "win32" &&
+      this.proc?.pid !== undefined &&
+      this.proc.exitCode === null
+    ) {
+      try {
+        spawnSync(
+          resolveTrustedExecutable("taskkill"),
+          ["/pid", String(this.proc.pid), "/T", "/F"],
+          { stdio: "ignore", env: sanitizeSpawnEnv(process.env) },
+        )
+      } catch {}
+    }
     this.killSignal.abort()
     if (this.proc) {
       const p = this.proc
@@ -108,7 +133,18 @@ export class McpTransport {
         await new Promise<void>((r) => {
           const t = setTimeout(() => {
             try {
-              p.kill("SIGKILL")
+              if (process.platform === "win32" && p.pid !== undefined) {
+                spawnSync(
+                  resolveTrustedExecutable("taskkill"),
+                  ["/pid", String(p.pid), "/T", "/F"],
+                  {
+                    stdio: "ignore",
+                    env: sanitizeSpawnEnv(process.env),
+                  },
+                )
+              } else {
+                p.kill("SIGKILL")
+              }
             } catch {}
             r()
           }, 2_000)
@@ -172,7 +208,7 @@ export class McpTransport {
     for (let i = 0; i < chunk.length; i++) {
       if (chunk[i] !== 0x0a) continue
       const part = chunk.subarray(start, i)
-      if (this.stdoutFrame.length + part.length > LIMITS.MCP_STDIO_FRAME_MAX_BYTES) {
+      if (this.stdoutFrame.length + part.length > this.maxFrameBytes) {
         this.rejectOversizedFrame(this.stdoutFrame.length + part.length)
         return
       }
@@ -184,7 +220,7 @@ export class McpTransport {
     }
     if (start < chunk.length) {
       const remainder = chunk.subarray(start)
-      if (this.stdoutFrame.length + remainder.length > LIMITS.MCP_STDIO_FRAME_MAX_BYTES) {
+      if (this.stdoutFrame.length + remainder.length > this.maxFrameBytes) {
         this.rejectOversizedFrame(this.stdoutFrame.length + remainder.length)
         return
       }
@@ -214,7 +250,7 @@ export class McpTransport {
 
   private rejectOversizedFrame(size: number): void {
     const error = new Error(
-      `MCP stdio frame exceeds ${LIMITS.MCP_STDIO_FRAME_MAX_BYTES} bytes (at least ${size})`,
+      `MCP stdio frame exceeds ${this.maxFrameBytes} bytes (at least ${size})`,
     )
     this.closed = true
     this.stdoutFrame = Buffer.alloc(0)

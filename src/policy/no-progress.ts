@@ -257,7 +257,33 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
 
   const fileTrackers = new Map<string, FileHashTracker>()
   const inflightPreHash = new Map<string, { relPath: string; preHash: string | null }>()
+  const inflightExecPreHashes = new Map<string, { relPath: string; preHash: string | null }[]>()
   const pendingPost = new Set<Promise<unknown>>()
+
+  /** Ekstrak kandidat path relatif yang sudah terlacak atau disebut pada cmd/code bash. */
+  function shellCandidatePaths(call: { args?: unknown }, workspaceRoot: string): string[] {
+    const candidates = new Set<string>()
+    for (const tracked of fileTrackers.keys()) {
+      if (candidates.size >= 32) break
+      candidates.add(tracked)
+    }
+    const a = (call.args ?? {}) as Record<string, unknown>
+    const rawText = typeof a.cmd === "string" ? a.cmd : typeof a.code === "string" ? a.code : ""
+    if (rawText) {
+      let addedFromCmd = 0
+      for (const tok of rawText.split(/[\s"'`;|&<>()]+/)) {
+        if (addedFromCmd >= 8) break
+        if (!tok || tok.startsWith("-") || tok.includes("://")) continue
+        if (!/[./\\]/.test(tok)) continue
+        const abs = isAbsolute(tok) ? resolve(tok) : resolve(workspaceRoot, tok)
+        const rel = normalizeTrackPath(relative(workspaceRoot, abs))
+        if (!rel || rel.startsWith("..") || isAbsolute(rel)) continue
+        candidates.add(rel)
+        addedFromCmd++
+      }
+    }
+    return [...candidates]
+  }
 
   const evaluateBeforeCall: NoProgressDetector["evaluateBeforeCall"] = (call, workspaceRoot) => {
     const name = String(call.name ?? "")
@@ -318,11 +344,34 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
           }
         }
       }
+    } else if ((name === "bash" || name === "code_run") && workspaceRoot) {
+      for (const cand of shellCandidatePaths(call, workspaceRoot)) {
+        const tracker = fileTrackers.get(cand)
+        if (tracker?.oscillationMessage) {
+          return {
+            allowed: false,
+            kind: "OSCILLATION",
+            reason: "WORKSPACE_REVERT_CYCLE",
+            message: tracker.oscillationMessage,
+          }
+        }
+      }
     }
 
-    // Sinyal 3: read-only thrashing di postur kerja aktif.
+    // Sinyal 3: read-only / non-mutating thrashing di postur kerja aktif.
+    // Hanya aksi kemajuan nyata (mutasi file, pembaruan rencana todo_write,
+    // delegasi, interaksi user, submit_result) yang me-reset counter; pencarian
+    // web (web_search/web_fetch) ikut terhitung sebagai bacaan tanpa-mutasi,
+    // dan bash/mcp hanya me-reset di recordOutcome bila benar-benar sukses.
     const isPureRead = contract?.sideEffectTier === "PURE_READ"
-    if (isPureRead) {
+    const isExternalLookup = name === "web_search" || name === "web_fetch"
+    const isResetsStreakImmediately =
+      contract?.sideEffectTier === "WORKSPACE_MUTATION" ||
+      name === "todo_write" ||
+      name === "ask_user" ||
+      name === "submit_result" ||
+      name === "delegate_task"
+    if (isPureRead || isExternalLookup) {
       if (getPosture() === "active") {
         if (consecutiveReadCalls >= maxConsecutiveReadCalls) {
           const observedCount = consecutiveReadCalls
@@ -341,8 +390,8 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
         }
         consecutiveReadCalls += 1
       }
-    } else {
-      // Pembaruan rencana (`todo_write`), mutasi file/env, delegasi, atau ask_user
+    } else if (isResetsStreakImmediately) {
+      // Pembaruan rencana (`todo_write`), mutasi file, delegasi, atau ask_user
       // memutus rentetan baca murni.
       consecutiveReadCalls = 0
     }
@@ -413,7 +462,17 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
     },
     async capturePreMutation(call, workspaceRoot) {
       const contract = contractForTool(call.name)
-      if (contract?.sideEffectTier !== "WORKSPACE_MUTATION" || !call.id) return
+      if (!call.id) return
+      if (call.name === "bash" || call.name === "code_run") {
+        const entries: { relPath: string; preHash: string | null }[] = []
+        for (const rel of shellCandidatePaths(call, workspaceRoot)) {
+          const pre = await hashWorkspaceFile(resolve(workspaceRoot, rel))
+          if (pre.ok) entries.push({ relPath: rel, preHash: pre.hash })
+        }
+        if (entries.length > 0) inflightExecPreHashes.set(call.id, entries)
+        return
+      }
+      if (contract?.sideEffectTier !== "WORKSPACE_MUTATION") return
       const rel = targetRelPathForTool(call.name, call.args, workspaceRoot)
       if (!rel) return
       const pre = await hashWorkspaceFile(resolve(workspaceRoot, rel))
@@ -428,7 +487,17 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
         throw new NoProgressError(verdict.kind, verdict.reason, verdict.message)
       }
       const contract = contractForTool(call.name)
-      if (contract?.sideEffectTier !== "WORKSPACE_MUTATION" || !call.id) return
+      if (!call.id) return
+      if (call.name === "bash" || call.name === "code_run") {
+        const entries: { relPath: string; preHash: string | null }[] = []
+        for (const rel of shellCandidatePaths(call, workspaceRoot)) {
+          const pre = await hashWorkspaceFile(resolve(workspaceRoot, rel))
+          if (pre.ok) entries.push({ relPath: rel, preHash: pre.hash })
+        }
+        if (entries.length > 0) inflightExecPreHashes.set(call.id, entries)
+        return
+      }
+      if (contract?.sideEffectTier !== "WORKSPACE_MUTATION") return
       const rel = targetRelPathForTool(call.name, call.args, workspaceRoot)
       if (!rel) return
       const pre = await hashWorkspaceFile(resolve(workspaceRoot, rel))
@@ -489,6 +558,15 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
           newEvidenceAfterBlock = true
         }
       }
+      // Sukses pada mutasi lokal non-deklaratif (bash/code_run/git_commit/dll.)
+      // menandakan progres nyata -> putus streak read-only. Tool gagal atau
+      // baca-eksternal (web_search/web_fetch) TIDAK mereset.
+      if (name !== "web_search" && name !== "web_fetch") {
+        const tier = contractForTool(name)?.sideEffectTier
+        if (tier === "LOCAL_ENV_MUTATION" || tier === "WORKSPACE_MUTATION") {
+          consecutiveReadCalls = 0
+        }
+      }
       lastErrorFingerprint = null
       lastErrorActionKey = null
       repeatedErrorStreak = 0
@@ -497,6 +575,22 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
     recordFileMutation,
     async completePostMutation(call, workspaceRoot) {
       const task = (async (): Promise<NoProgressVerdict> => {
+        const execEntries = call.id ? inflightExecPreHashes.get(call.id) : undefined
+        if (call.id) inflightExecPreHashes.delete(call.id)
+        if (execEntries && call.isError !== true) {
+          let lastVerdict: NoProgressVerdict = { allowed: true }
+          for (const entry of execEntries) {
+            const post = await hashWorkspaceFile(resolve(workspaceRoot, entry.relPath))
+            if (!post.ok) continue
+            const v = recordFileMutation({
+              path: entry.relPath,
+              preTargetHash: entry.preHash,
+              postTargetHash: post.hash,
+            })
+            if (!v.allowed) lastVerdict = v
+          }
+          return lastVerdict
+        }
         const entry = call.id ? inflightPreHash.get(call.id) : undefined
         if (call.id) inflightPreHash.delete(call.id)
         if (!entry || call.isError === true) return { allowed: true }
@@ -548,6 +642,7 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
       justifiedRetries = 0
       fileTrackers.clear()
       inflightPreHash.clear()
+      inflightExecPreHashes.clear()
     },
     snapshot() {
       const oscillatingPaths: string[] = []

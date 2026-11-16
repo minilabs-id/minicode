@@ -655,7 +655,7 @@ describe("runProviderManager", () => {
     const out = visible(tty)
     expect(out).toContain("a add")
     expect(out).toContain("e edit")
-    expect(out).toContain("Esc close")
+    expect(out).toContain("Esc cancel")
     await tty.send(KEY.esc, 30)
     await p
   })

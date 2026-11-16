@@ -3,6 +3,8 @@
 // provider memakai askLine/console.log di luar kotak.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { resetLocaleState, setSessionLocale } from "../src/ui/i18n/locale.ts"
+import { glyphs } from "../src/ui/render/theme.ts"
+import { displayWidth } from "../src/ui/render/width.ts"
 import { openAltScreen, resetAltScreenDepth } from "../src/ui/runtime/screen.ts"
 import { popupBoxWidth } from "../src/ui/screens/dialog.ts"
 import { runForm } from "../src/ui/screens/form.ts"
@@ -199,6 +201,39 @@ describe("runForm", () => {
     expect(res.cancelled).toBe(true)
     s.close()
   })
+  test("footer dinamis: tanpa placeholder {move}/{save}, hint state akurat", async () => {
+    const s = screen()
+    const p = runForm({ title: "Add", fields: [{ id: "url", label: "URL", kind: "text" }] }, s)
+    await tty!.ready()
+    const frame = tty!.screen().join("\n")
+    expect(frame).not.toContain("{move}")
+    expect(frame).not.toContain("{save}")
+    expect(frame).not.toContain("{cancel}")
+    expect(frame).toContain("Tab move")
+    expect(frame).toContain("Enter save")
+    expect(frame).toContain("Esc cancel")
+    await tty!.send(KEY.esc, 90)
+    await tty!.send(KEY.esc, 90)
+    await p
+    s.close()
+  })
+  test("footer select menampilkan panah kiri/kanan", async () => {
+    const s = screen()
+    const p = runForm(
+      {
+        title: "S",
+        fields: [{ id: "scope", label: "Scope", kind: "select", options: ["global", "local"] }],
+      },
+      s,
+    )
+    await tty!.ready()
+    const frame = tty!.screen().join("\n")
+    expect(frame).toContain("select")
+    expect(frame).toContain(glyphs.leftRight)
+    await tty!.send(KEY.esc, 90)
+    await p
+    s.close()
+  })
 })
 
 // ── Audit renderer 2026-11-12 ───────────────────────────────────────────────
@@ -269,6 +304,56 @@ describe("runForm: temuan audit 2026-11-12", () => {
     for (let i = 0; i < 9; i++) await tty!.send(KEY.tab)
     await tty!.send("ZZMARKERZZ")
     expect(tty!.screen().join("\n")).toContain("ZZMARKERZZ")
+    await tty!.send(KEY.esc, 90)
+    await tty!.send(KEY.esc, 90)
+    await p
+    s.close()
+  })
+
+  test("label panjang otomatis stack di atas field dan membuang byte kontrol C1", async () => {
+    tty = installFakeTty({ columns: 50, rows: 14 })
+    const s = openAltScreen()
+    const p = runForm(
+      {
+        title: "Stacked",
+        fields: [
+          {
+            id: "apiKey",
+            label: "Gateway Authorization Secret Key",
+            kind: "text",
+          },
+        ],
+      },
+      s,
+    )
+    await tty!.ready()
+    await tty!.waitForScreen((f) => f.some((l) => l.includes("Gateway Authorization Secret Key")))
+    await tty!.send("tok\u009b\u0085en")
+    await tty!.send(KEY.enter, 30)
+    const res = await p
+    expect(res.cancelled).toBe(false)
+    expect(res.values?.apiKey).toBe("token")
+    s.close()
+  })
+
+  test("resize saat form terbuka menyesuaikan lebar kotak tanpa meluap", async () => {
+    tty = installFakeTty({ columns: 100, rows: 20 })
+    const s = openAltScreen()
+    const p = runForm({ title: "Resize", fields: [{ id: "k", label: "Key", kind: "text" }] }, s)
+    await tty!.ready()
+    const wideW = displayWidth(
+      (tty!.screen().find((l) => l.includes("─") || l.includes("-")) ?? "").trim(),
+    )
+    expect(wideW).toBe(popupBoxWidth(100))
+
+    tty!.resize(50, 16)
+    await tty!.send("abc")
+    const narrowW = displayWidth(
+      (tty!.screen().find((l) => l.includes("─") || l.includes("-")) ?? "").trim(),
+    )
+    expect(narrowW).toBe(popupBoxWidth(50))
+    for (const row of tty!.screen()) expect(displayWidth(row)).toBeLessThanOrEqual(50)
+
     await tty!.send(KEY.esc, 90)
     await tty!.send(KEY.esc, 90)
     await p

@@ -7,7 +7,7 @@ import { sanitizeSessionPart } from "../lib/session-id.ts"
 import { isJournalHealthy, loadJournal, mutationsSinceTurn } from "../session/journal.ts"
 import {
   checkWorkspaceIntegrity,
-  collectModifiedFilesFromJournal,
+  collectSessionModifiedFiles,
   detectEvaluationTampering,
 } from "../session/verification.ts"
 import { type CanonicalAssignmentTable, encodeCanonicalAssignments } from "../task/assignment.ts"
@@ -137,26 +137,28 @@ export async function resolveFreshEvidence(
     // telah di-commit ke jurnal sesi ini. Best-effort pada jurnal absent/empty/
     // corrupt agar kompatibilitas legacy turn-less & sesi tanpa jurnal tetap utuh.
     const loaded = await loadJournal(sessionId, cwd).catch(() => null)
-    if (loaded?.status === "valid") {
-      const modified = collectModifiedFilesFromJournal(loaded.records)
-      if (modified.length > 0) {
-        const integrity = await checkWorkspaceIntegrity(modified, cwd)
-        if (!integrity.ok) {
-          return {
-            verdict: "failed",
-            detail: integrity.summary,
-            ...(base.requireVerified ? { requireVerified: true } : {}),
-          }
+    const modified = await collectSessionModifiedFiles(
+      sessionId,
+      cwd,
+      loaded?.status === "valid" ? loaded.records : undefined,
+    )
+    if (modified.length > 0) {
+      const integrity = await checkWorkspaceIntegrity(modified, cwd)
+      if (!integrity.ok) {
+        return {
+          verdict: "failed",
+          detail: integrity.summary,
+          ...(base.requireVerified ? { requireVerified: true } : {}),
         }
-        // [Fase 6A / ACE-02] Tamper guard fail-closed: evaluator/gate yang
-        // disentuh membuat SEMUA klaim completion tak bisa dipercaya.
-        const tamper = await detectEvaluationTampering(modified, cwd)
-        if (tamper.tampered) {
-          return {
-            verdict: "failed",
-            detail: `EVALUATOR_TAMPER_ATTEMPT: ${tamper.reason}`,
-            ...(base.requireVerified ? { requireVerified: true } : {}),
-          }
+      }
+      // [Fase 6A / ACE-02] Tamper guard fail-closed: evaluator/gate yang
+      // disentuh membuat SEMUA klaim completion tak bisa dipercaya.
+      const tamper = await detectEvaluationTampering(modified, cwd)
+      if (tamper.tampered) {
+        return {
+          verdict: "failed",
+          detail: `EVALUATOR_TAMPER_ATTEMPT: ${tamper.reason}`,
+          ...(base.requireVerified ? { requireVerified: true } : {}),
         }
       }
     }
@@ -195,26 +197,28 @@ export async function resolveFreshEvidence(
   // [Fase 3 / LOOP-INV-12, LOOP-G21] Tier 1 integrity check sebelum mengizinkan
   // bukti `passed` mengunci `COMPLETED`.
   const loaded = await loadJournal(sessionId, cwd).catch(() => null)
-  if (loaded?.status === "valid") {
-    const modified = collectModifiedFilesFromJournal(loaded.records)
-    if (modified.length > 0) {
-      const integrity = await checkWorkspaceIntegrity(modified, cwd)
-      if (!integrity.ok) {
-        return {
-          verdict: "failed",
-          detail: integrity.summary,
-          ...(base.requireVerified ? { requireVerified: true } : {}),
-        }
+  const modified = await collectSessionModifiedFiles(
+    sessionId,
+    cwd,
+    loaded?.status === "valid" ? loaded.records : undefined,
+  )
+  if (modified.length > 0) {
+    const integrity = await checkWorkspaceIntegrity(modified, cwd)
+    if (!integrity.ok) {
+      return {
+        verdict: "failed",
+        detail: integrity.summary,
+        ...(base.requireVerified ? { requireVerified: true } : {}),
       }
-      // [Fase 6A / ACE-02] Tamper guard: bukti `passed` batal bila evaluator
-      // atau test diubah untuk meloloskan verifikasi.
-      const tamper = await detectEvaluationTampering(modified, cwd)
-      if (tamper.tampered) {
-        return {
-          verdict: "failed",
-          detail: `EVALUATOR_TAMPER_ATTEMPT: ${tamper.reason}`,
-          ...(base.requireVerified ? { requireVerified: true } : {}),
-        }
+    }
+    // [Fase 6A / ACE-02] Tamper guard: bukti `passed` batal bila evaluator
+    // atau test diubah untuk meloloskan verifikasi.
+    const tamper = await detectEvaluationTampering(modified, cwd)
+    if (tamper.tampered) {
+      return {
+        verdict: "failed",
+        detail: `EVALUATOR_TAMPER_ATTEMPT: ${tamper.reason}`,
+        ...(base.requireVerified ? { requireVerified: true } : {}),
       }
     }
   }
@@ -583,7 +587,7 @@ export const todoWriteTool: Tool = {
     properties: {
       todos: {
         type: "array",
-        description: "full todo list (replace, not delta)",
+        description: "non-empty full todo list (replace, not delta)",
         items: {
           type: "object",
           properties: {
@@ -660,11 +664,9 @@ export const todoWriteTool: Tool = {
     // treats as "do not publish"). Rejecting after the JSON write would leave the
     // legacy file describing a state TaskStore never accepted.
     //
-    // EMPTY PAYLOAD is excluded. `todos: []` declares nothing, so there is no
-    // item to misaddress; it keeps its existing meaning (clear the legacy list,
-    // D7 retention keeps canonical tasks untouched). The guard cannot be laundered
-    // through it: canonical rows survive, so the NEXT all-id-less write is still
-    // rejected.
+    // EMPTY PAYLOAD already threw in `normalizeTodos` above (Test I in
+    // phase4a5-idless-rejection proves `todos: []` rejects before 4A.5 and
+    // leaves canonical TaskStore rows untouched).
     if (list.length > 0 && !hasCanonicalIdentity(list) && hasCanonicalTasks(cwd, sessionId)) {
       const count = new TaskStore(cwd).listTasks(sessionId).length
       throw new TaskError(

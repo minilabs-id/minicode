@@ -342,7 +342,9 @@ test("hook menerima MINICODE_HOOK_CTX tetapi TANPA secret env", async () => {
       `import fs from "node:fs";\nfs.writeFileSync(process.env.PROBE_OUT, JSON.stringify({hookCtx: process.env.MINICODE_HOOK_CTX ?? null, probe: process.env.HARDEN_PROBE_API_KEY ?? null}));\n`,
     )
     const { runRunHooks } = await import("../src/hooks/run.ts")
-    await runRunHooks("pre", { phase: "pre", prompt: "halo", cwd: root })
+    await runRunHooks("pre", { phase: "pre", prompt: "halo", cwd: root }, undefined, {
+      allowLocal: true,
+    })
     const seen = JSON.parse(readFileSync(outFile, "utf8")) as {
       hookCtx: string | null
       probe: string | null
@@ -374,7 +376,7 @@ test("hook dilewati bila sesi sudah aborted", async () => {
     const { runRunHooks } = await import("../src/hooks/run.ts")
     const c = new AbortController()
     c.abort()
-    await runRunHooks("pre", { phase: "pre", cwd: root }, c.signal)
+    await runRunHooks("pre", { phase: "pre", cwd: root }, c.signal, { allowLocal: true })
     let ran = false
     try {
       readFileSync(marker)

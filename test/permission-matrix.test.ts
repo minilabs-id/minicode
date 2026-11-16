@@ -144,9 +144,10 @@ function expected(mode: PermissionMode, ask: boolean, name: string): "allow" | "
   }
   if (mode === "ask") {
     if (READONLY.has(name) || NO_PROMPT.has(name)) return "allow"
+    if (name === "code_run") return "deny" // tanpa MINICODE_SANDBOX: fail-closed sebelum prompt
     if (name === "bash") return ask ? "allow" : "deny" // "echo hi" lolos guard
     if (GATED.has(name)) return ask && TTY ? "allow" : "deny" // promptAskOr butuh TTY
-    return ask ? "allow" : "deny" // file/internal/code_run perlu prompt
+    return ask ? "allow" : "deny" // file/internal perlu prompt
   }
   // auto = AUTO (otonomi penuh) headless, tanpa MINICODE_SANDBOX.
   // [mode-architecture] `gatedByDefault` TIDAK lagi berarti "auto prompt":
@@ -185,6 +186,8 @@ for (const mode of MODES) {
 }
 
 test("matriks ask + auto dengan ask=allow (TTY tersimulasikan)", async () => {
+  const savedSandbox = process.env.MINICODE_SANDBOX
+  delete process.env.MINICODE_SANDBOX
   const root = mkdtempSync(join(tmpdir(), "mc-matrix-ask-"))
   try {
     const allow: Ask = async () => "allow"
@@ -200,7 +203,12 @@ test("matriks ask + auto dengan ask=allow (TTY tersimulasikan)", async () => {
         if (gotAuto !== wantAuto) throw new Error(`auto+allow × ${name}: got ${gotAuto}`)
       }
     }
+    // Saat MINICODE_SANDBOX diset, ask meminta persetujuan dan meloloskan code_run.
+    process.env.MINICODE_SANDBOX = "os"
+    expect(await decide("ask", root, "code_run", allow)).toBe("allow")
   } finally {
+    if (savedSandbox === undefined) delete process.env.MINICODE_SANDBOX
+    else process.env.MINICODE_SANDBOX = savedSandbox
     rmSync(root, { recursive: true, force: true })
   }
 })

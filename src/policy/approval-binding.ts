@@ -1,43 +1,31 @@
-// [Area B · PROMPT 06] Pengikatan persetujuan ↔ operasi yang BENAR-BENAR
-// dieksekusi.
-//
-// Masalah yang ditutup: `edit`/`apply_patch` MEMBACA ULANG file saat eksekusi,
-// sementara preview yang dilihat user berasal dari state SAAT approval. Bila
-// file berubah di antara keduanya (proses lain, tool paralel, sub-agent),
-// operasi yang dijalankan bukan yang disetujui — persetujuan jadi basi.
-//
-// Mekanisme (dua titik, satu objek state):
-// · CAPTURE (sebelum prompt): sidik jari argumen (SHA-256 kanonis) + isi file
-//   target — "apa yang dilihat user".
-// · GRANT (setelah user setuju): simpan sidik jari itu untuk operasi ini saja.
-// · VERIFY (batas eksekusi): hitung ulang; beda ⇒ basi ⇒ TOLAK (fail-closed).
-//
-// Kenapa verifikasi di barrier efek (`src/app/session.ts` `beforeToolEffect`):
-// antara `permissions.check()` dan `tool.execute` kernel hanya menjalankan
-// langkah sinkron, TAPI aplikasi menambah await (intent jurnal + no-progress)
-// di dalam handler. Barrier adalah titik terakhir sesudah semua await itu dan
-// sebelum "allow" kembali ke kernel — efektif batas eksekusi, tanpa membungkus
-// tool (yang merusak identitas array tool live milik WorkMode).
-//
-// Lapis pertama diverifikasi SAAT user menyetujui supaya persetujuan basi
-// ditolak sebelum intent jurnal ditulis.
-//
-// Batas jujur: efek `bash` tak bisa difingerprint — yang terikat hanya
-// argumennya. Pada `always`/allowlist tak ada prompt ⇒ tak ada grant yang bisa
-// diverifikasi untuk call berikutnya; grant tetap dibuat untuk call berjalan.
+// [Area B · PROMPT 06] Pengikatan persetujuan ↔ operasi yang dieksekusi.
+// CAPTURE (sebelum prompt): hash argumen kanonis + isi target (anti-symlink) / state git.
+// GRANT (setelah setuju): simpan per operasi (callId/FIFO).
+// VERIFY (barrier efek sebelum & sesudah await): hitung ulang; beda ⇒ basi ⇒ TOLAK.
 
+import { spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
-import { readFileSync, statSync } from "node:fs"
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  readlinkSync,
+} from "node:fs"
 import { resolve } from "node:path"
+import { resolveTrustedExecutable } from "../lib/trusted-exec.ts"
 import { canonicalArgsHash } from "./no-progress.ts"
 
 /** Tool yang TARGET-nya file di workspace — satu-satunya yang bisa di-fingerprint. */
 const FILE_TARGET_TOOLS = new Set(["write_file", "edit", "apply_patch", "delete_file", "move_file"])
+const GIT_STATE_TOOLS = new Set(["git_commit", "git_push"])
 
 /**
  * Batas fingerprint KONTEN. File lebih besar dari ini di-fingerprint lewat
- * size+mtime (bukan hash isi): approval untuk file raksasa tetap bisa
- * dideteksi berubah, tanpa membaca ratusan MB dua kali per prompt.
+ * size+mtime+ctime+ino: approval untuk file raksasa tetap bisa dideteksi
+ * berubah, tanpa membaca ratusan MB dua kali per prompt.
  */
 export const MAX_CONTENT_FINGERPRINT_BYTES = 2 * 1024 * 1024
 
@@ -50,18 +38,28 @@ export const NOT_A_FILE = "not-a-file"
 export interface ApprovalTarget {
   /** Path absolut target. */
   readonly path: string
-  /** Hash isi (file kecil) / size+mtime (file besar) / MISSING_TARGET. */
+  /** Hash isi (file kecil) / size+mtime / symlink / MISSING_TARGET. */
   readonly fingerprint: string
+}
+
+/** Sidik jari state repo git untuk tool commit/push yang disetujui. */
+export interface ApprovalGitState {
+  readonly cwd: string
+  readonly digest: string
 }
 
 /** Bukti persetujuan untuk SATU operasi. */
 export interface ApprovalBinding {
+  /** ID tool call paralel agar konsumsi binding tak tertukar FIFO. */
+  readonly callId?: string
   /** Nama tool yang disetujui. */
   readonly tool: string
   /** SHA-256 argumen kanonis (identik dengan `hashArgs`/`canonicalArgsHash`). */
   readonly argsHash: string
   /** Target file yang jadi bukti (kosong untuk tool tanpa target file). */
   readonly targets: readonly ApprovalTarget[]
+  /** State git HEAD + working tree saat prompt untuk tool git tulis/push. */
+  readonly gitState?: ApprovalGitState
 }
 
 /**
@@ -83,17 +81,64 @@ export function approvalTargetPaths(tool: string, args: unknown, root: string): 
   return p ? [resolve(root, p)] : []
 }
 
-/** Sidik jari target saat ini (hash isi / size+mtime / marker). */
+/**
+ * Sidik jari target saat ini (anti-symlink: pakai lstat + O_NOFOLLOW + fstat
+ * agar swap symlink/file di antara check dan baca tidak diikuti diam-diam).
+ */
 export function fingerprintTarget(path: string): string {
+  let lst: ReturnType<typeof lstatSync>
   try {
-    const st = statSync(path)
-    if (!st.isFile()) return NOT_A_FILE
-    if (st.size > MAX_CONTENT_FINGERPRINT_BYTES)
-      return `size:${st.size}:mtime:${Math.trunc(st.mtimeMs)}`
-    return createHash("sha256").update(readFileSync(path)).digest("hex")
+    lst = lstatSync(path)
   } catch {
-    // Tidak ada / tak bisa dibaca = "missing" (bukan hash kosong).
     return MISSING_TARGET
+  }
+  if (lst.isSymbolicLink()) {
+    try {
+      return `symlink:${readlinkSync(path)}`
+    } catch {
+      return NOT_A_FILE
+    }
+  }
+  if (!lst.isFile()) return NOT_A_FILE
+  const flags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)
+  let fd: number | undefined
+  try {
+    fd = openSync(path, flags)
+    const fst = fstatSync(fd)
+    if (!fst.isFile()) return NOT_A_FILE
+    if (fst.size > MAX_CONTENT_FINGERPRINT_BYTES) {
+      return `size:${fst.size}:mtime:${fst.mtimeMs}:ctime:${fst.ctimeMs}:ino:${fst.ino}`
+    }
+    return createHash("sha256").update(readFileSync(fd)).digest("hex")
+  } catch {
+    return MISSING_TARGET
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd)
+      } catch {}
+    }
+  }
+}
+
+function captureGitDigest(cwd: string): string | null {
+  try {
+    const git = resolveTrustedExecutable("git")
+    const head = spawnSync(git, ["-c", "safe.directory=*", "rev-parse", "HEAD"], {
+      cwd,
+      encoding: "utf8",
+      timeout: 2_000,
+    })
+    const status = spawnSync(git, ["-c", "safe.directory=*", "status", "--porcelain"], {
+      cwd,
+      encoding: "utf8",
+      timeout: 2_000,
+    })
+    if (status.status !== 0) return null
+    const headOut = head.status === 0 ? head.stdout.trim() : "UNBORN"
+    return createHash("sha256").update(`${headOut}\0${status.stdout}`).digest("hex")
+  } catch {
+    return null
   }
 }
 
@@ -105,14 +150,28 @@ export function fingerprintTarget(path: string): string {
  * lama (user berpikir), dan kalau sidik jari diambil SETELAH prompt kita
  * memverifikasi state yang tidak pernah dilihat user.
  */
-export function captureApprovalBinding(tool: string, args: unknown, root: string): ApprovalBinding {
+export function captureApprovalBinding(
+  tool: string,
+  args: unknown,
+  root: string,
+  callId?: string,
+): ApprovalBinding {
+  let gitState: ApprovalGitState | undefined
+  if (GIT_STATE_TOOLS.has(tool)) {
+    const a = (args ?? {}) as Record<string, unknown>
+    const gitCwd = typeof a.cwd === "string" && a.cwd.trim() ? resolve(root, a.cwd) : root
+    const digest = captureGitDigest(gitCwd)
+    if (digest !== null) gitState = { cwd: gitCwd, digest }
+  }
   return {
+    ...(callId ? { callId } : {}),
     tool,
     argsHash: canonicalArgsHash(args),
     targets: approvalTargetPaths(tool, args, root).map((path) => ({
       path,
       fingerprint: fingerprintTarget(path),
     })),
+    ...(gitState ? { gitState } : {}),
   }
 }
 
@@ -134,7 +193,6 @@ export type BindingVerdict =
  */
 export function verifyApprovalBinding(binding: ApprovalBinding | undefined): BindingVerdict {
   if (!binding) return { kind: "no-binding" }
-  if (binding.targets.length === 0) return { kind: "ok" }
   for (const t of binding.targets) {
     const now = fingerprintTarget(t.path)
     if (now === t.fingerprint) continue
@@ -144,6 +202,15 @@ export function verifyApprovalBinding(binding: ApprovalBinding | undefined): Bin
         now === MISSING_TARGET
           ? `target ${t.path} tidak ada lagi (hilang sejak approval)`
           : `target ${t.path} berubah sejak approval — approval basi, minta ulang`,
+    }
+  }
+  if (binding.gitState) {
+    const nowDigest = captureGitDigest(binding.gitState.cwd)
+    if (nowDigest !== binding.gitState.digest) {
+      return {
+        kind: "stale",
+        reason: `state git di ${binding.gitState.cwd} berubah sejak approval — approval basi, minta ulang`,
+      }
     }
   }
   return { kind: "ok" }
@@ -157,7 +224,7 @@ export function verifyApprovalBinding(binding: ApprovalBinding | undefined): Bin
  */
 export class ApprovalBindingStore {
   readonly root: string
-  /** Antre per (tool, argsHash) — FIFO agar urut grant = urut eksekusi. */
+  /** Antre per (tool, argsHash) — cocokkan callId bila ada, FIFO jika tidak. */
   readonly #pending = new Map<string, ApprovalBinding[]>()
 
   constructor(root: string) {
@@ -176,14 +243,24 @@ export class ApprovalBindingStore {
     else this.#pending.set(k, [binding])
   }
 
-  /** Ambil satu binding untuk (tool, argsHash) — consume-once. */
-  take(tool: string, argsHash: string): ApprovalBinding | undefined {
+  /** Ambil satu binding untuk (tool, argsHash, callId?) — consume-once. */
+  take(tool: string, argsHash: string, callId?: string): ApprovalBinding | undefined {
     const k = ApprovalBindingStore.key(tool, argsHash)
     const arr = this.#pending.get(k)
     if (!arr || arr.length === 0) return undefined
-    const first = arr.shift()!
+    let idx = 0
+    if (callId) {
+      const exactIdx = arr.findIndex((b) => b.callId === callId)
+      if (exactIdx !== -1) idx = exactIdx
+      else {
+        const legacyIdx = arr.findIndex((b) => b.callId === undefined)
+        if (legacyIdx === -1) return undefined
+        idx = legacyIdx
+      }
+    }
+    const [picked] = arr.splice(idx, 1)
     if (arr.length === 0) this.#pending.delete(k)
-    return first
+    return picked
   }
 
   /** Jumlah binding yang masih tertunda (diagnostik/test). */

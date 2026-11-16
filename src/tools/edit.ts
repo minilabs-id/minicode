@@ -71,16 +71,29 @@ export function flexibleMatch(content: string, needle: string): MatchResult | nu
     }
 
   const cLfLines = cLf.split("\n")
-  // 3. Trailing whitespace tolerance
+  // 3. Trailing whitespace tolerance — hanya terima kecocokan yang menempel di
+  // batas baris utuh, karena lineRange() mengganti seluruh baris awal..akhir.
+  // Match substring di tengah baris bisa menelan token sebelum/sesudah match.
   const cTrimmed = stripTrailingWhitespace(cLf)
   const nTrimmed = stripTrailingWhitespace(nLf)
-  const trimStart = cTrimmed.indexOf(nTrimmed)
-  if (trimStart !== -1) {
-    const lineCountBefore = cTrimmed.slice(0, trimStart).split("\n").length - 1
-    const needleLineCount = nTrimmed.split("\n").length
-    if (lineCountBefore + needleLineCount <= cLfLines.length) {
-      const r = lineRange(cLfLines, lineCountBefore, needleLineCount, content)
-      return { ...r, mode: "trimmed" }
+  if (nTrimmed.length > 0) {
+    let searchFrom = 0
+    while (searchFrom <= cTrimmed.length - nTrimmed.length) {
+      const trimStart = cTrimmed.indexOf(nTrimmed, searchFrom)
+      if (trimStart === -1) break
+      const trimEnd = trimStart + nTrimmed.length
+      const atLineStart = trimStart === 0 || cTrimmed[trimStart - 1] === "\n"
+      const atLineEnd = trimEnd === cTrimmed.length || cTrimmed[trimEnd] === "\n"
+      if (atLineStart && atLineEnd) {
+        const lineCountBefore =
+          trimStart === 0 ? 0 : cTrimmed.slice(0, trimStart).split("\n").length - 1
+        const needleLineCount = nTrimmed.split("\n").length
+        if (lineCountBefore + needleLineCount <= cLfLines.length) {
+          const r = lineRange(cLfLines, lineCountBefore, needleLineCount, content)
+          return { ...r, mode: "trimmed" }
+        }
+      }
+      searchFrom = trimStart + 1
     }
   }
 

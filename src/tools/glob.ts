@@ -3,7 +3,7 @@ import { join, relative, resolve } from "node:path"
 import type { Tool } from "#minicore"
 import { LIMITS } from "../constants.ts"
 import { isIgnored, loadIgnoreMatchers } from "../lib/ignore.ts"
-import { isPathOutsideRoot, isSensitive } from "../policy/jail.ts"
+import { isCwdOutsideRoot, isPathOutsideRoot, isSensitive } from "../policy/jail.ts"
 import { contextUnrestricted, requireToolCwd } from "./context.ts"
 
 async function walk(
@@ -15,19 +15,21 @@ async function walk(
   signal: AbortSignal,
   ignoreMatchers: ((rel: string) => boolean)[],
   relaxed = false,
+  includeDotfiles = false,
 ) {
   if (signal.aborted) throw new Error("aborted")
   if (out.length >= limit) return
   const entries = await readdir(dir, { withFileTypes: true }).catch(() => [])
   for (const e of entries) {
     if (out.length >= limit) break
-    if (e.name.startsWith(".") || e.name === "node_modules" || e.name === ".git") continue
+    if (e.name === "node_modules" || e.name === ".git") continue
+    if (!includeDotfiles && e.name.startsWith(".")) continue
     const full = join(dir, e.name)
     const rel = relative(root, full).replace(/\\/g, "/")
     // Hormati .gitignore subset (bukan hard-coded saja).
     if (isIgnored(rel, ignoreMatchers)) continue
     if (e.isDirectory()) {
-      await walk(full, pattern, out, root, limit, signal, ignoreMatchers, relaxed)
+      await walk(full, pattern, out, root, limit, signal, ignoreMatchers, relaxed, includeDotfiles)
     } else if (pattern.test(rel) || pattern.test(e.name)) {
       const real = await realpath(full).catch(() => full)
       if (
@@ -73,24 +75,33 @@ export function globToRegExp(glob: string): RegExp {
 export const globTool: Tool = {
   name: "glob",
   description:
-    "Search files with a glob pattern (e.g. **/*.ts, src/**/*.js). Returns relative paths, capped at 100 by default. Skips .git, node_modules, and dotfiles.",
+    "Search files with a glob pattern (e.g. **/*.ts, src/**/*.js). Returns relative paths, capped at 100 by default. Skips .git, node_modules, and dotfiles by default (set includeDotfiles:true for .github/.eslintrc/etc.).",
   parameters: {
     type: "object",
     properties: {
       pattern: { type: "string", description: "glob pattern (e.g. **/*.ts)" },
       cwd: { type: "string", description: "root directory (default: workspace root)" },
       limit: { type: "number", description: "max results (default 100)" },
+      includeDotfiles: {
+        type: "boolean",
+        description: "include dotfiles/dotdirs like .github or .eslintrc (default false)",
+      },
     },
     required: ["pattern"],
     additionalProperties: false,
   },
-  async execute({ pattern, cwd, limit }, ctx) {
+  async execute({ pattern, cwd, limit, includeDotfiles }, ctx) {
     const sessionRoot = requireToolCwd(ctx)
     const relaxed = contextUnrestricted(ctx)
     const rawRoot = (cwd as string) ?? "."
     const root = resolve(sessionRoot, rawRoot)
-    if (!relaxed && isPathOutsideRoot(root, sessionRoot))
+    if (
+      !relaxed &&
+      (isPathOutsideRoot(root, sessionRoot) || isCwdOutsideRoot(rawRoot, sessionRoot))
+    )
       throw new Error(`cwd outside workspace: ${rawRoot}`)
+    const st = await stat(root).catch(() => null)
+    if (!st?.isDirectory()) return `cwd not found: ${rawRoot}`
     const rawLim = limit as number | undefined
     const lim = Number.isFinite(rawLim)
       ? Math.min(Math.max(Math.floor(rawLim!), 1), LIMITS.SEARCH_MAX_LIMIT)
@@ -98,9 +109,17 @@ export const globTool: Tool = {
     const re = globToRegExp(pattern as string)
     const ignoreMatchers = await loadIgnoreMatchers(root)
     const out: string[] = []
-    await walk(root, re, out, root, lim, ctx.signal, ignoreMatchers, relaxed)
-    const st = await stat(root).catch(() => null)
-    if (!st) return `cwd not found: ${rawRoot}`
+    await walk(
+      root,
+      re,
+      out,
+      root,
+      lim,
+      ctx.signal,
+      ignoreMatchers,
+      relaxed,
+      includeDotfiles === true,
+    )
     if (out.length === 0) return `no files match ${pattern} in ${rawRoot}`
     return out.slice(0, lim).join("\n")
   },

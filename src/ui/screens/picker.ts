@@ -9,12 +9,12 @@ import {
   toGraphemes,
 } from "../input/prompt-engine.ts"
 import { hintLine } from "../render/hint.ts"
+import { listRow, tailFilterWindow } from "../render/list.ts"
 import { cleanUntrusted, sanitizeAnsiLine } from "../render/sanitize.ts"
-import { c, stripAnsi } from "../render/theme.ts"
+import { c, glyphs, stripAnsi } from "../render/theme.ts"
 import { displayWidth, truncateToWidth } from "../render/width.ts"
 import { type AltScreen, openAltScreen } from "../runtime/screen.ts"
-import { beginInteractiveScreen } from "../runtime/statusline.ts"
-import { boxLeftPad, dialogBox, popupBoxWidth } from "./dialog.ts"
+import { boxLeftPad, canRenderModal, dialogBox, popupBoxWidth } from "./dialog.ts"
 import { createIdleTimer } from "./lifecycle.ts"
 
 export interface PickerItem {
@@ -29,21 +29,27 @@ export interface PickerOptions {
   onPick: (value: string) => void
   onCancel: () => void
   filterable?: boolean
+  /** Tampilkan judul di kotak (khusus wizard yang butuh indikator step). */
+  showTitle?: boolean
+  /** Screen induk (nested popup memakai handle yang sama — anti-tearing). */
+  screen?: AltScreen
 }
 
 const dim = (s: string): string => c.dim(s)
 
 // Tandai substring query di label agar user tahu KENAPA item cocok.
-// Operasi pada teks plain (sebelum truncate) — SGR bold nol kolom.
-function highlightMatch(label: string, query: string): string {
-  if (!query) return label
-  const idx = label.toLowerCase().indexOf(query.toLowerCase())
-  if (idx < 0) return label
-  return (
-    label.slice(0, idx) +
-    c.bold(label.slice(idx, idx + query.length)) +
-    label.slice(idx + query.length)
-  )
+// Pakai warna foreground saja (bukan bold \x1b[22m) agar atribut bold/dim dari
+// pemanggil tidak padam untuk sisa teks setelah bagian yang cocok.
+function highlightMatch(label: string, query: string, selected: boolean): string {
+  const paintBase = (s: string): string => (selected ? c.accent(c.bold(s)) : c.dim(s))
+  const paintHit = (s: string): string => (selected ? c.brightCyan(c.bold(s)) : c.dim(c.info(s)))
+  const idx = query ? label.toLowerCase().indexOf(query.toLowerCase()) : -1
+  const prefix = selected ? `  ${c.accent(glyphs.arrow)} ` : "    "
+  if (idx < 0) return `${prefix}${paintBase(label)}`
+  const before = label.slice(0, idx)
+  const hit = label.slice(idx, idx + query.length)
+  const after = label.slice(idx + query.length)
+  return `${prefix}${before ? paintBase(before) : ""}${paintHit(hit)}${after ? paintBase(after) : ""}`
 }
 
 export async function runPicker(opts: PickerOptions): Promise<void> {
@@ -69,8 +75,11 @@ export async function runPicker(opts: PickerOptions): Promise<void> {
     let scroll = 0
     let filter = ""
     const isFilterable = opts.filterable ?? false
-    // Lebar dibekukan saat mount (AUD-006).
-    const boxWidth = popupBoxWidth(process.stdout.columns || 80)
+    const showTitle = opts.showTitle === true
+    const ownScreen = !opts.screen
+    const screen: AltScreen = opts.screen ?? openAltScreen()
+    // Lebar dinamis terhadap terminal saat render/resize (tetap stabil saat filter).
+    const boxWidth = () => popupBoxWidth(screen.cols || 80)
 
     const filteredItems = (): PickerItem[] => {
       if (!isFilterable || !filter) return opts.items
@@ -88,27 +97,33 @@ export async function runPicker(opts: PickerOptions): Promise<void> {
     // dicetak — keduanya membungkus dan merusak tampilan.
     const visibleRows = () => {
       const rows = process.stdout.rows || 24
-      // Modal tanpa judul/footer dekoratif; sisakan border, baris pencarian
-      // (bila ada), DAN satu baris hint aksi di dasar.
-      if (useModal) return Math.max(1, Math.min(rows - (isFilterable ? 4 : 3), 12))
-      const chrome = isFilterable ? 4 : 3
+      // Modal: border + (judul bila diminta) + baris pencarian (bila ada) +
+      // satu baris hint aksi di dasar.
+      const titleRows = showTitle ? 1 : 0
+      if (useModal) {
+        const chrome = (isFilterable ? 4 : 3) + titleRows
+        return Math.max(1, Math.min(rows - chrome, 12))
+      }
+      const chrome = (isFilterable ? 4 : 3) + titleRows
       return Math.max(1, Math.min(rows - chrome, 12))
     }
     // Lebar konten = lebar kotak (dibekukan saat mount) dikurangi chrome dialog
     // (border+padding = 4 kolom) agar dialogBox tak memotong ulang label.
-    const width = () => Math.max(8, boxWidth - 4)
+    const width = () => Math.max(8, boxWidth() - 4)
 
-    // Isi untuk dialog popup (tanpa judul; hint aksi satu baris di dasar).
-    const bodyLines = (): string[] => {
+    // Isi untuk dialog popup (hint dipasung di `spec.footer` agar tak pernah
+    // ikut terpotong clipping dialogBox saat terminal menyusut).
+    const bodyLines = (): { lines: string[]; footer: string; filterShown: string } => {
       const items = filteredItems()
       const v = visibleRows()
-      // Hint minimalis: kunci terang, label redup (satu sumber `hintLine`).
-      // Selalu tampil agar navigasi tak perlu ditebak; tidak memakan tinggi
-      // daftar karena `visibleRows` sudah menyisihkan satu baris untuknya.
-      const hint = hintLine([
-        { key: "↑↓", label: t("hint.move") },
+      // Hint akurat per mode: Esc pertama mengosongkan filter (bukan menutup).
+      const footer = hintLine([
+        { key: glyphs.upDown, label: t("hint.move") },
         { key: "Enter", label: t("hint.select") },
-        { key: "Esc", label: t("hint.close") },
+        {
+          key: "Esc",
+          label: filter ? t("hint.clear") : t("hint.cancel"),
+        },
       ])
       if (sel >= items.length) sel = Math.max(0, items.length - 1)
       if (sel < 0) sel = 0
@@ -119,65 +134,68 @@ export async function runPicker(opts: PickerOptions): Promise<void> {
       const w = width()
       const cut = (s: string) => truncateToWidth(s, w)
       const lines: string[] = []
+      let filterShown = ""
       if (isFilterable) {
-        // Filter = input user tak terpercaya — sanitasi sebelum tampil.
-        const display = filter ? c.brightCyan(sanitizeAnsiLine(filter)) : ""
-        lines.push(cut(`${dim(">")} ${display}${c.accent("█")}`))
+        // Filter = input user tak terpercaya — sanitasi + windowing agar muat.
+        const budget = Math.max(4, w - 3 - displayWidth(glyphs.caret))
+        filterShown = filter ? tailFilterWindow(filter, budget) : ""
+        const display = filterShown ? c.brightCyan(filterShown) : ""
+        lines.push(cut(`${dim(">")} ${display}${c.accent(glyphs.caret)}`))
       }
       if (items.length === 0) {
         lines.push(cut(dim(`  ${t("pick.noMatch", { q: sanitizeAnsiLine(filter) })}`)))
-        lines.push(cut(hint))
-        return lines
+        return { lines, footer, filterShown }
       }
       for (let i = 0; i < rows.length; i++) {
         const it = rows[i]!
         const picked = i === sel - scroll
         // Label provider::model ringkas; teks tetap disanitasi sebelum truncate.
-        // Highlight query diterapkan sebelum truncate agar posisi kolom tepat.
         const safeProvider = sanitizeAnsiLine(it.provider)
         const rawLabel = safeProvider
           ? `${safeProvider}::${sanitizeAnsiLine(it.name)}`
           : sanitizeAnsiLine(it.name)
-        const label = highlightMatch(truncateToWidth(rawLabel, w - 4), filter)
-        if (picked) lines.push(`  ${c.accent("›")} ${c.accent(c.bold(label))}`)
-        else lines.push(`   ${dim(label)}`)
+        // Marker `…` agar pemotongan tidak diam-diam (kontrak OUTPUT_UX §10).
+        const truncated = truncateToWidth(rawLabel, Math.max(4, w - 4), glyphs.ellipsis)
+        lines.push(filter ? highlightMatch(truncated, filter, picked) : listRow(truncated, picked))
       }
-      lines.push(cut(hint))
-      return lines
+      return { lines, footer, filterShown }
     }
 
     const render = () => {
+      const { lines, footer, filterShown } = bodyLines()
+      const w = boxWidth()
       // Popup komposit: HANYA region kotak yang dilukis (tanpa clear) di atas
-      // konten pemilik layar (transkrip App / alt-buffer wizard). Pemilik
-      // Lebar beku (min=max): geometri tak bernapas saat filter berubah.
+      // konten pemilik layar (transkrip App / alt-buffer wizard).
       const box = dialogBox(
         {
-          title: "",
-          body: bodyLines(),
-          minWidth: boxWidth,
-          maxWidth: boxWidth,
+          title: showTitle ? opts.title : "",
+          body: lines,
+          footer,
+          minWidth: w,
+          maxWidth: w,
         },
         screen.cols,
         screen.rows,
       )
       screen.paintRegion(box.lines, box.topRow)
-      // Parkir kursor pada input filter meski kosong agar teks pertama langsung
-      // masuk ke pencarian; navigasi item tetap memakai tombol panah.
-      // Kolom = padding kiri + border + spasi + lebar label+filter + 1.
+      // Parkir kursor pada input filter; picker tanpa ketikan sembunyikan kursor.
       try {
         if (isFilterable) {
           const li = Math.min(box.lines.length - 1, box.bodyTop)
           const row = box.topRow + li
           const leftPad = boxLeftPad(stripAnsi(box.lines[li] ?? ""))
-          const col = leftPad + 2 + 2 + displayWidth(stripAnsi(filter)) + 1
-          process.stdout.write(`\x1b[${row};${Math.max(1, col)}H\x1b[?25h`)
+          const maxCol = leftPad + 2 + width() + 1
+          const col = Math.max(
+            1,
+            Math.min(
+              screen.cols || 80,
+              maxCol,
+              leftPad + 4 + displayWidth(stripAnsi(filterShown)) + 1,
+            ),
+          )
+          screen.moveCursor(row, col)
         } else {
-          const itemRow = Math.min(Math.max(0, sel - scroll), Math.max(0, visibleRows() - 1))
-          const bodyOffset = isFilterable ? 1 : 0
-          const li = Math.min(box.lines.length - 1, box.bodyTop + bodyOffset + itemRow)
-          const row = box.topRow + li
-          const leftPad = boxLeftPad(stripAnsi(box.lines[li] ?? ""))
-          process.stdout.write(`\x1b[${row};${Math.max(1, leftPad + 1)}H\x1b[?25h`)
+          screen.setCursorVisible(false)
         }
       } catch {}
     }
@@ -210,8 +228,8 @@ export async function runPicker(opts: PickerOptions): Promise<void> {
     // itu tak ada permukaan popup — tolak BERSUARA + batal (fail-closed).
     // Jalur overlay inline dihapus: satu-satunya tampilan interaktif adalah
     // TUI fullscreen (atau alt-buffer wizard first-run).
-    const screen: AltScreen = openAltScreen()
-    const useModal = screen.ok && (process.stdout.rows || 24) >= 10
+    const useModal =
+      screen.ok && canRenderModal(process.stdout.columns || 80, process.stdout.rows || 24)
     if (!useModal) {
       try {
         console.log(`⚠ ${t("gate.tuiPicker", { title: opts.title })}`)
@@ -219,21 +237,16 @@ export async function runPicker(opts: PickerOptions): Promise<void> {
       try {
         opts.onCancel()
       } catch {}
-      // Tutup layar sebelum batal: openAltScreen sudah menulis ENTER fisik
-      // (?1049h) — bail tanpa close membocorkan alt-screen (terminal tertinggal
-      // di buffer alternatif) dan hold painter-nya (I27) tidak pernah lepas.
-      try {
-        screen.close()
-      } catch {}
+      // Tutup layar sebelum batal hanya bila picker membukanya sendiri:
+      // screen milik pemanggil tetap menjadi tanggung jawab pemanggil.
+      if (ownScreen) {
+        try {
+          screen.close()
+        } catch {}
+      }
       resolve()
       return
     }
-    // Raw mode (sama seperti askLine/askSecret): picker juga menghalangi
-    // painter transient stderr melukis di baris yang sama. Jalur ini aktif
-    // bahkan saat runPicker dipanggil langsung (bukan lewat wizard), misalnya
-    // di bawah alt-screen App yang painter-nya sudah ditahan — hold nested dan
-    // release-nya idempoten.
-    const endScreen = beginInteractiveScreen()
     const cleanup = () => {
       if (done) return
       done = true
@@ -244,18 +257,16 @@ export async function runPicker(opts: PickerOptions): Promise<void> {
         process.stdin.setMaxListeners(prevMaxListeners)
       } catch {}
       idle.dispose()
-      // Lepas kepemilikan layar: painter boleh melukis lagi setelah ini
-      // (kursor sudah kembali ke anchor, overlay sudah dibersihkan).
-      endScreen()
       // Hapus region popup sendiri; pemilik layar (App.resume) repaint penuh,
-      // standalone (wizard) membuang alt-buffer utuh via close.
+      // standalone membuang alt-buffer + memulihkan kursor via close().
       try {
         screen.clearRegion()
       } catch {}
-      try {
-        screen.close()
-      } catch {}
-      process.stdout.write("\x1b[0m\x1b[?25h")
+      if (ownScreen) {
+        try {
+          screen.close()
+        } catch {}
+      }
       // TIDAK menulis \r\n di sini: \r\n membuat baris kosong permanen tiap
       // picker dipakai — terlihat sebagai gap saat picker nested di dalam
       // manager (mis. Enter → Thinking effort di /model).
@@ -274,10 +285,12 @@ export async function runPicker(opts: PickerOptions): Promise<void> {
         const items = filteredItems()
         switch (d.key.type) {
           case "up":
+          case "wheelup":
             sel = Math.max(0, sel - 1)
             render()
             break
           case "down":
+          case "wheeldown":
             // Daftar kosong: jangan biarkan sel=-1 (Enter setelah Down lalu
             // filter menghadirkan 1 item akan menunjuk items[-1]=undefined →
             // onCancel padahal ada hasil ter-highlight).
@@ -341,8 +354,8 @@ export async function runPicker(opts: PickerOptions): Promise<void> {
           }
           case "pageup":
           case "pagedown": {
-            // Scroll daftar panjang (… N more) per halaman — paritas App.
-            const vis = Math.max(1, Math.min((process.stdout.rows || 24) - 5, 12))
+            // Scroll daftar (… N more) per halaman memakai visibleRows() konsisten.
+            const vis = visibleRows()
             if (items.length > vis) {
               const page = Math.max(1, vis - 1)
               const maxScroll = Math.max(0, items.length - vis)
@@ -424,7 +437,7 @@ export async function runPicker(opts: PickerOptions): Promise<void> {
 
     onResize = () => render()
 
-    process.stdout.write("\x1b[?25l")
+    screen.setCursorVisible(false)
     try {
       process.stdin.setRawMode(true)
       process.stdin.resume()

@@ -11,7 +11,7 @@ export const deleteFileTool: Tool = {
   parameters: {
     type: "object",
     properties: {
-      path: { type: "string", description: "path file relatif" },
+      path: { type: "string", description: "relative file path" },
     },
     required: ["path"],
     additionalProperties: false,
@@ -25,7 +25,8 @@ export const deleteFileTool: Tool = {
     const { abs, real } = await resolveSafePath(p, root, relaxed)
     const st = await stat(real).catch(() => null)
     if (!st) throw new Error(`file not found: ${p}`)
-    if (st.isDirectory()) throw new Error(`path is directory, use bash rm -r: ${p}`)
+    if (st.isDirectory())
+      throw new Error(`path is a directory, cannot delete directories with delete_file: ${p}`)
     // soft-delete ke .minicode/.trash (gitignored, cap 100) — restore via move_file
     const dest = await trashFile(root, abs)
     return `deleted ${p} -> ${dest} (soft-delete, restore via move_file if needed)`

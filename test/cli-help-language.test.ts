@@ -42,12 +42,12 @@ const run = async (cmd: string) => {
 }
 
 describe("/help: kelengkapan & ukuran", () => {
-  // /help penuh (handleBuiltinCommand) dikelompokkan: header + 4 header grup +
-  // 17 perintah + baris pintasan = ~24 baris. Batas longgar supaya grup bisa
+  // /help penuh (handleBuiltinCommand) dikelompokkan: header + 5 header grup +
+  // 22 perintah + baris pintasan = ~30 baris. Batas longgar supaya grup bisa
   // bertambah tanpa merusak kontrak; yang ketat adalah kelengkapan di bawah.
-  test("full help terkelompok & tidak melebihi 26 baris", async () => {
+  test("full help terkelompok & tidak melebihi 34 baris", async () => {
     const lines = await run("/help")
-    expect(lines.length).toBeLessThanOrEqual(26)
+    expect(lines.length).toBeLessThanOrEqual(34)
   })
 
   test("contains only the supported command surface", async () => {
@@ -58,7 +58,11 @@ describe("/help: kelengkapan & ukuran", () => {
     // DI /HELP tapi TIDAK di dropdown completion (lihat DRIVER_HELP_COMMANDS).
     for (const cmd of ["/undo", "/redo", "/clear", "/copy", "/history"])
       expect(teks, cmd).toContain(cmd)
-    for (const cmd of ["/models", "/providers", "/cost", "/resume", "/theme", "/thinking"])
+    // Grup View WAJIB terisi di full help — dulu heading-nya kosong karena
+    // command driver tidak terdaftar di BUILTIN/DRIVER registry.
+    for (const cmd of ["/compact", "/thinking", "/expand", "/minimize", "/fold"])
+      expect(teks, cmd).toContain(cmd)
+    for (const cmd of ["/models", "/providers", "/cost", "/resume", "/theme"])
       expect(teks, cmd).not.toContain(cmd)
   })
 
@@ -148,6 +152,9 @@ describe("konsistensi bahasa keluaran", () => {
     expect(teks).toContain("(intent layer)")
     expect(teks).toContain("Permission:")
     expect(teks).toContain("(allow/deny authority)")
+    // Nilai memakai bentuk produk title case, sama seperti footer.
+    expect(teks).toContain("WorkMode: Discuss")
+    expect(teks).toContain("Permission: Auto")
   })
 
   test("/status Provider = efektif, lalu pin, terakhir hint wire", async () => {

@@ -125,10 +125,13 @@ function posTool(
     parameters: {
       type: "object",
       properties: {
-        file: { type: "string", description: "path file relatif cwd" },
-        symbol: { type: "string", description: "nama simbol di file (alternatif line/character)" },
+        file: { type: "string", description: "file path relative to cwd" },
+        symbol: {
+          type: "string",
+          description: "symbol name in the file (alternative to line/character)",
+        },
         line: { type: "number", description: "0-based line (optional)" },
-        character: { type: "number", description: "kolom 0-based (opsional)" },
+        character: { type: "number", description: "0-based column (optional)" },
       },
       required: ["file"],
       additionalProperties: false,
@@ -171,7 +174,7 @@ export const lspDiagnosticsTool: Tool = {
     "LSP diagnostics for one file (errors/warnings from the language server). Requires a registered LSP server for the file extension.",
   parameters: {
     type: "object",
-    properties: { file: { type: "string", description: "path file relatif cwd" } },
+    properties: { file: { type: "string", description: "file path relative to cwd" } },
     required: ["file"],
     additionalProperties: false,
   },
@@ -220,15 +223,15 @@ export const lspReferencesTool = posTool(
 export const lspHoverTool = posTool(
   "lsp_hover",
   "textDocument/hover",
-  "Hover info / tipe data simbol. Params: file + symbol.",
+  "Hover info and type signature for a symbol. Params: file + symbol (or line/character).",
 )
 
 export const lspSymbolsTool: Tool = {
   name: "lsp_symbols",
-  description: "Outline simbol dokumen (fungsi/kelas/variabel) via LSP.",
+  description: "Document symbol outline (functions/classes/variables) via LSP.",
   parameters: {
     type: "object",
-    properties: { file: { type: "string", description: "path file relatif cwd" } },
+    properties: { file: { type: "string", description: "file path relative to cwd" } },
     required: ["file"],
     additionalProperties: false,
   },
@@ -279,10 +282,10 @@ export const lspWorkspaceSymbolsTool: Tool = {
   },
   async execute({ query }, ctx) {
     ctx.signal.throwIfAborted()
+    const cwd = requireToolCwd(ctx)
     if (getConfiguredExts().length === 0)
       return "(no LSP servers configured — add via minicode config lsp add)"
     try {
-      const cwd = requireToolCwd(ctx)
       const symbols = await raceAbort(
         workspaceSymbols((query as string) ?? "", 5000, cwd),
         ctx.signal,

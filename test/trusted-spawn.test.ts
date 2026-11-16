@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { isAbsolute, join } from "node:path"
-import { resolveTrustedExecutable } from "../src/lib/trusted-exec.ts"
+import { resolveSpawnTarget, resolveTrustedExecutable } from "../src/lib/trusted-exec.ts"
 import { osSandboxAvailable, runInOsSandbox } from "../src/sandbox/os.ts"
 
 const gitAvailable =
@@ -63,4 +63,37 @@ test("F-23: nama absolut / ber-separator diteruskan apa adanya", () => {
 test("F-23: runInOsSandbox tanpa backend menolak (fail-closed seam)", async () => {
   if (osSandboxAvailable()) return
   await expect(runInOsSandbox("echo hi", tmpdir())).rejects.toThrow(/not available/)
+})
+
+test("resolveSpawnTarget: membungkus .cmd/.bat di Windows lewat cmd.exe, biner biasa langsung", () => {
+  const shim = resolveSpawnTarget("npx", ["-y", "@playwright/mcp", "--port", "8931"], {
+    platform: "win32",
+    resolveExec: (name) =>
+      name === "npx" ? "C:\\Program Files\\nodejs\\npx.CMD" : "C:\\Windows\\System32\\cmd.exe",
+  })
+  expect(shim.command).toBe("C:\\Windows\\System32\\cmd.exe")
+  expect(shim.windowsVerbatimArguments).toBe(true)
+  expect(shim.args.slice(0, 3)).toEqual(["/d", "/s", "/c"])
+  expect(shim.args[3]).toContain('"C:\\Program Files\\nodejs\\npx.CMD"')
+  expect(shim.args[3]).toContain("@playwright/mcp")
+
+  const direct = resolveSpawnTarget("bun", ["--version"], {
+    platform: "linux",
+    resolveExec: () => "/usr/local/bin/bun",
+  })
+  expect(direct).toEqual({ command: "/usr/local/bin/bun", args: ["--version"] })
+
+  // Metakarakter cmd.exe (%VAR%) di-escape dengan ^% dan newline ditolak fail-closed.
+  const pct = resolveSpawnTarget("npx", ["%USERNAME%", "a&b %PATH% c"], {
+    platform: "win32",
+    resolveExec: (name) =>
+      name === "npx" ? "C:\\Program Files\\nodejs\\npx.CMD" : "C:\\Windows\\System32\\cmd.exe",
+  })
+  expect(pct.args[3]).toContain("^%")
+  expect(() =>
+    resolveSpawnTarget("npx", ["line1\nwhoami"], {
+      platform: "win32",
+      resolveExec: () => "npx.CMD",
+    }),
+  ).toThrow(/unsafe control character/)
 })

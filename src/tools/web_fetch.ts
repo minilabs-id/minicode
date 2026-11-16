@@ -8,6 +8,43 @@ const MAX_REDIRECTS = LIMITS.WEB_FETCH_MAX_REDIRECTS
 // Hard-cap pembacaan body SEBELUM slicing — cegah OOM dari response raksasa.
 const BODY_HARD_CAP_BYTES = LIMITS.WEB_RESPONSE_BODY_HARD_CAP_BYTES
 
+/**
+ * Ekstrak teks terbaca dari HTML agar halaman web penuh <script>/<style>/<svg>
+ * tidak memboroskan budget 8000 karakter sebelum isi artikel sempat terbaca.
+ */
+export function extractReadableHtml(html: string): string {
+  const withoutBlocks = html
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<(script|style|noscript|svg)\b[^>]*>[\s\S]*?<\/\1>/gi, "\n")
+    .replace(
+      /<\/?(?:p|div|section|article|main|aside|header|footer|nav|h[1-6]|li|tr|td|th|blockquote|pre|br|hr)\b[^>]*>/gi,
+      "\n",
+    )
+    .replace(/<[^>]+>/g, " ")
+  const decoded = withoutBlocks
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&#(\d+);/g, (_m, n) => {
+      const cp = Number(n)
+      return Number.isSafeInteger(cp) && cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : ""
+    })
+    .replace(/&#x([0-9a-f]+);/gi, (_m, hex) => {
+      const cp = Number.parseInt(hex, 16)
+      return Number.isSafeInteger(cp) && cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : ""
+    })
+  const cleaned = decoded
+    .split("\n")
+    .map((line) => line.replace(/[ \t\r]+/g, " ").trim())
+    .filter((line) => line.length > 0)
+    .join("\n")
+    .trim()
+  return cleaned
+}
+
 // Diekspor untuk web_search (jalur DDG): satu kebijakan cap untuk semua fetch.
 export async function readBodyCapped(
   res: Response,
@@ -119,8 +156,9 @@ export const webFetchTool: Tool = {
         throw new Error(`blocked private host: ${current.hostname}`)
       }
       const headers = {
-        "user-agent": "minicode-webfetch/1.0",
+        "user-agent": "Mozilla/5.0 (compatible; minicode/1.0)",
         accept: "text/html,application/json,text/*;q=0.9,*/*;q=0.8",
+        "accept-language": "en-US,en;q=0.9",
       }
       let res: Response | undefined
       for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
@@ -159,7 +197,9 @@ export const webFetchTool: Tool = {
 
       const contentType = res.headers.get("content-type") ?? ""
       const body = await readBodyCapped(res, controller)
-      const scrubbed = scrubSecrets(body.text)
+      const isHtml = /\b(?:text\/html|application\/xhtml\+xml)\b/i.test(contentType)
+      const readable = isHtml ? extractReadableHtml(body.text) || body.text : body.text
+      const scrubbed = scrubSecrets(readable)
       const sliced = scrubbed.slice(0, limit)
       const outputTruncation =
         scrubbed.length > limit ? `\n\n… truncated ${scrubbed.length - limit} chars` : ""

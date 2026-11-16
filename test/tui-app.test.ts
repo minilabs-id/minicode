@@ -44,12 +44,24 @@ afterEach(() => {
   resetLocaleState()
 })
 
+/** Ambil nama command dari baris overlay (border/padding/marker dibuang). */
+function menuNames(text: string): string[] {
+  return text.split("\n").map((line) =>
+    line
+      .replace(/^\s*[│|]\s*/, "")
+      .replace(/\s*[│|]$/, "")
+      .replace(/^\s*›\s*/, "")
+      .trim(),
+  )
+}
+
 function setup(
   opts: {
     columns?: number
     rows?: number
     isTTY?: boolean
     getStatus?: () => TuiStatusSnapshot
+    cycleWorkMode?: () => void
   } = {},
 ) {
   const columns = opts.columns ?? 60
@@ -89,7 +101,7 @@ function setup(
     abort: () => {
       abortCalls++
     },
-    cycleWorkMode: () => {},
+    cycleWorkMode: opts.cycleWorkMode ?? (() => {}),
     togglePermissionMode: () => {},
     toggleCompact: () => {},
     toggleReasoning: () => {},
@@ -733,10 +745,12 @@ describe("TuiApp", () => {
     await tty!.ready()
     await tty!.waitForOutput((o) => o.includes("00.00.00"))
     await tty!.send("/")
-    expect(screenText().split("\n")).toContain("model")
-    expect(screenText().split("\n")).toContain("help")
-    expect(screenText().split("\n")).toContain("exit")
-    expect(screenText().split("\n")).not.toContain("/model")
+    // Overlay memakai border/padding; marker `›` di kolom tetap, nama tanpa slash.
+    const menu = menuNames(screenText())
+    expect(menu).toContain("model")
+    expect(menu).toContain("help")
+    expect(menu).toContain("exit")
+    expect(menu).not.toContain("/model")
     expect(screenText()).not.toContain("commands")
     // Esc butuh flush lone-ESC (~50ms) — settle pendek membuatnya hilang.
     await tty!.send(KEY.esc, 90)
@@ -1056,8 +1070,9 @@ describe("TuiApp", () => {
     expect(tty!.promptListeners()).toBe(1)
     // Ujung-ke-ujung: ketik "/" → dropdown rekomendasi muncul lagi.
     await tty!.send("/")
-    expect(screenText().split("\n")).toContain("model")
-    expect(screenText().split("\n")).not.toContain("/model")
+    const menu = menuNames(screenText())
+    expect(menu).toContain("model")
+    expect(menu).not.toContain("/model")
     await tty!.send(KEY.backspace)
     await tty!.send(KEY.ctrlD)
     await runP
@@ -1121,11 +1136,71 @@ describe("TuiApp", () => {
     app.resume()
     expect(tty!.promptListeners()).toBe(1)
     await tty!.send("/")
-    expect(screenText().split("\n")).toContain("model")
-    expect(screenText().split("\n")).not.toContain("/model")
+    const menu = menuNames(screenText())
+    expect(menu).toContain("model")
+    expect(menu).not.toContain("/model")
     await tty!.send(KEY.backspace)
     await tty!.send(KEY.ctrlD)
     await runP
     expect(tty!.all()).toContain("\x1b[?1049l")
+  })
+
+  test("zero-state welcome tampil di boot kosong dan hilang saat mulai mengetik", async () => {
+    const { app, screenText } = setup()
+    const runP = app.run()
+    await tty!.ready()
+    await tty!.waitForOutput((o) => o.includes("00.00.00"))
+    const initial = screenText()
+    expect(initial).toContain("test-model")
+    expect(initial).toContain("/kerja")
+    expect(initial).toContain("Shift+Tab permission")
+    await tty!.send("a")
+    expect(screenText()).not.toContain("Shift+Tab permission")
+    await tty!.send(KEY.backspace)
+    await tty!.send(KEY.ctrlD)
+    await runP
+  })
+
+  test("Tab melengkapi dropdown / saat terbuka dan memutar WorkMode saat tertutup", async () => {
+    let cycles = 0
+    const { app, calls, screenText } = setup({
+      cycleWorkMode: () => {
+        cycles++
+      },
+    })
+    const runP = app.run()
+    await tty!.ready()
+    await tty!.waitForOutput((o) => o.includes("00.00.00"))
+    await tty!.send("/")
+    await tty!.send(KEY.down) // model
+    await tty!.send(KEY.tab)
+    expect(cycles).toBe(0)
+    expect(calls).toEqual([])
+    expect(screenText()).toContain("minicode › /model")
+    // Dropdown sudah tertutup -> Tab berikutnya memutar WorkMode.
+    await tty!.send(KEY.tab)
+    expect(cycles).toBe(1)
+    await tty!.send(KEY.ctrlU)
+    await tty!.send(KEY.ctrlD)
+    await runP
+  })
+
+  test("klik pada baris composer kedua hasil wrap menempatkan kursor di baris yang diklik", async () => {
+    const { app } = setup({ columns: 30, rows: 14 })
+    const runP = app.run()
+    await tty!.ready()
+    await tty!.waitForOutput((o) => o.includes("minicode"))
+    // "minicode › " (11 col) + 25 'a' -> row 1 berisi 19 'a' (total 30), row 2 berisi 6 'a'.
+    await tty!.send("a".repeat(25))
+    const row2Index = tty!.screen().indexOf("aaaaaa")
+    expect(row2Index).toBeGreaterThan(0)
+    // Klik kolom ke-3 pada baris kedua composer (sesudah 2 karakter 'aa').
+    await tty!.send(`\x1b[<0;3;${row2Index + 1}M\x1b[<0;3;${row2Index + 1}m`)
+    await tty!.send("X")
+    const joined = tty!.screen().join("\n")
+    expect(joined).toContain("aaXaaaa")
+    await tty!.send(KEY.ctrlU)
+    await tty!.send(KEY.ctrlD)
+    await runP
   })
 })

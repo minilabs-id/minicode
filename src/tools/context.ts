@@ -16,3 +16,16 @@ export function requireToolCwd(context: unknown): string {
 export function contextUnrestricted(context: unknown): boolean {
   return (context as { permissionMode?: unknown } | null)?.permissionMode === "unrestricted"
 }
+
+/**
+ * Potong string tanpa membelah pasangan surrogate UTF-16: `slice` mentah pada
+ * batas tinggi menghasilkan kode pengganti `U+FFFD`. Dipakai bersama oleh tool
+ * yang memotong baris/teks panjang (`read_file`, `ask_user`).
+ */
+export function sliceSafeChars(s: string, max: number): string {
+  if (s.length <= max) return s
+  let end = max
+  const code = s.charCodeAt(end - 1)
+  if (code >= 0xd800 && code <= 0xdbff) end -= 1
+  return s.slice(0, Math.max(0, end))
+}

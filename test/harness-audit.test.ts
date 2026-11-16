@@ -13,6 +13,8 @@ describe("harness P1.4: audit suite", () => {
     expect(ids.has("guard/bypass-rate")).toBe(true)
     expect(ids.has("budget/fail-closed")).toBe(true)
     expect(ids.has("scope/explore-tanpa-bash")).toBe(true)
+    expect(ids.has("control/approval-decide-requires-sid")).toBe(true)
+    expect(ids.has("compaction/microcompact-small-window-active")).toBe(true)
     expect([...ids].some((i) => i.startsWith("fake/"))).toBe(true)
   })
 

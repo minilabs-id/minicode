@@ -86,8 +86,10 @@ export async function runModelManager(opts: {
     onSelect: async (id) => {
       // Reload providers agar router langsung kenal provider baru tanpa restart
       const { reloadProviders } = await import("../src/app/provider-layer.ts")
+      // Jangan tulis mentah ke stderr saat alt-screen masih aktif; tulis lewat
+      // log standar ditangkap captureConsole → mendarat bersih sesudah popup.
       await reloadProviders(opts.cwd, { allowLocal: opts.allowLocalConfig }).catch(() =>
-        process.stderr.write("[warn] provider reload failed — restart to apply changes\n"),
+        console.error(`[warn] ${t("prov.reloadFail")}`),
       )
       opts.setModelOverride?.(id)
     },

@@ -31,11 +31,16 @@ import { acquireTransientPaint, paintWrite, registerStatusLine } from "../runtim
 // Kursor disembunyikan selama garis melukis agar tak terbaca sebagai bagian
 // indikator (pola spinner.ts). Didaftarkan sekali per proses — aman
 // dipanggil berulang karena tiap attach me-restore di stopPaint/endTurn.
-process.on("exit", () => {
-  try {
-    if (process.stderr.isTTY) process.stderr.write("\x1b[?25h")
-  } catch {}
-})
+let exitHookInstalled = false
+function installExitHook(): void {
+  if (exitHookInstalled) return
+  exitHookInstalled = true
+  process.on("exit", () => {
+    try {
+      if (process.stderr.isTTY) process.stderr.write("\x1b[?25h")
+    } catch {}
+  })
+}
 
 export interface TurnStatusHandle {
   detach(): void
@@ -192,11 +197,15 @@ export function attachTurnStatus(
       })
       // Sembunyikan kursor selama melukis agar tak terbaca sebagai bagian
       // indikator ("✦···|"); dikembalikan di stopPaint.
+      installExitHook()
       try {
         paintWrite("\x1b[?25l")
       } catch {}
       paint()
       intervalId = setInterval(paint, intervalMs)
+      try {
+        ;(intervalId as unknown as { unref?: () => void }).unref?.()
+      } catch {}
     } else paint()
   }
   const resetTurn = () => {

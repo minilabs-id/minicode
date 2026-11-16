@@ -564,9 +564,19 @@ export function createLlmCompaction(opts: LlmCompactionOptions = {}): Compaction
       mOpts: { budgetTokens?: number },
     ): readonly import("#minicore/core/types.ts").Message[] {
       if (!microcompactEnabled) return store.messages
+      // Skala penghematan minimum mengikuti budget jendela: konstanta keras 20k
+      // tak pernah tercapai pada model <=64k, memaksa kompaksi LLM penuh lebih awal.
+      const budget = mOpts.budgetTokens
+      const minSavingTokens =
+        typeof budget === "number" && Number.isFinite(budget) && budget > 0
+          ? Math.min(
+              LIMITS.MICROCOMPACT_MIN_SAVING_TOKENS,
+              Math.max(1_000, Math.floor(budget * 0.12)),
+            )
+          : LIMITS.MICROCOMPACT_MIN_SAVING_TOKENS
       const result = applyMicrocompact(store.messages, {
         keepRecent: LIMITS.MICROCOMPACT_KEEP_RECENT,
-        minSavingTokens: LIMITS.MICROCOMPACT_MIN_SAVING_TOKENS,
+        minSavingTokens,
         minToolShare: LIMITS.MICROCOMPACT_MIN_TOOL_SHARE,
         estimateTokens: (text) => minicodeEstimator(text),
         budgetTokens: mOpts.budgetTokens,

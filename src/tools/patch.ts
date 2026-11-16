@@ -3,6 +3,7 @@ import type { Tool } from "#minicore"
 import { LIMITS } from "../constants.ts"
 import { atomicWriteText } from "../lib/atomic-write.ts"
 import { assertSafeWriteTarget, resolveSafePath, safeReadFile } from "../lib/safe-open.ts"
+import { appendLspDiagnostics } from "../policy/verifier.ts"
 import { contextUnrestricted, requireToolCwd } from "./context.ts"
 import { flexibleMatch } from "./edit.ts"
 
@@ -54,6 +55,7 @@ export const applyPatchTool: Tool = {
     const patchList = patches as { search: string; replace: string }[]
     if (patchList.length > 50) throw new Error(`too many patches: ${patchList.length} (max 50)`)
     const applied: string[] = []
+    let changedCount = 0
 
     for (let i = 0; i < patchList.length; i++) {
       ctx.signal.throwIfAborted()
@@ -76,13 +78,19 @@ export const applyPatchTool: Tool = {
         throw new Error(`result too large after patch[${i}]: ${content.length} chars (max 5M)`)
       const note = match.mode !== "exact" ? ` (${match.mode} match)` : ""
       applied.push(`[${i}] replaced ${oldS.length} → ${newS.length} chars${note}`)
+      changedCount++
     }
 
     if (content.length > LIMITS.WRITE_FILE_MAX_CHARS)
       throw new Error(`result too large: ${content.length} chars (max 5M)`)
 
+    if (changedCount === 0) {
+      return `no changes written to ${realAbs} (all patches skipped):\n${applied.join("\n")}`
+    }
+
     await atomicWriteText(realAbs, content)
 
-    return `applied ${applied.length} patch(es) to ${realAbs}:\n${applied.join("\n")}`
+    const base = `applied ${applied.length} patch(es) to ${realAbs}:\n${applied.join("\n")}`
+    return await appendLspDiagnostics(realAbs, content, base, undefined, root)
   },
 }

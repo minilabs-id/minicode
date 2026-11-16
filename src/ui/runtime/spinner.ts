@@ -2,10 +2,19 @@ import { sanitizeAnsiLine } from "../render/sanitize.ts"
 import { c, glyphs } from "../render/theme.ts"
 import { acquireTransientPaint, paintWrite } from "./statusline.ts"
 
-// Jaga agar kursor terminal selalu ter-restore meski proses dihentikan (SIGINT/dll).
-process.on("exit", () => {
-  if (process.stderr.isTTY) process.stderr.write("\x1b[?25h")
-})
+// Jaga agar kursor terminal selalu ter-restore meski proses dihentikan
+// (SIGINT/dll). Didaftarkan LAZY saat spinner benar-benar menyembunyikan
+// kursor (pola loading-bar.ts) agar import modul tak menulis ESC[?25h saat exit.
+let exitHookInstalled = false
+function installExitHook(): void {
+  if (exitHookInstalled) return
+  exitHookInstalled = true
+  process.on("exit", () => {
+    try {
+      if (process.stderr.isTTY) process.stderr.write("\x1b[?25h")
+    } catch {}
+  })
+}
 
 export interface Spinner {
   update: (message: string) => void
@@ -68,10 +77,14 @@ export function createSpinner(initialMessage: string = "", opts: SpinnerOptions 
       return
     }
     // Hide cursor during spin
+    installExitHook()
     paintWrite("\x1b[?25l")
     owned = acquireTransientPaint("spinner", tick)
     tick()
     intervalId = setInterval(tick, intervalMs)
+    try {
+      ;(intervalId as unknown as { unref?: () => void }).unref?.()
+    } catch {}
   }
 
   const stopTimer = () => {
@@ -111,13 +124,13 @@ export function createSpinner(initialMessage: string = "", opts: SpinnerOptions 
       if (stopped) return
       stopped = true
       stopTimer()
-      process.stderr.write(`${c.green(glyphs.check)} ${sanitizeAnsiLine(msg)}\n`)
+      process.stderr.write(`${c.green("ok")} ${sanitizeAnsiLine(msg)}\n`)
     },
     error(msg: string) {
       if (stopped) return
       stopped = true
       stopTimer()
-      process.stderr.write(`${c.red(glyphs.cross)} ${sanitizeAnsiLine(msg)}\n`)
+      process.stderr.write(`${c.red("failed")} ${sanitizeAnsiLine(msg)}\n`)
     },
   }
 }

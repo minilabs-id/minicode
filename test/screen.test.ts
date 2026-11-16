@@ -2,7 +2,12 @@
 // enter/exit SELALU berpasangan (termasuk nested + exception), null-screen
 // nol byte + fail-closed di non-TTY/dumb.
 import { afterEach, beforeEach, expect, test } from "bun:test"
-import { altScreenDepth, openAltScreen, resetAltScreenDepth } from "../src/ui/runtime/screen.ts"
+import {
+  altScreenDepth,
+  openAltScreen,
+  registerScreenBackdrop,
+  resetAltScreenDepth,
+} from "../src/ui/runtime/screen.ts"
 import { type FakeTty, installFakeTty } from "./helpers/tui-harness.ts"
 
 let tty: FakeTty | undefined
@@ -227,4 +232,55 @@ test("paintRegion([]) = no-op murni (bukan clear, bukan lacak)", () => {
   expect(tty.screen().join("\n")).toContain("tetap")
   const cups = tty.all().split("\x1b[4;1H").length - 1
   expect(cups).toBe(1)
+})
+
+test("backdrop redup dipulihkan saat region menyusut, tutup, dan resize tanpa 2J", () => {
+  tty = installFakeTty({ columns: 40, rows: 8 })
+  const outer = openAltScreen()
+  const makeBackdrop = (cols: number, rows: number) =>
+    Array.from({ length: rows }, (_, i) => `bg-${cols}-${i + 1}`)
+  outer.paint(makeBackdrop(40, 8))
+  const release = registerScreenBackdrop(makeBackdrop, 40, 8)
+  tty.clear()
+
+  const modal = openAltScreen()
+  modal.paintRegion(["kotak-1", "kotak-2", "kotak-3"], 3)
+  // Menyusut ke 1 baris: baris 3 & 5 harus memulihkan bg-40-3 dan bg-40-5 tanpa 2J.
+  modal.paintRegion(["kotak-mini"], 4)
+  let screenText = tty.screen().join("\n")
+  expect(screenText).toContain("bg-40-3")
+  expect(screenText).toContain("kotak-mini")
+  expect(screenText).toContain("bg-40-5")
+  expect(tty.all()).not.toContain("\x1b[2J")
+
+  // Resize saat modal hidup: baris backdrop di luar kotak ikut berubah ke cols=50.
+  tty.resize(50, 10)
+  modal.paintRegion(["kotak-baru"], 5)
+  screenText = tty.screen().join("\n")
+  expect(screenText).toContain("bg-50-1")
+  expect(screenText).toContain("bg-50-10")
+  expect(screenText).toContain("kotak-baru")
+  expect(tty.all()).not.toContain("\x1b[2J")
+
+  modal.clearRegion()
+  expect(tty.screen().join("\n")).toContain("bg-50-5")
+  modal.close()
+  release()
+  outer.close()
+})
+
+test("paint induk setelah paintRegion anak tak melewatkan baris identik (NO_COLOR parity)", () => {
+  tty = installFakeTty({ columns: 30, rows: 6 })
+  const outer = openAltScreen()
+  const sameLines = ["baris-1", "baris-2", "baris-3", "baris-4", "baris-5", "baris-6"]
+  outer.paint(sameLines)
+  const modal = openAltScreen()
+  modal.paintRegion(["TIMPA"], 3)
+  modal.clearRegion()
+  modal.close()
+  // Induk me-paint frame yang SAMA (situasi NO_COLOR=1 saat dim == terang):
+  // tanpa regionEpoch, diff melihat string identik dan meninggalkan baris-3 kosong.
+  outer.paint(sameLines)
+  expect(tty.screen().join("\n")).toContain("baris-3")
+  outer.close()
 })

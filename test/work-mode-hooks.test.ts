@@ -83,7 +83,9 @@ describe("eksekusi nyata — guard DISCUSS & PLAN mencegah runRunHooks", () => {
     writeMarkerHook(root, marker)
     process.env.MINICODE_HOOKS = "1"
     expect(shouldRunHooks("auto", "EXECUTE")).toBe(true)
-    await runRunHooks("pre", { phase: "pre", prompt: "halo", cwd: root })
+    await runRunHooks("pre", { phase: "pre", prompt: "halo", cwd: root }, undefined, {
+      allowLocal: true,
+    })
     expect(readFileSync(marker, "utf8")).toBe("jalan")
   })
 
@@ -93,7 +95,9 @@ describe("eksekusi nyata — guard DISCUSS & PLAN mencegah runRunHooks", () => {
     writeMarkerHook(root, marker)
     process.env.MINICODE_HOOKS = "1"
     if (shouldRunHooks("auto", "DISCUSS")) {
-      await runRunHooks("pre", { phase: "pre", prompt: "halo", cwd: root })
+      await runRunHooks("pre", { phase: "pre", prompt: "halo", cwd: root }, undefined, {
+        allowLocal: true,
+      })
     }
     let ran = false
     try {
@@ -110,7 +114,9 @@ describe("eksekusi nyata — guard DISCUSS & PLAN mencegah runRunHooks", () => {
     process.env.MINICODE_HOOKS = "1"
     for (const pm of ["auto", "allow-all"] as const) {
       if (shouldRunHooks(pm, "PLAN")) {
-        await runRunHooks("pre", { phase: "pre", prompt: "halo", cwd: root })
+        await runRunHooks("pre", { phase: "pre", prompt: "halo", cwd: root }, undefined, {
+          allowLocal: true,
+        })
       }
     }
     let ran = false

@@ -127,19 +127,19 @@ describe("model-manager: alur interactive", () => {
     await p
   }, 8000)
 
-  test("kursor diparkir di ujung baris search pada jendela tanpa judul", async () => {
-    // Pencarian tetap menerima ketikan tanpa menambah baris judul.
+  test("kursor diparkir di ujung baris search pada jendela berjudul", async () => {
+    // Jendela command seragam: border + judul + baris search.
     // Benar: tepat sebelum penanda █ tempat ketikan menempel.
     tty = installFakeTty({ columns: 100, rows: 24 })
     const p = runModelManager({ cwd: workspace, currentModel: "prov::m1" })
     await tty.ready()
     const frame = tty.screen()
     const top0 = frame.findIndex((l) => l.includes(boxTl()))
-    const srow = frame[top0 + 1] ?? ""
+    const srow = frame[top0 + 2] ?? ""
     const m = /^ */.exec(srow)
     const leftPad = m ? m[0].length : 0
     // Baris search body[0]: padding + border + spasi + "> " + filter(0) + 1.
-    const row = top0 + 1 + 1
+    const row = top0 + 2 + 1
     const col = Math.max(1, Math.min(100, leftPad + 2 + 2 + 0 + 1))
     expect(srow).toContain(">")
     expect(tty.all()).toContain(`\x1b[${row};${col}H`)
@@ -339,7 +339,7 @@ describe("model-manager: alur interactive", () => {
     await tty.waitForOutput((out) => out.includes("Delete model"), 2000)
     await tty.send("n")
     await tty.send(KEY.enter, 30)
-    await tty.waitForOutput((out) => out.includes("Canceled"), 5000)
+    await tty.waitForOutput((out) => out.includes("Cancelled"), 5000)
     expect((await readConfig(localConfigPath())).providers[0]?.models).toContain("m1")
     await tty.waitForListener(2000)
     await tty.send(KEY.esc, 30)
@@ -577,7 +577,7 @@ describe("model-manager view: Enter gagal tidak menutup manager", () => {
     })
     await tty.ready()
     await tty.send(KEY.enter, 60)
-    await tty.waitForOutput((out) => out.includes("timed out"), 5000)
+    await tty.waitForOutput((out) => /timeout|timed out|batas waktu/i.test(out), 5000)
     // UI pulih: listener kembali, Esc menutup normal.
     await tty.waitForListener(2000)
     await tty.send(KEY.esc, 80)
@@ -647,5 +647,31 @@ describe("model-manager view: Enter gagal tidak menutup manager", () => {
     await tty.send(KEY.enter, 60)
     await p
     expect(picked).not.toBe("m00")
+  }, 8000)
+
+  test("notice error multi-baris TIDAK memotong hint footer saat tinggi menyusut (spec.footer dipin)", async () => {
+    const { runModelManagerView } = await import("../src/ui/screens/model-manager.ts")
+    tty = installFakeTty({ columns: 110, rows: 16 })
+    const p = runModelManagerView({
+      initialRows: [{ id: "prov::o3-mini", active: true }],
+      getEfforts: () => ["default"],
+      onSelect: () => {
+        throw new Error(Array.from({ length: 4 }, (_, i) => `err-${i}-${"x".repeat(45)}`).join(" "))
+      },
+      loadRows: async () => [{ id: "prov::o3-mini", active: true }],
+      onDelete: async () => [{ id: "prov::o3-mini", active: true }],
+    })
+    await tty.ready()
+    await tty.send(KEY.enter, 60)
+    await tty.waitForScreen((f) => f.some((l) => l.includes("err-")))
+    // Perkecil tinggi layar di bawah total isi+notice: body ter-clip (`more`),
+    // tetapi footer hint (`Esc`) WAJIB tetap tampil utuh.
+    tty.resize(110, 7)
+    const frame = tty.screen().join("\n")
+    expect(frame).toContain("more")
+    expect(frame).toContain("Esc")
+    await tty.waitForListener(2000)
+    await tty.send(KEY.esc, 80)
+    await p
   }, 8000)
 })

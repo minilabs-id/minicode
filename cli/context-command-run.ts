@@ -18,6 +18,7 @@ import {
 import { t } from "../src/ui/i18n/locale.ts"
 import { sanitizeAnsiLine } from "../src/ui/render/sanitize.ts"
 import { renderTable } from "../src/ui/render/table.ts"
+import { outputWindowWidth } from "../src/ui/screens/output-window.ts"
 import type { CommandContext } from "./commands.ts"
 import {
   contextWindowRow,
@@ -59,13 +60,19 @@ async function rowsFor(ctx: CommandContext): Promise<string[]> {
   }
   if (!rows.length) return [t("ctx.empty")]
   const head = contextWindowTableHeader()
+  // Lebar kolom mengikuti inner width jendela output command agar tabel tidak
+  // ter-wrap/terpotong (terminal 80 → inner 68; terminal 60 → inner 52).
+  const inner = Math.max(20, outputWindowWidth(process.stdout.columns || 80) - 4)
+  const windowW = 9
+  const originW = Math.min(14, Math.max(10, Math.floor(inner * 0.18)))
+  const modelW = Math.max(18, Math.min(40, inner - windowW - originW - 10))
   return [
     "",
     renderTable(
       [
-        { header: head.model, key: "model", width: 40 },
-        { header: head.window, key: "window", width: 10, align: "right" },
-        { header: head.origin, key: "origin", width: 14 },
+        { header: head.model, key: "model", width: modelW },
+        { header: head.window, key: "window", width: windowW, align: "right" },
+        { header: head.origin, key: "origin", width: originW },
       ],
       rows,
     ),

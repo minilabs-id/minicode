@@ -38,6 +38,8 @@ export async function createRagLayer(opts: {
   cfg: MinicodeConfig
   prompt: string
   cwd?: string
+  /** Izinkan memuat `.minicode/skills` dari workspace (butuh `--allow-local-config`). */
+  allowLocalConfig?: boolean
   // false = retrieval RAG jangan menulis access_count (mode readonly/plan).
   trackAccess?: boolean
 }): Promise<{ systemExtra?: string; skills: Skill[]; memoryHits: number }> {
@@ -109,7 +111,7 @@ export async function createRagLayer(opts: {
     } catch {}
   }
 
-  const skills = await loadSkills(opts.cwd)
+  const skills = await loadSkills(opts.cwd, { allowLocal: opts.allowLocalConfig === true })
   try {
     const skillPrompt = skillsToSystemPrompt(skills)
     if (skillPrompt) systemExtra = (systemExtra ?? "") + skillPrompt

@@ -7,7 +7,8 @@ import {
   OAUTH_PROVIDERS,
 } from "../../src/providers/oauth.ts"
 import { saveProvider } from "../../src/providers/provision.ts"
-import { c, glyphs } from "../../src/ui/render/theme.ts"
+import { formatError } from "../../src/ui/render/errors.ts"
+import { c } from "../../src/ui/render/theme.ts"
 
 function usage(code = 0): never {
   console.log(`minicode auth — OAuth login (no API key)
@@ -66,7 +67,7 @@ export async function handleAuth(args: string[]): Promise<never> {
     }
     const ok = await removeAuth(id)
     console.log(
-      ok ? `${c.green(glyphs.check)} credentials "${id}" removed` : `(no credentials for "${id}")`,
+      ok ? `${c.green("ok")} credentials "${id}" removed` : `(no credentials for "${id}")`,
     )
     process.exit(0)
   }
@@ -127,7 +128,7 @@ export async function handleAuth(args: string[]): Promise<never> {
       },
     })
     process.stderr.write("\r                    \r")
-    console.log(`${c.green(glyphs.check)} login successful`)
+    console.log(`${c.green("ok")} login successful`)
 
     // Daftarkan provider bila belum ada. apiKey dibiarkan kosong: tokennya
     // hidup di auth.json dan diambil saat runtime oleh buildProviderListAsync.
@@ -155,13 +156,13 @@ export async function handleAuth(args: string[]): Promise<never> {
       { global: true },
     )
     console.log(
-      `${c.green(glyphs.check)} provider "${c.bold(spec.id)}" ready (${models.length} models)\n` +
+      `${c.green("ok")} provider "${c.bold(spec.id)}" ready (${models.length} models)\n` +
         `  ${c.dim(`try: minicode --provider ${spec.id} "hello"`)}\n`,
     )
     process.exit(0)
   } catch (e) {
     process.stderr.write("\r                    \r")
-    console.error(`${c.red(glyphs.cross)} ${(e as Error).message}`)
+    console.error(c.red(formatError(e)))
     process.exit(1)
   } finally {
     process.off("SIGINT", onSigint)

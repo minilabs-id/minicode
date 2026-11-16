@@ -1,6 +1,6 @@
 import type { MarkdownTable, PipeTableAlignment } from "./markdown-table.ts"
 import { cleanUntrusted, sanitizeAnsiLine, stripSgr } from "./sanitize.ts"
-import { c, getTerminalWidth, supportsUtf8 } from "./theme.ts"
+import { c, getTerminalWidth, glyphs, supportsUtf8 } from "./theme.ts"
 import {
   displayWidth,
   graphemeWidth,
@@ -40,7 +40,6 @@ export interface GridRenderOptions {
   fairMinimums?: boolean
 }
 
-const DEFAULT_ELLIPSIS = "…"
 const DEFAULT_MAX_CELL_WIDTH = 50
 const MIN_CONTENT_WIDTH = 3
 /** Margin kiri kotak tabel — biar tidak menempel ke tepi terminal. */
@@ -241,11 +240,11 @@ function renderBorderedGrid(
         h: "-",
         v: "|",
       }
-  // Guard terakhir: baris sel TIDAK BOLEH lebih lebar dari kolomnya. Dengan
-  // minimum wide-aware ini seharusnya tak terjadi, tapi invariant geometri
-  // (I1) terlalu mahal untuk ditebak — potong defensif tanpa ellipsis.
+  const cellEllipsis = options.ellipsis ?? glyphs.ellipsis
+  // Guard terakhir: baris sel TIDAK BOLEH lebih lebar dari kolomnya. Pakai
+  // ellipsis runtime (bukan kosong) supaya pemotongan token tetap terbaca.
   const fitCellLine = (line: string, colWidth: number): string =>
-    displayWidth(line) > colWidth ? truncateToWidth(line, colWidth, "") : line
+    displayWidth(line) > colWidth ? truncateToWidth(line, colWidth, cellEllipsis) : line
   // Sel yang seluruhnya satu token tanpa spasi (identifier, path, hash, URL
   // pendek) tidak punya titik patah yang wajar untuk dibaca user.
   const hasNoBreakOpportunity = (plain: string): boolean => !/[\s\-_/.]/.test(plain.trim())
@@ -301,7 +300,7 @@ export function renderGridTable(table: GridTable, options: GridRenderOptions = {
   const width = Number.isFinite(requestedTotalWidth)
     ? Math.max(1, Math.trunc(requestedTotalWidth))
     : getTerminalWidth()
-  const ellipsis = options.ellipsis ?? DEFAULT_ELLIPSIS
+  const ellipsis = options.ellipsis ?? glyphs.ellipsis
   const requestedMaxCellWidth = options.maxCellWidth ?? DEFAULT_MAX_CELL_WIDTH
   const maxCellWidth = Number.isFinite(requestedMaxCellWidth)
     ? Math.max(1, Math.trunc(requestedMaxCellWidth))
@@ -338,7 +337,7 @@ export function renderGridTable(table: GridTable, options: GridRenderOptions = {
 
   if (options.box) return renderBorderedGrid(table, widths, aligns, styleHeader, options)
 
-  const separator = c.dim(widths.map((value) => "─".repeat(value + 2)).join(" "))
+  const separator = c.dim(widths.map((value) => glyphs.hLine.repeat(value + 2)).join(" "))
 
   if (options.wrap) {
     // Wrap isi sel di batas kolom (BUKAN truncate) agar info panjang tidak hilang

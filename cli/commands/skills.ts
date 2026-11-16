@@ -4,8 +4,8 @@ import { c } from "../../src/ui/render/theme.ts"
 
 const SKILLS_HELP = `minicode skills — markdown skills in .minicode/skills/*.md
 
-  minicode skills list           list installed skills
-  minicode skills show <name>    show one skill
+  minicode skills list [--allow-local-config]           list installed skills
+  minicode skills show <name> [--allow-local-config]    show one skill
 
   In interactive mode, run a skill with /name [arguments].`
 
@@ -14,11 +14,19 @@ export async function handleSkills(
   getArg: (name: string) => string | undefined,
 ): Promise<never> {
   const cwdArg = getArg("--cwd")
+  const allowLocal =
+    args.includes("--allow-local-config") || process.env.MINICODE_ALLOW_LOCAL_CONFIG === "1"
   const sub = args[1]
   if (sub === "list" || sub === undefined) {
-    const all = await loadSkills(cwdArg)
+    const all = await loadSkills(cwdArg, { allowLocal })
     if (all.length === 0) {
-      console.log(c.dim("(no skills yet - add markdown files in .minicode/skills/*.md)"))
+      console.log(
+        c.dim(
+          allowLocal
+            ? "(no skills yet - add markdown files in .minicode/skills/*.md)"
+            : "(no global skills - pass --allow-local-config to include project .minicode/skills)",
+        ),
+      )
       process.exit(0)
     }
     const tableData = all.map((s) => ({
@@ -46,7 +54,7 @@ export async function handleSkills(
       console.error("usage: minicode skills show <name>")
       process.exit(2)
     }
-    const s = await findSkill(name, cwdArg)
+    const s = await findSkill(name, cwdArg, { allowLocal })
     if (!s) {
       console.error(`skill "${name}" not found - see: minicode skills list`)
       process.exit(1)

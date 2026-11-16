@@ -14,6 +14,19 @@ export function capTotal(out: string, cap: number): string {
   return out.length > cap ? `${out.slice(0, cap)}\n… [truncated: showing first ${cap} chars]` : out
 }
 
+export function decodeDdgUrl(raw: string): string {
+  const unescaped = raw.replace(/&amp;/g, "&").trim()
+  const full = unescaped.startsWith("//") ? `https:${unescaped}` : unescaped
+  try {
+    const u = new URL(full)
+    if (u.hostname.endsWith("duckduckgo.com") && u.pathname.startsWith("/l/")) {
+      const uddg = u.searchParams.get("uddg")
+      if (uddg) return uddg
+    }
+  } catch {}
+  return full
+}
+
 export const webSearchTool: Tool = {
   name: "web_search",
   description:
@@ -33,6 +46,7 @@ export const webSearchTool: Tool = {
     const q = String(query ?? "").trim()
     if (!q) throw new Error("query required")
     const n = Math.min(Math.max(Number(count) || 5, 1), 10)
+    const providerErrors: string[] = []
     // Prefer Tavily if key available (more reliable than scraping)
     const tavilyKey = process.env.TAVILY_API_KEY
     if (tavilyKey) {
@@ -69,12 +83,16 @@ export const webSearchTool: Tool = {
               ? content
               : fenceUntrustedToolOutput("web_search", content)
           }
+          providerErrors.push(`tavily HTTP ${res.status}`)
           await res.body?.cancel().catch(() => {})
         } finally {
           clearTimeout(t)
           ctx.signal.removeEventListener("abort", onAbort)
         }
-      } catch {}
+      } catch (e) {
+        ctx.signal.throwIfAborted()
+        providerErrors.push(`tavily: ${scrubSecrets((e as Error).message)}`)
+      }
     }
     // Fallback 2: Brave Search API (gratis, JSON bersih) bila BRAVE_API_KEY ada.
     const braveKey = process.env.BRAVE_API_KEY
@@ -116,13 +134,19 @@ export const webSearchTool: Tool = {
                 ? content
                 : fenceUntrustedToolOutput("web_search", content)
             }
+            providerErrors.push("brave: 0 results")
+          } else {
+            providerErrors.push(`brave HTTP ${res.status}`)
           }
           await res.body?.cancel().catch(() => {})
         } finally {
           clearTimeout(t)
           ctx.signal.removeEventListener("abort", onAbort)
         }
-      } catch {}
+      } catch (e) {
+        ctx.signal.throwIfAborted()
+        providerErrors.push(`brave: ${scrubSecrets((e as Error).message)}`)
+      }
     }
     // Fallback 3: DuckDuckGo html lite (gratis, tanpa key).
     const ddgUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`
@@ -137,8 +161,18 @@ export const webSearchTool: Tool = {
       try {
         const res = await fetch(ddgUrl, {
           signal: controller.signal,
-          headers: { "user-agent": "minicode-websearch/1.0" },
+          headers: {
+            "user-agent": "Mozilla/5.0 (compatible; minicode/1.0)",
+            "accept-language": "en-US,en;q=0.9",
+          },
         })
+        if (!res.ok) {
+          await res.body?.cancel().catch(() => {})
+          const errDetail = providerErrors.length ? ` (${providerErrors.join("; ")})` : ""
+          throw new Error(
+            `DuckDuckGo HTTP ${res.status} ${res.statusText || "blocked/rate-limited"}${errDetail}`,
+          )
+        }
         // Cap streaming seperti web_fetch (bug-hunt 2026-09-19: res.text()
         // tanpa batas = transient ~2x body di heap untuk halaman raksasa).
         const body = await readBodyCapped(res, controller)
@@ -150,12 +184,12 @@ export const webSearchTool: Tool = {
         const results: { url: string; title: string }[] = []
         for (const m of scrubbed.matchAll(resRe)) {
           if (results.length >= n) break
-          results.push({ url: m[1] ?? "", title: (m[2] ?? "").trim() })
+          results.push({ url: decodeDdgUrl(m[1] ?? ""), title: (m[2] ?? "").trim() })
         }
         if (results.length === 0) {
           for (const m of scrubbed.matchAll(altRe)) {
             if (results.length >= n) break
-            results.push({ url: m[1] ?? "", title: (m[2] ?? "").trim() })
+            results.push({ url: decodeDdgUrl(m[1] ?? ""), title: (m[2] ?? "").trim() })
           }
         }
         if (results.length) {
@@ -168,9 +202,10 @@ export const webSearchTool: Tool = {
             ? content
             : fenceUntrustedToolOutput("web_search", content)
         }
+        const errHint = providerErrors.length ? ` (prior errors: ${providerErrors.join("; ")})` : ""
         const fallback = body.truncated
-          ? `[web_search] DuckDuckGo response exceeded the byte cap before structured results could be parsed for "${q}" — coba set TAVILY_API_KEY atau BRAVE_API_KEY.`
-          : `[web_search] no structured results for "${q}" — coba set TAVILY_API_KEY atau BRAVE_API_KEY untuk hasil lebih baik.`
+          ? `[web_search] DuckDuckGo response exceeded the byte cap before structured results could be parsed for "${q}"${errHint} — try setting TAVILY_API_KEY or BRAVE_API_KEY.`
+          : `[web_search] no structured results for "${q}"${errHint} — try setting TAVILY_API_KEY or BRAVE_API_KEY for more reliable results.`
         return isAlreadyFenced(fallback)
           ? fallback
           : fenceUntrustedToolOutput("web_search", fallback)
@@ -179,7 +214,11 @@ export const webSearchTool: Tool = {
         ctx.signal.removeEventListener("abort", onAbort)
       }
     } catch (e) {
-      throw new Error(`web_search failed: ${(e as Error).message}`)
+      const errDetail =
+        providerErrors.length && !(e as Error).message.includes(providerErrors[0]!)
+          ? ` (${providerErrors.join("; ")})`
+          : ""
+      throw new Error(`web_search failed: ${(e as Error).message}${errDetail}`)
     }
   },
 }

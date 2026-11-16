@@ -107,4 +107,32 @@ describe("kompaksi di titik tetap: dilaporkan, bukan dilempar buta", () => {
       unsubscribe()
     }
   }, 15000)
+
+  test("kompaksi yang mengecilkan token isi pesan tanpa mengurangi messages.length tetap dihitung berprogres", async () => {
+    let calls = 0
+    const p = new FakeProvider([{ events: [text("ok"), finish("stop")] }])
+    const s = createSession({
+      provider: p,
+      permissions: allowAll,
+      contextWindowTokens: 500,
+      compaction: {
+        kind: "content-shrink",
+        compact: (store) => {
+          calls++
+          return store.messages.map((m) => (m.role === "user" ? { ...m, content: "ringkas" } : m))
+        },
+      },
+    })
+    const { events, unsubscribe } = collectEvents(s.events)
+    try {
+      const res = await s.run(`halo ${"k".repeat(3_000)}`, {})
+      expect(res.finalText).toBe("ok")
+      expect(calls).toBe(1)
+      const compacted = events.filter((e) => e.type === "context:compacted")
+      expect(compacted).toHaveLength(1)
+      expect(String((compacted[0] as { reason?: string }).reason)).not.toContain("no-op")
+    } finally {
+      unsubscribe()
+    }
+  })
 })

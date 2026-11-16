@@ -22,17 +22,20 @@ test("skills: load, find, render", async () => {
     `${tmp}/.minicode/skills/review.md`,
     `---\nname: review\ndescription: Review code\n---\nReview this code: {{args}}`,
   )
-  const all = await loadSkills(tmp)
+  const all = await loadSkills(tmp, { allowLocal: true })
   expect(all.length).toBe(1)
   expect(all[0]?.name).toBe("review")
-  const found = await findSkill("review", tmp)
+  const found = await findSkill("review", tmp, { allowLocal: true })
   expect(found?.description).toBe("Review code")
   const rendered = await renderSkill(found!, "src/a.ts")
   expect(rendered).toContain("src/a.ts")
   expect(skillsToSystemPrompt(all)).toContain("/review")
   // /name with args via findSkill
-  const foundSlash = await findSkill("/review", tmp)
+  const foundSlash = await findSkill("/review", tmp, { allowLocal: true })
   expect(foundSlash?.name).toBe("review")
+  // Tanpa allowLocal, skill repo lokal tak dimuat (fail-closed)
+  invalidateSkillCache()
+  expect((await loadSkills(tmp)).some((s) => s.path.includes(tmp))).toBe(false)
   await rm(tmp, { recursive: true, force: true })
 })
 
@@ -46,7 +49,7 @@ test("RESOURCE-02: skill read stops at the byte cap and marks truncation", async
   )
   try {
     invalidateSkillCache()
-    const skill = (await loadSkills(dir)).find((s) => s.name === "large")
+    const skill = (await loadSkills(dir, { allowLocal: true })).find((s) => s.name === "large")
     expect(skill).toBeDefined()
     expect(skill!.body).toContain("skill truncated after first 32000 bytes")
     expect(skill!.body).not.toContain(secretTail)
@@ -286,14 +289,14 @@ test("F4.1: disable-model-invocation keluar katalog tapi tetap via /nama", async
   )
   try {
     invalidateSkillCache()
-    const all = await loadSkills(dir)
+    const all = await loadSkills(dir, { allowLocal: true })
     const deploy = all.find((s) => s.name === "deploy")!
     expect(deploy.manualOnly).toBe(true)
     const prompt = skillsToSystemPrompt(all)
     expect(prompt).toContain("/lint")
     expect(prompt).not.toContain("/deploy")
     // ...tapi pemanggilan eksplisit tetap jalan (fail-open untuk user).
-    expect((await findSkill("/deploy", dir))?.name).toBe("deploy")
+    expect((await findSkill("/deploy", dir, { allowLocal: true }))?.name).toBe("deploy")
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
@@ -311,7 +314,7 @@ test("F4.1: aset scripts/references sibling terdaftar sebagai petunjuk baca", as
   await writeFile(`${dir}/.minicode/skills/review/references/guide.md`, "# panduan")
   try {
     invalidateSkillCache()
-    const all = await loadSkills(dir)
+    const all = await loadSkills(dir, { allowLocal: true })
     const review = all.find((s) => s.name === "review")!
     expect(review.assets.scripts).toEqual(["check.sh"])
     expect(review.assets.references).toEqual(["guide.md"])
@@ -325,7 +328,7 @@ test("F4.1: aset scripts/references sibling terdaftar sebagai petunjuk baca", as
     // Tanpa folder sibling = kosong, bukan error.
     await writeFile(`${dir}/.minicode/skills/plain.md`, `---\nname: plain\n---\nBiasa.`)
     invalidateSkillCache()
-    const plain = (await loadSkills(dir)).find((s) => s.name === "plain")!
+    const plain = (await loadSkills(dir, { allowLocal: true })).find((s) => s.name === "plain")!
     expect(plain.assets).toEqual({ scripts: [], references: [] })
   } finally {
     await rm(dir, { recursive: true, force: true })

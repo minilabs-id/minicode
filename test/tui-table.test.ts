@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { renderTable } from "../src/ui/render/table.ts"
-import { stripAnsi } from "../src/ui/render/theme.ts"
+import { glyphs, stripAnsi } from "../src/ui/render/theme.ts"
 import { displayWidth } from "../src/ui/render/width.ts"
 
 test("table: renders empty state", () => {
@@ -43,8 +43,8 @@ test("table: width adalah batas keras, kolom tetap berbaris", () => {
   // Semua baris (separator, header, body) punya lebar tampak identik.
   const widths = new Set(lines.map((l) => l.length))
   expect(widths.size).toBe(1)
-  // Nilai kepanjangan dipotong dengan elipsis, tidak melebarkan kolom.
-  expect(lines.some((l) => l.includes("\u2026"))).toBe(true)
+  // Nilai kepanjangan dipotong dengan elipsis runtime (UTF-8 … atau ASCII ...), tidak melebarkan kolom.
+  expect(lines.some((l) => l.includes(glyphs.ellipsis))).toBe(true)
   // Tiap sel " isi " (width+2), antar sel satu spasi: 16 + 1 + 22 = 39.
   for (const line of lines) expect(line.length).toBe(14 + 2 + 1 + 20 + 2)
 })
@@ -155,5 +155,28 @@ test("table: fallback vertikal tak melebihi lebar terminal (header ikut dihitung
     }
   } finally {
     Object.defineProperty(process.stdout, "columns", { value: prev, configurable: true })
+  }
+})
+
+test("table: MINICODE_ASCII=1 memaksa garis '-' dan ellipsis '...'", () => {
+  const prevAscii = process.env.MINICODE_ASCII
+  const prevWt = process.env.WT_SESSION
+  process.env.WT_SESSION = "1"
+  process.env.MINICODE_ASCII = "1"
+  try {
+    const columns = [
+      { header: "Name", key: "n", width: 8 },
+      { header: "Val", key: "v", width: 8 },
+    ]
+    const out = stripAnsi(renderTable(columns, [{ n: "superlongname", v: "ok" }]))
+    expect(out).toContain("...")
+    expect(out).toContain("-")
+    expect(out).not.toContain("…")
+    expect(out).not.toContain("─")
+  } finally {
+    if (prevAscii === undefined) delete process.env.MINICODE_ASCII
+    else process.env.MINICODE_ASCII = prevAscii
+    if (prevWt === undefined) delete process.env.WT_SESSION
+    else process.env.WT_SESSION = prevWt
   }
 })

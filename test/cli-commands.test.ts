@@ -132,9 +132,9 @@ test("commands: /sessions TTY membuka picker overlay, Esc batal bersih", async (
   } catch {}
 })
 
-test("commands: /status selalu mencetak readout (tanpa jendela)", async () => {
-  // Jendela info dihapus bersama REPL linier: /status mencetak langsung —
-  // di TUI ditangkap ke transkrip, di one-shot ke scrollback.
+test("commands: /status selalu mencetak readout (handler-level)", async () => {
+  // Handler tetap mencetak baris; TUI (v7.18) membungkus hasilnya menjadi
+  // jendela output command, sedangkan one-shot mencetak ke scrollback.
   tty = installFakeTty({ rows: 24 })
   const ctx = dummyCtx()
   const res = await handleBuiltinCommand("/status", ctx)

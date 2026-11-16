@@ -11,6 +11,8 @@ import type { EventBus } from "#minicore/core/index.ts"
 import { attachSimpleLogger } from "../src/ui/assistant/simple.ts"
 import { ESC, stripAnsi } from "../src/ui/render/theme.ts"
 import { displayWidth } from "../src/ui/render/width.ts"
+import { resetAltScreenDepth } from "../src/ui/runtime/screen.ts"
+import { popupBoxWidth } from "../src/ui/screens/dialog.ts"
 import { runPicker } from "../src/ui/screens/picker.ts"
 import { createFakeBus, type FakeTty, installFakeTty, KEY } from "./helpers/tui-harness.ts"
 
@@ -18,6 +20,7 @@ let tty: FakeTty | undefined
 afterEach(() => {
   tty?.restore()
   tty = undefined
+  resetAltScreenDepth()
 })
 
 const lines = (t: FakeTty) => stripAnsi(t.all()).split("\n")
@@ -152,6 +155,50 @@ describe("picker popup: region di atas layar, hormat ukuran terminal", () => {
     const out = tty.all()
     expect(out).not.toContain("m\x1b[2JAHAT")
     expect(stripAnsi(out)).toContain("mAHAT")
+    await tty.send(KEY.esc, 30)
+    await p
+  })
+
+  test("picker menyesuaikan lebar kotak dinamis saat resize (100 -> 50 kolom)", async () => {
+    tty = installFakeTty({ columns: 100, rows: 20 })
+    const p = runPicker({
+      title: "Dinamis",
+      items: [{ name: "item-a", provider: "p", value: "a" }],
+      onPick: () => {},
+      onCancel: () => {},
+    })
+    await tty.ready()
+    const boxWidthOf = () =>
+      displayWidth((tty!.screen().find((l) => l.includes("─") || l.includes("-")) ?? "").trim())
+    expect(boxWidthOf()).toBe(popupBoxWidth(100))
+    tty.resize(50, 16)
+    await tty.send("", 40)
+    expect(boxWidthOf()).toBe(popupBoxWidth(50))
+    await tty.send(KEY.esc, 30)
+    await p
+  })
+
+  test("picker nested di /model membersihkan kotak induk tanpa tearing bingkai", async () => {
+    const { runModelManagerView } = await import("../src/ui/screens/model-manager.ts")
+    tty = installFakeTty({ columns: 80, rows: 24 })
+    const p = runModelManagerView({
+      initialRows: [{ id: "prov::o3-mini", active: true }],
+      getEfforts: () => ["default", "high"],
+      onSelect: () => {},
+      loadRows: async () => [{ id: "prov::o3-mini", active: true }],
+      onDelete: async () => [{ id: "prov::o3-mini", active: true }],
+      onSetEffort: async () => [{ id: "prov::o3-mini", active: true }],
+    })
+    await tty.ready()
+    expect(tty.screen().join("\n")).toContain("prov::o3-mini")
+    await tty.send(KEY.tab, 40)
+    await tty.waitForScreen((f) => f.some((l) => l.includes("high")))
+    // Bingkai induk Models tidak tertinggal memotong di atas/bawah picker effort.
+    const nestedScreen = tty.screen().join("\n")
+    expect(nestedScreen).not.toContain("prov::o3-mini")
+    expect(nestedScreen).not.toContain("Models")
+    await tty.send(KEY.esc, 90)
+    await tty.waitForScreen((f) => f.some((l) => l.includes("prov::o3-mini")))
     await tty.send(KEY.esc, 30)
     await p
   })

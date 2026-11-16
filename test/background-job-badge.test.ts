@@ -78,14 +78,30 @@ describe("onBackgroundJobFinished (event selesai job)", () => {
 })
 
 describe("waitingGlyph (badge ◷ N)", () => {
+  const origWt = process.env.WT_SESSION
+  const origAscii = process.env.MINICODE_ASCII
+
+  afterEach(() => {
+    if (origWt == null) delete process.env.WT_SESSION
+    else process.env.WT_SESSION = origWt
+    if (origAscii == null) delete process.env.MINICODE_ASCII
+    else process.env.MINICODE_ASCII = origAscii
+  })
+
   test("nol job = string kosong; >=1 = glyph + angka menempel", () => {
+    delete process.env.MINICODE_ASCII
+    process.env.WT_SESSION = "1"
     expect(waitingGlyph(0)).toBe("")
     expect(waitingGlyph(-1)).toBe("")
     expect(waitingGlyph(1)).toBe("◷ 1")
     expect(waitingGlyph(3)).toBe("◷ 3")
+    process.env.MINICODE_ASCII = "1"
+    expect(waitingGlyph(1)).toBe("[BG:1]")
   })
 
   test("frame memutar glyph", () => {
+    delete process.env.MINICODE_ASCII
+    process.env.WT_SESSION = "1"
     const glyphs = new Set(["◷", "◶", "◵", "◴"])
     for (let f = 0; f < 12; f++) {
       const out = waitingGlyph(1, f)
