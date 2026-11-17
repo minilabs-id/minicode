@@ -1,5 +1,4 @@
-// Block logo minicode: mark wordmark pemilik, dikonversi dari SVG vektor
-// (CorelDRAW) menjadi grid 17 kolom × 9 baris sel.
+// Block logo minicode: mark wordmark pemilik pada grid 14 kolom × 9 baris sel.
 //
 // ASPEK PER-SEL — inti modul ini. Satu karakter terminal TIDAK persegi:
 // tingginya ±2× lebarnya. Menggambar satu sel = satu karakter penuh membuat
@@ -13,34 +12,32 @@
 //   atas█ bawah█ → '█' (kedua sel terisi)
 //   atas█ bawah∅ → '▀' (hanya sel atas)
 //   atas∅ bawah█ → '▄' (hanya sel bawah)
-// Hasil: 17 kolom × 5 baris karakter (baris terakhir hanya berisi sel ke-9,
-// karena tinggi logis 9 sel — ganjil). Rasio kotak fisik ≈ 17:9, sama dengan
-// SVG asli; tidak lagi "dipipihkan" seperti blok karakter penuh.
+// Hasil: 14 kolom × 5 baris karakter (baris terakhir hanya berisi sel ke-9,
+// karena tinggi logis 9 sel — ganjil). Rasio kotak fisik ≈ 14:9, sesuai grid
+// piksel pemilik; tidak lagi "dipipihkan" seperti blok karakter penuh.
 //
 // Fallback: terminal tanpa UTF-8 (MINICODE_ASCII/mini console legacy) memakai
 // '#' 9 baris — aspek setengah-sel tidak tersedia di sana, jadi bentuk penuh
 // dipertahankan agar pola tidak terpotong.
 //
-// Dimensi DIVERIFIKASI terhadap SVG (viewBox 8418.09 × 4456.66): 8418.09 =
-// 495.18 × 17 kolom, 4456.66 = 495.18 × 9 baris (sel seragam 495.18²).
-// Setiap '#' = satu sel terisi (75 polygon → 75 sel).
+// Grid referensi pemilik: 14 kolom × 9 baris sel seragam (62 sel '#' terisi).
 
 import { supportsUtf8 } from "./theme.ts"
 
 const ROWS = [
-  "           ##### ",
-  " ###      #######",
-  "#####    ##    ##",
-  "##  ### ##     ##",
-  "##     ##      ##",
-  "##    ##       ##",
-  "##   ## ###    ##",
-  "######    ### ###",
-  " ####      ##### ",
+  "          ### ",
+  " ###     ## ##",
+  "#####   ##  ##",
+  "##  ## ##   ##",
+  "##    ##    ##",
+  "##   ##     ##",
+  "##  ##  ##  ##",
+  "## ##    #####",
+  " ###      ### ",
 ] as const
 
 /** Dimensi logis logo (sel), untuk pemanggil yang butuh geometri/centering. */
-export const LOGO_WIDTH = 17
+export const LOGO_WIDTH = 14
 export const LOGO_HEIGHT = 9
 
 /** Glyph sel terisi (fallback ASCII). */

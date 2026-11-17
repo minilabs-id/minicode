@@ -565,11 +565,14 @@ describe("7. command /work-mode (TUI end-to-end)", () => {
     await tty.waitForOutput((o) => o.includes("00.00.00"))
     await tty.send("/work-mode DISCUSS")
     await tty.send(KEY.enter)
-    // Toast /work-mode menutupi baris footer selama 2000ms; beri margin 4000ms
-    // agar tidak balapan dengan batas waktu waitForOutput saat beban penuh.
-    await tty.waitForOutput(() => /Discuss/.test(stripAnsi(tty!.screen().join("\n"))), 4000)
+    // Perubahan /work-mode langsung merender label di footer in-place (tanpa toast penutup footer).
+    await tty.waitForOutput(() =>
+      /Discuss/.test(stripAnsi(tty!.screen()[tty!.screen().length - 1] ?? "")),
+    )
+    const discussFooter = stripAnsi(tty.screen()[tty.screen().length - 1] ?? "")
+    expect(discussFooter).toContain("Discuss")
+    expect(discussFooter).not.toContain("work mode:")
     expect(control.getWorkMode()).toBe("DISCUSS")
-    expect(stripAnsi(tty.screen().join("\n"))).toMatch(/Discuss/)
     // BUILD diterima → identitas internal EXECUTE, ditampil Build.
     await tty.send("/work-mode BUILD")
     await tty.send(KEY.enter)
@@ -651,7 +654,12 @@ describe("7. command /work-mode (TUI end-to-end)", () => {
     await tty.waitForOutput((o) => o.includes("00.00.00"))
     await tty.send("/mode ask")
     await tty.send(KEY.enter)
-    await tty.waitForOutput(() => /Ask/.test(stripAnsi(tty!.screen().join("\n"))))
+    await tty.waitForOutput(() =>
+      /Ask/.test(stripAnsi(tty!.screen()[tty!.screen().length - 1] ?? "")),
+    )
+    const askFooter = stripAnsi(tty.screen()[tty!.screen().length - 1] ?? "")
+    expect(askFooter).toContain("Ask")
+    expect(askFooter).not.toContain("mode:")
     expect(control.getWorkMode()).toBe("DISCUSS")
     await tty.send("/mode readonly")
     await tty.send(KEY.enter)

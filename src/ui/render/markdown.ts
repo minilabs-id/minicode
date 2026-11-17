@@ -3,37 +3,14 @@
 // Inline: **bold**, *italic*, `code`, ~~strike~~, [text](url) -> teks accent (no underline).
 
 import { highlightCode } from "./highlight.ts"
+import { effectiveAssistantMargin, formatAssistantSpacing, parseFence } from "./markdown-layout.ts"
 import { type MarkdownTable, parseMarkdownBlocks } from "./markdown-table.ts"
 import { sanitizeAnsi } from "./sanitize.ts"
 import { renderMarkdownTable } from "./table-grid.ts"
 import { c, glyphs } from "./theme.ts"
 
+export { type FenceMatch, parseFence } from "./markdown-layout.ts"
 export { renderMarkdownTable, renderMarkdownTableLines } from "./table-grid.ts"
-
-export interface FenceMatch {
-  char: string
-  len: number
-  lang: string
-}
-
-/**
- * Parse satu baris fence markdown (``` atau ~~~) → info pembuka, atau null.
- *
- * Diekspor agar simple.ts (printer linier streaming) memakai parser yang SAMA
- * dengan decorateMarkdown — sebelumnya ia men-toggle `inFence` naif per baris
- * (`line.includes("```")`) yang tidak kenal ~~~ dan tidak cek char/panjang,
- * sehingga fence berbahasa kehilangan highlight dan state desync.
- */
-export function parseFence(line: string): FenceMatch | null {
-  // Info-string setelah bahasa diperbolehkan (````ts title="demo"` atau
-  // ` ```js #tag `). Hanya token pertama (non-spasi) yang dibaca sebagai
-  // bahasa — sisanya adalah metadata yang tak memengaruhi highlight. Regex
-  // lama menolak seluruh baris ber-info-string sehingga kode jatuh ke dekorasi
-  // inline (`const x = *a*` jadi `const x = a`).
-  const m = /^\s*(```+|~~~+)([A-Za-z0-9_+.-]*)(?:\s+[^\r\n]*)?\s*$/.exec(line)
-  if (!m) return null
-  return { char: m[1]![0]!, len: m[1]!.length, lang: m[2] ?? "" }
-}
 
 // ── Inline markdown -> ANSI ──
 // Urutan replace lama: `code` diganti dulu jadi `c.brightCyan(...)`, lalu
@@ -72,7 +49,11 @@ export function decorateMarkdown(text: string): string {
   // Teks model tak-terpercaya: sanitasi SEKALI di hulu agar fence-content,
   // renderInline, dan highlight tak pernah melihat escape mentah. Urutan ini
   // juga melindungi placeholder `\u0000` (sanitize membuang null model).
-  const lines = sanitizeAnsi(text).split("\n")
+  const sanitized = sanitizeAnsi(text)
+  const spaced = sanitized.includes("\n") ? formatAssistantSpacing(sanitized) : sanitized
+  const lines = spaced.split("\n")
+  const cols = process.stdout.columns || 80
+  const margin = " ".repeat(effectiveAssistantMargin(cols))
   const tableStarts = new Map<number, MarkdownTable>()
   for (const block of parseMarkdownBlocks(lines.join("\n"))) {
     if (block.type === "table") tableStarts.set(block.startLine, block.table)
@@ -87,9 +68,7 @@ export function decorateMarkdown(text: string): string {
     const table = tableStarts.get(lineIndex)
     if (table) {
       if (process.stdout.isTTY)
-        out.push(
-          ...renderMarkdownTable(table, process.stdout.columns || 80, renderInline).split("\n"),
-        )
+        out.push(...renderMarkdownTable(table, cols, renderInline).split("\n"))
       else
         for (let tableLine = lineIndex; tableLine <= table.endLine; tableLine++)
           out.push(lines[tableLine]!)
@@ -105,7 +84,7 @@ export function decorateMarkdown(text: string): string {
         fenceChar = fence.char
         fenceLen = fence.len
         fenceLang = fence.lang
-        if (fenceLang) out.push(c.dim(`  ${glyphs.dot} ${fenceLang}`))
+        if (fenceLang) out.push(`${margin}${c.dim(`${glyphs.dot} ${fenceLang}`)}`)
       } else {
         if (fence.char === fenceChar && fence.len >= fenceLen) {
           inFence = false
@@ -115,7 +94,7 @@ export function decorateMarkdown(text: string): string {
         } else {
           // fence di dalam fence dengan char/len berbeda → anggap konten
           const bar = fenceLang ? c.dim(glyphs.vLine) : glyphs.vLine
-          out.push(`  ${bar} ${fenceLang ? highlightCode(line, fenceLang) : line}`)
+          out.push(`${margin}${bar} ${fenceLang ? highlightCode(line, fenceLang) : line}`)
           continue
         }
       }
@@ -129,32 +108,45 @@ export function decorateMarkdown(text: string): string {
     // `npm run build -- --flag=*value*` kehilangan bintangnya karena dianggap
     // italic. Fence tanpa bahasa justru bentuk paling umum untuk perintah shell.
     if (inFence) {
+      if (line.trim() === "") {
+        out.push("")
+        continue
+      }
       const bar = fenceLang ? c.dim(glyphs.vLine) : glyphs.vLine
-      out.push(`  ${bar} ${fenceLang ? highlightCode(line, fenceLang) : line}`)
+      out.push(`${margin}${bar} ${fenceLang ? highlightCode(line, fenceLang) : line}`)
       continue
     }
 
-    // Headings (# ## ###) -> bold with vertical spacing
-    if (/^#{1,3}\s/.test(line)) {
+    if (line.trim() === "") {
+      out.push("")
+      continue
+    }
+
+    // Headings (# .. ######) -> bold dengan margin area teks.
+    if (/^#{1,6}\s/.test(line)) {
       if (out.length > 0 && out[out.length - 1] !== "") out.push("")
-      // Margin kiri 1 kolom — jangan menempel ke tepi terminal.
-      out.push(` ${c.bold(line)}`)
+      out.push(`${margin}${c.bold(line)}`)
       continue
     }
 
-    // Daftar (bullet `-`/`*`/`+` atau bernomor `1.`/`2)`) — indentasi BERSARANG
-    // mengikuti lekukan sumber, bukan diratakan jadi satu level. Marker
-    // dipertahankan; isi didekorasi inline (bold/italic/code tetap jalan).
+    // Daftar (bullet `-`/`*`/`+` atau bernomor `1.`/`2)`) — pertahankan indentasi
+    // sumber bersarang relatif di atas margin terluar agar sub-item tetap sejajar
+    // tepat di bawah teks induknya saat di-wrap.
     const listItem = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/.exec(line)
     if (listItem) {
-      const depth = Math.min(8, Math.floor((listItem[1]!.length + 1) / 2))
-      const indent = "  ".repeat(depth + 1)
-      out.push(`${indent}${listItem[2]} ${renderInline(listItem[3] ?? "")}`)
+      const sourceIndent = listItem[1]!.slice(0, 16)
+      out.push(`${margin}${sourceIndent}${listItem[2]} ${renderInline(listItem[3] ?? "")}`)
       continue
     }
 
-    // Margin kiri 1 kolom untuk paragraf (tidak menempel ke tepi terminal).
-    out.push(` ${renderInline(line)}`)
+    // Kutipan (`> `) atau paragraf biasa / berindentasi multi-tingkat.
+    const blockquote = /^(\s*(?:>\s*)+)(.*)$/.exec(line)
+    if (blockquote) {
+      out.push(`${margin}${blockquote[1]}${renderInline(blockquote[2] ?? "")}`)
+      continue
+    }
+
+    out.push(`${margin}${renderInline(line)}`)
   }
   return out.join("\n")
 }

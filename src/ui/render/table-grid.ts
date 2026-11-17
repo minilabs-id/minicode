@@ -1,3 +1,4 @@
+import { effectiveAssistantMargin } from "./markdown-layout.ts"
 import type { MarkdownTable, PipeTableAlignment } from "./markdown-table.ts"
 import { cleanUntrusted, sanitizeAnsiLine, stripSgr } from "./sanitize.ts"
 import { c, getTerminalWidth, glyphs, supportsUtf8 } from "./theme.ts"
@@ -42,8 +43,6 @@ export interface GridRenderOptions {
 
 const DEFAULT_MAX_CELL_WIDTH = 50
 const MIN_CONTENT_WIDTH = 3
-/** Margin kiri kotak tabel — biar tidak menempel ke tepi terminal. */
-const BOX_MARGIN = 1
 
 function cleanCell(value: unknown): string {
   return cleanUntrusted(
@@ -212,6 +211,7 @@ function renderBorderedGrid(
   aligns: readonly PipeTableAlignment[],
   styleHeader: boolean,
   options: GridRenderOptions,
+  margin: number,
 ): string {
   const g = supportsUtf8()
     ? {
@@ -290,7 +290,8 @@ function renderBorderedGrid(
     for (let li = 0; li < height; li++) out.push(rowLine(cols, li))
   }
   out.push(horiz(g.bl, g.bm, g.br))
-  return out.map((line) => " ".repeat(BOX_MARGIN) + line).join("\n")
+  const pad = margin > 0 ? " ".repeat(margin) : ""
+  return pad ? out.map((line) => pad + line).join("\n") : out.join("\n")
 }
 
 export function renderGridTable(table: GridTable, options: GridRenderOptions = {}): string {
@@ -311,9 +312,10 @@ export function renderGridTable(table: GridTable, options: GridRenderOptions = {
     : MIN_CONTENT_WIDTH
   // Overhead batas: format kotak `│ c │` memakan 2 kolom lebih banyak per baris
   // (baris batas `│` + padding) daripada format separator lama ` c ` + spasi.
-  // `BOX_MARGIN` = margin kiri agar kotak tidak nempel ke tepi terminal.
+  // Margin kiri kotak tabel diselaraskan dengan margin area teks asisten.
+  const boxMargin = options.box ? effectiveAssistantMargin(width) : 0
   const overhead = options.box
-    ? table.headers.length * 3 + 1 + BOX_MARGIN
+    ? table.headers.length * 3 + 1 + boxMargin
     : table.headers.length * 3 - 1
   const budget = width - overhead
   const natural = naturalWidths(table, maxCellWidth)
@@ -330,12 +332,19 @@ export function renderGridTable(table: GridTable, options: GridRenderOptions = {
     budget < minimums.reduce((sum, value) => sum + value, 0)
       ? null
       : fitWidths(natural, budget, minimums)
-  if (!widths) return renderVertical(table, width, ellipsis).join("\n")
+  if (!widths) {
+    const vMargin = options.box ? effectiveAssistantMargin(width) : 0
+    const lines = renderVertical(table, Math.max(1, width - vMargin), ellipsis)
+      .join("\n")
+      .split("\n")
+    const pad = vMargin > 0 ? " ".repeat(vMargin) : ""
+    return (pad ? lines.map((l) => (l ? pad + l : l)) : lines).join("\n")
+  }
 
   const aligns = table.aligns ?? table.headers.map(() => "left" as const)
   const styleHeader = options.styleHeader !== false
 
-  if (options.box) return renderBorderedGrid(table, widths, aligns, styleHeader, options)
+  if (options.box) return renderBorderedGrid(table, widths, aligns, styleHeader, options, boxMargin)
 
   const separator = c.dim(widths.map((value) => glyphs.hLine.repeat(value + 2)).join(" "))
 

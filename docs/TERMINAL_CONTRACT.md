@@ -18,9 +18,10 @@ Perubahan v7.19 (remediasi audit & ergonomi UX):
    meski pesan notice membungkus; form men-stack label panjang di atas baris
    input agar lebar field minimal tetap terjaga, dan menyaring byte kontrol C1
    (`\u0080–\u009f`); wizard menjaga pesan error sampai user menekan Enter/Esc.
-4. **Zero-state, ritme transkrip, seleksi akurat, & ASCII konsisten.**
-   Saat transkrip kosong dan idle, header sambutan ringkas tampil di area
-   kosong tanpa menambah baris frame atau mengubah baris spacer. Transkrip
+4. **Zero-state clean (logo kecil pojok kiri atas), ritme transkrip, seleksi akurat, & ASCII konsisten.**
+   Saat transkrip kosong dan idle, hanya logo kecil minicode (`14×9` half-block)
+   tampil di pojok kiri atas tanpa teks identitas/hint di atas prompt & footer,
+   dan tanpa menambah baris frame atau mengubah baris spacer. Transkrip
    menambahkan jeda antar-turn sebelum `pushUser`, header bahasa redup pada
    pembuka code fence berbahasa, serta pemetaan `displayStart` dan teks inline
    untuk akurasi `pointAt`/`columnAtOffset`. `Shift+Enter`/`Alt+Enter` modern
@@ -307,7 +308,7 @@ proteksi").
 | Stream | Isi | Catatan |
 |---|---|---|
 | stdout | Permanent output pada non-interaktif; frame TUI saat sesi interaktif | `App` satu-satunya pemilik frame interaktif; machine output tetap murni |
-| stderr | Human-facing progress/diagnostic: ledger tool (`› …` hijau/merah), reasoning (default terlihat; `MINICODE_SHOW_THINKING=0` minimized), warning, error | Boleh transient rendering bila stderr TTY |
+| stderr | Human-facing progress/diagnostic: ledger tool (`› …` hijau/merah), reasoning (default tersembunyi/minimized; `MINICODE_SHOW_THINKING=1` atau `/thinking` / `Ctrl+T` / `--verbose` menampilkan), warning, error | Boleh transient rendering bila stderr TTY |
 | keduanya | Warna hanya bila stream TTY (`stdout.isTTY`); `NO_COLOR` menang; TERM/COLORTERM env TIDAK menyalakan warna pada pipe/redirect | Lihat `src/ui/render/theme.ts` `colorLevel()` |
 
 Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
@@ -588,16 +589,19 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
      di footer form ("batal dalam 10 dtk" — bukan countdown hidup), 10 dtk
      berikutnya = auto-batal (cancel), total semantik 90 dtk lama; SATU
      ketikan apa pun me-reset kedua timer.
-22. Thinking terlihat SECARA DEFAULT (expanded): composer memakai dots clock;
-     dengan panel aktivitas ON (default TUI; `/fold`), transkrip menampilkan
-     AREA thinking = blok live maks 10 baris visual terakhir (header
-     `+ thinking`, penanda `… N baris lagi`), lalu saat fase berakhir diringkas
-     SATU baris (`+ thinking · N baris`) dengan detail penuh tetap tersedia di
-     `/expand`; dengan panel OFF, perilaku legacy = alir thinking ber-warna terbaca (`c.thinking`,
+22. Thinking tersembunyi SECARA DEFAULT (hidden/minimized) agar transkrip
+     tetap bersih: composer tetap memakai dots clock saat thinking dan detail
+     penuh disimpan ke buffer `/expand`. User dapat membukanya kapan saja lewat
+     `/thinking`, `Ctrl+T`, `--verbose`, atau `MINICODE_SHOW_THINKING=1`: saat
+     dibuka dengan panel aktivitas ON (default TUI; `/fold`), transkrip
+     menampilkan AREA thinking = blok live maks 10 baris visual terakhir
+     (header `+ thinking`, penanda `… N baris lagi`), lalu saat fase berakhir
+     diringkas SATU baris (`+ thinking · N baris`); dengan panel OFF,
+     perilaku legacy = alir thinking ber-warna terbaca (`c.thinking`,
      abu-kebiruan) dan ber-indentasi 2 kolom, dipisah SATU baris kosong dari
-     jawaban/ledger — bukan `dim`; minimized (`/thinking`, `MINICODE_SHOW_THINKING=0`)
-     = bersih tanpa marker (`… thinking`); isi tetap tersedia di `/expand`;
-     fase berakhir = commit (tak ada thinking yatim).
+     jawaban/ledger — bukan `dim`; saat tetap tersembunyi di TUI, transkrip
+     bersih tanpa marker (`… thinking`); fase berakhir = commit (tak ada
+     thinking yatim).
 23. Approval & ask_user tercatat di transkrip (pertanyaan + keputusan) dan
      terlihat sebelum menjawab; non-TTY = deny/null fail-closed; stdout
      di-pipe tanpa sink TUI = deny/null (prompt tak terlihat + mencemari
@@ -761,7 +765,7 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
 
 prompt `minicode ›` tampil saat boot/idle dan hilang saat busy (dropdown `/`
 berbingkai di atasnya; `Tab` melengkapi command terpilih saat terbuka, dan
-memutar WorkMode saat tertutup) · zero-state welcome ringkas saat transkrip kosong/idle ·
+memutar WorkMode saat tertutup) · logo kecil minicode di pojok kiri atas saat transkrip kosong/idle ·
 status bar `✦ 00.00.00 Discuss  model  cwd … context  Auto ●`
 (timer redup idle; detik putih aktif, menit mulai terang di 60 dtk, jam di 1
 jam; tanpa bullet separator; permission rata kanan dekat token konteks; label
@@ -781,7 +785,10 @@ command di atas chat (v7.18) ·
 baris ledger per-tool dirangkum jadi SATU baris ringkas (`n tools · nama · x ok · y gagal`),
 tidak hilang diam-diam; detail dibuka via `/expand` ·
 tabel markdown dirender kotak ber-garis (opencode-like) ber-`wrap` (konten panjang
-tidak kepotong) + margin kiri 1 kolom; teks paragraf ber-margin kiri 1 kolom ·
+tidak kepotong) + margin kiri 3 kolom (adaptif di lebar < 36); area teks jawaban
+(paragraf, heading, daftar, blockquote, code block) ber-margin kiri 3 kolom
+dengan hanging-indent wrap untuk daftar/paragraf multi-tingkat agar lanjutan teks
+tidak melewati batas kiri tingkatnya serta jeda baris kosong antar-poin/heading/blok ·
 Projection V2: `› name target … running`, ledger status ber-warna/kata,
 retry/grup anak (anak ber-identitas run = baris `↳ run_<8>` sendiri; tanpa
 identitas run = hitungan `n child tools`), ringkasan turn, dan marker evict
@@ -835,7 +842,7 @@ panjang).
   counter posisi di judul, sembunyikan hint scroll bila pas 1 layar, salin isi
   dengan `c` lewat `onCopy`, Esc menutup, non-TTY fallback false, lebar outputWindowWidth).
 - `test/tui-app.test.ts` — I1/I13/I14/I17-I20 (baris indikator dipotong ke
-  lebar frame walau locale id 51 kolom; zero-state welcome saat boot kosong;
+  lebar frame walau locale id 51 kolom; logo kecil pojok kiri atas saat boot kosong tanpa teks welcome;
   `Tab` autolengkap dropdown `/` vs putar WorkMode saat menu tertutup; klik pada
   baris composer kedua hasil wrap; prompt idle bertahan setelah Esc;
   `repaint()` tak melukis saat suspended; boot/exit pairing, transcript

@@ -237,15 +237,72 @@ describe("markdown: fence & inline", () => {
     }
   })
 
-  test("list bernomor & bersarang tetap mempertahankan tingkatnya", () => {
+  test("list bernomor & bersarang tetap mempertahankan tingkatnya dan jeda poin utama", () => {
     const src = "1. satu\n2. dua\n   - sub a\n   - sub b"
-    const out = stripAnsi(decorateMarkdown(src)).split("\n")
-    expect(out[0]).toContain("1. satu")
-    expect(out[1]).toContain("2. dua")
-    // Item bersarang lebih dalam (indentasi ekstra), tidak diratakan ke level 1.
-    expect(out[2]).toMatch(/^\s{3,}- sub a/)
-    expect(out[3]).toMatch(/^\s{3,}- sub b/)
-    expect(out[2]!.length).toBeGreaterThan(out[0]!.length)
+    const rawLines = stripAnsi(decorateMarkdown(src)).split("\n")
+    expect(rawLines).toContain("")
+    const items = rawLines.filter(Boolean)
+    expect(items[0]).toBe("   1. satu")
+    expect(items[1]).toBe("   2. dua")
+    // Item bersarang lebih dalam (margin 3 + 3 spasi = 6 kolom), sejajar di bawah induk.
+    expect(items[2]).toMatch(/^\s{6}- sub a/)
+    expect(items[3]).toMatch(/^\s{6}- sub b/)
+    expect(items[2]!.length).toBeGreaterThan(items[0]!.length)
+  })
+
+  test("printer linier menyisipkan margin kiri lebar, hanging indent, dan jeda antar poin", () => {
+    const tty = installFakeTty({ columns: 50, rows: 24 })
+    try {
+      const bus = createFakeBus()
+      const detach = attachSimpleLogger(bus as unknown as EventBus, {})
+      bus.emit("turn:started", { turn: 1 })
+      bus.emit("provider:text", {
+        text: [
+          "Pengantar singkat.",
+          "1. Poin pertama dengan penjelasan panjang sekali yang perlu dibungkus rapi.",
+          "   - Sub poin panjang yang tetap sejajar di bawah huruf S pada baris lanjutan.",
+          "2. Poin kedua.",
+          "Penutup.",
+        ].join("\n"),
+      })
+      bus.emit("turn:completed", {})
+      detach()
+      const out = stripAnsi(tty.all())
+      expect(out).toContain("   Pengantar singkat.\n\n   1. Poin pertama")
+      expect(out).toContain("   - Sub poin panjang")
+      expect(out).toContain("\n\n   2. Poin kedua.\n\n   Penutup.")
+      for (const line of out.split("\n").filter(Boolean)) {
+        expect(line.startsWith("   ")).toBe(true)
+        expect(displayWidth(line)).toBeLessThanOrEqual(50)
+      }
+      const subCont = out
+        .split("\n")
+        .find((l) => l.includes("di bawah") || l.includes("pada baris"))
+      expect(subCont).toMatch(/^\s{8}\S/)
+    } finally {
+      tty.restore()
+    }
+  })
+
+  test("wrap linear menjaga hanging indent paragraf dan list multi-tingkat", () => {
+    const longNested =
+      "      - item bersarang yang cukup panjang sampai perlu turun ke baris berikutnya secara rapi"
+    const wrapped = wordWrap(longNested, 36).split("\n")
+    expect(wrapped.length).toBeGreaterThan(2)
+    expect(wrapped[0]).toMatch(/^\s{6}- item/)
+    for (const cont of wrapped.slice(1)) {
+      expect(cont).toMatch(/^\s{8}\S/)
+      expect(displayWidth(cont)).toBeLessThanOrEqual(36)
+    }
+
+    const longIndentedPara =
+      "      Paragraf berindentasi dalam tingkat daftar yang harus bertahan batas kirinya ketika dibungkus."
+    const paraWrapped = wordWrap(longIndentedPara, 36).split("\n")
+    expect(paraWrapped.length).toBeGreaterThan(1)
+    for (const line of paraWrapped) {
+      expect(line).toMatch(/^\s{6}\S/)
+      expect(displayWidth(line)).toBeLessThanOrEqual(36)
+    }
   })
 })
 

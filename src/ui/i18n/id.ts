@@ -5,9 +5,6 @@ import type { MsgKey } from "./locale.ts"
 export const id: Record<MsgKey, string> = {
   "app.newBelow": "↓ {n} baris baru di bawah · PgDn ke ekor",
   "app.abortHint": "abort terkirim — tekan Esc sekali lagi untuk keluar",
-  "app.welcomeTitle": "minicode {dot} {model}",
-  "app.welcomeCwd": "{cwd}",
-  "app.welcomeHints": "Tab mode {dot} Shift+Tab izin {dot} / menu {dot} Ctrl+R riwayat",
   "tui.selectionCopied": "seleksi disalin ke clipboard",
   "tui.selectionCopyFailed": "seleksi tidak bisa disalin (OSC 52 tidak tersedia)",
   "tui.selectionTooLarge": "seleksi terlalu besar untuk disalin",

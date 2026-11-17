@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.30.1] - 2026-11-17
+
+### Added & Changed — UX TUI, Render Teks, Thinking Default & Kejelasan Mode
+
+- **Logo `14×9` simetris & clean boot di pojok kiri atas**: Memperbaiki grid block-logo pada `src/ui/render/logo.ts` (`14×9`), menghapus banner identitas/hint berpusat di layar awal, serta menampilkan logo kecil di pojok kiri atas saat transkrip kosong/idle (`src/ui/tui/app.ts`).
+- **Update footer mode in-place & penanda mode aktif ke model**: Mengubah perpindahan WorkMode (`DISCUSS` ↔ `BUILD`), PermissionMode (`Ask` ↔ `Auto`), dan `/unrestric` (`UNRESTRICTED`) agar langsung memperbarui footer tanpa toast pop-up (`cli/tui.ts`, `src/ui/tui/app.ts`), serta menambahkan hint aktif dan catatan transisi ephemereal per-turn di wire LLM (`src/app/session.ts`) agar model langsung memahami batasan/wewenang baru saat berganti mode bolak-balik.
+- **Thinking tersembunyi default**: Menjadikan `UiSessionState.reasoningVisible` bernilai `false` secara default (`src/ui/session-state.ts`, tetap tersedia via `/thinking`, `Ctrl+T`, `--verbose`, `MINICODE_SHOW_THINKING=1`, dan buffer `/expand` termasuk saat `commitThinking` di `src/ui/tui/transcript.ts`).
+- **Margin kiri 3 kolom, *hanging-indent* multi-tingkat, & spasi antar-poin**: Menambahkan `src/ui/render/markdown-layout.ts` (`ASSISTANT_LEFT_MARGIN = 3`, `effectiveAssistantMargin`, `computeHangingIndent`, `MarkdownFlowStepper`, `formatAssistantSpacing`), `wrapByWidth` dengan `hangingIndent` + `chunkByWidthSplit` (`src/ui/render/width.ts`), perbaikan `wordWrap` (`src/ui/render/wrap.ts`), serta penyelarasan `decorateMarkdown`, `attachSimpleLogger`, `renderGridTable`, dan `Transcript` dengan tetap mempertahankan akurasi drag-selection/copy (`pointAt`/`columnAtOffset`).
+- **Sinkronisasi kontrak terminal & test**: Memperbarui `docs/TERMINAL_CONTRACT.md`, `docs/environment.md`, `docs/UI_RENDER_PIPELINE.md`, dan suite test TUI/render/mode.
+
 ## [0.30.0] - 2026-11-17
 
 ### Added & Changed — Arsitektur, Modularisasi, & Efisiensi Wire

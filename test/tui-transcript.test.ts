@@ -53,7 +53,7 @@ describe("Transcript", () => {
     bus.emit("provider:text", { text: "dunia" })
     bus.emit("turn:completed", {})
     expect(t.size()).toBe(1)
-    expect(t.view(40, 3, 0)[2]).toBe("halo dunia")
+    expect(t.view(40, 3, 0)[2]).toBe("   halo dunia")
   })
   test("attempt provider gagal dihapus dari jawaban live dan diberi penanda", () => {
     const { bus, t } = setup()
@@ -151,9 +151,9 @@ describe("Transcript", () => {
     })
     bus.emit("turn:completed", {})
     const out = t.view(80, 20, 0).join("\n").trim()
-    expect(out).toContain("Ringkasan\n\nParagraf.")
+    expect(out).toContain("Ringkasan\n\n   Paragraf.")
     expect(out).not.toContain("Paragraf.\n\n\n")
-    expect(out).toContain("const a = 1\n\nconst b = 2")
+    expect(out).toContain("const a = 1\n\n   const b = 2")
   })
   test("jawaban streaming mempertahankan blank line di fence yang belum lengkap", () => {
     const { bus, t } = setup()
@@ -259,21 +259,21 @@ describe("Transcript", () => {
     bus.emit("context:compacted", { reason: "penuh" })
     expect(t.view(40, 2, 0).join("\n")).toContain("compacted")
   })
-  test("thinking minimized: transcript bersih, indikator dots dimiliki App", async () => {
-    const { setReasoningVisible } = await import("../src/ui/render/reasoning.ts")
-    setReasoningVisible(false)
-    try {
-      const { bus, t } = setup()
-      bus.emit("provider:extension", { kind: "reasoning", data: { text: "hmm " } })
-      bus.emit("provider:extension", { kind: "reasoning", data: { text: "mikirmodelrahasia" } })
-      const live = t.view(40, 3, 0).join("\n")
-      expect(live).not.toContain("thinking")
-      expect(live).not.toContain("mikirmodelrahasia")
-      bus.emit("turn:completed", {})
-      expect(t.view(40, 3, 0).join("\n")).not.toContain("thinking")
-    } finally {
-      setReasoningVisible(false)
-    }
+  test("thinking default hidden: transcript bersih, indikator dots dimiliki App", async () => {
+    const { defaultUiState } = await import("../src/ui/session-state.ts")
+    expect(defaultUiState.reasoningVisible).toBe(false)
+    const { bus, t } = setup()
+    bus.emit("provider:extension", { kind: "reasoning", data: { text: "hmm " } })
+    bus.emit("provider:extension", { kind: "reasoning", data: { text: "mikirmodelrahasia" } })
+    const live = t.view(40, 3, 0).join("\n")
+    expect(live).not.toContain("thinking")
+    expect(live).not.toContain("mikirmodelrahasia")
+    bus.emit("turn:completed", {})
+    expect(t.view(40, 3, 0).join("\n")).not.toContain("thinking")
+    expect(
+      defaultUiState.collapsedSectionsSnapshot().some((s) => s.text.includes("mikirmodelrahasia")),
+    ).toBe(true)
+    defaultUiState.clearCollapsedSections()
   })
   test("thinking expanded: mengalir redup per baris", async () => {
     const { setReasoningVisible } = await import("../src/ui/render/reasoning.ts")
@@ -455,10 +455,49 @@ describe("Transcript UI audit regressions (Fase 3.2-3.4)", () => {
     bus.emit("turn:completed", {})
     const rows = t.viewport(60, 4, 0).rows
     const mdRow = rows.find((r) => r.text.includes("Use"))!
-    expect(mdRow.displayEnd).toBe(12)
-    const start = t.pointAt(mdRow, 0)!
-    const end = t.pointAt(mdRow, 12)!
+    expect(mdRow.displayStart).toBe(3)
+    expect(mdRow.displayEnd).toBe(15)
+    const start = t.pointAt(mdRow, 3)!
+    const end = t.pointAt(mdRow, 15)!
     expect(t.selectionText(start, end)).toBe("Use **bold** end")
-    expect(t.columnAtOffset(mdRow, end.offset)).toBe(12)
+    expect(t.columnAtOffset(mdRow, end.offset)).toBe(15)
+    // Menarik mulai kolom margin kiri (0) tetap mendarat di awal konten logis.
+    expect(t.pointAt(mdRow, 0)!.offset).toBe(start.offset)
+  })
+
+  test("wrap multi-tingkat menjaga batas kiri tiap level dan selection tetap akurat", () => {
+    const { bus, t } = setup()
+    const nested =
+      "   - sub item panjang sekali yang harus terbungkus rapi di bawah levelnya tanpa kembali ke tepi"
+    bus.emit("provider:text", {
+      text: `1. Poin utama pertama yang ringkas\n${nested}\n2. Poin utama kedua`,
+    })
+    bus.emit("turn:completed", {})
+    const rows = t.viewport(44, 20, 0).rows
+    const plain = rows.map((r) => r.text).filter(Boolean)
+    // Jeda vertikal antara poin utama `1.` dan `2.` (dengan sub-item tetap terkelompok).
+    const p1Idx = plain.findIndex((l) => l.includes("1. Poin utama"))
+    const subIdx = plain.findIndex((l) => l.includes("- sub item"))
+    const p2Idx = plain.findIndex((l) => l.includes("2. Poin utama kedua"))
+    expect(p1Idx).toBeGreaterThanOrEqual(0)
+    expect(subIdx).toBe(p1Idx + 1)
+    expect(p2Idx).toBeGreaterThan(subIdx + 1)
+
+    // Setiap baris lanjutan sub-item wajib menjorok >= 8 kolom (margin 3 + indent 3 + "- " 2).
+    const subRows = rows.filter(
+      (r) => r.selectable && (r.text.includes("- sub item") || /^\s{8}\S/.test(r.text)),
+    )
+    expect(subRows.length).toBeGreaterThanOrEqual(2)
+    for (let i = 1; i < subRows.length; i++) {
+      expect(subRows[i]!.text).toMatch(/^\s{8}\S/)
+      expect(subRows[i]!.displayStart).toBe(8)
+    }
+
+    // Drag selection lintas baris terbungkus menyalin teks asli tanpa spasi gantung sintetis.
+    const first = subRows[0]!
+    const last = subRows[subRows.length - 1]!
+    const selStart = t.pointAt(first, first.displayStart)!
+    const selEnd = t.pointAt(last, last.displayEnd)!
+    expect(t.selectionText(selStart, selEnd)).toBe(nested)
   })
 })

@@ -102,7 +102,7 @@ tanpa IO) digerakkan `cli/` (`tui.ts`, `commands.ts`, `wizard.ts`,
 resize, counter judul, scroll wheel/`j`/`k`/`Space`, dan salin `c` opsional); jendela
 interaktif command (`/model`, `/provider`, `/sessions`, picker) berbagi
 `dialogBox`/`hintLine` (dan `listRow` untuk daftar) yang sama serta mendukung scroll mouse
-wheel. TUI fullscreen menampilkan zero-state welcome ringkas saat transkrip kosong/idle,
+wheel. TUI fullscreen menampilkan logo kecil minicode di pojok kiri atas saat transkrip kosong/idle (tanpa identitas/hint di atas prompt),
 `Tab` pada dropdown `/` untuk autocomplete, jeda antar-turn dan label bahasa fence redup,
 serta fallback glyph `MINICODE_ASCII=1` konsisten hingga garis tabel dan ellipsis.
 
@@ -113,10 +113,10 @@ I = bisa diinterupsi, L = bisa tiba setelah completion.
 
 | Event | Producer | Representasi UI | S | D | O | I | L |
 |---|---|---|---|---|---|---|---|
-| assistant text | provider stream | stdout wrap + fence 2-spasi; pipe-table-aligned di TTY, source sanitized di non-TTY | ya | tidak (E1) | tidak | ya (abort) | tidak (detach flush 1x, E6) |
+| assistant text | provider stream | stdout/TUI wrap ber-indentasi gantung (margin kiri 3 kolom adaptif, jeda antar-poin/heading/blok) + code fence 3-spasi; pipe-table-aligned di TTY, source sanitized di non-TTY | ya | tidak (E1) | tidak | ya (abort) | tidak (detach flush 1x, E6) |
 | tool call | model → kernel | `› nama target` muted (compact: diam) | tidak | tidak | tidak | ya | tidak |
 | tool result | tool → executor | ledger hijau/merah; minimize → `+ label` + buffer; panel aktivitas ON → baris grup per keluarga tool (`+ explore · N tools · N ok`) | tidak | tidak | tidak | ya | tidak |
-| reasoning | provider extension | TUI composer: dots clock; panel aktivitas ON → AREA thinking live maks 10 baris (`+ thinking`, ringkas 1 baris saat turn selesai, detail di `/expand`); panel OFF → alir per baris; minimized → buffer `/expand` | ya | tidak | tidak | ya | tidak |
+| reasoning | provider extension | default tersembunyi (TUI composer tetap dots clock, isi disimpan ke `/expand`); bila dibuka (`/thinking` / `Ctrl+T` / `MINICODE_SHOW_THINKING=1` / `--verbose`), panel aktivitas ON → AREA thinking live maks 10 baris (`+ thinking`, ringkas 1 baris saat turn selesai); panel OFF → alir per baris | ya | tidak | tidak | ya | tidak |
 | thinking effort | picker `/model` | badge + level per model | tidak | tidak | tidak | tidak | tidak |
 | usage | provider extension | verbose saja; masuk budget watcher | ya | tidak | ya (tail pasca-finish) | ya | ya (diabaikan aman) |
 | compaction | kernel loop | `── compacted: <reason>` kuning, reason verbatim | tidak | tidak | tidak | tidak | tidak |

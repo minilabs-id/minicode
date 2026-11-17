@@ -308,7 +308,12 @@ describe("TUI table transcript", () => {
     expect(narrowTable.length).toBe(2)
     // Wrap (bukan truncate): konten panjang dilanjutkan ke baris berikutnya
     // dalam sel — info tidak dipotong hilang (tak ada ellipsis "…").
-    expect(narrow.some((line) => line.includes("long-long"))).toBe(true)
+    expect(narrow.some((line) => line.includes("value-long"))).toBe(true)
+    const firstColText = narrow
+      .filter((line) => /[|│]/.test(line))
+      .map((line) => line.split(/[|│]/)[1]?.replace(/\s+/g, "") ?? "")
+      .join("")
+    expect(firstColText).toContain("value-long-long-long")
     expect(narrow.some((line) => line.includes("…"))).toBe(false)
     for (const line of narrow.filter(Boolean)) expect(displayWidth(line)).toBeLessThanOrEqual(30)
     expect(transcript.view(80, 8, 0).map(stripAnsi)).toEqual(wide)
@@ -329,6 +334,6 @@ describe("TUI table transcript", () => {
     const source = [`${tick.repeat(3)}`, "| a | b |", "| --- | --- |", `${tick.repeat(3)}`].join(nl)
     for (const part of source) bus.emit("provider:text", { text: part })
     bus.emit("turn:completed", {})
-    expect(transcript.view(80, 10, 0).map(stripAnsi)).toContain("| a | b |")
+    expect(transcript.view(80, 10, 0).map(stripAnsi)).toContain("   | a | b |")
   })
 })

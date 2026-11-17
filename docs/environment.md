@@ -90,7 +90,7 @@ Variabel yang paling menentukan perilaku (sisanya referensi di bawah):
 | `MINICODE_BELL` | `0` → matikan bell `\x07` saat approval (aksesibilitas) |
 | `MINICODE_STATUSLINE` | `rich` → statusline turn menampilkan token kumulatif + biaya sesi (default hemat) |
 | `MINICODE_A11Y` | `1` → live-region approval untuk screen reader (baris polos tanpa ANSI) |
-| `MINICODE_SHOW_THINKING` | reasoning model terlihat SECARA DEFAULT; `0` → minimized (hanya penanda), `1` → paksa terlihat |
+| `MINICODE_SHOW_THINKING` | reasoning model tersembunyi SECARA DEFAULT (`false`); `1` → paksa terlihat (atau `/thinking` / `Ctrl+T` / `--verbose`), `0` → paksa tersembunyi |
 | `MINICODE_MINIMIZE_ACTIVITY` | ON secara default di TUI; `0` → transparan (baris per-tool). Lipat aktivitas tool per turn jadi satu ringkasan (detail via `/expand`) |
 | `MINICODE_ACTIVITY_PANEL` | `0` → matikan panel aktivitas (default AKTIF di TUI; `/fold` toggle); `1` → paksa aktif juga di jalur linear/one-shot |
 | `MINICODE_AUTORESUME_BG` | `0` → nonaktifkan auto-resume turn TUI saat job background selesai (default aktif; sekali per job, hanya bila tidak ada turn berjalan) |

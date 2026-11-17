@@ -19,7 +19,7 @@ sub-milestone (`P2.x`), Quality Remediation (`Stage 1`–`10`), dan hotfix
 
 ## Status checkout
 
-`CHANGELOG.md` dan `package.json` saat ini mencatat v0.30.0. `PLAN.md` adalah
+`CHANGELOG.md` dan `package.json` saat ini mencatat v0.30.1. `PLAN.md` adalah
 ledger milestone legacy, bukan roadmap aktif. `ROADMAP.md`,
 `docs/ARCHITECTURE.html`, dan `docs/audit/` tidak ada; status roadmap belum
 tersedia. Gate repository dapat dijalankan, tetapi checkout tidak boleh

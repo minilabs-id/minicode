@@ -26,6 +26,7 @@ import {
 import { appendWrapped, shaveWrapped } from "../render/composer-wrap.ts"
 import { formatError } from "../render/errors.ts"
 import { listRow } from "../render/list.ts"
+import { LOGO_WIDTH, renderLogoRows } from "../render/logo.ts"
 import { sanitizeAnsi, sanitizeAnsiLine, stripSgr } from "../render/sanitize.ts"
 import { c, glyphs, scrimMode, scrimSgr } from "../render/theme.ts"
 import { chunkByWidth, displayWidth, escapeLength, truncateToWidth } from "../render/width.ts"
@@ -257,7 +258,7 @@ export class TuiApp {
   private lastAbortAt = 0
   /** Hint "tekan lagi untuk keluar" tampil sekali setelah abort pertama. */
   private abortHintOn = false
-  /** Micro-toast 2 detik di slot footer saat mengganti mode/bahasa/salin. */
+  /** Micro-toast 2 detik di slot footer saat mengganti bahasa/salin. */
   private statusToast = ""
   private toastTimer: ReturnType<typeof setTimeout> | undefined
   private frames = 0
@@ -784,21 +785,15 @@ export class TuiApp {
         return
       }
       this.host.cycleWorkMode(1)
-      const wm = this.host.getStatus().footer.workMode
-      if (wm) {
-        const label = wm === "EXECUTE" ? "Build" : "Discuss"
-        this.showToast(t("tui.workModeLine", { m: label }))
-      } else {
-        this.paintCurrent()
-      }
+      // Pembaruan WorkMode langsung mengubah label di bar footer tanpa
+      // menutup footer dengan toast sementara.
+      this.paintCurrent()
       return
     }
     if (key.type === "shift-tab") {
       this.host.togglePermissionMode()
-      const pm = this.host.getStatus().footer.mode
-      const label = pm ? `${pm[0]!.toUpperCase()}${pm.slice(1)}` : ""
-      if (label) this.showToast(t("tui.modeLine", { m: label }))
-      else this.paintCurrent()
+      // Pembaruan PermissionMode langsung mengubah label di bar footer.
+      this.paintCurrent()
       return
     }
     if (key.type === "ctrl-o") {
@@ -1919,30 +1914,14 @@ export class TuiApp {
       const selected = this.selectedRange(row)
       return selected ? highlightColumns(row.text, selected.start, selected.end) : row.text
     })
-    // Zero-state welcome ringkas saat sesi masih kosong & idle: langsung memberi
-    // orientasi model/workspace/pintasan tanpa menyisipkan riwayat scrollback.
-    if (
-      this.transcript.total() === 0 &&
-      !busy &&
-      menu.length === 0 &&
-      !this.state.line &&
-      viewH >= 5 &&
-      width >= 24
-    ) {
-      const dot = glyphs.dot
-      const innerMax = Math.max(8, width - 4)
-      const model = sanitizeAnsiLine(snap.footer.model || t("tui.noModel"))
-      const cwdText = sanitizeAnsiLine(snap.footer.cwd || "")
-      const welcome = [
-        c.bold(c.accent(truncateToWidth(t("app.welcomeTitle", { dot, model }), innerMax))),
-        ...(cwdText
-          ? [c.dim(truncateToWidth(t("app.welcomeCwd", { cwd: cwdText }), innerMax))]
-          : []),
-        c.muted(truncateToWidth(t("app.welcomeHints", { dot }), innerMax)),
-      ]
-      const startRow = Math.max(0, Math.floor((body.length - welcome.length) / 2))
-      for (let wi = 0; wi < welcome.length && startRow + wi < body.length; wi++) {
-        body[startRow + wi] = `  ${welcome[wi]!}`
+    // Zero-state boot: tampilkan hanya logo kecil minicode di pojok kiri atas
+    // tanpa blok identitas/hint di atas prompt & footer agar tampilan awal clean.
+    if (this.transcript.total() === 0 && !busy && menu.length === 0 && !this.state.line) {
+      const logoRows = renderLogoRows()
+      if (viewH >= logoRows.length && width >= LOGO_WIDTH + 2) {
+        for (let wi = 0; wi < logoRows.length; wi++) {
+          body[wi] = `  ${c.accent(logoRows[wi]!)}`
+        }
       }
     }
 

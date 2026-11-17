@@ -42,8 +42,8 @@ test("markdown: decorates code fences with indentation", () => {
   expect(stripAnsi(out)).toContain("const x = 1;")
 })
 
-test("markdown: plain text without fences unchanged", () => {
-  expect(decorateMarkdown("just text")).toBe(" just text")
+test("markdown: plain text without fences gets outer left margin", () => {
+  expect(decorateMarkdown("just text")).toBe("   just text")
 })
 
 test("theme: section separator uses display width for CJK/emoji", () => {

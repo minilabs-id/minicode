@@ -19,6 +19,11 @@ import { t } from "../i18n/locale.ts"
 import { renderActivityPanel } from "../render/activity-panel.ts"
 import { paintLedger, runMarker, statusWord } from "../render/ledger.ts"
 import { parseFence, renderInline } from "../render/markdown.ts"
+import {
+  computeAssistantLineLayout,
+  effectiveAssistantMargin,
+  formatAssistantSpacing,
+} from "../render/markdown-layout.ts"
 import { type MarkdownTable, parseMarkdownBlocks } from "../render/markdown-table.ts"
 import { sanitizeAnsi, sanitizeAnsiLine, stripSgr } from "../render/sanitize.ts"
 import { renderMarkdownTable } from "../render/table-grid.ts"
@@ -188,46 +193,26 @@ function renderAssistantLine(line: string, fenceState: FenceState): string | nul
   if (fenceState === "boundary") return null
   if (fenceState.startsWith("open:")) {
     const lang = fenceState.slice(5)
-    return lang ? c.dim(`  ${glyphs.dot} ${lang}`) : null
+    return lang ? c.dim(`${glyphs.dot} ${lang}`) : null
   }
   if (fenceState === "inside") return line
   if (!/(?:\*{1,2}|`|^#{1,6}\s|~~|\[[^\]]+\]\()/.test(line)) return line
   const heading = /^(#{1,6})\s+(.*)$/.exec(line)
   if (heading) return c.bold(renderInline(heading[2] ?? ""))
+  const listItem = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/.exec(line)
+  if (listItem) return `${listItem[1]}${listItem[2]} ${renderInline(listItem[3] ?? "")}`
+  const blockquote = /^(\s*(?:>\s*)+)(.*)$/.exec(line)
+  if (blockquote) return `${blockquote[1]}${renderInline(blockquote[2] ?? "")}`
   return renderInline(line)
 }
 
 /**
  * Rapikan hanya whitespace presentasi jawaban model: hapus baris kosong di
- * tepi dan batasi jeda berulang di luar fenced code. Isi code fence tetap
- * literal karena spasi dan baris kosong di dalamnya adalah bagian contoh.
+ * tepi, sisipkan jeda bersih antar-poin/heading/blok, dan batasi jeda berulang
+ * di luar fenced code. Isi code fence tetap literal.
  */
 function normalizeAssistantOutput(text: string): string {
-  const lines = text.replace(/\r\n?/g, "\n").split("\n")
-  const out: string[] = []
-  let openFence: { char: string; len: number } | null = null
-  for (const line of lines) {
-    const fence = parseFence(line)
-    if (openFence) {
-      out.push(line)
-      if (fence && fence.char === openFence.char && fence.len >= openFence.len) openFence = null
-      continue
-    }
-    if (fence) {
-      openFence = fence
-      out.push(line)
-      continue
-    }
-    if (!line.trim()) {
-      if (out.length && out[out.length - 1] !== "") out.push("")
-      continue
-    }
-    out.push(line)
-  }
-  // Jika fence belum ditutup, baris kosong di ekor masih bagian dari contoh
-  // kode dan harus tetap literal. Hanya whitespace di luar fence yang dirapatkan.
-  if (!openFence) while (out.length && out[out.length - 1] === "") out.pop()
-  return out.join("\n")
+  return formatAssistantSpacing(text)
 }
 
 let selectionSegmenter: Intl.Segmenter | undefined
@@ -601,6 +586,15 @@ export class Transcript {
       }
       return
     }
+    if (!this.uiState.reasoningVisible) {
+      // Tetap simpan thinking tersembunyi ke buffer `/expand` sebelum reset
+      // agar user tetap bisa membuka proses berpikir jika diperlukan.
+      if (this.thinkingBuf) this.uiState.rememberCollapsedSection("thinking", this.thinkingBuf)
+      this.thinkingBuf = ""
+      this.thinkingTail = ""
+      this.thinkingArea = []
+      return
+    }
     if (this.thinkingTail) {
       this.append(c.thinking(`  ${this.thinkingTail}`), { kind: "diagnostic" })
       this.thinkingTail = ""
@@ -710,6 +704,7 @@ export class Transcript {
     fenceState: FenceState = "outside",
   ): TranscriptRow[] {
     const w = Math.max(10, width)
+    const outerMargin = markdown ? effectiveAssistantMargin(w) : 0
     const renderedLines = text.split("\n")
     const sourceLines = sourceText.split("\n")
     const out: TranscriptRow[] = []
@@ -717,22 +712,43 @@ export class Transcript {
     for (let lineIndex = 0; lineIndex < renderedLines.length; lineIndex++) {
       const raw = renderedLines[lineIndex] ?? ""
       const source = sourceLines[lineIndex] ?? stripSgr(sanitizeAnsi(raw))
-      let rendered: string | null
-      if (!markdown) rendered = raw
+      let renderedBody: string | null
+      if (!markdown) renderedBody = raw
       else if (sourceId >= 0 && this.assistantDisplay.has(sourceId))
-        rendered = this.assistantDisplay.get(sourceId)!
+        renderedBody = this.assistantDisplay.get(sourceId)!
       else {
-        rendered = renderAssistantLine(raw, fenceState)
-        if (sourceId >= 0) this.assistantDisplay.set(sourceId, rendered)
+        renderedBody = renderAssistantLine(raw, fenceState)
+        if (sourceId >= 0) this.assistantDisplay.set(sourceId, renderedBody)
       }
-      if (rendered === null) {
+      if (renderedBody === null) {
         sourceBase += source.length + 1
         continue
       }
       const isBoundaryHeader = markdown && fenceState.startsWith("open:")
-      const renderedRows = rendered === "" ? [""] : wrapByWidth(rendered, w)
+      let firstLead = ""
+      let hangingIndent = ""
+      if (markdown) {
+        if (isBoundaryHeader) {
+          firstLead = outerMargin > 0 ? " ".repeat(outerMargin) : ""
+          hangingIndent = firstLead
+        } else if (renderedBody !== "") {
+          const layout = computeAssistantLineLayout(raw, outerMargin, w, {
+            inFence: fenceState === "inside",
+          })
+          firstLead = layout.firstLead
+          hangingIndent = layout.hangingIndent
+        }
+      }
+      const rendered = renderedBody === "" ? "" : `${firstLead}${renderedBody}`
+      const renderedRows =
+        rendered === ""
+          ? [""]
+          : wrapByWidth(rendered, w, hangingIndent ? { hangingIndent } : undefined)
+      const effectiveHangCols = displayWidth(hangingIndent)
+      const effectiveHang = effectiveHangCols > 0 && effectiveHangCols < w ? hangingIndent : ""
       const plainRenderedFull = stripSgr(sanitizeAnsi(rendered))
-      const expectedExact = `${sourcePrefix}${source}`
+      const linePrefix0 = `${firstLead}${sourcePrefix}`
+      const expectedExact = `${linePrefix0}${source}`
       const exactMatch = !isBoundaryHeader && (!markdown || plainRenderedFull === expectedExact)
       const prefixTrimmed = sourcePrefix.trimEnd()
       const rowBodies: Array<{
@@ -746,19 +762,25 @@ export class Transcript {
         const plainRendered = stripSgr(sanitizeAnsi(renderedRow))
         let rowDisplayStart = 0
         let plainBody = plainRendered
-        if (sourcePrefix && rowIndex === 0) {
-          if (plainRendered.startsWith(sourcePrefix)) {
-            rowDisplayStart = displayWidth(sourcePrefix)
-            plainBody = plainRendered.slice(sourcePrefix.length)
+        if (rowIndex === 0 && linePrefix0) {
+          if (plainRendered.startsWith(linePrefix0)) {
+            rowDisplayStart = displayWidth(linePrefix0)
+            plainBody = plainRendered.slice(linePrefix0.length)
           } else if (
+            sourcePrefix &&
             prefixTrimmed &&
-            plainRendered.startsWith(prefixTrimmed) &&
-            plainRendered.length <= sourcePrefix.length
+            plainRendered.startsWith(`${firstLead}${prefixTrimmed}`) &&
+            plainRendered.length <= linePrefix0.length
           ) {
             // Terminal sempit memecah tepat di ujung chrome prefix ("minicode ›").
             rowDisplayStart = displayWidth(plainRendered)
             plainBody = ""
           }
+        } else if (rowIndex > 0 && effectiveHang && plainRendered.startsWith(effectiveHang)) {
+          // Lewati spasi indentasi gantung sintetis di awal baris lanjutan agar
+          // highlight seleksi & clipboard /copy tetap bersih berisi teks asli.
+          rowDisplayStart = effectiveHangCols
+          plainBody = plainRendered.slice(effectiveHang.length)
         }
         rowBodies.push({
           text: renderedRow,
@@ -914,9 +936,10 @@ export class Transcript {
     if (this.thinkingTail) logical.push(this.thinkingTail)
     if (logical.length === 0) return []
     const visual: string[] = []
+    const contentWidth = Math.max(1, w - 2)
     for (const line of logical) {
       if (line === "") visual.push("")
-      else visual.push(...wrapByWidth(line, w))
+      else visual.push(...wrapByWidth(line, contentWidth))
     }
     const shown = visual.slice(-MAX_THINKING_ROWS)
     const hidden = visual.length - shown.length
@@ -1135,9 +1158,33 @@ export class Transcript {
     const pending = normalizeAssistantOutput(sanitizeAnsi(this.pending))
     if (pending) {
       for (const block of parseMarkdownBlocks(pending)) {
-        if (block.type === "table") rows.push(...this.projectTable(block.table, -1, w))
-        else
-          for (const line of block.text.split("\n")) {
+        if (block.type === "table") {
+          if (rows.length > 0 && rows[rows.length - 1]!.text !== "") {
+            rows.push({
+              text: "",
+              sourceId: -1,
+              sourceStart: 0,
+              sourceEnd: 0,
+              displayStart: 0,
+              displayEnd: 0,
+              selectable: false,
+            })
+          }
+          rows.push(...this.projectTable(block.table, -1, w))
+        } else {
+          const lineList = block.text.split("\n")
+          if (rows.length > 0 && lineList[0] !== "" && rows[rows.length - 1]!.text !== "") {
+            rows.push({
+              text: "",
+              sourceId: -1,
+              sourceStart: 0,
+              sourceEnd: 0,
+              displayStart: 0,
+              displayEnd: 0,
+              selectable: false,
+            })
+          }
+          for (const line of lineList) {
             const fenceState = pendingFence(line)
             const memoKey =
               line.length <= PENDING_MEMO_LINE_MAX ? `${w}\u0000${fenceState}\u0000${line}` : null
@@ -1156,6 +1203,7 @@ export class Transcript {
             }
             rows.push(...produced)
           }
+        }
       }
     }
     if (this.pendingTruncated) {
@@ -1342,10 +1390,19 @@ export class Transcript {
     // Pisahkan jawaban dari thinking/diagnostik tepat di atasnya dengan satu
     // baris kosong — supaya "berpikir" tidak nempel ke jawaban.
     if (this.lastKind() === "diagnostic") this.append("", { kind: "assistant" })
-    for (const block of parseMarkdownBlocks(sanitizeAnsi(text))) {
-      if (block.type === "table") this.appendTable(block.table, { kind: "assistant" })
-      else {
-        for (const row of block.text.split("\n")) this.append(row, { kind: "assistant" })
+    const blocks = parseMarkdownBlocks(sanitizeAnsi(text))
+    for (const block of blocks) {
+      if (block.type === "table") {
+        if (this.lines.length > 0 && this.lines[this.lines.length - 1] !== "") {
+          this.append("", { kind: "assistant" })
+        }
+        this.appendTable(block.table, { kind: "assistant" })
+      } else {
+        const rows = block.text.split("\n")
+        if (this.tables[this.tables.length - 1] && rows[0] !== "") {
+          this.append("", { kind: "assistant" })
+        }
+        for (const row of rows) this.append(row, { kind: "assistant" })
       }
     }
   }

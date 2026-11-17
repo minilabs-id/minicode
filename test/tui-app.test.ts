@@ -62,6 +62,7 @@ function setup(
     isTTY?: boolean
     getStatus?: () => TuiStatusSnapshot
     cycleWorkMode?: () => void
+    togglePermissionMode?: () => void
   } = {},
 ) {
   const columns = opts.columns ?? 60
@@ -102,7 +103,7 @@ function setup(
       abortCalls++
     },
     cycleWorkMode: opts.cycleWorkMode ?? (() => {}),
-    togglePermissionMode: () => {},
+    togglePermissionMode: opts.togglePermissionMode ?? (() => {}),
     toggleCompact: () => {},
     toggleReasoning: () => {},
   }
@@ -1145,17 +1146,21 @@ describe("TuiApp", () => {
     expect(tty!.all()).toContain("\x1b[?1049l")
   })
 
-  test("zero-state welcome tampil di boot kosong dan hilang saat mulai mengetik", async () => {
+  test("zero-state tampilkan logo kecil di pojok kiri atas tanpa identitas welcome dan hilang saat mengetik", async () => {
     const { app, screenText } = setup()
     const runP = app.run()
     await tty!.ready()
     await tty!.waitForOutput((o) => o.includes("00.00.00"))
-    const initial = screenText()
-    expect(initial).toContain("test-model")
-    expect(initial).toContain("/kerja")
-    expect(initial).toContain("Shift+Tab permission")
+    const rows = tty!.screen()
+    const bodyText = rows.slice(0, -2).join("\n")
+    expect(rows[0]).toContain("▄▄▄     ▄█▀█▄")
+    expect(rows[1]).toContain("██▀▀█▄ ▄█▀  ██")
+    expect(rows[4]).toContain("▀▀▀      ▀▀▀")
+    expect(bodyText).not.toContain("test-model")
+    expect(bodyText).not.toContain("/kerja")
+    expect(bodyText).not.toContain("Shift+Tab")
     await tty!.send("a")
-    expect(screenText()).not.toContain("Shift+Tab permission")
+    expect(screenText()).not.toContain("██▀▀█▄")
     await tty!.send(KEY.backspace)
     await tty!.send(KEY.ctrlD)
     await runP
@@ -1230,5 +1235,43 @@ describe("TuiApp", () => {
     await tty!.send(KEY.ctrlD)
     await runP
     expect(tty!.all()).toContain("\x1b[?1049l")
+  })
+
+  test("Tab dan Shift+Tab memperbarui teks WorkMode & PermissionMode langsung di footer tanpa toast", async () => {
+    let workMode: "DISCUSS" | "EXECUTE" = "DISCUSS"
+    let mode: "auto" | "ask" = "auto"
+    const { app } = setup({
+      getStatus: () => ({
+        footer: { workMode, mode, model: "test-model", cwd: "/kerja", context: "1k" },
+        busy: false,
+      }),
+      cycleWorkMode: () => {
+        workMode = workMode === "DISCUSS" ? "EXECUTE" : "DISCUSS"
+      },
+      togglePermissionMode: () => {
+        mode = mode === "auto" ? "ask" : "auto"
+      },
+    })
+    const runP = app.run()
+    await tty!.ready()
+    await tty!.waitForOutput((o) => o.includes("00.00.00"))
+    const footerRow = () => tty!.screen()[tty!.screen().length - 1] ?? ""
+
+    expect(footerRow()).toContain("Discuss")
+    expect(footerRow()).toContain("Auto")
+
+    await tty!.send(KEY.tab)
+    expect(footerRow()).toContain("Build")
+    expect(footerRow()).toContain("test-model")
+    expect(footerRow()).not.toContain("work mode:")
+
+    await tty!.send(KEY.shiftTab)
+    expect(footerRow()).toContain("Ask")
+    expect(footerRow()).toContain("Build")
+    expect(footerRow()).toContain("test-model")
+    expect(footerRow()).not.toContain("mode:")
+
+    await tty!.send(KEY.ctrlD)
+    await runP
   })
 })

@@ -8,8 +8,9 @@
 // yang di sini tidak ikut diperbaiki saat pola ANSI diperluas untuk sekuens
 // private-mode (ESC[?25l dsb.).
 
+import { computeHangingIndent } from "./markdown-layout.ts"
 import { stripAnsi } from "./theme.ts"
-import { chunkByWidth, displayWidth } from "./width.ts"
+import { chunkByWidthSplit, displayWidth } from "./width.ts"
 
 export { stripAnsi }
 
@@ -34,13 +35,20 @@ export function wordWrap(text: string, width: number): string {
       out.push(line)
       continue
     }
+    const hang = computeHangingIndent(line, width)
+    const hangWidth = hang ? displayWidth(hang) : 0
     let current = ""
+    let lineIndex = 0
+    const emitLine = (textOut: string) => {
+      out.push(textOut)
+      lineIndex++
+    }
     const flush = () => {
-      if (current !== "") {
+      if (current !== "" && (lineIndex === 0 || current.trim() !== "")) {
         // Spasi pemisah di ujung tidak ikut tampil.
-        out.push(current.trimEnd())
-        current = ""
+        emitLine(current.trimEnd())
       }
+      current = ""
     }
     // Pisah dengan pemisah tertangkap agar spasi ganda (ASCII art/tabel)
     // tetap utuh — run whitespace menempel ke kata berikut, wrap hanya putus
@@ -56,25 +64,35 @@ export function wordWrap(text: string, width: number): string {
         continue
       }
       const word = tok
-      // Kata tunggal lebih lebar dari baris: pecah paksa per kolom.
-      if (displayWidth(word) > width) {
+      const contBudget = Math.max(1, width - hangWidth)
+      // Kata tunggal lebih lebar dari sisa lebar baris lanjutan: pecah paksa per kolom.
+      if (
+        displayWidth(word) > contBudget &&
+        (displayWidth(word) > width || current.trim() !== "")
+      ) {
         // Indentasi (bila ada) menempel ke potongan PERTAMA dan menyusutkan
         // lebar potongan itu — tanpa ini indentasi hilang atau baris meluap.
         const lead = current.trim() === "" ? current : ""
         // Teks yang sudah terkumpul (bila ada) ditutup dulu; hanya indentasi
         // murni yang ikut menempel ke potongan pertama.
-        if (current.trim() !== "") out.push(current.trimEnd())
+        if (current.trim() !== "") emitLine(current.trimEnd())
         current = ""
-        const avail = Math.max(1, width - displayWidth(lead))
-        const pieces = chunkByWidth(word, avail)
-        if (lead && pieces.length > 0) {
-          out.push(lead + (pieces[0] ?? ""))
-          for (let i = 1; i < pieces.length - 1; i++) out.push(pieces[i]!)
-          current = pieces[pieces.length - 1] ?? ""
-          if (pieces.length === 1) current = ""
-        } else {
-          for (let i = 0; i < pieces.length - 1; i++) out.push(pieces[i]!)
-          current = pieces[pieces.length - 1] ?? ""
+        const firstPrefix = lineIndex === 0 ? lead : hang
+        const firstPrefixWidth = displayWidth(firstPrefix)
+        const availFirst = Math.max(1, width - firstPrefixWidth)
+        if (displayWidth(word) <= availFirst) {
+          current = firstPrefix + word
+          continue
+        }
+        // Potong bagian pertama sepas `availFirst`, sisanya mengikuti `contBudget`
+        // (SGR-safe via chunkByWidthSplit agar warna tetap terbawa utuh).
+        const pieces = chunkByWidthSplit(word, availFirst, contBudget)
+        if (pieces.length > 0) {
+          emitLine(firstPrefix + (pieces[0] ?? ""))
+          for (let i = 1; i < pieces.length - 1; i++) {
+            emitLine(hang + pieces[i]!)
+          }
+          current = pieces.length > 1 ? hang + (pieces[pieces.length - 1] ?? "") : ""
         }
         continue
       }
@@ -82,12 +100,11 @@ export function wordWrap(text: string, width: number): string {
       // hanya bila tidak ada pemisah di antara dua kata.
       const glued = !current || /\s$/.test(current) ? `${current}${word}` : `${current} ${word}`
       if (displayWidth(glued) > width && current.trim() !== "") {
-        out.push(current.trimEnd())
-        current = word
+        emitLine(current.trimEnd())
+        current = hang && displayWidth(hang) + displayWidth(word) <= width ? hang + word : word
       } else if (displayWidth(glued) > width) {
-        // Indentasi + kata tak muat bersama: indentasi dilepas untuk baris ini
-        // (baris tetap <= width; lebih baik daripada meluap/memecah kata).
-        current = word
+        // Indentasi + kata tak muat bersama: lepas indentasi berlebih atau pakai hang.
+        current = hang && displayWidth(hang) + displayWidth(word) <= width ? hang + word : word
       } else {
         current = glued
       }

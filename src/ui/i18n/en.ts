@@ -4,9 +4,6 @@
 export const en = {
   "app.newBelow": "↓ {n} new lines below · PgDn to bottom",
   "app.abortHint": "abort sent — press Esc again to quit",
-  "app.welcomeTitle": "minicode {dot} {model}",
-  "app.welcomeCwd": "{cwd}",
-  "app.welcomeHints": "Tab mode {dot} Shift+Tab permission {dot} / menu {dot} Ctrl+R history",
   "tui.selectionCopied": "selection copied to clipboard",
   "tui.selectionCopyFailed": "selection could not be copied (OSC 52 unavailable)",
   "tui.selectionTooLarge": "selection too large to copy",

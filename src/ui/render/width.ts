@@ -349,13 +349,8 @@ export function padToWidth(s: string, width: number, align: "left" | "right" = "
   return align === "right" ? pad + s : s + pad
 }
 
-/**
- * Pecah string menjadi potongan yang masing-masing <= `width` kolom.
- * Dipakai untuk teks tanpa spasi (CJK, URL panjang, hash) yang tidak bisa
- * dipecah di batas kata.
- */
-export function chunkByWidth(s: string, width: number): string[] {
-  if (width <= 0) return [""]
+function chunkByWidthCore(s: string, firstWidth: number, contWidth: number): string[] {
+  if (firstWidth <= 0 || contWidth <= 0) return [""]
   const out: string[] = []
   let cur = ""
   let w = 0
@@ -389,7 +384,8 @@ export function chunkByWidth(s: string, width: number): string[] {
       cur += seq
       continue
     }
-    if (w + token.width > width && cur !== "") {
+    const limit = out.length === 0 ? firstWidth : contWidth
+    if (w + token.width > limit && cur !== "") {
       pushChunk()
     }
     cur += token.text
@@ -397,6 +393,28 @@ export function chunkByWidth(s: string, width: number): string[] {
   }
   if (cur !== "") pushChunk()
   return out.length ? out : [""]
+}
+
+/**
+ * Pecah string menjadi potongan per-kolom, dengan anggaran baris pertama dan
+ * baris lanjutan terpisah (dipakai word-wrap ber-indentasi gantung).
+ */
+export function chunkByWidthSplit(s: string, firstWidth: number, contWidth: number): string[] {
+  return chunkByWidthCore(s, firstWidth, contWidth)
+}
+
+/**
+ * Pecah string menjadi potongan yang masing-masing <= `width` kolom.
+ * Dipakai untuk teks tanpa spasi (CJK, URL panjang, hash) yang tidak bisa
+ * dipecah di batas kata.
+ */
+export function chunkByWidth(s: string, width: number): string[] {
+  return chunkByWidthCore(s, width, width)
+}
+
+export interface WrapByWidthOptions {
+  /** Indentasi gantung (kolom spasi) yang disisipkan di awal setiap baris lanjutan. */
+  hangingIndent?: string
 }
 
 /**
@@ -409,12 +427,22 @@ export function chunkByWidth(s: string, width: number): string[] {
  * Spasi yang tepat TIDAK muat menjadi titik putus; spasi itu (dan spasi-trailing
  * yang tak terlihat) dibuang, bukan dipindah ke baris berikutnya.
  */
-export function wrapByWidth(s: string, width: number): string[] {
+export function wrapByWidth(s: string, width: number, options?: WrapByWidthOptions): string[] {
   if (width <= 0) return [""]
+  const rawHang = options?.hangingIndent ?? ""
+  const rawHangWidth = rawHang ? displayWidth(rawHang) : 0
+  // Jangan biarkan indentasi gantung menutup seluruh lebar baris — minimal 1 kolom isi.
+  const effectiveHang = rawHangWidth > 0 && rawHangWidth < width ? rawHang : ""
+  const effectiveHangWidth = effectiveHang ? rawHangWidth : 0
+  const contBudget = Math.max(1, width - effectiveHangWidth)
+
   const out: string[] = []
   let line = ""
   let lineWidth = 0
+  let plainIndent = ""
+  let lineHasWord = false
   let openSgr: string[] = []
+  let openSgrBeforeWord: string[] = []
   let word = ""
   let wordWidth = 0
 
@@ -430,36 +458,56 @@ export function wrapByWidth(s: string, width: number): string[] {
 
   const flush = (): void => {
     if (line !== "") out.push(openSgr.length > 0 ? `${line}\x1b[0m` : line)
-    line = openSgr.join("")
-    lineWidth = 0
+    // Indentasi gantung diletakkan SEBELUM SGR terbuka agar spasi margin/indentasi
+    // tidak ikut mendapat gaya warna/latar teks di baris lanjutan.
+    line = effectiveHang + openSgr.join("")
+    lineWidth = effectiveHangWidth
+    plainIndent = effectiveHang
+    lineHasWord = false
   }
 
   const placeWord = (): void => {
     if (wordWidth === 0) {
+      if (word) line += word
       word = ""
+      openSgrBeforeWord = [...openSgr]
       return
     }
     if (lineWidth + wordWidth <= width) {
       line += word
       lineWidth += wordWidth
-    } else if (wordWidth <= width) {
+      lineHasWord = true
+    } else if (wordWidth <= contBudget) {
       // Kata utuh pindah ke baris berikutnya (bukan dibelah di tengah).
       flush()
       line += word
       lineWidth += wordWidth
+      lineHasWord = true
     } else {
-      // Token tanpa spasi > width: potong per kolom (chunkByWidth, sgr-safe).
-      if (lineWidth > 0) flush()
-      const pieces = chunkByWidth(word, width)
+      // Token tanpa spasi > sisa anggaran: potong per kolom (chunkByWidthCore, sgr-safe).
+      if (lineHasWord) flush()
+      const firstBudget = Math.max(1, width - lineWidth)
+      const pieces = chunkByWidthCore(openSgrBeforeWord.join("") + word, firstBudget, contBudget)
       for (let i = 0; i < pieces.length - 1; i++) {
+        const prefix = i === 0 ? plainIndent : effectiveHang
         const piece = pieces[i]!
-        out.push(openSgr.length > 0 && !piece.endsWith("\x1b[0m") ? `${piece}\x1b[0m` : piece)
+        out.push(prefix + piece)
       }
-      line = pieces[pieces.length - 1] ?? ""
+      let lastPiece = pieces[pieces.length - 1] ?? ""
+      // Jika masih ada SGR terbuka setelah kata ini, lepas `\x1b[0m` penutup
+      // sementara dari chunkByWidthCore agar kata berikutnya di baris yang sama
+      // tetap mewarisi gaya aslinya.
+      if (openSgr.length > 0 && lastPiece.endsWith("\x1b[0m")) {
+        lastPiece = lastPiece.slice(0, -4)
+      }
+      const lastPrefix = pieces.length === 1 ? plainIndent : effectiveHang
+      line = lastPrefix + lastPiece
       lineWidth = displayWidth(line)
+      lineHasWord = true
     }
     word = ""
     wordWidth = 0
+    openSgrBeforeWord = [...openSgr]
   }
 
   for (const token of displayTokens(s)) {
@@ -475,6 +523,7 @@ export function wrapByWidth(s: string, width: number): string[] {
       if (lineWidth + 1 <= width) {
         line += " "
         lineWidth += 1
+        if (!lineHasWord) plainIndent += " "
       }
       continue
     }
@@ -482,6 +531,10 @@ export function wrapByWidth(s: string, width: number): string[] {
     wordWidth += token.width
   }
   placeWord()
-  if (line !== "" || out.length === 0) flush()
+  if (out.length === 0 || lineHasWord || lineWidth > effectiveHangWidth) {
+    if (line !== "" || out.length === 0) {
+      out.push(openSgr.length > 0 ? `${line}\x1b[0m` : line)
+    }
+  }
   return out.length ? out : [""]
 }

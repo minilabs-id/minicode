@@ -18,6 +18,7 @@ import { formatArgsPreview, formatProviderError, formatUsage } from "../render/f
 import { highlightCode } from "../render/highlight.ts"
 import { paintLedger, runMarker, statusWord } from "../render/ledger.ts"
 import { decorateMarkdown, type FenceMatch, parseFence, renderInline } from "../render/markdown.ts"
+import { effectiveAssistantMargin, MarkdownFlowStepper } from "../render/markdown-layout.ts"
 import { MarkdownTableStream } from "../render/markdown-table.ts"
 import {
   cleanUntrusted,
@@ -236,9 +237,9 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
   // /copy tak tersentuh (rememberTurn selalu jalan sebelum sink).
   let answerBuf = ""
   let answerTruncated = false
-  // K.3 (item 12): lacak apakah sudah ada isi jawaban yang tercetak — untuk
-  // menambahkan satu baris kosong pemisah sebelum heading (paritas dengan TUI).
-  let answerHasLine = false
+  // State aliran markdown untuk memberi jeda bersih antar-poin, heading,
+  // blockquote, tabel, dan code fence (paritas penuh dengan TUI Transcript).
+  let answerFlow = new MarkdownFlowStepper()
   let activeProviderAttempt: number | null = null
   let attemptCopyText = ""
   let attemptAnswerBuf = ""
@@ -247,6 +248,7 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
   let attemptReasoningLine = ""
   let attemptThinkState: "off" | "min" | "exp" = "off"
   let attemptFence: FenceMatch | null = null
+  let attemptAnswerFlow = answerFlow.clone()
   const ANSWER_BUF_MAX = 1_000_000
   // Jawaban tak pernah disembunyikan di pipa/CI (output mesin harus utuh)
   // dan --verbose selalu menampilkan semua.
@@ -356,28 +358,29 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
   const flushLine = (line: string) => {
     const w = process.stdout.columns || 80
     const f = parseFence(line)
+    if (fence !== null) {
+      if (f && f.char === fence.char && f.len >= fence.len) {
+        fence = null
+        answerFlow.onFenceClose()
+      } else {
+        const margin = " ".repeat(effectiveAssistantMargin(w))
+        const content = fence.lang ? highlightCode(line, fence.lang) : line
+        emitAnswer(line.trim() === "" ? "\n" : `${margin}${content}\n`)
+      }
+      return
+    }
     if (f) {
-      if (fence === null) fence = f
-      else if (f.char === fence.char && f.len >= fence.len) fence = null
-      // Baris pembuka/penutup fence adalah delimiter — tidak dicetak.
+      if (answerFlow.onFenceOpen()) emitAnswer("\n")
+      fence = f
       return
     }
-    if (fence) {
-      // Di dalam fence: isi TIDAK disentuh markdown; di-highlight bila ada
-      // bahasa. Tanpa bahasa, tetap apa adanya (perbaikan V8: fence tanpa
-      // bahasa tidak boleh kehilangan *value* karena dianggap italic).
-      const content = fence.lang ? highlightCode(line, fence.lang) : line
-      emitAnswer(`  ${content}\n`)
-      answerHasLine = true
+    if (line.trim() === "") {
+      if (answerFlow.onBlank()) emitAnswer("\n")
       return
     }
-    // Heading (K.3 item 12): satu baris kosong pemisah bila sudah ada isi —
-    // paritas dengan decorateMarkdown TUI (spasi vertikal sebelum heading).
-    const isHeading = /^#{1,3}\s/.test(line)
-    if (isHeading && answerHasLine) emitAnswer("\n")
+    if (answerFlow.onLine(line)) emitAnswer("\n")
     emitAnswer(formatWrapped(decorateMarkdown(line), w))
     emitAnswer("\n")
-    answerHasLine = answerHasLine || line.trim() !== ""
   }
   const consumePlainText = (text: string): void => {
     const combined = plainLineBuffer + text
@@ -392,6 +395,7 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
         continue
       }
       const width = process.stdout.columns || 80
+      if (answerFlow.onTable()) emitAnswer("\n")
       const rendered = process.stdout.isTTY
         ? renderMarkdownTable(event.table, width, renderInline)
         : event.raw
@@ -625,7 +629,7 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
       reasoningLine = ""
       answerBuf = ""
       answerTruncated = false
-      answerHasLine = false
+      answerFlow = new MarkdownFlowStepper()
       activeProviderAttempt = null
       attemptCopyText = ""
       ui.clearCollapsedSections()
@@ -714,6 +718,7 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
           attemptReasoningLine = reasoningLine
           attemptThinkState = thinkState
           attemptFence = fence ? { ...fence } : null
+          attemptAnswerFlow = answerFlow.clone()
           textSan = createStreamSanitizer()
           reasoningSan = createStreamSanitizer()
         } else if (id === activeProviderAttempt && data?.phase === "completed") {
@@ -731,6 +736,7 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
           reasoningLine = attemptReasoningLine
           thinkState = attemptThinkState
           fence = attemptFence ? { ...attemptFence } : null
+          answerFlow = attemptAnswerFlow.clone()
           plainLineBuffer = ""
           tableStream.reset()
           textSan.flush()

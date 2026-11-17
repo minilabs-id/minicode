@@ -1,6 +1,7 @@
 // Kop ringkasan sesi (exit): wordmark "minicode" + detail sesi, dan format durasi.
 
 import { describe, expect, test } from "bun:test"
+import { LOGO_HEIGHT, LOGO_WIDTH, logoBlock, renderLogoRows } from "../src/ui/render/logo.ts"
 import { formatDuration, renderSessionSummary } from "../src/ui/render/session-summary.ts"
 import { stripAnsi } from "../src/ui/render/theme.ts"
 
@@ -51,5 +52,43 @@ describe("session summary (kop)", () => {
     )
     expect(out).toContain("s")
     expect(out).toContain("1s")
+  })
+
+  test("logo minicode menggunakan grid 14x9 (5 baris half-block UTF-8, 9 baris ASCII)", () => {
+    expect(LOGO_WIDTH).toBe(14)
+    expect(LOGO_HEIGHT).toBe(9)
+    const prevAscii = process.env.MINICODE_ASCII
+    const prevWt = process.env.WT_SESSION
+    try {
+      delete process.env.MINICODE_ASCII
+      process.env.WT_SESSION = "1"
+      expect(logoBlock()).toBe("█")
+      expect(renderLogoRows()).toEqual([
+        " ▄▄▄     ▄█▀█▄",
+        "██▀▀█▄ ▄█▀  ██",
+        "██   ▄█▀    ██",
+        "██ ▄█▀  ▀█▄▄██",
+        " ▀▀▀      ▀▀▀ ",
+      ])
+
+      process.env.MINICODE_ASCII = "1"
+      expect(logoBlock()).toBe("#")
+      expect(renderLogoRows()).toEqual([
+        "          ### ",
+        " ###     ## ##",
+        "#####   ##  ##",
+        "##  ## ##   ##",
+        "##    ##    ##",
+        "##   ##     ##",
+        "##  ##  ##  ##",
+        "## ##    #####",
+        " ###      ### ",
+      ])
+    } finally {
+      if (prevAscii === undefined) delete process.env.MINICODE_ASCII
+      else process.env.MINICODE_ASCII = prevAscii
+      if (prevWt === undefined) delete process.env.WT_SESSION
+      else process.env.WT_SESSION = prevWt
+    }
   })
 })

@@ -21,7 +21,7 @@ function paintWordmark(): string {
   return c.bold(WORDMARK)
 }
 
-/** Block logo pemilik (9×19) dicat dengan aksen brand — jatuh ke plain saat
+/** Block logo pemilik (14×9) dicat dengan aksen brand — jatuh ke plain saat
  * NO_COLOR, dan ke '#' saat terminal tanpa UTF-8 (fallback di logo.ts). */
 function paintLogo(): string[] {
   return renderLogoRows().map((row) => c.accent(row))

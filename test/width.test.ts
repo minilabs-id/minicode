@@ -297,4 +297,26 @@ describe("wrapByWidth", () => {
     expect(chunks.length).toBeGreaterThan(1)
     for (const c of chunks.slice(0, -1)) expect(c.endsWith("\x1b[0m")).toBe(true)
   })
+
+  test("hangingIndent menjaga indentasi baris lanjutan tanpa memberi gaya SGR ke spasi gantung", () => {
+    const chunks = wrapByWidth("   - kata satu dua tiga empat lima enam", 18, {
+      hangingIndent: "     ",
+    })
+    expect(chunks.length).toBeGreaterThan(1)
+    expect(chunks[0]).toMatch(/^\s{3}- /)
+    for (const c of chunks.slice(1)) {
+      expect(c).toMatch(/^\s{5}\S/)
+      expect(displayWidth(c)).toBeLessThanOrEqual(18)
+    }
+
+    const colored = wrapByWidth(`\x1b[36m    ${"x".repeat(25)}\x1b[0m`, 14, {
+      hangingIndent: "    ",
+    })
+    expect(colored.length).toBeGreaterThan(2)
+    for (const c of colored.slice(1)) {
+      // Spasi hanging berada SEBELUM SGR pembuka sehingga tidak ikut diwarnai.
+      expect(c.startsWith("    \x1b[36m")).toBe(true)
+      expect(displayWidth(c)).toBeLessThanOrEqual(14)
+    }
+  })
 })

@@ -419,7 +419,7 @@ export async function runTui(ctx: CliSession): Promise<void> {
     return all.filter((t) => t.startsWith(line))
   }
 
-  // Tab: cycle WorkMode (DISCUSS → PLAN → BUILD → DISCUSS). Hanya command ini
+  // Tab: cycle WorkMode (DISCUSS ↔ BUILD). Hanya command ini
   // (beserta /work-mode) yang menggeser operating mode — TIDAK permission mode.
   const cycleWorkMode = (dir: 1 | -1): void => {
     if (!workModeControl) return // policy terinjeksi = tanpa kontrol (fail-closed)
@@ -710,9 +710,8 @@ export async function runTui(ctx: CliSession): Promise<void> {
       } else {
         togglePermissionMode()
       }
-      const modeLabel = mode ? `${mode[0]!.toUpperCase()}${mode.slice(1)}` : ""
+      app.repaint()
       transcript.pushInfo([c.muted(t("tui.modeLine", { m: mode }))])
-      if (modeLabel) app.showToast(t("tui.modeLine", { m: modeLabel }))
       return
     }
     // [mode-architecture] /work-mode = WorkMode (operating mode) SAJA.
@@ -739,8 +738,8 @@ export async function runTui(ctx: CliSession): Promise<void> {
       }
       workModeControl.setWorkMode(next)
       const label = displayWorkMode(next)
+      app.repaint()
       transcript.pushInfo([c.muted(t("tui.workModeLine", { m: label }))])
-      app.showToast(t("tui.workModeLine", { m: label }))
       return
     }
     // /unrestric — full akses tanpa gerbang (jail + bash-guard + sandbox/allowlist).

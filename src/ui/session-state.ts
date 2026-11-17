@@ -72,10 +72,10 @@ export class UiSessionState {
     this.#minimizeAnswer = opts.minimizeAnswer ?? process.env.MINICODE_MINIMIZE_ANSWER === "1"
     this.#minimizeTool = opts.minimizeTool ?? process.env.MINICODE_MINIMIZE_TOOL === "1"
     this.#compact = opts.compact ?? process.env.MINICODE_COMPACT === "1"
-    // Thinking/teks berpikir TERLIHAT secara default (expanded) — alasannya user
-    // ingin membaca proses berpikir model tanpa flag. `MINICODE_SHOW_THINKING=0`
-    // eksplisit mematikan (minimized); `=1` eksplisit menghidupkan.
-    this.#reasoningVisible = opts.reasoningVisible ?? process.env.MINICODE_SHOW_THINKING !== "0"
+    // Thinking/teks berpikir TERSEMBUNYI secara default agar transkrip bersih;
+    // user tetap bisa membukanya lewat `/thinking`, `Ctrl+T`, `--verbose`, atau
+    // `MINICODE_SHOW_THINKING=1` (indikator dots di composer tetap hidup).
+    this.#reasoningVisible = opts.reasoningVisible ?? process.env.MINICODE_SHOW_THINKING === "1"
     // Lipat aktivitas tool per turn (opencode-like): baris ledger per-tool
     // ditahan, diganti satu ringkasan turn. Opt-in (`MINICODE_MINIMIZE_ACTIVITY=1`),
     // default transparan sesuai filosofi "agentic Unix shell".

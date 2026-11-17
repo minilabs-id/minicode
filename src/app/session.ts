@@ -17,6 +17,7 @@ import {
   estimateTools,
   safeStringify,
 } from "#minicore/core/tokens.ts"
+import type { Message, UserMessage } from "#minicore/core/types.ts"
 import { LIMITS } from "../constants.ts"
 // [Area B · PROMPT 06] Binding persetujuan ↔ operasi yang dieksekusi.
 import { ApprovalBindingStore, verifyApprovalBinding } from "../policy/approval-binding.ts"
@@ -257,10 +258,9 @@ export type WorkModeControl = {
  *
  * DISCUSS = investigasi baca-saja yang berorientasi diskusi: model membaca,
  * mencari, dan bernalar, lalu MENYAJIKAN temuan/opsi/trade-off untuk didiskusikan
- * dengan user — bukan menulis atau mengeksekusi apa pun. PLAN = investigasi/
- * planning formal dengan prompt SENDIRI (independen dari `planHint` milik
- * PermissionMode di bawah; lapisan intent ≠ lapisan permission). EXECUTE = tidak
- * menambah apa pun (identitas).
+ * dengan user — bukan menulis atau mengeksekusi apa pun.
+ * BUILD (EXECUTE) = direktif aktif positif bahwa implementasi diizinkan dan
+ * mengabaikan pembatasan DISCUSS pada histori percakapan sebelumnya.
  *
  * Ini *guidance* (behavior), bukan enforcement — enforcement tetap milik ceiling
  * handler `work-mode.ts`. Diekspor agar teruji langsung (pola repo pure/export).
@@ -268,13 +268,109 @@ export type WorkModeControl = {
 export function workModeHint(workMode: WorkMode): string {
   if (workMode === "DISCUSS") {
     return (
-      "\n\nDISCUSS MODE: You are in read-only investigation, discussion, and planning mode. " +
+      "\n\nDISCUSS MODE (active): You are in read-only investigation, discussion, and planning mode. " +
       "Do NOT modify files, run bash, or use write/edit tools. " +
       "Read, search, and reason — investigate the question thoroughly, discuss findings, options, and trade-offs with the user, and produce a concrete implementation plan. " +
       "Do not implement or execute any change."
     )
   }
-  return ""
+  return (
+    "\n\nBUILD MODE (active): Full implementation and execution tools are active. " +
+    "If earlier turns in the conversation occurred under read-only DISCUSS mode, ignore prior self-statements or plans about waiting/refusing edits — proceed directly to implement requested changes using write/edit/bash tools without asking for written confirmation unless genuine ambiguity remains."
+  )
+}
+
+const PLAN_PM_HINT =
+  "\n\nPLAN MODE: You are in read-only planning mode. Do NOT modify files, run bash, or use write/edit tools. Only read, search, and reason — then output a concrete implementation plan."
+
+/**
+ * Penanda live `PermissionMode` (`Auto`, `Ask`, `Unrestricted`, dsb.) pada
+ * system prompt supaya model memahami perilaku gerbang izin & tidak meminta
+ * konfirmasi tertulis yang tidak perlu saat berganti mode.
+ */
+export function permissionModeHint(
+  permissionMode: PermissionMode | undefined,
+  workMode: WorkMode,
+): string {
+  if (!permissionMode) return ""
+  switch (permissionMode) {
+    case "plan":
+      return PLAN_PM_HINT
+    case "unrestricted":
+      return workMode === "EXECUTE"
+        ? "\n\nPERMISSION MODE: UNRESTRICTED (active this session). Interactive approval prompts, workspace path jail, bash-guard, and allowlist restrictions are lifted; execute tools directly without asking confirmation."
+        : "\n\nPERMISSION MODE: UNRESTRICTED (suspended in DISCUSS mode — read-only ceiling and workspace path jail stay enforced until switching to BUILD)."
+    case "ask":
+      return "\n\nPERMISSION MODE: ASK (supervised). Non-read-only mutating/execution tools require interactive approval in the UI; invoke tools directly when ready — do NOT ask the user for written confirmation in chat before calling them."
+    case "auto":
+      return "\n\nPERMISSION MODE: AUTO (autonomous within workspace safety guards). Authorized workspace tools execute without confirmation prompts (`ask_user` is unavailable); act directly."
+    case "allow-all":
+      return "\n\nPERMISSION MODE: ALLOW-ALL. Workspace tools run autonomously subject to path jail and hard security guards."
+    case "allowlist":
+      return "\n\nPERMISSION MODE: ALLOWLIST. Shell commands are restricted to the configured bash allowlist; workspace path jail and hard security guards stay active."
+    case "readonly":
+      return "\n\nPERMISSION MODE: READONLY. Only read-only workspace tools are permitted."
+  }
+}
+
+export interface ModeSnapshot {
+  workMode: WorkMode
+  permissionMode?: PermissionMode
+}
+
+const workModeLabel = (wm: WorkMode): "BUILD" | "DISCUSS" =>
+  wm === "EXECUTE" ? "BUILD" : "DISCUSS"
+
+/**
+ * Catatan transisi singkat ketika `WorkMode` atau `PermissionMode` berubah antar
+ * turn dalam sesi yang sama — disisipkan hanya di salinan wire request turn itu
+ * supaya model tidak terkecoh oleh histori turn sebelumnya saat bolak-balik mode.
+ */
+export function buildModeTransitionNote(prev: ModeSnapshot, curr: ModeSnapshot): string {
+  const parts: string[] = []
+  if (prev.workMode !== curr.workMode) {
+    parts.push(
+      curr.workMode === "EXECUTE"
+        ? `WorkMode ${workModeLabel(prev.workMode)} -> BUILD (write/edit/bash tools NOW ENABLED; ignore prior read-only/planning statements in history and implement directly without asking written confirmation)`
+        : `WorkMode ${workModeLabel(prev.workMode)} -> DISCUSS (read-only mode NOW ACTIVE; do NOT modify files or run mutating commands)`,
+    )
+  }
+  if (prev.permissionMode !== curr.permissionMode && curr.permissionMode) {
+    const fromLabel = (prev.permissionMode ?? "auto").toUpperCase()
+    const toLabel = curr.permissionMode.toUpperCase()
+    if (curr.permissionMode === "unrestricted") {
+      parts.push(
+        curr.workMode === "EXECUTE"
+          ? `PermissionMode ${fromLabel} -> UNRESTRICTED (full access active; approval prompts, jail, and bash-guard bypassed)`
+          : `PermissionMode ${fromLabel} -> UNRESTRICTED (read-only DISCUSS ceiling stays active until switching to BUILD)`,
+      )
+    } else if (curr.permissionMode === "ask") {
+      parts.push(
+        `PermissionMode ${fromLabel} -> ASK (supervised; call tools directly — approval prompt is automatic in UI)`,
+      )
+    } else {
+      parts.push(
+        `PermissionMode ${fromLabel} -> ${toLabel} (autonomous workspace execution active)`,
+      )
+    }
+  }
+  return parts.length > 0 ? `[Runtime mode update: ${parts.join("; ")}]` : ""
+}
+
+function annotateLastUserMessage(messages: readonly Message[], note: string): readonly Message[] {
+  if (!note) return messages
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i]
+    if (msg?.role !== "user") continue
+    const content: UserMessage["content"] =
+      typeof msg.content === "string"
+        ? `${note}\n\n${msg.content}`
+        : [{ type: "text", text: `${note}\n` }, ...msg.content]
+    const next = messages.slice()
+    next[i] = { ...msg, content }
+    return next
+  }
+  return messages
 }
 
 export async function createMinicodeSession(
@@ -425,12 +521,10 @@ export async function createMinicodeSession(
       `createMinicodeSession: workMode ${resolvedWorkMode} dengan permissionHandler terinjeksi belum didukung (fail-closed S2.1)`,
     )
   }
-  const PLAN_PM_HINT =
-    "\n\nPLAN MODE: You are in read-only planning mode. Do NOT modify files, run bash, or use write/edit tools. Only read, search, and reason — then output a concrete implementation plan."
-  // P0.2 (G-PROMPT-RT): rakit bagian dasar sekali, lalu tambahkan `planHint`
-  // (PermissionMode) + `workModeHint` (WorkMode) secara LIVE per-turn lewat
-  // pembungkus provider supaya transisi runtime `/work-mode` maupun `/mode`
-  // tercermin langsung di StreamRequest.system tanpa mengedit vendor/minicore.
+  // P0.2 (G-PROMPT-RT): rakit bagian dasar sekali, lalu tambahkan `workModeHint`
+  // + `permissionModeHint` secara LIVE per-turn lewat pembungkus provider supaya
+  // transisi runtime `/work-mode` maupun `/mode` & `/unrestric` tercermin
+  // langsung di StreamRequest.system tanpa mengedit vendor/minicore.
   const baseSystem = await buildSystemPrompt({
     cwd: defaultCwd,
     extra: opts.systemExtra ?? "",
@@ -686,13 +780,19 @@ export async function createMinicodeSession(
   // Teruskan mode live ke kernel agar ToolContext.permissionMode selalu
   // mencerminkan Shift+Tab saat itu (bukan snapshot saat sesi dibuat).
   const livePermissionMode = (): PermissionMode => (injected ? "readonly" : withMode.__getMode())
+  const liveWorkModeForSystem = (): WorkMode =>
+    injected ? resolvedWorkMode : (wmCtl.__getWorkMode?.() ?? resolvedWorkMode)
+  const livePermissionModeForSystem = (): PermissionMode | undefined =>
+    injected ? opts.permissionMode : withMode.__getMode()
+  let lastTurnMode: ModeSnapshot | null = null
+  let activeTurnTransitionNote = ""
+  let turnSentStream = false
   const computeLiveSystem = (): string => {
-    const pm = injected ? opts.permissionMode : withMode.__getMode()
-    const wm = injected ? resolvedWorkMode : (wmCtl.__getWorkMode?.() ?? resolvedWorkMode)
-    const planHint = pm === "plan" ? PLAN_PM_HINT : ""
+    const pm = livePermissionModeForSystem()
+    const wm = liveWorkModeForSystem()
     const contextWindow = contextWindowForModel(currentContextModel())
     const capacityHint = `\n\n# Harness context capacity\nThe harness currently budgets ${contextWindow} tokens for the selected model. This is the configured/resolved session limit, not a guarantee from the provider. It is independent of the Windows operating system and shell. System instructions, tool schemas, history, and output share this budget; compaction starts before the full window is exhausted. Preserve durable task progress before compaction.`
-    return baseSystem + planHint + workModeHint(wm) + capacityHint
+    return baseSystem + workModeHint(wm) + permissionModeHint(pm, wm) + capacityHint
   }
   // [CTX] Kalibrasi dipisahkan per identitas model agar berpindah ke model
   // lain tidak membawa rasio tokenizer/provider dari sesi sebelumnya.
@@ -852,7 +952,11 @@ export async function createMinicodeSession(
       return provider.models
     },
     async *stream(req, signal) {
+      turnSentStream = true
       const system = computeLiveSystem()
+      const messages = activeTurnTransitionNote
+        ? annotateLastUserMessage(req.messages, activeTurnTransitionNote)
+        : req.messages
       const model = req.model ?? currentContextModel()
       let limit = contextWindowForModel(model)
       let maxOutputTokens = maxOutputTokensForModel(model)
@@ -866,21 +970,21 @@ export async function createMinicodeSession(
           ? rawTools.filter((t) => !hiddenWireTools.has(t.name))
           : rawTools
       const localInputTokens =
-        estimateMessages(req.messages, minicodeEstimator) +
+        estimateMessages(messages, minicodeEstimator) +
         estimateSystem(system, minicodeEstimator) +
         estimateTools(tools, minicodeEstimator)
       let inputTokens =
-        estimateMessages(req.messages, estimator) +
+        estimateMessages(messages, estimator) +
         estimateSystem(system, estimator) +
         estimateTools(tools, estimator)
       // Anchor ukuran nyata: jangan biarkan estimasi (chars/4, bisa under-count
       // 2–5× pada kode/JSON) jatuh di bawah input asli terakhir provider. Input
       // hanya tumbuh antar-turn normal; bila jumlah pesan menyusut (kompaksi,
       // rewind/checkpoint, atau clear), reset anchor agar tidak memicu overflow palsu.
-      if (req.messages.length < lastRequestMessageCount) {
+      if (messages.length < lastRequestMessageCount) {
         lastProviderInputTokens = undefined
       }
-      lastRequestMessageCount = req.messages.length
+      lastRequestMessageCount = messages.length
       if (lastProviderInputTokens !== undefined && lastProviderInputTokens > inputTokens) {
         inputTokens = lastProviderInputTokens
       }
@@ -911,7 +1015,7 @@ export async function createMinicodeSession(
           // cutoff ini palsu (inflasi kalibrasi) — bukan konteks benar-benar penuh.
           factor: calibration.snapshot().factor,
           localInputTokens: localInputTokens,
-          storeMessages: req.messages.length,
+          storeMessages: messages.length,
         },
       })
       let clientOverflowErr: ProviderError | undefined
@@ -945,6 +1049,7 @@ export async function createMinicodeSession(
         for await (const event of provider.stream(
           {
             ...req,
+            messages,
             system,
             ...(hiddenWireTools && hiddenWireTools.size > 0 ? { tools } : {}),
           },
@@ -968,7 +1073,7 @@ export async function createMinicodeSession(
               admittedFactor = calibration.snapshot().factor
               inputTokens = Math.max(
                 inputTokens,
-                estimateMessages(req.messages, estimator) +
+                estimateMessages(messages, estimator) +
                   estimateSystem(system, estimator) +
                   estimateTools(tools, estimator),
               )
@@ -980,7 +1085,7 @@ export async function createMinicodeSession(
           if (currentFactor > admittedFactor) {
             inputTokens = Math.max(
               inputTokens,
-              estimateMessages(req.messages, estimator) +
+              estimateMessages(messages, estimator) +
                 estimateSystem(system, estimator) +
                 estimateTools(tools, estimator),
             )
@@ -1200,35 +1305,55 @@ export async function createMinicodeSession(
     run(input: string, runOpts?: { signal?: AbortSignal; model?: string }) {
       activeContextModel = runOpts?.model ?? opts.model
       const modelForRun = activeContextModel
-      return core.run(input, runOpts).catch((error: unknown) => {
-        // Kernel melaporkan kehabisan konteks sebagai `budget_exceeded` dengan
-        // `details.reason` = `fixpoint` atau `critical`. Keduanya BUKTI
-        // terverifikasi bahwa jendela yang dipakai terlalu kecil untuk sesi ini
-        // — sama sahnya dengan penolakan provider. Tanpa eskalasi di sini,
-        // sesi yang sudah di titik tetap langsung mati padahal endpoint mungkin
-        // punya kapasitas jauh lebih besar.
-        //
-        // Bukan pemicu: `max_steps_exceeded`, `max_turns`, `aborted`, timeout,
-        // dan error provider non-konteks — menaikkan jendela tak akan menolong.
-        // (`max_steps_exceeded` punya jalurnya sendiri: eskalasi batas langkah.)
-        if (error instanceof AgentError && error.kind === "budget_exceeded") {
-          const reason = error.details?.reason
-          if (reason === "fixpoint" || reason === "critical") {
-            const used =
-              typeof error.details?.fixedTokens === "number" ? error.details.fixedTokens : 0
-            escalateContextWindow(modelForRun, used, true)
+      const startMode: ModeSnapshot = {
+        workMode: liveWorkModeForSystem(),
+        permissionMode: livePermissionModeForSystem(),
+      }
+      activeTurnTransitionNote = lastTurnMode
+        ? buildModeTransitionNote(lastTurnMode, startMode)
+        : ""
+      turnSentStream = false
+      return core
+        .run(input, runOpts)
+        .finally(() => {
+          if (turnSentStream) {
+            lastTurnMode = {
+              workMode: liveWorkModeForSystem(),
+              permissionMode: livePermissionModeForSystem(),
+            }
           }
-        }
-        // [T-008] Turn mentok batas langkah: naik satu tangga untuk turn
-        // berikutnya. Kerja turn ini tetap hilang (kernel sudah berhenti), tapi
-        // turn lanjutan tidak akan menabrak dinding yang sama. Bounded: satu
-        // langkah per kejadian, dibatasi STEP_LIMIT_CEILING.
-        if (error instanceof AgentError && error.kind === "max_steps_exceeded") {
-          const used = typeof error.details?.steps === "number" ? error.details.steps : 0
-          escalateMaxSteps(used)
-        }
-        throw error
-      })
+          activeTurnTransitionNote = ""
+          turnSentStream = false
+        })
+        .catch((error: unknown) => {
+          // Kernel melaporkan kehabisan konteks sebagai `budget_exceeded` dengan
+          // `details.reason` = `fixpoint` atau `critical`. Keduanya BUKTI
+          // terverifikasi bahwa jendela yang dipakai terlalu kecil untuk sesi ini
+          // — sama sahnya dengan penolakan provider. Tanpa eskalasi di sini,
+          // sesi yang sudah di titik tetap langsung mati padahal endpoint mungkin
+          // punya kapasitas jauh lebih besar.
+          //
+          // Bukan pemicu: `max_steps_exceeded`, `max_turns`, `aborted`, timeout,
+          // dan error provider non-konteks — menaikkan jendela tak akan menolong.
+          // (`max_steps_exceeded` punya jalurnya sendiri: eskalasi batas langkah.)
+          if (error instanceof AgentError && error.kind === "budget_exceeded") {
+            const reason = error.details?.reason
+            if (reason === "fixpoint" || reason === "critical") {
+              const used =
+                typeof error.details?.fixedTokens === "number" ? error.details.fixedTokens : 0
+              escalateContextWindow(modelForRun, used, true)
+            }
+          }
+          // [T-008] Turn mentok batas langkah: naik satu tangga untuk turn
+          // berikutnya. Kerja turn ini tetap hilang (kernel sudah berhenti), tapi
+          // turn lanjutan tidak akan menabrak dinding yang sama. Bounded: satu
+          // langkah per kejadian, dibatasi STEP_LIMIT_CEILING.
+          if (error instanceof AgentError && error.kind === "max_steps_exceeded") {
+            const used = typeof error.details?.steps === "number" ? error.details.steps : 0
+            escalateMaxSteps(used)
+          }
+          throw error
+        })
     },
     abort() {
       core.abort()

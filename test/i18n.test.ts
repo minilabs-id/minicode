@@ -100,8 +100,6 @@ describe("t()", () => {
       "one.turnHead",
       // "Tool" adalah istilah produk (bukan diterjemahkan menjadi Alat).
       "appr.tool",
-      "app.welcomeTitle",
-      "app.welcomeCwd",
     ])
     const same = (Object.keys(en) as (keyof typeof en)[]).filter(
       (k) => id[k] === en[k] && !NEUTRAL.has(k),

@@ -107,15 +107,15 @@ describe("Area A: dua sesi produksi nyata → state UI terisolasi", () => {
     a.uiState.setSectionMinimized("tool", true)
     a.uiState.setSectionMinimized("answer", true)
     a.uiState.setCompactMode(true)
-    a.uiState.setReasoningVisible(false)
+    a.uiState.setReasoningVisible(true)
 
     // B tak tersentuh.
     expect(b.uiState.sectionMinimized("tool")).toBe(false)
     expect(b.uiState.sectionMinimized("answer")).toBe(false)
     expect(b.uiState.compact).toBe(false)
-    // Default reasoning kini TERLIHAT (true) — membalik toggle A ke false tak
-    // boleh mengubah B yang masih memegang default-nya.
-    expect(b.uiState.reasoningVisible).toBe(true)
+    // Default reasoning kini TERSEMBUNYI (false) — membalik toggle A ke true
+    // tak boleh mengubah B yang masih memegang default-nya.
+    expect(b.uiState.reasoningVisible).toBe(false)
 
     // Instance default modul juga tak tersentuh oleh penulisan sesi A/B.
     expect(defaultUiState.sectionMinimized("tool")).toBe(defaultToolBefore)
@@ -228,20 +228,35 @@ describe("Area A: buffer /copy bertahan lintas re-attach (regresi /copy [n])", (
 
 describe("Area A: env hanya nilai awal, bukan media penyimpanan", () => {
   test("instance baru mewarisi env sebagai nilai awal; toggle tak menulis env", () => {
-    const prev = process.env.MINICODE_MINIMIZE_TOOL
+    const prevMin = process.env.MINICODE_MINIMIZE_TOOL
+    const prevThink = process.env.MINICODE_SHOW_THINKING
     process.env.MINICODE_MINIMIZE_TOOL = "1"
+    delete process.env.MINICODE_SHOW_THINKING
     try {
       const a = new UiSessionState()
       const b = new UiSessionState()
       expect(a.sectionMinimized("tool")).toBe(true)
       expect(b.sectionMinimized("tool")).toBe(true)
+      // Thinking default tersembunyi tanpa MINICODE_SHOW_THINKING=1.
+      expect(a.reasoningVisible).toBe(false)
+      expect(b.reasoningVisible).toBe(false)
+
       a.setSectionMinimized("tool", false)
+      a.setReasoningVisible(true)
       expect(a.sectionMinimized("tool")).toBe(false)
       expect(b.sectionMinimized("tool")).toBe(true)
+      expect(a.reasoningVisible).toBe(true)
+      expect(b.reasoningVisible).toBe(false)
       expect(process.env.MINICODE_MINIMIZE_TOOL).toBe("1")
+      expect(process.env.MINICODE_SHOW_THINKING).toBeUndefined()
+
+      process.env.MINICODE_SHOW_THINKING = "1"
+      expect(new UiSessionState().reasoningVisible).toBe(true)
     } finally {
-      if (prev === undefined) delete process.env.MINICODE_MINIMIZE_TOOL
-      else process.env.MINICODE_MINIMIZE_TOOL = prev
+      if (prevMin === undefined) delete process.env.MINICODE_MINIMIZE_TOOL
+      else process.env.MINICODE_MINIMIZE_TOOL = prevMin
+      if (prevThink === undefined) delete process.env.MINICODE_SHOW_THINKING
+      else process.env.MINICODE_SHOW_THINKING = prevThink
     }
   })
 })
