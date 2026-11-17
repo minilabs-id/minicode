@@ -74,7 +74,9 @@ Batas `BASH_BACKGROUND_MAX_JOBS`; semua job mati saat CLI keluar.
 | Tool | Fungsi | Catatan |
 |---|---|---|
 | `web_fetch` | GET URL publik, 10 dtk, max 50k char | SSRF guard + DNS pinning, redirect manual ≤5 hop, body hard-cap 2 MB |
-| `web_search` | Search via Tavily/Brave/DuckDuckGo | Urutan: `TAVILY_API_KEY` → `BRAVE_API_KEY` → DDG html lite (tanpa key) |
+| `web_search` | Search web atau sumber developer | Web: `TAVILY_API_KEY` → `BRAVE_API_KEY` → Firecrawl keyless → Mwmbl → Marginalia → DDG opt-in (`MINICODE_ALLOW_DDG=1`). Coding: `source=stackoverflow|hn|github|github-issues|grep|wikipedia|arxiv|crossref|openalex|papers|dev` (tanpa key; rate limit per sumber) |
+
+`source=dev` menggabungkan Stack Overflow + Hacker News + GitHub repos/issues + grep.app. `source=papers` menggabungkan OpenAlex + arXiv + Crossref. Kuota keyless: Stack Exchange 300 request/hari per IP, GitHub 60 request/jam unauthenticated (endpoint search lebih ketat), HN/arXiv/Crossref/OpenAlex/grep.app tanpa batas resmi (gunakan wajar). Semua hasil tetap dibungkus sebagai output tak terpercaya.
 
 ## Memory & plan
 

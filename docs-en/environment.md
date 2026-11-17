@@ -65,7 +65,9 @@ The variables that most determine behaviour (the rest are referenced below):
 | `MINICODE_AUTO_MEMORY` | `0` -> disable automatically saving summaries/snippets to memory (opt-out) |
 | `MINICODE_READ_VOLUME_GUARD` | `1` -> enable a once-per-turn warning when read volume (tool result chars) crosses a threshold — a marker for "read a lot without compaction" (working-memory degradation risk, not the token window); off by default |
 | `MINICODE_REPOMAP` | `regex` -> force the regex repo-map (skip LSP) |
-| `TAVILY_API_KEY` | API key for the Tavily web_search (falls back to DuckDuckGo when empty) |
+| `TAVILY_API_KEY` | API key for Tavily web_search (falls back to keyless Firecrawl/Mwmbl/Marginalia when empty) |
+| `BRAVE_API_KEY` | Brave Search API key (second fallback after Tavily) |
+| `MINICODE_ALLOW_DDG` | `1` -> enable the DDG HTML fallback. Off by default because DuckDuckGo is blocked in Indonesia |
 
 ## Budget & config
 

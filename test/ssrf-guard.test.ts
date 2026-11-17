@@ -197,20 +197,50 @@ test("header tak menggema userinfo/query kredensial (bug-hunt F4)", async () => 
   expect(out2).toContain("api_key=[REDACTED]")
 })
 
-test("DDG fallback cap streaming: stream tak-berujung tak gantung (bug-hunt)", async () => {
+test("DDG opt-in cap streaming: stream tak-berujung tak gantung (bug-hunt)", async () => {
   // Kode lama: await res.text() — stream ini tak pernah selesai = test
   // timeout 5 dtk di kode lama. Kode baru: berhenti di hard-cap 2M.
-  const encoder = new TextEncoder()
-  const chunk = encoder.encode("x".repeat(65536))
-  globalThis.fetch = (async () =>
-    new Response(
-      new ReadableStream({
-        pull(controller) {
-          controller.enqueue(chunk)
-        },
-      }),
-      { status: 200, headers: { "content-type": "text/html" } },
-    )) as unknown as typeof fetch
-  const out = String(await webSearchTool.execute({ query: "probe-cap" }, ctx))
-  expect(out.length).toBeLessThan(20000)
+  // DDG kini opt-in (MINICODE_ALLOW_DDG=1); keyless providers dibuat gagal
+  // agar jalur cap DDG yang diuji.
+  const saved = {
+    tavily: process.env.TAVILY_API_KEY,
+    brave: process.env.BRAVE_API_KEY,
+    ddg: process.env.MINICODE_ALLOW_DDG,
+  }
+  delete process.env.TAVILY_API_KEY
+  delete process.env.BRAVE_API_KEY
+  process.env.MINICODE_ALLOW_DDG = "1"
+  try {
+    const encoder = new TextEncoder()
+    const chunk = encoder.encode("x".repeat(65536))
+    globalThis.fetch = (async (input: unknown) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : String((input as Request).url)
+      if (!url.includes("html.duckduckgo.com")) {
+        return new Response("down", { status: 503 })
+      }
+      return new Response(
+        new ReadableStream({
+          pull(controller) {
+            controller.enqueue(chunk)
+          },
+        }),
+        { status: 200, headers: { "content-type": "text/html" } },
+      )
+    }) as unknown as typeof fetch
+    await expect(webSearchTool.execute({ query: "probe-cap" }, ctx)).rejects.toThrow(
+      /response exceeded body cap/,
+    )
+  } finally {
+    if (saved.tavily === undefined) delete process.env.TAVILY_API_KEY
+    else process.env.TAVILY_API_KEY = saved.tavily
+    if (saved.brave === undefined) delete process.env.BRAVE_API_KEY
+    else process.env.BRAVE_API_KEY = saved.brave
+    if (saved.ddg === undefined) delete process.env.MINICODE_ALLOW_DDG
+    else process.env.MINICODE_ALLOW_DDG = saved.ddg
+  }
 }, 15000)

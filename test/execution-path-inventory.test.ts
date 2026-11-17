@@ -108,7 +108,7 @@ export const EXECUTION_PATHS: Readonly<Record<string, RegisteredPath>> = {
   "src/tools/web_search.ts": {
     cls: "external-tool",
     entry: "webSearchTool.execute (fetch)",
-    note: "Network tool (Tavily/Brave/DDG). Admission = permission handler.",
+    note: "Network tool (Tavily/Brave/keyless Firecrawl-Mwmbl-Marginalia/developer APIs; DDG opt-in). Admission = permission handler.",
   },
 
   // ── Integrasi proses (bukan work milik runtime) ──────────────────────────

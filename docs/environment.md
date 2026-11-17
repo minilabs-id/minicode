@@ -64,7 +64,9 @@ Variabel yang paling menentukan perilaku (sisanya referensi di bawah):
 | `MINICODE_AUTO_MEMORY` | `0` → matikan auto-simpan summary/snippet ke memory (opt-out) |
 | `MINICODE_READ_VOLUME_GUARD` | `1` → aktifkan peringatan sekali per turn saat volume baca (char hasil tool) melewati ambang — penanda "banyak dibaca tanpa kompaksi" (risiko degradasi working-memory, bukan jendela token); default nonaktif |
 | `MINICODE_REPOMAP` | `regex` → paksa repo-map regex (skip LSP) |
-| `TAVILY_API_KEY` | API key untuk Tavily web_search (fallback DuckDuckGo bila kosong) |
+| `TAVILY_API_KEY` | API key untuk Tavily web_search (fallback keyless Firecrawl/Mwmbl/Marginalia bila kosong) |
+| `BRAVE_API_KEY` | API key Brave Search (fallback kedua setelah Tavily) |
+| `MINICODE_ALLOW_DDG` | `1` → aktifkan fallback DDG HTML. Default mati karena DuckDuckGo diblokir di Indonesia |
 
 ## Budget & config
 

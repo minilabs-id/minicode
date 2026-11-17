@@ -104,7 +104,8 @@ Kepala tabel penuh ada di [Environment Variables](environment.md); yang paling s
 | `MINICODE_AUTO_MEMORY=0` | Matikan auto-simpan summary/snippet |
 | `MINICODE_TELEMETRY=0` | Matikan `traces.jsonl` |
 | `MINICODE_HOME` | Override home untuk DB lokal/global |
-| `TAVILY_API_KEY` | Tavily web_search (fallback DDG bila kosong) |
+| `TAVILY_API_KEY` | Tavily web_search (fallback keyless Firecrawl/Mwmbl/Marginalia bila kosong) |
+| `MINICODE_ALLOW_DDG=1` | Aktifkan fallback DDG HTML (default mati; DDG diblokir di Indonesia) |
 | `NO_COLOR` | Matikan warna (menang atas TTY) |
 | `MINICODE_ASCII=1` | Glyph ASCII untuk konsol tanpa UTF-8 |
 | `MINICODE_STATUSLINE=rich` | Spinner tampilkan token + biaya sesi |

@@ -105,7 +105,8 @@ The full table is in [Environment Variables](environment.md); the most used:
 | `MINICODE_AUTO_MEMORY=0` | Disable auto-saving summaries/snippets |
 | `MINICODE_TELEMETRY=0` | Disable `traces.jsonl` |
 | `MINICODE_HOME` | Override the home used for local/global DBs |
-| `TAVILY_API_KEY` | Tavily web_search (falls back to DDG when empty) |
+| `TAVILY_API_KEY` | Tavily web_search (falls back to keyless Firecrawl/Mwmbl/Marginalia when empty) |
+| `MINICODE_ALLOW_DDG=1` | Enable the DDG HTML fallback (off by default; DDG is blocked in Indonesia) |
 | `NO_COLOR` | Disable colour (wins over TTY) |
 | `MINICODE_ASCII=1` | ASCII glyphs for consoles without UTF-8 |
 | `MINICODE_STATUSLINE=rich` | Spinner also shows session tokens + cost |

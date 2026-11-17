@@ -73,7 +73,9 @@ Bounded by `BASH_BACKGROUND_MAX_JOBS`; every job dies when the CLI exits.
 | Tool | Function | Notes |
 |---|---|---|
 | `web_fetch` | GET a public URL, 10 s, max 50k chars | SSRF guard + DNS pinning, manual redirects up to 5 hops, 2 MB hard body cap |
-| `web_search` | Search via Tavily/Brave/DuckDuckGo | Order: `TAVILY_API_KEY` -> `BRAVE_API_KEY` -> DDG html lite (no key needed) |
+| `web_search` | Search web or developer sources | Web: `TAVILY_API_KEY` -> `BRAVE_API_KEY` -> Firecrawl keyless -> Mwmbl -> Marginalia -> DDG opt-in (`MINICODE_ALLOW_DDG=1`). Coding: `source=stackoverflow|hn|github|github-issues|grep|wikipedia|arxiv|crossref|openalex|papers|dev` (no key; per-source rate limits) |
+
+`source=dev` combines Stack Overflow + Hacker News + GitHub repos/issues + grep.app. `source=papers` combines OpenAlex + arXiv + Crossref. Keyless quotas: Stack Exchange 300 requests/day per IP, GitHub 60 requests/hour unauthenticated (search endpoints are stricter), HN/arXiv/Crossref/OpenAlex/grep.app have no published limit (use politely). All results are still fenced as untrusted output.
 
 ## Memory & plan
 
