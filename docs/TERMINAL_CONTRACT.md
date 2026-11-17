@@ -520,11 +520,16 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
      `MINICODE_MOTION=0` membuat dots dan sparkle statis tetapi tidak
      menghilangkan feedback; satu baris kosong memisahkan composer dari footer.
 14. Binding TUI: mouse wheel (X10/SGR) scroll transkrip; drag kiri app-level
-     membuat selection transkrip dan `Ctrl+C` menyalinnya; PgUp/PgDn scroll;
-     **Shift+PgUp/PgDn (ESC[5;2~/6;2, modifier 2) = setengah halaman; Home/End
-     saat prompt KOSONG = lompat baris-teratas/ekor transkrip (baris berisi =
-     editing awal/akhir baris; dropdown terbuka = jalur engine)**; Up/Down
-     histori; Tab WorkMode / Shift+Tab PermissionMode; Ctrl+O/T compact/thinking; Ctrl+D baris-kosong
+     membuat selection transkrip yang kontinu melintasi jeda paragraf, border
+     tabel, header kode, serta tepi viewport dan `Ctrl+C` menyalinnya; klik
+     pada baris composer manapun memindahkan kursor langsung ke posisi klik;
+     PgUp/PgDn scroll; **Shift+PgUp/PgDn (ESC[5;2~/6;2, modifier 2) = setengah
+     halaman; Home/End saat prompt KOSONG = lompat baris-teratas/ekor
+     transkrip (baris berisi = editing awal/akhir baris; dropdown terbuka =
+     jalur engine)**; Up/Down bernavigasi antar-baris visual pada prompt
+     terbungkus/multi-baris (menjaga kolom) lalu ke histori saat di baris
+     visual pertama/terakhir; Tab WorkMode / Shift+Tab PermissionMode; Ctrl+O/T
+     compact/thinking; Ctrl+D baris-kosong
      keluar; Esc membersihkan selection lebih dulu, lalu batal input / abort
      turn (busy: SEMUA input dibekukan kecuali abort, scroll, dan selection —
      Enter pun sunyi; berlaku juga saat layar MENCIUT: abort+scroll selalu lolos
@@ -844,7 +849,10 @@ panjang).
 - `test/tui-app.test.ts` — I1/I13/I14/I17-I20 (baris indikator dipotong ke
   lebar frame walau locale id 51 kolom; logo kecil pojok kiri atas saat boot kosong tanpa teks welcome;
   `Tab` autolengkap dropdown `/` vs putar WorkMode saat menu tertutup; klik pada
-  baris composer kedua hasil wrap; prompt idle bertahan setelah Esc;
+  baris composer hasil wrap (>5 baris scrolled maupun baris lanjutan) serta
+  navigasi visual panah Up/Down pada paragraf panjang; drag seleksi kontinu
+  melintasi jeda paragraf, border tabel, header kode, dan keluar batas viewport;
+  prompt idle bertahan setelah Esc;
   `repaint()` tak melukis saat suspended; boot/exit pairing, transcript
   viewport, mouse-wheel/drag-selection/PgUp/PgDn scroll + indikator, prompt
   editing, dots/timer, status bar, Esc-only abort, quit, suspend/resume,

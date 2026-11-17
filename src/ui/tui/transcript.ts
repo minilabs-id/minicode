@@ -878,6 +878,10 @@ export class Transcript {
       /^[\s─━┌┐└┘├┤┬┴┼]+$/.test(row) || /^[\s+-]+$/.test(row)
     const horizontal = plainRows.some(isBorderRow)
     const fields = Math.max(1, table.headers.length)
+    // Tabel kotak diawali margin kiri (spasi); lewati dari displayStart dan sertakan
+    // plainBody agar seleksi & highlight pakai pemetaan kolom layar, bukan tab source.
+    const outerCols = effectiveAssistantMargin(Math.max(1, width))
+    const marginPrefix = outerCols > 0 ? " ".repeat(outerCols) : ""
     let logicalIndex = 0
     return renderedRows.map((row, index) => {
       const plain = plainRows[index] ?? ""
@@ -890,14 +894,17 @@ export class Transcript {
         const dataIndex = table.rows.length === 0 ? 0 : Math.floor(index / fields) + 1
         range = ranges[dataIndex] ?? range
       }
+      const rowDisplayStart = marginPrefix && plain.startsWith(marginPrefix) ? outerCols : 0
+      const rowSelectable = !isBorder && sourceId >= 0
       return {
         text: row,
         sourceId: isBorder ? -1 : sourceId,
         sourceStart: range.start,
         sourceEnd: range.end,
-        displayStart: 0,
+        displayStart: rowDisplayStart,
         displayEnd: displayWidth(row),
-        selectable: !isBorder && sourceId >= 0,
+        selectable: rowSelectable,
+        ...(rowSelectable ? { plainBody: plain.slice(rowDisplayStart) } : {}),
       }
     })
   }

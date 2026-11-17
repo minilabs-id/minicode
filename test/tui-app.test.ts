@@ -1274,4 +1274,128 @@ describe("TuiApp", () => {
     await tty!.send(KEY.ctrlD)
     await runP
   })
+
+  test("panah Up/Down menavigasi baris visual paragraf prompt panjang dan menjaga kolom", async () => {
+    const { app, calls } = setup({ columns: 30, rows: 14 })
+    const runP = app.run()
+    await tty!.ready()
+    await tty!.waitForOutput((o) => o.includes("minicode"))
+    // Isi histori agar fallback Up di baris visual pertama tetap teruji.
+    await tty!.send("histori-lama")
+    await tty!.send(KEY.enter)
+    await waitForCall(calls, "histori-lama")
+    await tty!.waitForScreen((rows) => rows.some((l) => l.includes("› histori-lama")))
+
+    // Baris visual 0: "minicode › " (11) + 19 'a' (30 col); baris 1: 30 'b'; baris 2: 14 'c'.
+    await tty!.send("a".repeat(19) + "b".repeat(30) + "c".repeat(14))
+    // Up dari baris 2 kolom 15 → baris 1 kolom 15 (tengah 'b', bukan melompat ke histori).
+    await tty!.send(KEY.up)
+    await tty!.send("Y")
+    expect(tty!.screen().join("\n")).toContain(`${"b".repeat(14)}Y${"b".repeat(15)}`)
+
+    // Sekarang kursor di baris 1 kolom 16 ('Y' di indeks 14 → col 16).
+    // Down kembali ke baris 2: "b" tergeser wrap + 14 'c' = 15 col, jadi col 16 terjepit di ujung kanan.
+    await tty!.send(KEY.down)
+    await tty!.send("Z")
+    expect(tty!.screen().join("\n")).toContain(`b${"c".repeat(14)}Z`)
+
+    // Up dua kali ke baris 0: desiredCol 16 (17th screen col) - prefix 11 = indeks 5 pada 'a'.
+    await tty!.send(KEY.up)
+    await tty!.send(KEY.up)
+    await tty!.send("X")
+    expect(tty!.screen().join("\n")).toContain("minicode › aaaaaXaaaaaaaaaaaaa")
+
+    // Sudah di baris visual paling atas → Up berikutnya memanggil histori lama.
+    await tty!.send(KEY.up)
+    expect(tty!.screen().join("\n")).toContain("minicode › histori-lama")
+    await tty!.send(KEY.ctrlU)
+    await tty!.send(KEY.ctrlD)
+    await runP
+  })
+
+  test("klik mouse pada paragraf prompt panjang (>5 baris wrap) menempatkan kursor tepat pada baris target", async () => {
+    const { app } = setup({ columns: 30, rows: 16 })
+    const runP = app.run()
+    await tty!.ready()
+    await tty!.waitForOutput((o) => o.includes("minicode"))
+    // 6 baris visual (> MAX_INPUT_ROWS 5): jendela menampilkan baris 1..5 (composerOffset=1).
+    await tty!.send(
+      "0".repeat(19) +
+        "1".repeat(30) +
+        "2".repeat(30) +
+        "3".repeat(30) +
+        "4".repeat(30) +
+        "5".repeat(8),
+    )
+    const screen = tty!.screen()
+    const row2 = screen.findIndex((l) => l.startsWith("22222"))
+    expect(row2).toBeGreaterThan(0)
+    // Klik kolom ke-6 pada baris "222..." -> menyisipkan tepat di baris yang diklik (bukan baris 0).
+    await tty!.send(`\x1b[<0;6;${row2 + 1}M\x1b[<0;6;${row2 + 1}m`)
+    await tty!.send("M")
+    expect(tty!.screen().join("\n")).toContain("22222M22222")
+
+    // Navigasi panah Up berkali-kali menggulir jendela ke baris 0 ("000...") dan klik di baris 0 tetap akurat.
+    for (let i = 0; i < 4; i++) await tty!.send(KEY.up)
+    const row0 = tty!.screen().findIndex((l) => l.includes("minicode › 000"))
+    expect(row0).toBeGreaterThanOrEqual(0)
+    await tty!.send(`\x1b[<0;15;${row0 + 1}M\x1b[<0;15;${row0 + 1}m`)
+    await tty!.send("A")
+    expect(tty!.screen().join("\n")).toContain("minicode › 000A000")
+    await tty!.send(KEY.ctrlU)
+    await tty!.send(KEY.ctrlD)
+    await runP
+  })
+
+  test("drag seleksi melintasi jeda paragraf, border tabel, header kode, dan tepi layar tetap kontinu", async () => {
+    const { app, bus, copied, screenText } = setup({ rows: 18, columns: 60 })
+    const runP = app.run()
+    await tty!.ready()
+    await tty!.waitForOutput((o) => o.includes("00.00.00"))
+    bus.emit("provider:text", {
+      text: [
+        "Paragraf pertama teks panjang",
+        "",
+        "| KolomA | KolomB |",
+        "| --- | --- |",
+        "| isiSatu | isiDua |",
+        "",
+        "```ts",
+        "const akhir = 42",
+        "```",
+      ].join("\n"),
+    })
+    bus.emit("turn:completed", {})
+    await tty!.waitForScreen((rows) => rows.some((l) => l.includes("const akhir = 42")))
+
+    const screen = tty!.screen()
+    const startIdx = screen.findIndex((l) => l.includes("Paragraf pertama"))
+    const borderIdx = screen.findIndex((l) => l.includes("├──"))
+    const endIdx = screen.findIndex((l) => l.includes("const akhir = 42"))
+    expect(startIdx).toBeGreaterThanOrEqual(0)
+    expect(borderIdx).toBeGreaterThan(startIdx)
+    expect(endIdx).toBeGreaterThan(borderIdx)
+
+    // Tekan di baris paragraf 1, drag melewati border tabel & jeda kosong, bahkan
+    // turun keluar batas transkrip menuju area composer/footer sebelum release.
+    await tty!.send(`\x1b[<0;4;${startIdx + 1}M`)
+    await tty!.send(`\x1b[<32;12;${borderIdx + 1}M`)
+    await tty!.send(`\x1b[<32;25;18M`)
+    await tty!.send(`\x1b[<0;25;18m`)
+
+    expect(tty!.all()).toContain("\x1b[7m")
+    await tty!.send(KEY.ctrlC)
+    expect(copied[0]).toContain("Paragraf pertama teks panjang")
+    expect(copied[0]).toContain("KolomA\tKolomB")
+    expect(copied[0]).toContain("const akhir = 42")
+    expect(screenText()).toContain("selection copied")
+
+    // Klik sekali pada baris padding kosong teratas membatalkan seleksi secara bersih.
+    await tty!.send(`\x1b[<0;1;1M\x1b[<0;1;1m`)
+    await tty!.send(KEY.ctrlC)
+    expect(copied.length).toBe(1)
+
+    await tty!.send(KEY.ctrlD)
+    await runP
+  })
 })

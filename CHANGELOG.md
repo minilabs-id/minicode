@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.30.2] - 2026-11-17
+
+### Fixed — Interaksi Mouse & Keyboard TUI
+
+- **Seleksi teks tidak lagi hilang-hilangan**: Drag selection kini kontinu saat melintasi jeda paragraf kosong, border tabel, header blok kode, maupun keluar batas atas/bawah viewport (`resolveTranscriptPoint`, auto-scroll memindai baris selectable terdekat), sorotan tetap utuh pada baris jeda yang diapit seleksi, dan repaint seleksi memakai timer sendiri agar tidak bentrok dengan repaint bus (`src/ui/tui/app.ts`). Baris tabel kini membawa `displayStart` margin + `plainBody` sehingga pemetaan kolom seleksi tabel akurat (`src/ui/tui/transcript.ts`).
+- **Klik mouse di paragraf prompt panjang**: Klik pada baris composer mana pun (termasuk baris hasil wrap dan saat jendela composer >5 baris tergulir) memindahkan kursor tepat ke posisi klik, memakai satu grid baris visual bersama dengan render.
+- **Panah Up/Down di composer**: Up/Down kini bergerak per baris visual (paragraf wrap maupun multiline) sambil menjaga kolom, dan baru berpindah ke histori saat di baris visual paling atas/bawah; jendela composer ikut bergulir bila kursor keluar area terlihat.
+- **Kontrak & test**: `docs/TERMINAL_CONTRACT.md` diperbarui; test regresi baru di `test/tui-app.test.ts` dan `test/tui-transcript.test.ts`.
+
 ## [0.30.1] - 2026-11-17
 
 ### Added & Changed — UX TUI, Render Teks, Thinking Default & Kejelasan Mode

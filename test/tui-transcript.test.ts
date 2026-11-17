@@ -500,4 +500,34 @@ describe("Transcript UI audit regressions (Fase 3.2-3.4)", () => {
     const selEnd = t.pointAt(last, last.displayEnd)!
     expect(t.selectionText(selStart, selEnd)).toBe(nested)
   })
+
+  test("projectTable menyertakan displayStart dan plainBody selaras kolom layar tabel", () => {
+    const { t } = setup()
+    t.pushInfo(["| KolomA | KolomB |\n| --- | --- |\n| satu | dua |"])
+    const rows = t.viewport(60, 12, 0).rows
+    const selectable = rows.filter((r) => r.selectable)
+    expect(selectable.length).toBe(2)
+    const headerRow = selectable[0]!
+    expect(headerRow.displayStart).toBe(3)
+    expect(headerRow.plainBody).toBeDefined()
+    expect(headerRow.plainBody!).toMatch(/^[│|]/)
+
+    const pStart = t.pointAt(headerRow, headerRow.displayStart)!
+    const pMid = t.pointAt(
+      headerRow,
+      Math.floor((headerRow.displayStart + headerRow.displayEnd) / 2),
+    )!
+    const pEnd = t.pointAt(headerRow, headerRow.displayEnd)!
+    expect(pStart.offset).toBe(headerRow.sourceStart)
+    expect(pMid.offset).toBeGreaterThan(pStart.offset)
+    expect(pEnd.offset).toBe(headerRow.sourceEnd)
+
+    const colStart = t.columnAtOffset(headerRow, pStart.offset)
+    const colMid = t.columnAtOffset(headerRow, pMid.offset)
+    const colEnd = t.columnAtOffset(headerRow, pEnd.offset)
+    expect(colStart).toBe(headerRow.displayStart)
+    expect(colMid).toBeGreaterThan(colStart)
+    expect(colMid).toBeLessThan(colEnd)
+    expect(colEnd).toBe(headerRow.displayEnd)
+  })
 })

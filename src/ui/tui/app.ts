@@ -15,7 +15,6 @@ import {
   createDecoderState,
   createKeyStreamPump,
   createState,
-  cursorLineIndex,
   type DecoderState,
   type KeyStreamPump,
   type PromptKey,
@@ -27,7 +26,7 @@ import { appendWrapped, shaveWrapped } from "../render/composer-wrap.ts"
 import { formatError } from "../render/errors.ts"
 import { listRow } from "../render/list.ts"
 import { LOGO_WIDTH, renderLogoRows } from "../render/logo.ts"
-import { sanitizeAnsi, sanitizeAnsiLine, stripSgr } from "../render/sanitize.ts"
+import { sanitizeAnsiLine, stripSgr } from "../render/sanitize.ts"
 import { c, glyphs, scrimMode, scrimSgr } from "../render/theme.ts"
 import { chunkByWidth, displayWidth, escapeLength, truncateToWidth } from "../render/width.ts"
 import { motionReduced } from "../runtime/motion.ts"
@@ -156,6 +155,7 @@ export function dropdownWindowStart(sel: number, visible: number, total: number)
 interface FrameLayout {
   frame: string[]
   cursor: { row: number; col: number }
+  cols: number
   transcriptRows: TranscriptRow[]
   transcriptTop: number
   composerTop: number
@@ -163,14 +163,25 @@ interface FrameLayout {
   composerOffset: number
 }
 
+/** Detail satu baris visual composer agar layout, klik mouse, dan panah atas/bawah memakai geometri yang sama. */
+interface ComposerVisualRow {
+  text: string
+  prefixCols: number
+  body: string
+  startCursor: number
+  endCursor: number
+  softWrapped: boolean
+}
+
 /** Baris visual composer + posisi kursor (indeks baris 0-based, kolom 1-based). */
 interface ComposerLayout {
   rows: string[]
   visIdx: number
   col: number
+  visual?: ComposerVisualRow[]
 }
 
-const EMPTY_COMPOSER_LAYOUT: ComposerLayout = { rows: [], visIdx: 0, col: 1 }
+const EMPTY_COMPOSER_LAYOUT: ComposerLayout = { rows: [], visIdx: 0, col: 1, visual: [] }
 
 interface SelectionState {
   anchor: TranscriptPoint
@@ -237,6 +248,18 @@ function graphemeOffsetAtColumn(text: string, column: number): number {
     if (target <= used) return i + 1
   }
   return units.length
+}
+
+/** Konversi koordinat kolom layar (0-based) ke posisi grapheme pada satu baris visual composer. */
+function cursorAtVisualRowColumn(row: ComposerVisualRow, screenColZeroBased: number): number {
+  const targetBodyCol = Math.max(0, screenColZeroBased - row.prefixCols)
+  const localOffset = graphemeOffsetAtColumn(row.body, targetBodyCol)
+  // Pada sub-baris hasil soft-wrap, posisi `endCursor` dirender di awal sub-baris
+  // berikutnya; jepit ke sebelum wrap agar klik/panah tetap bertahan di baris target.
+  const maxOffset = row.softWrapped
+    ? Math.max(0, row.endCursor - row.startCursor - 1)
+    : row.endCursor - row.startCursor
+  return row.startCursor + Math.min(localOffset, maxOffset)
 }
 
 export class TuiApp {
@@ -323,6 +346,10 @@ export class TuiApp {
    */
   private busUnsubs: (() => void)[] = []
   private repaintTimer: ReturnType<typeof setTimeout> | undefined
+  /** Timer debounce khusus drag-selection agar tak bentrok dengan repaint bus. */
+  private selectionPaintTimer: ReturnType<typeof setTimeout> | undefined
+  /** Kolom layar (0-based) yang dijaga selama navigasi panah Up/Down berturut-turut. */
+  private preferredCol: number | null = null
   /** Ukuran transkrip saat mulai scroll ke atas (basis hitung baris baru). */
   private scrollBase = 0
   /** Panjang visual terakhir (kunci posisi baca agar stream tak merampasnya). */
@@ -544,6 +571,7 @@ export class TuiApp {
       clearTimeout(this.repaintTimer)
       this.repaintTimer = undefined
     }
+    this.clearSelectionPaintTimer()
     if (this.toastTimer !== undefined) {
       clearTimeout(this.toastTimer)
       this.toastTimer = undefined
@@ -739,6 +767,7 @@ export class TuiApp {
       }
       if (this.state.line || this.editing) {
         this.state = createState()
+        this.preferredCol = null
         this.histIdx = -1
         // Prompt TETAP tampil setelah Esc: kontrak I13 mensyaratkan prompt
         // ada saat idle, dan menyembunyikannya membuat layar terlihat mati
@@ -810,40 +839,20 @@ export class TuiApp {
       this.historySearch()
       return
     }
-    // Up/Down di luar menu: jika teks multi-line, navigasi baris dalam teks dulu.
-    // Hanya picu navigasi histori bila Up di baris pertama atau Down di baris terakhir.
+    // Up/Down di luar menu: navigasi baris visual dalam composer dulu (baik
+    // paragraf wrap panjang maupun multiline `\n`), sambil menjaga kolom layar.
+    // Hanya picu navigasi histori bila sudah di baris visual pertama/terakhir.
     if ((key.type === "up" || key.type === "down") && !this.state.menuOpen) {
-      if (this.state.line.includes("\n")) {
-        const { lineIdx, colIdx } = cursorLineIndex(this.state.line, this.state.cursor)
-        const lines = this.state.line.split("\n")
-        if (key.type === "up" && lineIdx > 0) {
-          const targetLine = lineIdx - 1
-          const targetCol = Math.min(colIdx, toGraphemes(lines[targetLine] ?? "").length)
-          let newCursor = 0
-          for (let i = 0; i < targetLine; i++) newCursor += toGraphemes(lines[i] ?? "").length + 1
-          newCursor += targetCol
-          this.state = { ...this.state, cursor: newCursor }
-          this.paintCurrent()
-          return
-        }
-        if (key.type === "down" && lineIdx < lines.length - 1) {
-          const targetLine = lineIdx + 1
-          const targetCol = Math.min(colIdx, toGraphemes(lines[targetLine] ?? "").length)
-          let newCursor = 0
-          for (let i = 0; i < targetLine; i++) newCursor += toGraphemes(lines[i] ?? "").length + 1
-          newCursor += targetCol
-          this.state = { ...this.state, cursor: newCursor }
-          this.paintCurrent()
-          return
-        }
-      }
-      this.historyNav(key.type === "up" ? -1 : 1)
+      const dir = key.type === "up" ? -1 : 1
+      if (this.moveCursorVertical(dir)) return
+      this.historyNav(dir)
       return
     }
     this.applyEngine(key)
   }
 
   private applyEngine(key: PromptKey): void {
+    this.preferredCol = null
     if (["char", "backspace", "delete", "enter", "ctrl-j"].includes(key.type)) this.selection = null
     const hints = (line: string) => (line.startsWith("/") ? this.host.listCommands(line) : [])
     // Fast path kursor: panah/Home/End hanya memindahkan kursor — isi frame
@@ -910,6 +919,16 @@ export class TuiApp {
       return
     }
     const composer = this.composerLayout(Math.max(10, screen.cols))
+    const visibleRows = Math.min(MAX_INPUT_ROWS, Math.max(1, layout.composerLines.length))
+    // Bila kursor berpindah ke luar jendela composer terlihat (input > 5 baris),
+    // lukis ulang penuh agar `composerOffset` & baris tampil ikut bergulir.
+    if (
+      composer.visIdx < layout.composerOffset ||
+      composer.visIdx >= layout.composerOffset + visibleRows
+    ) {
+      this.paintCurrent()
+      return
+    }
     const row = Math.max(1, layout.cursor.row + (composer.visIdx - prevVisIdx))
     const col = Math.max(1, composer.col)
     try {
@@ -927,6 +946,7 @@ export class TuiApp {
   private async doSubmit(rawLine: string): Promise<void> {
     const line = rawLine.trim()
     this.state = createState()
+    this.preferredCol = null
     this.histIdx = -1
     this.editing = false
     this.followTail()
@@ -1198,6 +1218,7 @@ export class TuiApp {
     // menu (sel), bukan history, dan user terkunci tak bisa melewati entri command.
     s = { ...s, menuOpen: false, sel: -1 }
     this.state = s
+    this.preferredCol = null
     this.editing = true
     this.paintCurrent()
   }
@@ -1408,11 +1429,19 @@ export class TuiApp {
     } catch {}
   }
 
+  private clearSelectionPaintTimer(): void {
+    if (this.selectionPaintTimer !== undefined) {
+      clearTimeout(this.selectionPaintTimer)
+      this.selectionPaintTimer = undefined
+    }
+  }
+
   private paintCurrent(): void {
     if (this.paintBatchDepth > 0) {
       this.paintPending = true
       return
     }
+    this.clearSelectionPaintTimer()
     if (!this.currentScreen || this.quitRequested) return
     try {
       this.paint(this.currentScreen)
@@ -1505,6 +1534,39 @@ export class TuiApp {
     return layout
   }
 
+  /** Pastikan layout composer memuat peta baris visual lengkap (dipakai klik & panah vertikal). */
+  private composerVisual(cols: number): ComposerLayout & { visual: ComposerVisualRow[] } {
+    const w = Math.max(10, cols)
+    const cached = this.composerLayout(w)
+    if (cached.visual) return cached as ComposerLayout & { visual: ComposerVisualRow[] }
+    const pf = promptFirst()
+    const full = this.layoutComposer(this.state.line, this.state.cursor, w)
+    this.composerCache = {
+      line: this.state.line,
+      cursor: this.state.cursor,
+      cols: w,
+      editing: true,
+      prompt: pf,
+      layout: full,
+    }
+    return full as ComposerLayout & { visual: ComposerVisualRow[] }
+  }
+
+  /** Pindahkan kursor ke baris visual di atas/bawah dalam composer (menjaga kolom). */
+  private moveCursorVertical(dir: -1 | 1): boolean {
+    if (this.isBusy() || !this.editing || !this.state.line) return false
+    const cols = Math.max(10, this.currentScreen?.cols || process.stdout.columns || 80)
+    const { visual, visIdx, col } = this.composerVisual(cols)
+    const targetIdx = visIdx + dir
+    if (targetIdx < 0 || targetIdx >= visual.length) return false
+    const desiredCol = this.preferredCol ?? Math.max(0, col - 1)
+    this.preferredCol = desiredCol
+    this.state = { ...this.state, cursor: cursorAtVisualRowColumn(visual[targetIdx]!, desiredCol) }
+    this.selection = null
+    this.paintCurrent()
+    return true
+  }
+
   /**
    * Coba wrap inkremental untuk ketikan/silang di UJUNG baris. `null` =
    * pemanggil membungkus ulang penuh (`layoutComposer`). Aman: hanya menerima
@@ -1552,51 +1614,91 @@ export class TuiApp {
   private layoutComposer(line: string, cursor: number, w: number): ComposerLayout {
     const pf = promptFirst()
     const pc = promptCont()
+    const pfCols = displayWidth(pf)
     // Prompt kosong SELALU satu baris utuh — sama dengan jalur lama. Tanpa
     // special-case, terminal sempit (w < lebar prefix) memecah prefix jadi dua
     // baris dan menggeser kursor; MIN_COLS membuatnya tak terjangkau di app,
     // tapi helper ini juga dipakai layout lain/test.
-    if (!line) return { rows: [pf], visIdx: 0, col: displayWidth(pf) + 1 }
-    // Kursor dinormalisasi ke batas grapheme supaya emoji tak terbelah saat
-    // dihitung (targetWidth memakai teks sebelum kursor).
-    const units = toGraphemes(line)
-    const safeCursor = Math.max(0, Math.min(cursor, units.length))
-    const before = units.slice(0, safeCursor).join("")
-    const beforeLines = before.split("\n")
-    const logicalIdx = beforeLines.length - 1
-    const lastLine = beforeLines[logicalIdx] ?? ""
-    const targetWidth = displayWidth(logicalIdx === 0 ? pf : pc) + displayWidth(lastLine)
-
-    const rows: string[] = []
-    const logical = line.split("\n")
-    let visIdx = 0
-    let col = 1
-    let cursorRowFound = false
-    for (let li = 0; li < logical.length; li++) {
-      const prefix = li === 0 ? pf : pc
-      const full = `${prefix}${logical[li] ?? ""}`
-      const wrapped = chunkByWidth(full, w)
-      for (const row of wrapped) rows.push(row)
-      if (li < logicalIdx) {
-        visIdx += wrapped.length
-        continue
-      }
-      if (li !== logicalIdx || cursorRowFound) continue
-      // Baris kursor: baris visual pertama yang memuat targetWidth (atau
-      // baris terakhir bila kursor tepat di ujung wrap).
-      let acc = 0
-      for (let wi = 0; wi < wrapped.length; wi++) {
-        const ww = displayWidth(wrapped[wi] ?? "")
-        if (targetWidth < acc + ww || wi === wrapped.length - 1) {
-          visIdx += wi
-          col = Math.max(1, targetWidth - acc + 1)
-          cursorRowFound = true
-          break
-        }
-        acc += ww
+    if (!line) {
+      return {
+        rows: [pf],
+        visIdx: 0,
+        col: pfCols + 1,
+        visual: [
+          {
+            text: pf,
+            prefixCols: pfCols,
+            body: "",
+            startCursor: 0,
+            endCursor: 0,
+            softWrapped: false,
+          },
+        ],
       }
     }
-    return { rows, visIdx, col }
+    // Kursor dinormalisasi ke batas grapheme supaya emoji tak terbelah saat
+    // dihitung. Hitungan visual & posisi kursor dibangun dari array `visual`
+    // yang sama agar render, klik mouse, dan panah atas/bawah selalu sinkron.
+    const units = toGraphemes(line)
+    const safeCursor = Math.max(0, Math.min(cursor, units.length))
+    const visual: ComposerVisualRow[] = []
+    const rows: string[] = []
+    const logical = line.split("\n")
+    let cursorBase = 0
+    for (let li = 0; li < logical.length; li++) {
+      const prefix = li === 0 ? pf : pc
+      const wrapped = chunkByWidth(`${prefix}${logical[li] ?? ""}`, w)
+      let prefixRemaining = prefix
+      for (let wi = 0; wi < wrapped.length; wi++) {
+        const rowText = wrapped[wi] ?? ""
+        const plain = stripSgr(rowText)
+        let prefixCols = 0
+        let body = plain
+        if (prefixRemaining) {
+          let matched = 0
+          while (
+            matched < prefixRemaining.length &&
+            matched < plain.length &&
+            prefixRemaining[matched] === plain[matched]
+          ) {
+            matched++
+          }
+          prefixCols = displayWidth(plain.slice(0, matched))
+          body = plain.slice(matched)
+          prefixRemaining = prefixRemaining.slice(matched)
+        }
+        const bodyLen = toGraphemes(body).length
+        const startCursor = cursorBase
+        const endCursor = cursorBase + bodyLen
+        visual.push({
+          text: rowText,
+          prefixCols,
+          body,
+          startCursor,
+          endCursor,
+          softWrapped: wi < wrapped.length - 1,
+        })
+        rows.push(rowText)
+        cursorBase = endCursor
+      }
+      cursorBase += 1
+    }
+    let visIdx = Math.max(0, visual.length - 1)
+    let col = 1
+    for (let i = 0; i < visual.length; i++) {
+      const row = visual[i]!
+      // Baris kursor: baris visual pertama yang memuat `safeCursor` (atau
+      // baris akhir baris logis bila kursor tepat di ujung tanpa soft-wrap).
+      if (safeCursor < row.endCursor || (safeCursor === row.endCursor && !row.softWrapped)) {
+        visIdx = i
+        const beforeInRow = toGraphemes(row.body)
+          .slice(0, Math.max(0, safeCursor - row.startCursor))
+          .join("")
+        col = Math.max(1, row.prefixCols + displayWidth(beforeInRow) + 1)
+        break
+      }
+    }
+    return { rows, visIdx, col, visual }
   }
 
   private menuRows(rows: number, cols: number, busy = this.isBusy()): string[] {
@@ -1652,13 +1754,13 @@ export class TuiApp {
   }
 
   private scheduleSelectionPaint(): void {
-    if (this.repaintTimer !== undefined) return
-    this.repaintTimer = setTimeout(() => {
-      this.repaintTimer = undefined
+    if (this.selectionPaintTimer !== undefined) return
+    this.selectionPaintTimer = setTimeout(() => {
+      this.selectionPaintTimer = undefined
       if (!this.quitRequested && this.suspended === 0 && !this.released) this.paintCurrent()
     }, 16)
     try {
-      ;(this.repaintTimer as unknown as { unref?: () => void }).unref?.()
+      ;(this.selectionPaintTimer as unknown as { unref?: () => void }).unref?.()
     } catch {}
   }
 
@@ -1669,64 +1771,105 @@ export class TuiApp {
     if (this.isBusy() || !this.editing) return false
     const relativeRow = key.y - 1 - layout.composerTop
     const targetRow = layout.composerOffset + relativeRow
-    if (relativeRow < 0 || targetRow < 0) return false
-    const w = Math.max(10, process.stdout.columns || 80)
-    const pf = promptFirst()
-    const pc = promptCont()
-    const logical = this.state.line.split("\n")
-    let rowIndex = 0
-    let baseCodeUnits = 0
-    for (let lineIndex = 0; lineIndex < logical.length; lineIndex++) {
-      const line = logical[lineIndex] ?? ""
-      const prefix = lineIndex === 0 ? pf : pc
-      const rows = chunkByWidth(`${prefix}${line}`, w)
-      if (targetRow < rowIndex + rows.length) {
-        const localRow = targetRow - rowIndex
-        // Baris ter-wrap: jumlahkan panjang grapheme baris visual sebelumnya
-        // di baris logis yang sama supaya klik di baris lanjutan akurat.
-        let precedingGraphemes = 0
-        for (let ri = 0; ri < localRow; ri++) {
-          const prevPlain = stripSgr(sanitizeAnsi(rows[ri] ?? ""))
-          const prevBody =
-            ri === 0 && prevPlain.startsWith(prefix) ? prevPlain.slice(prefix.length) : prevPlain
-          precedingGraphemes += toGraphemes(prevBody).length
-        }
-        const row = rows[localRow] ?? ""
-        const plain = stripSgr(sanitizeAnsi(row))
-        const hasPrefix = localRow === 0 && plain.startsWith(prefix)
-        const body = hasPrefix ? plain.slice(prefix.length) : plain
-        const targetColumn = Math.max(0, key.x - 1 - (hasPrefix ? displayWidth(prefix) : 0))
-        const local = precedingGraphemes + graphemeOffsetAtColumn(body, targetColumn)
-        const base = toGraphemes(this.state.line.slice(0, baseCodeUnits)).length
-        this.state = { ...this.state, cursor: base + local }
-        this.histIdx = -1
-        this.editing = true
-        this.selection = null
-        this.paintCurrent()
-        return true
-      }
-      rowIndex += rows.length
-      baseCodeUnits += line.length + 1
+    const { visual } = this.composerVisual(layout.cols)
+    const shownRows = Math.min(MAX_INPUT_ROWS, Math.max(1, visual.length - layout.composerOffset))
+    if (
+      relativeRow < 0 ||
+      relativeRow >= shownRows ||
+      targetRow < 0 ||
+      targetRow >= visual.length
+    ) {
+      return false
     }
-    return false
+    this.state = {
+      ...this.state,
+      cursor: cursorAtVisualRowColumn(visual[targetRow]!, key.x - 1),
+    }
+    this.preferredCol = null
+    this.histIdx = -1
+    this.editing = true
+    this.selection = null
+    this.paintCurrent()
+    return true
+  }
+
+  /**
+   * Petakan koordinat baris/kolom ke TranscriptPoint terdekat yang selectable.
+   * Menjaga drag selection tetap kontinu saat melintasi separator kosong, border
+   * tabel, header blok kode, atau keluar batas atas/bawah viewport.
+   */
+  private resolveTranscriptPoint(
+    layout: FrameLayout,
+    rowIndex: number,
+    column: number,
+  ): TranscriptPoint | null {
+    const rows = layout.transcriptRows
+    const n = rows.length
+    if (n === 0) return null
+    const clamped = Math.max(0, Math.min(n - 1, rowIndex))
+    const pointOnRow = (idx: number, col: number): TranscriptPoint | null => {
+      const target = rows[idx]
+      if (!target?.selectable) return null
+      return this.transcript.pointAt(target, Math.max(0, col))
+    }
+    if (rowIndex >= 0 && rowIndex < n) {
+      const direct = pointOnRow(clamped, column)
+      if (direct) return direct
+    }
+    if (rowIndex < 0) {
+      for (let i = 0; i < n; i++) {
+        const p = pointOnRow(i, 0)
+        if (p) return p
+      }
+      return null
+    }
+    if (rowIndex >= n) {
+      for (let i = n - 1; i >= 0; i--) {
+        const p = pointOnRow(i, rows[i]!.displayEnd)
+        if (p) return p
+      }
+      return null
+    }
+    const anchor = this.selection?.anchor
+    for (let delta = 1; delta < n; delta++) {
+      const upIdx = clamped - delta
+      const downIdx = clamped + delta
+      const upRow = upIdx >= 0 && rows[upIdx]?.selectable ? rows[upIdx] : undefined
+      const downRow = downIdx < n && rows[downIdx]?.selectable ? rows[downIdx] : undefined
+      if (upRow && downRow) {
+        if (anchor) {
+          const upEnd = this.transcript.pointAt(upRow, upRow.displayEnd)
+          if (upEnd && this.transcript.comparePoints(anchor, upEnd) <= 0) return upEnd
+          const downStart = this.transcript.pointAt(downRow, 0)
+          if (downStart) return downStart
+        }
+        return this.transcript.pointAt(upRow, column) ?? this.transcript.pointAt(downRow, column)
+      }
+      if (upRow) return this.transcript.pointAt(upRow, upRow.displayEnd)
+      if (downRow) return this.transcript.pointAt(downRow, 0)
+    }
+    return null
   }
 
   private handleMouse(key: Extract<PromptKey, { type: "mouse" }>): void {
-    if (key.action === "move" || (key.action !== "release" && key.button !== 0)) return
+    if (key.action === "move") return
+    if (key.button !== 0 && !(key.action === "release" && key.button === null)) return
     const layout = this.lastLayout
     if (!layout) return
     const rowIndex = key.y - 1 - layout.transcriptTop
-    const row = rowIndex >= 0 ? layout.transcriptRows[rowIndex] : undefined
+    const insideTranscript = rowIndex >= 0 && rowIndex < layout.transcriptRows.length
     if (key.action === "press") {
-      if (!row) {
+      if (!insideTranscript) {
         if (this.movePromptCursor(layout, key)) return
         this.selection = null
+        this.stopAutoScroll()
         this.paintCurrent()
         return
       }
-      const point = this.transcript.pointAt(row, key.x - 1)
+      const point = this.resolveTranscriptPoint(layout, rowIndex, key.x - 1)
       if (!point) {
         this.selection = null
+        this.stopAutoScroll()
         this.paintCurrent()
         return
       }
@@ -1736,20 +1879,17 @@ export class TuiApp {
       return
     }
     if (key.action === "drag") {
-      if (!this.selection?.dragging || !row) return
-      const point = this.transcript.pointAt(row, key.x - 1)
-      if (!point) return
-      this.selection.focus = point
+      if (!this.selection?.dragging) return
       this.updateAutoScroll(layout, key)
+      const point = this.resolveTranscriptPoint(layout, rowIndex, key.x - 1)
+      if (point) this.selection.focus = point
       this.scheduleSelectionPaint()
       return
     }
     if (key.action === "release") {
       if (!this.selection?.dragging) return
-      if (row) {
-        const point = this.transcript.pointAt(row, key.x - 1)
-        if (point) this.selection.focus = point
-      }
+      const point = this.resolveTranscriptPoint(layout, rowIndex, key.x - 1)
+      if (point) this.selection.focus = point
       this.selection.dragging = false
       this.stopAutoScroll()
       this.paintCurrent()
@@ -1760,7 +1900,10 @@ export class TuiApp {
 
   /** Mulai/teruskan auto-scroll seleksi ke arah `dir` pada kolom `col`. */
   private startAutoScroll(dir: 1 | -1, col: number): void {
-    if (this.autoScrollTimer !== undefined && this.autoScrollDir === dir) return
+    if (this.autoScrollTimer !== undefined && this.autoScrollDir === dir) {
+      this.autoScrollCol = col
+      return
+    }
     this.stopAutoScroll()
     this.autoScrollDir = dir
     this.autoScrollCol = col
@@ -1772,13 +1915,19 @@ export class TuiApp {
       }
       const layout = this.lastLayout
       if (!layout || layout.transcriptRows.length === 0) return
-      // Tautkan fokus ke baris tepi SEBELUM menggulir, supaya tiap tick seleksi
-      // meluas searah scroll; scrollRows() berikutnya menampilkan baris tetangga.
+      // Tautkan fokus ke baris selectable terdekat dari tepi viewport SEBELUM
+      // menggulir (pindai masuk bila baris tepi persis border/pemisah kosong).
       const rows = layout.transcriptRows
-      const edgeRow = this.autoScrollDir === 1 ? rows[0] : rows[rows.length - 1]
-      if (edgeRow?.selectable) {
-        const p = this.transcript.pointAt(edgeRow, this.autoScrollCol - 1)
-        if (p) sel.focus = p
+      const step = this.autoScrollDir === 1 ? 1 : -1
+      const start = this.autoScrollDir === 1 ? 0 : rows.length - 1
+      for (let i = start; i >= 0 && i < rows.length; i += step) {
+        const edgeRow = rows[i]!
+        if (!edgeRow.selectable) continue
+        const p = this.transcript.pointAt(edgeRow, Math.max(0, this.autoScrollCol - 1))
+        if (p) {
+          sel.focus = p
+          break
+        }
       }
       // +1 baris/ke atas (konten lama), -1/ke bawah (konten baru).
       this.scrollRows(this.autoScrollDir)
@@ -1910,10 +2059,39 @@ export class TuiApp {
       this.selection = null
     }
     const bodyRows = viewport.rows
-    const body = bodyRows.map((row) => {
-      const selected = this.selectedRange(row)
-      return selected ? highlightColumns(row.text, selected.start, selected.end) : row.text
-    })
+    let body = bodyRows.map((row) => row.text)
+    if (this.selection) {
+      const sel = this.selection
+      const first =
+        this.transcript.comparePoints(sel.anchor, sel.focus) <= 0 ? sel.anchor : sel.focus
+      const last = first === sel.anchor ? sel.focus : sel.anchor
+      const ranges = bodyRows.map((row) => this.selectedRange(row))
+      let topSelected = -1
+      let bottomSelected = -1
+      for (let i = 0; i < ranges.length; i++) {
+        if (ranges[i]) {
+          if (topSelected === -1) topSelected = i
+          bottomSelected = i
+        }
+      }
+      body = bodyRows.map((row, i) => {
+        const selected = ranges[i]
+        if (selected) return highlightColumns(row.text, selected.start, selected.end)
+        // Jaga kontinitas visual blok seleksi saat melintasi jeda paragraf/poin
+        // kosong atau baris border/header non-selectable yang diapit teks terpilih.
+        const spannedLogical =
+          row.selectable &&
+          row.sourceId >= 0 &&
+          this.transcript.comparePoints(first, { id: row.sourceId, offset: row.sourceStart }) < 0 &&
+          this.transcript.comparePoints(last, { id: row.sourceId, offset: row.sourceEnd }) > 0
+        const spannedVisual = topSelected !== -1 && i > topSelected && i < bottomSelected
+        if (spannedLogical || spannedVisual) {
+          const wRow = displayWidth(row.text)
+          return wRow > 0 ? highlightColumns(row.text, 0, wRow) : "\x1b[7m \x1b[27m"
+        }
+        return row.text
+      })
+    }
     // Zero-state boot: tampilkan hanya logo kecil minicode di pojok kiri atas
     // tanpa blok identitas/hint di atas prompt & footer agar tampilan awal clean.
     if (this.transcript.total() === 0 && !busy && menu.length === 0 && !this.state.line) {
@@ -1991,6 +2169,7 @@ export class TuiApp {
         row: Math.max(1, Math.min(height, cursorRow + topPad - crop)),
         col: Math.max(1, cursorCol),
       },
+      cols: Math.max(10, width),
       transcriptRows: bodyRows,
       transcriptTop: topPad - crop,
       composerTop: topPad - crop + body.length + menu.length,
