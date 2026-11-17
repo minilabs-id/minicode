@@ -1,17 +1,19 @@
 // Proteksi regresi untuk perbaikan Audit Command & Deduplikasi (CMD-01..CMD-10).
 // Mencakup helper telemetry (`readTraceRows`), builtin command (`/init`, `/sessions`),
-// dan perilaku end-to-end TUI (`/compact`, `/thinking`, `/fold`, `/expand`, `/history`, `/init`).
+// dan perilaku end-to-end TUI (`/view compact`, `/view thinking`, `/view fold`, `/view expand`, `/sessions history`, `/init`).
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { type CommandContext, handleBuiltinCommand } from "../cli/commands.ts"
 import type { CliSession } from "../cli/setup.ts"
 import { runTui } from "../cli/tui.ts"
 import { saveSession } from "../src/session/persistence.ts"
+import { TaskStore } from "../src/task/store.ts"
 import { readTraceRows } from "../src/telemetry/trace.ts"
 import { resetLocaleState, setSessionLocale, t } from "../src/ui/i18n/locale.ts"
+import { UiSessionState } from "../src/ui/session-state.ts"
 import { captureOutput } from "./helpers/capture.ts"
 import { createFakeBus, installFakeTty, KEY } from "./helpers/tui-harness.ts"
 
@@ -37,7 +39,7 @@ beforeEach(() => {
   process.env.MINICODE_HOME = makeTmp("minicode-cmd-audit-home-")
 })
 
-afterEach(() => {
+afterEach(async () => {
   tty?.restore()
   tty = null
   resetLocaleState()
@@ -45,12 +47,11 @@ afterEach(() => {
   else process.env.MINICODE_HOME = prevHome
   if (prevLang === undefined) delete process.env.MINICODE_LANG
   else process.env.MINICODE_LANG = prevLang
+  const { rm } = await import("node:fs/promises")
   for (const d of tmpRoots.splice(0)) {
-    try {
-      rmSync(d, { recursive: true, force: true })
-    } catch {
-      // Handle Windows SQLite (sessions.db) lambat lepas — sama seperti test/cli-handlers.test.ts.
-    }
+    TaskStore.close(d)
+    if (process.platform === "win32") Bun.gc(true)
+    await rm(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 })
   }
 })
 
@@ -87,6 +88,7 @@ function makeFakeTuiSession(cwd: string) {
     modelRef: {} as { current?: string },
     permissionMode: "auto",
     permissions: undefined,
+    uiState: new UiSessionState(),
     workModeControl: {
       getWorkMode: () => wm,
       setWorkMode: (next: "DISCUSS" | "EXECUTE") => {
@@ -192,7 +194,143 @@ describe("handleBuiltinCommand: /init & /sessions", () => {
 })
 
 describe("TUI slash commands (CMD-02..CMD-09)", () => {
-  test("/compact, /thinking, dan /fold menerima on/off case-insensitive serta menolak argumen asing", async () => {
+  test.each(["compact", "thinking", "expand", "minimize", "fold"] as const)(
+    "/view picker dispatches %s without leaking input",
+    async (action) => {
+      const session = makeFakeTuiSession(makeTmp("minicode-view-picker-"))
+      tty = installFakeTty({ columns: 100, rows: 24 })
+      const runP = runTui(session)
+      try {
+        await tty.ready()
+        await tty.waitForOutput((o) => o.includes("00.00.00"))
+        await tty.send("/view")
+        await tty.send(KEY.enter)
+        const frame = await tty.waitForScreen((f) => f.some((l) => l.includes("compact —")))
+        for (const name of ["compact", "thinking", "expand", "minimize", "fold"]) {
+          expect(frame.join("\n")).toContain(`${name} —`)
+        }
+        expect(tty.promptListeners()).toBe(1)
+        const index = ["compact", "thinking", "expand", "minimize", "fold"].indexOf(action)
+        for (let i = 0; i < index; i++) await tty.send(KEY.down)
+        await tty.send(KEY.enter)
+        const receipt =
+          action === "compact"
+            ? t("tui.compactLine", { v: t("state.expanded") })
+            : action === "thinking"
+              ? t("tui.thinkingSet", { v: t("state.expanded") })
+              : action === "expand"
+                ? t("tui.expandEmpty")
+                : action === "minimize"
+                  ? t("tui.sectionsMin")
+                  : t("tui.activityFold", { v: t("state.folded") })
+        await tty.waitForScreen((f) => f.some((l) => l.includes(receipt)))
+        expect(tty.promptListeners()).toBe(1)
+        if (action === "minimize") {
+          expect(session.uiState!.sectionMinimized("tool")).toBe(true)
+          expect(session.uiState!.sectionMinimized("answer")).toBe(true)
+        }
+      } finally {
+        await closeTuiClean(tty, runP)
+      }
+    },
+  )
+
+  test("retired names are unknown in TUI completion and dispatch", async () => {
+    tty = installFakeTty({ columns: 100, rows: 24 })
+    const runP = runTui(makeFakeTuiSession(makeTmp("minicode-retired-")))
+    try {
+      await tty.ready()
+      await tty.waitForOutput((o) => o.includes("00.00.00"))
+      for (const name of [
+        "work-mode",
+        "sync",
+        "compact",
+        "thinking",
+        "expand",
+        "minimize",
+        "fold",
+        "history",
+        "branches",
+      ]) {
+        await tty.send(`/${name}`)
+        await tty.send(KEY.enter)
+        // Pesan i18n berkapital ("Unknown command"), jadi bandingkan tanpa case.
+        await tty.waitForScreen((f) =>
+          f.some((l) => l.toLowerCase().includes(`unknown command: /${name}`)),
+        )
+      }
+    } finally {
+      await closeTuiClean(tty, runP)
+    }
+  })
+
+  test("/provider sync keeps opt-in, live progress, refresh and output-window routing", async () => {
+    const dir = makeTmp("minicode-provider-sync-ui-")
+    mkdirSync(join(dir, ".minicode"), { recursive: true })
+    let release!: () => void
+    const pending = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let requests = 0
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        if (!new URL(request.url).pathname.endsWith("/models"))
+          return new Response("not found", { status: 404 })
+        requests++
+        await pending
+        return Response.json({ data: [{ id: "new-one" }, { id: "new-two" }] })
+      },
+    })
+    const path = join(dir, ".minicode", "config.json")
+    writeFileSync(
+      path,
+      JSON.stringify({
+        providers: [{ id: "sync-ui", baseUrl: `${server.url}v1`, apiKey: "test", models: ["old"] }],
+      }),
+    )
+    const { clearDetectCache } = await import("../src/providers/detect.ts")
+    clearDetectCache()
+    let runP: Promise<void> | null = null
+    try {
+      const denied = await captureOutput(() =>
+        handleBuiltinCommand("/provider sync", makeCommandCtx(dir, "DISCUSS")),
+      )
+      expect(denied.value.handled).toBe(true)
+      expect(requests).toBe(0)
+      expect(JSON.parse(readFileSync(path, "utf8")).providers[0].models).toEqual(["old"])
+      const session = makeFakeTuiSession(dir)
+      session.allowLocalConfig = true
+      tty = installFakeTty({ columns: 90, rows: 24 })
+      runP = runTui(session)
+      await tty.ready()
+      await tty.waitForOutput((o) => o.includes("00.00.00"))
+      await tty.send("/provider SYNC")
+      await tty.send(KEY.enter)
+      await tty.waitForScreen((f) => f.some((l) => l.includes(t("cmd.syncing"))))
+      tty.resize(100, 26)
+      await tty.waitForScreen((f) => f.some((l) => l.includes(t("out.titleSync"))))
+      release()
+      await tty.waitForScreen((f) => f.some((l) => l.includes("completed sync-ui")))
+      expect(requests).toBe(1)
+      expect(JSON.parse(readFileSync(path, "utf8")).providers[0].models).toEqual([
+        "new-one",
+        "new-two",
+      ])
+      await tty.send(KEY.esc, 90)
+      await tty.waitForScreen((f) => f.some((l) => l.includes("minicode ›")))
+      expect(tty.screen().join("\n")).not.toContain("completed sync-ui")
+    } finally {
+      release()
+      if (tty && runP) await tty.send(KEY.esc, 90)
+      await closeTuiClean(tty, runP)
+      server.stop(true)
+      clearDetectCache()
+    }
+  }, 15_000)
+
+  test("/view compact, /view thinking, dan /view fold menerima on/off case-insensitive serta menolak argumen asing", async () => {
     const dir = makeTmp("minicode-tui-toggles-")
     tty = installFakeTty({ columns: 90, rows: 24 })
     let runP: Promise<void> | null = runTui(makeFakeTuiSession(dir))
@@ -200,25 +338,25 @@ describe("TUI slash commands (CMD-02..CMD-09)", () => {
       await tty.ready()
       await tty.waitForOutput((o) => o.includes("00.00.00"))
 
-      await tty.send("/compact ON")
+      await tty.send("/view compact ON")
       await tty.send(KEY.enter)
       await tty.waitForScreen((f) =>
         f.some((l) => l.includes(t("tui.compactLine", { v: t("state.compact") }))),
       )
 
-      await tty.send("/compact salah")
+      await tty.send("/view compact salah")
       await tty.send(KEY.enter)
       await tty.waitForScreen((f) =>
         f.some((l) => l.includes(t("tui.toggleUse", { cmd: "compact" }))),
       )
 
-      await tty.send("/thinking OFF")
+      await tty.send("/view thinking OFF")
       await tty.send(KEY.enter)
       await tty.waitForScreen((f) =>
         f.some((l) => l.includes(t("tui.thinkingSet", { v: t("state.minimized") }))),
       )
 
-      await tty.send("/fold bogus")
+      await tty.send("/view fold bogus")
       await tty.send(KEY.enter)
       await tty.waitForScreen((f) => f.some((l) => l.includes(t("tui.toggleUse", { cmd: "fold" }))))
 
@@ -231,7 +369,7 @@ describe("TUI slash commands (CMD-02..CMD-09)", () => {
     }
   })
 
-  test("/expand membedakan daftar kosong vs id tidak ditemukan", async () => {
+  test("/view expand membedakan daftar kosong vs id tidak ditemukan", async () => {
     const dir = makeTmp("minicode-tui-expand-")
     tty = installFakeTty({ columns: 90, rows: 24 })
     let runP: Promise<void> | null = runTui(makeFakeTuiSession(dir))
@@ -239,11 +377,11 @@ describe("TUI slash commands (CMD-02..CMD-09)", () => {
       await tty.ready()
       await tty.waitForOutput((o) => o.includes("00.00.00"))
 
-      await tty.send("/expand")
+      await tty.send("/view expand")
       await tty.send(KEY.enter)
       await tty.waitForScreen((f) => f.some((l) => l.includes(t("tui.expandEmpty"))))
 
-      await tty.send("/expand tidak-ada-id")
+      await tty.send("/view expand tidak-ada-id")
       await tty.send(KEY.enter)
       await tty.waitForScreen((f) =>
         f.some((l) => l.includes(t("tui.expandNotFound", { id: "tidak-ada-id" }))),
@@ -258,7 +396,7 @@ describe("TUI slash commands (CMD-02..CMD-09)", () => {
     }
   })
 
-  test("/history menampilkan prompt in-memory dari sesi berjalan walau file histori kosong", async () => {
+  test("/sessions history menampilkan prompt in-memory dari sesi berjalan walau file histori kosong", async () => {
     const dir = makeTmp("minicode-tui-hist-")
     tty = installFakeTty({ columns: 90, rows: 24 })
     let runP: Promise<void> | null = runTui(makeFakeTuiSession(dir))
@@ -270,7 +408,7 @@ describe("TUI slash commands (CMD-02..CMD-09)", () => {
       await tty.send(KEY.enter)
       await tty.waitForListener(2000)
 
-      await tty.send("/history")
+      await tty.send("/sessions history")
       await tty.send(KEY.enter)
       await tty.waitForScreen(
         (f) =>
@@ -289,7 +427,7 @@ describe("TUI slash commands (CMD-02..CMD-09)", () => {
     }
   })
 
-  test("/init di TUI tertahan saat DISCUSS lalu berhasil sesudah /work-mode BUILD", async () => {
+  test("/init di TUI tertahan saat DISCUSS lalu berhasil sesudah /mode BUILD", async () => {
     const dir = makeTmp("minicode-tui-init-")
     tty = installFakeTty({ columns: 90, rows: 24 })
     let runP: Promise<void> | null = runTui(makeFakeTuiSession(dir))
@@ -304,7 +442,7 @@ describe("TUI slash commands (CMD-02..CMD-09)", () => {
       await tty.send(KEY.esc, 90)
       await tty.waitForScreen((f) => f.some((l) => l.includes("minicode ›")))
 
-      await tty.send("/work-mode BUILD")
+      await tty.send("/mode BUILD")
       await tty.send(KEY.enter)
       await tty.waitForScreen((f) => f.some((l) => l.includes("work mode: BUILD")))
 

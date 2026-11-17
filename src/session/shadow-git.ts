@@ -6,6 +6,7 @@ import { LIMITS } from "../constants.ts"
 import { GIT_NO_DIFF_DRIVERS, GIT_SAFE_BASE, gitFilterNeutralizers } from "../lib/git-hardening.ts"
 import { sanitizeSessionPart } from "../lib/session-id.ts"
 import { resolveTrustedExecutable } from "../lib/trusted-exec.ts"
+import { isOwnedState, isRealPathOutsideRoot, isSensitive } from "../policy/jail.ts"
 import { sanitizeSpawnEnv } from "../policy/scrub.ts"
 
 // Checkpoint berbasis objek git ("shadow git").
@@ -184,14 +185,22 @@ function sanitizeRefPart(s: string): string {
 }
 
 /** Perubahan antara dua tree, dibatasi ke path di dalam workspace. */
-export async function diffTrees(cwd: string, from: string, to: string): Promise<ShadowChange[]> {
+export async function diffTrees(
+  cwd: string,
+  from: string,
+  to: string,
+  strict = false,
+): Promise<ShadowChange[]> {
   // --no-ext-diff/--no-textconv: diff tak menjalankan driver konten repo.
   // (Flag diff harus sebelum revisi `from`/`to`, bukan di ekor.)
   const r = await git(
     ["diff", ...GIT_NO_DIFF_DRIVERS, "--name-status", "-z", "--find-renames", from, to],
     cwd,
   )
-  if (r.code !== 0) return []
+  if (r.code !== 0) {
+    if (strict) throw new Error(`git diff failed: ${r.stderr.trim()}`)
+    return []
+  }
   const parts = r.stdout.split("\0").filter((s) => s.length > 0)
   const out: ShadowChange[] = []
   for (let i = 0; i < parts.length; ) {
@@ -258,19 +267,50 @@ export function isPathWithinWorkspace(root: string, p: string): boolean {
  * Ini penting karena diff tree bisa memuat path dari toplevel repo bila
  * snapshot diambil dengan scope berbeda.
  */
-export async function restoreTree(cwd: string, tree: string): Promise<RestoreResult> {
+export async function restoreTree(
+  cwd: string,
+  tree: string,
+  opts?: { paths: readonly string[]; strict: true },
+): Promise<RestoreResult> {
   const root = resolve(cwd)
   const applied: string[] = []
   const skipped: string[] = []
 
+  if (opts && !/^[0-9a-f]{40,64}$/.test(tree)) throw new Error("invalid snapshot tree")
   const now = await ephemeralTree(cwd)
-  if (!now) return { applied, skipped: ["(failed to read current state)"] }
+  if (!now) {
+    if (opts) throw new Error("failed to read current workspace")
+    return { applied, skipped: ["(failed to read current state)"] }
+  }
   if (now === tree) return { applied, skipped: [] } // sudah identik
 
-  const changes = await diffTrees(cwd, tree, now)
+  const allChanges = await diffTrees(cwd, tree, now, opts?.strict)
+  const changes = opts
+    ? allChanges.filter(
+        (change) =>
+          opts.paths.includes(change.path) || (!!change.from && opts.paths.includes(change.from)),
+      )
+    : allChanges
   if (changes.length === 0) return { applied, skipped: [] }
 
   const inside = (p: string): boolean => isPathWithinWorkspace(root, p)
+  if (opts) {
+    for (const change of changes) {
+      for (const path of [change.path, ...(change.from ? [change.from] : [])]) {
+        const absolute = resolve(root, path)
+        if (
+          !inside(path) ||
+          isRealPathOutsideRoot(absolute, root) ||
+          isOwnedState(absolute) ||
+          isSensitive(absolute)
+        )
+          throw new Error(`unsafe restore path: ${path}`)
+        const entry = await git(["ls-tree", tree, "--", path], cwd)
+        if (entry.code !== 0 || (entry.stdout && !/^100(?:644|755) blob /.test(entry.stdout)))
+          throw new Error(`unsupported restore entry: ${path}`)
+      }
+    }
+  }
 
   // Path yang harus DIAMBIL dari tree lama (berubah di tree lama → sekarang
   // sebagai M, atau hilang sekarang sebagai D dari sudut pandang diff).
@@ -319,8 +359,11 @@ export async function restoreTree(cwd: string, tree: string): Promise<RestoreRes
     }
   }
 
+  if (opts && skipped.length) throw new Error(`restore failed: ${skipped.join(", ")}`)
   for (const p of toDelete) {
-    await rm(resolve(root, p), { force: true, recursive: false }).catch(() => {})
+    const removal = rm(resolve(root, p), { force: true, recursive: false })
+    if (opts) await removal
+    else await removal.catch(() => {})
     applied.push(`${p} (removed)`)
   }
 

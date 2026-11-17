@@ -28,7 +28,7 @@ minicode doctor [--json]   # runtime, provider, pricing, memory, sandbox, config
 - **Verify does not run:** set `MINICODE_VERIFY_CMD` / `verifyCommand`.
 - **Budget is inaccurate:** prices are estimates; the real cost depends on the provider.
 - **`bun install` cannot find minicore:** make sure `vendor/minicore` exists (it ships with the repo). Re-syncing needs a sibling `../minicore` + `bun run vendor:minicore`.
-- **`/sync` says restart?** Only when there really are new models (sync honestly reports `{updated,failed}`).
+- **`/provider sync` says restart?** Only when there really are new models (sync honestly reports `{updated,failed}`).
 - **`models --match` is empty?** Header noise is already cleaned; empty means genuinely no match.
 - **Colour leaking into a pipe?** Colour is gated on `stdout.isTTY`; `NO_COLOR` wins; `TERM`/`COLORTERM` do not turn colour on in a pipe.
 

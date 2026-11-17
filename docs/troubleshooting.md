@@ -28,7 +28,7 @@ minicode doctor [--json]   # runtime, provider, pricing, memory, sandbox, config
 - **Verify tak jalan:** set `MINICODE_VERIFY_CMD` / `verifyCommand`.
 - **Budget tak akurat:** harga estimasi; biaya riil tergantung provider.
 - **`bun install` gagal cari minicore:** pastikan `vendor/minicore` ada (ikut repo). Sync ulang butuh sibling `../minicore` + `bun run vendor:minicore`.
-- **`/sync` bilang restart?** Hanya bila benar ada model baru (sync jujur `{updated,failed}`).
+- **`/provider sync` bilang restart?** Hanya bila benar ada model baru (sync jujur `{updated,failed}`).
 - **`models --match` kosong?** Header noise sudah dibersihkan; kosong = benar tidak match.
 - **Warna bocor ke pipe?** Warna di-gate `stdout.isTTY`; `NO_COLOR` menang; `TERM`/`COLORTERM` tidak menyalakan warna di pipe.
 

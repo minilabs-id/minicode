@@ -26,7 +26,7 @@ import { appendWrapped, shaveWrapped } from "../render/composer-wrap.ts"
 import { formatError } from "../render/errors.ts"
 import { listRow } from "../render/list.ts"
 import { LOGO_WIDTH, renderLogoRows } from "../render/logo.ts"
-import { sanitizeAnsiLine, stripSgr } from "../render/sanitize.ts"
+import { sanitizeAnsi, sanitizeAnsiLine, stripSgr } from "../render/sanitize.ts"
 import { c, glyphs, scrimMode, scrimSgr } from "../render/theme.ts"
 import { chunkByWidth, displayWidth, escapeLength, truncateToWidth } from "../render/width.ts"
 import { motionReduced } from "../runtime/motion.ts"
@@ -279,6 +279,7 @@ export class TuiApp {
   private waitingStartedAt = 0
   /** Timestamp abort terakhir (ms) — deteksi double-tap Esc = quit. */
   private lastAbortAt = 0
+  private lastIdleEscapeAt = 0
   /** Hint "tekan lagi untuk keluar" tampil sekali setelah abort pertama. */
   private abortHintOn = false
   /** Micro-toast 2 detik di slot footer saat mengganti bahasa/salin. */
@@ -361,10 +362,15 @@ export class TuiApp {
   /** Kolom x yang ditambatkan fokus seleksi selama auto-scroll. */
   private autoScrollCol = 0
 
+  private initialDraft = ""
+
   constructor(
     private readonly transcript: Transcript,
     private readonly host: TuiHost,
-  ) {}
+    opts?: { initialDraft?: string },
+  ) {
+    this.initialDraft = opts?.initialDraft ?? ""
+  }
 
   /** Jalan sampai quit. Alt-screen enter/exit SELALU berpasangan (I17). */
   async run(): Promise<TuiRunResult> {
@@ -544,6 +550,11 @@ export class TuiApp {
       sub("context:compacted")
       this.scrollBase = this.transcript.total()
       this.setMouseMode(mouseSelectionEnabled() ? "drag" : "off")
+      if (this.initialDraft) {
+        const draft = this.initialDraft
+        this.initialDraft = ""
+        this.setLine(draft)
+      }
       this.paint(screen)
       await done
       this.throwRuntimeFailure()
@@ -690,6 +701,7 @@ export class TuiApp {
   }
 
   private handleKey(key: PromptKey): void {
+    if (key.type !== "esc") this.lastIdleEscapeAt = 0
     if (key.type === "mouse") {
       this.handleMouse(key)
       return
@@ -751,20 +763,31 @@ export class TuiApp {
     // atau Ctrl+D baris-kosong, = abort + quit. Tanpa ini sesi hanya bisa
     // dibunuh kill -9 (kontrak I14).
     if (key.type === "esc" && this.selection) {
+      this.lastIdleEscapeAt = 0
       this.selection = null
       this.paintCurrent()
       return
     }
     if (key.type === "esc") {
       if (this.isBusy()) {
+        this.lastIdleEscapeAt = 0
         this.requestAbort()
         return
       }
       if (this.tooSmall()) return
       if (this.state.menuOpen) {
+        this.lastIdleEscapeAt = 0
         this.applyEngine(key)
         return
       }
+      if (!this.state.line) {
+        const now = Date.now()
+        const doubleTap = this.lastIdleEscapeAt > 0 && now - this.lastIdleEscapeAt < 500
+        this.lastIdleEscapeAt = doubleTap ? 0 : now
+        if (doubleTap) void this.doSubmit("/undo")
+        return
+      }
+      this.lastIdleEscapeAt = 0
       if (this.state.line || this.editing) {
         this.state = createState()
         this.preferredCol = null
@@ -1204,20 +1227,17 @@ export class TuiApp {
     // Bangun ulang state lewat engine (aturan menu/sel ikut terjaga). Baris
     // berubah = kembali ke ekor (paritas ketikan — viewport tidak diam).
     this.followTail()
-    let s = createState()
-    const hints = (l: string) => (l.startsWith("/") ? this.host.listCommands(l) : [])
-    for (const ch of line) {
-      const r = applyKey(s, { type: "char", ch }, hints)
-      s = r.state
-      if (r.action !== "render" && r.action !== "none") break
-    }
+    const { state } = applyKey(
+      createState(),
+      { type: "char", ch: stripSgr(sanitizeAnsi(line)) },
+      () => [],
+    )
     // Recall (history ↑↓ / Ctrl+R) BUKAN mengetik "/" — menu command hanya
     // boleh terbuka saat user AKTIF mengetik (via applyEngine). `withLine` di
     // engine menyetel menuOpen = line.startsWith("/"), jadi recall entri command
     // (/model) akan membuka menu; tanpa koreksi ini, ↑↓ berikutnya dinavigasi ke
     // menu (sel), bukan history, dan user terkunci tak bisa melewati entri command.
-    s = { ...s, menuOpen: false, sel: -1 }
-    this.state = s
+    this.state = { ...state, menuOpen: false, sel: -1 }
     this.preferredCol = null
     this.editing = true
     this.paintCurrent()
@@ -1437,6 +1457,14 @@ export class TuiApp {
   }
 
   private paintCurrent(): void {
+    // Suspend = pemilik layar lain (popup, approval, modal progres command)
+    // sedang melukis regionnya sendiri. Paint batch yang tertunda dari tombol
+    // Enter (`flushPendingPaint`) tak boleh menimpanya: submit yang langsung
+    // suspend + melukis modal berjalan di dalam handler key yang sama.
+    if (this.suspended > 0) {
+      this.paintPending = false
+      return
+    }
     if (this.paintBatchDepth > 0) {
       this.paintPending = true
       return

@@ -118,6 +118,7 @@ import {
   recordCheckpointFromTrees,
   snapshotWorkspace,
   validateResumeWorkspace,
+  workspaceChangedPaths,
 } from "../src/session/checkpoint.ts"
 import {
   attachHeadlessCompactionBridge,
@@ -154,6 +155,7 @@ import {
 import {
   appendPresentationEvents,
   backfillHistoryEventIds,
+  beginSessionTurn,
   completeRun,
   countDurableCompactionEvents,
   createRun,
@@ -169,10 +171,13 @@ import {
   loadSessionWorkMode,
   loadThreadHistoryWithSeq,
   type PresentationPersistStats,
+  presentationHead,
   RefusedHistoryRewriteError,
   readWriterEpoch,
+  type SessionTurnRecord,
   saveSession,
   saveSessionWorkMode,
+  settleSessionTurn,
   shrinkThreadHistory,
   ThreadArchivedError,
   terminalizeChildRuns,
@@ -180,6 +185,7 @@ import {
   tombstoneOrphanChildRuns,
   transitionRun,
 } from "../src/session/persistence.ts"
+import { recoverRewindWorkspace } from "../src/session/rewind.ts"
 import { collectOperationalState } from "../src/session/runtime-header.ts"
 import { snapshotTree } from "../src/session/shadow-git.ts"
 import {
@@ -612,9 +618,11 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   // (jurnal, checkpoint, todos, runtime journal, scheduler) memakai sid.
   // --resume tak dikenal melempar SessionNotFoundError (eksplisit, bukan
   // sesi baru diam-diam).
+  const rewindResume = await recoverRewindWorkspace(cwd ?? process.cwd(), resumeId)
+  if (rewindResume) startupWrite(`[rewind] resuming active branch ${rewindResume}\n`)
   const identity = resolveSessionIdentity({
     sessionFlag: sessionFlag,
-    resumeFlag: resumeId,
+    resumeFlag: rewindResume ?? resumeId,
     cwd,
     ...(bootIdOpt ? { bootId: bootIdOpt } : {}),
   })
@@ -1924,23 +1932,19 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   // edit/write_file.
   type TurnSnapshot = Awaited<ReturnType<typeof beginTurnSnapshot>>
   let preTurnPromise: Promise<TurnSnapshot> | null = null
+  let activeTurnOrdinal: number | null = null
+  let logicalTurn: SessionTurnRecord | null = null
   const postEditSnapshots = new Map<string, { path: string; content: string | null }>()
 
   // ── Kepemilikan pekerjaan checkpoint (Stage 5B) ──
   //
-  // Bus kernel memanggil handler SINKRON dan TIDAK menunggu promise yang
-  // dikembalikan handler async. Listener `turn:completed` di bawah memulai
-  // penulisan checkpoint async — tanpa pemilik eksplisit, operasi itu
-  // menjadi yatim: bisa berjalan SETELAH `close()` kembali (rejection →
-  // unhandled error) dan bisa menulis ke direktori yang sudah dibersihkan.
-  //
-  // Kepemilikan: SET promise yang masih berjalan (bukan "promise terakhir"):
-  // beberapa turn bisa memicu beberapa operasi, dan semuanya harus
-  // diselesaikan. Setiap operasi dihapus dari set saat settle (sukses
-  // maupun gagal).
+  // Finalisasi checkpoint kini di-await di lifecycle turn (bukan listener bus),
+  // sehingga tidak ada pekerjaan yatim yang lahir dari event. Set dan drain
+  // dipertahankan sebagai kontrak close (`pendingCheckpointCount`) dan pengaman
+  // untuk pekerjaan yang mungkin ditambahkan di masa depan; kegagalan tetap
+  // dicatat di `checkpointFailureNotes` + warn stderr.
   const pendingCheckpointWork = new Set<Promise<unknown>>()
   const checkpointFailureNotes: string[] = []
-  let checkpointUnsub: (() => void) | null = null
 
   /**
    * Diagnostic `[warn]` ke stderr (kontrak writer kelas 3: layer non-UI boleh
@@ -1954,41 +1958,12 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   }
 
   /**
-   * Daftarkan pekerjaan checkpoint async sebagai milik lifecycle sesi ini.
-   *
-   * Rejection ditangani SEKALI di titik lahirnya (bukan ditunggu di
-   * `close()`): kegagalan jadi tercatat — bukan unhandled rejection, dan
-   * bukan sukses palsu. Yang dicatat hanya pesan error (tak ada credential
-   * di jalur ini: pesan internal filesystem/session).
-   */
-  const trackCheckpointWork = (work: Promise<unknown>): void => {
-    pendingCheckpointWork.add(work)
-    const settle = (): void => {
-      pendingCheckpointWork.delete(work)
-    }
-    work
-      .catch((err: unknown) => {
-        const reason = (err as Error)?.message ?? String(err)
-        const note = `checkpoint failed: ${reason}`
-        checkpointFailureNotes.push(note)
-        warnLine(note)
-      })
-      .then(settle, settle)
-      .catch(() => {})
-  }
-
-  /**
    * Drain: TUNGGU seluruh pekerjaan checkpoint yang sudah dimulai.
    *
-   * Listener dilepas lebih dulu — tak boleh ada operasi checkpoint baru yang
-   * lahir setelah drain (listener itu yang memulainya). Loop, bukan sekali:
-   * pekerjaan yang lahir saat drain berjalan ikut tertunggu.
+   * Finalisasi kini di-await langsung di lifecycle turn; drain tetap menjaga
+   * pekerjaan yang mungkin masih berjalan saat close.
    */
   const drainCheckpointWork = async (): Promise<void> => {
-    try {
-      checkpointUnsub?.()
-    } catch {}
-    checkpointUnsub = null
     while (pendingCheckpointWork.size > 0) {
       const batch = [...pendingCheckpointWork]
       await Promise.allSettled(batch)
@@ -1998,17 +1973,18 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     }
   }
 
-  session.events.on("turn:started", () => {
-    // Temuan #10: hanya rekam git snapshot sebelum turn ketika sesi dalam mode
-    // eksekusi penuh (BUILD / EXECUTE) dan bukan mode izin read-only/plan.
+  const captureBeforeTurn = async (): Promise<void> => {
     const liveWm = workModeControl?.getWorkMode() ?? effectiveWorkMode
     const livePm = permissions?.getMode() ?? permissionMode
-    if (liveWm !== "EXECUTE" || livePm === "readonly" || livePm === "plan") {
-      preTurnPromise = null
-      return
+    if (liveWm !== "EXECUTE" || livePm === "readonly" || livePm === "plan") return
+    preTurnPromise = beginTurnSnapshot(sessionId, cwd ?? process.cwd())
+    pendingCheckpointWork.add(preTurnPromise)
+    try {
+      await preTurnPromise
+    } finally {
+      pendingCheckpointWork.delete(preTurnPromise)
     }
-    preTurnPromise = beginTurnSnapshot(sessionId, cwd ?? ".")
-  })
+  }
   session.events.on("execution:completed", (e) => {
     const name = e.execution.call.name
     if (name !== "edit" && name !== "write_file" && name !== "apply_patch") return
@@ -2021,71 +1997,94 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       postEditSnapshots.set(p, { path: p.replace(/\\/g, "/"), content: null })
     }
   })
-  checkpointUnsub = session.events.on("turn:completed", (e) => {
-    // Handler SINKRON: bus tak menunggu, jadi seluruh pekerjaan async-nya
-    // diambil alih lifecycle (trackCheckpointWork) dan DILEWATI di close().
-    // Handler async yang dilepas ke bus = rejection tanpa pemilik = unhandled
-    // error (bukti Stage 5A).
-    trackCheckpointWork(
-      (async () => {
-        const pre = await preTurnPromise
-        const redoSnapshots = [...postEditSnapshots.values()]
+  /**
+   * Rekam checkpoint untuk SEMUA outcome, bukan hanya `turn:completed`.
+   *
+   * Turn yang gagal/di-cancel tetap bisa mengubah berkas sebelum provider
+   * berhenti. Tanpa checkpoint, `/undo` harus memilih antara membuang
+   * percakapan saja (divergen) atau menolak. Snapshot post-turn diambil dari
+   * tree saat finalisasi; turn tanpa perubahan tetap tidak membuat checkpoint.
+   */
+  const finalizeTurnCheckpoint = async (
+    outcome: "completed" | "failed" | "interrupted" | null,
+  ): Promise<string | null> => {
+    try {
+      let pre: TurnSnapshot | null = null
+      try {
+        pre = await preTurnPromise
+      } finally {
         preTurnPromise = null
-        postEditSnapshots.clear()
-        if (!pre) return
-        const turn =
-          typeof e.result?.usage?.turns === "number"
-            ? e.result.usage.turns
-            : session.state.turnCount
-        const desc = `turn ${turn}`
-        if (pre.mode === "unavailable") {
-          warnLine(`checkpoint unavailable: ${pre.reason}; undo/redo will not cover turn ${turn}`)
-          return
-        }
-        if (pre.mode === "git") {
-          const after = await snapshotTree(cwd ?? ".", sessionId, `post-${turn}`)
-          const checkpoint = await recordCheckpointFromTrees(
-            sessionId,
-            turn,
-            pre.tree,
-            after?.tree,
-            desc,
-            cwd,
-          )
-          if (checkpoint) {
-            presentation?.noteCheckpoint({
-              checkpointId: checkpoint.id,
-              turnId: turn,
-              paths: [],
-            })
-          }
-          return
-        }
-        if (pre.snapshots.length === 0) return
-        let redo = redoSnapshots
-        try {
-          const { LIMITS } = await import("../src/constants.ts")
-          const post = await snapshotWorkspace(cwd ?? ".", LIMITS.WORKSPACE_SNAPSHOT_LIMIT)
-          if (post.length) redo = post
-        } catch {}
-        const checkpoint = await recordCheckpointFromSnapshots(
+      }
+      const redoSnapshots = [...postEditSnapshots.values()]
+      postEditSnapshots.clear()
+      if (!pre) return "none"
+      const turn = activeTurnOrdinal ?? session.state.turnCount
+      if (turn < 1) return null
+      const desc = outcome && outcome !== "completed" ? `turn ${turn} (${outcome})` : `turn ${turn}`
+      if (pre.mode === "unavailable") {
+        warnLine(`checkpoint unavailable: ${pre.reason}; undo/redo will not cover turn ${turn}`)
+        return null
+      }
+      if (pre.mode === "git") {
+        const after = await snapshotTree(cwd ?? ".", sessionId, `post-${turn}`)
+        if (!after) throw new Error("post-turn snapshot unavailable")
+        if (
+          !(
+            await workspaceChangedPaths(
+              pre,
+              { mode: "git", tree: after.tree },
+              cwd ?? process.cwd(),
+            )
+          ).length
+        )
+          return "none"
+        const checkpoint = await recordCheckpointFromTrees(
           sessionId,
           turn,
-          pre.snapshots,
+          pre.tree,
+          after?.tree,
           desc,
           cwd,
-          redo,
         )
         if (checkpoint) {
           presentation?.noteCheckpoint({
             checkpointId: checkpoint.id,
             turnId: turn,
-            paths: (redo ?? []).map((snapshot) => snapshot.path),
+            paths: [],
           })
         }
-      })(),
-    )
-  })
+        return checkpoint?.id ?? "none"
+      }
+      if (pre.snapshots.length === 0) return "none"
+      let redo = redoSnapshots
+      try {
+        const { LIMITS } = await import("../src/constants.ts")
+        const post = await snapshotWorkspace(cwd ?? ".", LIMITS.WORKSPACE_SNAPSHOT_LIMIT)
+        if (post.length) redo = post
+      } catch {}
+      const checkpoint = await recordCheckpointFromSnapshots(
+        sessionId,
+        turn,
+        pre.snapshots,
+        desc,
+        cwd,
+        redo,
+      )
+      if (checkpoint) {
+        presentation?.noteCheckpoint({
+          checkpointId: checkpoint.id,
+          turnId: turn,
+          paths: (redo ?? []).map((snapshot) => snapshot.path),
+        })
+      }
+      return checkpoint?.id ?? "none"
+    } catch (error) {
+      const note = `checkpoint failed: ${(error as Error).message}`
+      checkpointFailureNotes.push(note)
+      warnLine(note)
+      return null
+    }
+  }
 
   // ── Step trace (Harness-P1) ──
   // Satu baris per tool + ringkasan per step ke .minicode/step-traces.jsonl.
@@ -2637,8 +2636,34 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     // `runs.pending_tool_ids` sebelum efeknya, lalu dilepas saat selesai.
     setPendingToolsRun(created.run_id, cwd)
     lastTurnOutcome = null
+    activeTurnOrdinal = session.state.turnCount + 1
     // Listener UI segar tiap turn (pagar turn yatim — lihat attachUI).
     attachUI()
+    // Fase 0: prefix kanonik + ledger turn direkam SEBELUM prompt masuk ke
+    // histori/event. beforeEventSeq diambil sebelum noteUserMessage supaya
+    // cabang rewind memotong tepat sebelum prompt turn ini, bukan sesudahnya.
+    // Kegagalan menulis ledger = fail-closed: run diselesaikan lebih dulu agar
+    // tak ada RUNNING yatim, lalu error diteruskan (turn tak dijalankan).
+    try {
+      await captureBeforeTurn()
+      logicalTurn = beginSessionTurn(
+        sessionId,
+        {
+          runId: created.run_id,
+          prompt: p,
+          beforeMessages: loadThreadHistoryWithSeq(sessionId, thread.thread_id, cwd).map(
+            (row) => row.message,
+          ),
+          beforeEventSeq: presentationHead(sessionId, cwd),
+        },
+        cwd ?? process.cwd(),
+        { expectedEpoch },
+      )
+    } catch (error) {
+      lastTurnOutcome = "failed"
+      markPreviousRunTerminal()
+      throw error
+    }
     try {
       presentation?.noteUserMessage({ text: p, turnId: session.state.turnCount })
     } catch {}
@@ -2664,6 +2689,50 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       // bukti. Best-effort: kegagalan sudah dicatat degraded oleh jurnal.
       if (journalHandle !== null) {
         await journalHandle.flushPending().catch(() => {})
+      }
+      const outcome = lastTurnOutcome
+      // Checkpoint harus selesai sebelum turn dianggap settle: provider/abort
+      // bisa meninggalkan perubahan berkas yang belum tercatat. Kegagalan
+      // snapshot tidak boleh menutupi outcome turn.
+      const checkpointId = await finalizeTurnCheckpoint(outcome)
+      activeTurnOrdinal = null
+      // Fase 0: tutup ledger turn dengan status terminal + id checkpoint.
+      // Urutan penting: checkpoint dulu, baru settle supaya checkpoint_id ikut
+      // tersimpan dan rewind tahu batas berkas turn ini. Sentinel "none" dari
+      // checkpoint (turn tanpa perubahan) dinormalisasi jadi null di ledger.
+      if (logicalTurn) {
+        const status =
+          outcome === "completed"
+            ? "COMPLETED"
+            : outcome === "interrupted"
+              ? "INTERRUPTED"
+              : "FAILED"
+        try {
+          settleSessionTurn(
+            sessionId,
+            logicalTurn.ordinal,
+            status,
+            checkpointId === null || checkpointId === "none" ? null : checkpointId,
+            cwd ?? process.cwd(),
+            { expectedEpoch },
+          )
+        } catch (error) {
+          warnLine(`turn ledger settle failed: ${(error as Error).message}`)
+        }
+        logicalTurn = null
+      }
+      // Prompt yang gagal sebelum persist (mis. provider 503) tetap harus
+      // durable; tanpa ini user tak bisa melihat/meng-undo prompt tersebut.
+      // Sukses tetap dipersist oleh pemanggil (TUI/one-shot) seperti semula.
+      if (outcome !== null && outcome !== "completed") {
+        try {
+          await persistCurrent(usage.get(modelRef.current))
+        } catch (error) {
+          warnLine(`failed-turn persist failed: ${(error as Error).message}`)
+        }
+        // Jangan biarkan run FAILED/INTERRUPTED berstatus RUNNING sampai turn
+        // berikutnya: tombstone/proses lain harus melihat terminal segera.
+        markPreviousRunTerminal()
       }
       detachUI()
       try {

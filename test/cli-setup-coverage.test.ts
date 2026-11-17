@@ -8,7 +8,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createCliSession } from "../cli/setup.ts"
-import { loadPresentationEvents } from "../src/session/persistence.ts"
+import { listSessionRuns, loadPresentationEvents } from "../src/session/persistence.ts"
 
 const tmpRoots: string[] = []
 
@@ -248,6 +248,42 @@ describe("cli/setup: permissionMode & timeout & budget", () => {
     expect(s.runPromptWithVerify).toBeDefined()
     await s.close()
   })
+
+  test("turn provider gagal mempersist prompt durable dan menutup run", async () => {
+    const cwd = makeWorkspace()
+    const prevRetry = process.env.MINICODE_TURN_AUTO_RESUME
+    process.env.MINICODE_TURN_AUTO_RESUME = "0"
+    const s = await createCliSession({
+      cwd,
+      allowLocalConfig: true,
+      sessionId: "s12-failed-turn",
+      prompt: "hi",
+      enterRepl: false,
+      verbose: false,
+      allowAll: false,
+      ask: false,
+      allowlist: false,
+      verify: false,
+      timeoutMs: 5_000,
+    })
+    try {
+      await s.runPromptWithVerify("prompt-gagal-durable", AbortSignal.timeout(1500))
+    } catch {
+      // Provider fake memang gagal; yang diuji adalah efek durablenya.
+    }
+    // Kernel membuang input turn tanpa progres dari messages (safeTurnBoundary),
+    // jadi prompt yang gagal harus tetap ditemukan lewat event presentasi —
+    // inilah yang dipakai /undo untuk membuat cabang sebelum prompt tersebut.
+    expect(
+      loadPresentationEvents("s12-failed-turn", cwd).some(
+        (e) => e.type === "user.message" && e.text === "prompt-gagal-durable",
+      ),
+    ).toBe(true)
+    expect(listSessionRuns("s12-failed-turn", cwd).some((r) => r.status === "RUNNING")).toBe(false)
+    await s.close()
+    if (prevRetry === undefined) delete process.env.MINICODE_TURN_AUTO_RESUME
+    else process.env.MINICODE_TURN_AUTO_RESUME = prevRetry
+  }, 15_000)
 
   // Fase 3 dark-launch: shadow reducer harus aktif dengan divergence 0
   // dan tidak mengganggu output TUI (lihat plan §Phase 3 acceptance).

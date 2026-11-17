@@ -57,7 +57,7 @@ Subcommands are routed in `cli/router.ts` (`stats`, `sessions`, `mcp`, `config`,
 | `--max-steps <n>` | Tool step limit (default 50) |
 | `--context-window <n>` | Context window size (tokens) |
 | `--session <id>` | Session ID (random by default, sanitised) |
-| `--work-mode <m>` | `DISCUSS` \| `PLAN` \| `BUILD` (default: `DISCUSS`). **Work Mode**: `DISCUSS` = read-only investigation, `PLAN` = planning, `BUILD` = implementation. Approval is only `AUTO`/`ASK` (default `AUTO`). See [TUI](repl.md) for `/work-mode` |
+| `--work-mode <m>` | `DISCUSS` \| `BUILD` (default: `DISCUSS`). **Work Mode**: `DISCUSS` = read-only investigation & planning, `BUILD` = implementation. Approval is only `AUTO`/`ASK` (default `AUTO`). See [TUI](repl.md) for `/mode` |
 | `--enable-scheduler` | Opt-in autonomous scheduler (default **off**). Without this flag the scheduler is not built at all and `/scheduler` answers "not enabled". Execution is manual only via `/scheduler run` — no timers; autonomous turns are read-only. See `/scheduler status` and `/scheduler stop` |
 | `--runtime <mode>` | `off` (default) \| `constructed` \| `owned`. Execution architecture: `off` = current behaviour, unchanged; `constructed` = runtime + durable journal built, turns still run the old path; `owned` = every turn is admitted through the runtime (kernel + durable journal) and a rejected admission runs nothing. Unknown value = `off` |
 
@@ -70,7 +70,7 @@ large a limit risks provider rejection. The limit changes automatically when
 `/model` switches models. MiniCode also caps streamed output by the space left
 after the system prompt, tools, and history are counted.
 
-In the TUI, **Tab** cycles Work Mode (`Discuss` -> `Plan` -> `Build`) and **Shift+Tab** toggles Permission Mode (`Auto` <-> `Ask`). `/mode <AUTO|ASK>` changes approval; `/work-mode <DISCUSS|PLAN|BUILD>` changes the operating mode. The footer shows Work Mode on the left and Permission Mode in cyan on the right, near context usage; on narrow terminals the labels are condensed.
+In the TUI, **Tab** cycles Work Mode (`Discuss` -> `Build`) and **Shift+Tab** toggles Permission Mode (`Auto` <-> `Ask`). `/mode auto|ask` changes approval; `/mode discuss|build` changes the operating mode. The footer shows Work Mode on the left and Permission Mode in cyan on the right, near context usage; on narrow terminals the labels are condensed.
 
 ## When to use what
 

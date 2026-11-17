@@ -54,7 +54,7 @@ diselaraskan 0.9.27 saat seam dihilirkan; sebelumnya `budget:<…>`):
 
 **Contract wajib menjawab:**
 - *Who requested?* — budget path (kernel, pressure ≥ 75%) atau recovery path
-  (kernel, error konteks). Manual `/compact` tak menyentuh kernel (view saja).
+  (kernel, error konteks). Manual `/view compact` tak menyentuh kernel (view saja).
 - *Why?* — reason event di atas.
 - *What is eligible?* — hanya messages; system prompt di-cap di hulu
   (`SYSTEM_PROMPT_MAX_CHARS` 8000), tool schema TIDAK pernah terkompaksi.

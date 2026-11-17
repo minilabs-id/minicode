@@ -63,6 +63,7 @@ function setup(
     getStatus?: () => TuiStatusSnapshot
     cycleWorkMode?: () => void
     togglePermissionMode?: () => void
+    initialDraft?: string
   } = {},
 ) {
   const columns = opts.columns ?? 60
@@ -107,7 +108,7 @@ function setup(
     toggleCompact: () => {},
     toggleReasoning: () => {},
   }
-  const app = new TuiApp(transcript, host)
+  const app = new TuiApp(transcript, host, { initialDraft: opts.initialDraft })
   lastApp = app
   const screenText = () => tty!.screen().join("\n")
   // Lepaskan turn lambat + beri kesempatan microtask finally (busy=false)
@@ -148,6 +149,49 @@ async function waitForCall(calls: string[], text: string, timeoutMs = 2000): Pro
 }
 
 describe("TuiApp", () => {
+  test("Esc Esc idle membuka undo tanpa menambah command; mengetik membatalkan gesture", async () => {
+    const { app, calls } = setup()
+    const runP = app.run()
+    await tty!.ready()
+    await tty!.send(KEY.esc, 90)
+    expect(calls).toEqual([])
+    await tty!.send("x")
+    await tty!.send(KEY.esc, 90)
+    await tty!.send(KEY.esc, 90)
+    expect(calls).toEqual([])
+    await tty!.send(KEY.esc, 90)
+    await waitForCall(calls, "/undo")
+    expect(calls).toEqual(["/undo"])
+    app.requestQuit()
+    await runP
+  })
+
+  test("draft awal multiline tetap literal, tidak otomatis submit atau membuka menu", async () => {
+    const draft = "/help\nconst pesan = '中文';\nbaris terakhir"
+    const { app, calls } = setup({ initialDraft: draft })
+    const runP = app.run()
+    await tty!.ready()
+    await tty!.waitForScreen((frame) => frame.some((line) => line.includes("baris terakhir")))
+    expect(calls).toEqual([])
+    await tty!.send(KEY.enter)
+    await waitForCall(calls, draft)
+    expect(calls).toEqual([draft])
+    app.requestQuit()
+    await runP
+  })
+
+  test("draft awal membuang escape terminal tanpa menghapus newline", async () => {
+    const { app, calls } = setup({ initialDraft: "\x1b[31mmerah\x1b[0m\n\x1b]52;c;evil\x07aman" })
+    const runP = app.run()
+    await tty!.ready()
+    await tty!.waitForScreen((frame) => frame.some((line) => line.includes("aman")))
+    await tty!.send(KEY.enter)
+    await waitForCall(calls, "merah\naman")
+    expect(tty!.all()).not.toContain("52;c;evil")
+    app.requestQuit()
+    await runP
+  })
+
   test("boot: frame penuh tepat rows + enter/exit berpasangan (I17)", async () => {
     const { app } = setup()
     const runP = app.run()

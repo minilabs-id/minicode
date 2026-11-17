@@ -16,26 +16,23 @@ locale OS > en. `/lang` tanpa argumen = tampilkan aktif. Semua string lewat kamu
 | `/help` | Daftar perintah ringkas, terkelompok per kategori (Session/Model/Mode/View/Task) |
 | `/help full` | Daftar lengkap terkelompok dengan deskripsi (alias `/help all`); `/help` kosong dari non-TTY juga menampilkan ini |
 | `/help keys` | Pintasan papan tombol lengkap (alias `/help tombol`) |
-| `/provider` | Kelola provider: popup — picker preset + form (URL/key/scope/timpa), hapus (`d`, menyebut jumlah model yang ikut hilang), ubah (`e`) |
+| `/provider [sync]` | Kelola provider: popup — picker preset + form (URL/key/scope/timpa), hapus (`d`, menyebut jumlah model yang ikut hilang), ubah (`e`). `sync` = segarkan daftar model semua provider (hanya bilang restart bila benar ada model baru) |
 | `/model [cari]` | Popup semua `provider::model` (argumen = filter awal; di dalam ketik langsung cari live, Ctrl+U clear, Esc keluar filter). Del = hapus (konfirmasi). Enter = pilih + atur thinking effort (`default/low/medium/high`, tersimpan di provider, berlaku sesi berikutnya; Esc = batal total). Effort non-default tampil badge `[low|medium|high]` |
 | `/context [nilai]` | Tabel jendela konteks efektif tiap model + asal angkanya (`manual`/`endpoint`/`katalog`/`models.dev`/`flag`/`default aman`). Dengan argumen: setel untuk model aktif (`128k`, `1m`, `1024x1024`, `auto`) — langsung berlaku turn berikutnya. Detail di [Konfigurasi](config.md) |
-| `/sync` | Segarkan daftar model semua provider (hanya bilang restart bila benar ada model baru) |
-| `/undo` | Batalkan perubahan berkas turn terakhir |
-| `/redo` | Terapkan ulang yang dibatalkan |
-| `/sessions` | Tanpa argumen = popup picker resume; `/sessions <id>` = langsung resume |
+| `/undo [n\|list]` | Undo percakapan **dan** berkas sampai sebelum turn `n` (tanpa argumen: picker terbaru-dulu; `last`: turn terakhir). `Esc Esc` saat composer kosong membuka picker. Sesi lama tetap utuh; prompt target dibuka sebagai draft di sesi cabang. `list` menampilkan nomor turn. Di DISCUSS, undo yang menyentuh berkas ditolak; undo percakapan-saja tetap boleh |
+| `/redo` | Kembali ke sesi asal setelah `/undo` dan pulihkan workspace ke keadaan sebelum undo; ditolak bila sudah ada turn baru di cabang |
+| `/sessions [id\|history\|branches]` | Tanpa argumen = popup picker resume; `<id>` = langsung resume; `history` = 20 riwayat prompt; `branches` = daftar cabang undo |
 | `/status` | Runtime + pemakaian & biaya **kumulatif sesi** |
-| `/mode [AUTO\|ASK]` | Ganti pengawasan persetujuan; tanpa argumen = toggle AUTO/ASK |
-| `/work-mode [DISCUSS\|BUILD]` | WorkMode membatasi cara agent bekerja. `DISCUSS` investigasi/perencanaan read-only (+ artefak rencana); `BUILD` tidak menambah ceiling (identitas internal `EXECUTE`). Tanpa argumen = tampilkan mode aktif + usage; nilai invalid ditolak dan mode aktif tidak berubah. Tab dan `/work-mode` mengubah WorkMode; Shift+Tab dan `/mode` mengubah PermissionMode. |
+| `/mode [discuss\|build\|auto\|ask]` | Tanpa argumen = popup dua sumbu: WorkMode (`discuss`/`build`) + PermissionMode (`auto`/`ask`). WorkMode membatasi cara agent bekerja: `DISCUSS` investigasi/perencanaan read-only (+ artefak rencana), `BUILD` tidak menambah ceiling (identitas internal `EXECUTE`). Nilai invalid ditolak dan mode aktif tidak berubah. Tab/Shift+Tab tetap pintasan cepat. |
 | `/lang [en|id]` | Bahasa UI; tanpa argumen = tampilkan aktif |
 | `/init` | Buat `AGENTS.md` proyek ini |
 | `/copy [n]` | Salin `n` turn terakhir (default `1`, maksimal `10`) via OSC 52 |
 | `/clear` | Kosongkan transkrip (viewport kembali kosong) |
-| `/expand` | Buka isi tool/thinking yang disembunyikan ledger compact (sekali ambil habis) |
-| `/history` | 20 entri prompt terakhir |
+| `/view [action]` | Tanpa argumen = popup aksi tampilan. `compact` = putar output tool ringkas/penuh; `thinking` = tampil/sembunyikan reasoning; `expand [id]` = buka isi tool/thinking yang disembunyikan ledger compact (sekali ambil habis); `minimize` = lipat tool+jawaban; `fold` = panel aktivitas |
 | `/exit` | Keluar (satu-satunya jalan keluar; `/quit` alias). Setelah keluar, tercetak kop ringkasan sesi: wordmark `minicode` + Session/Model/Usage (token, biaya, durasi) |
 | `/scheduler [status\|run\|stop]` | Kendali Scheduler produksi. **Nonaktif secara bawaan** di setiap sesi (perlu flag `--enable-scheduler`); tanpa flag, perintahnya menjawab "not enabled". Tetap tampil di `/help` supaya operator yang mengaktifkan flag bisa menemukannya. |
 
-Alias (jalan, tidak diiklankan di `/help`): `/models` → `/model`, `/providers` → `/provider`, `/usage` & `/cost` → `/status`, `/resume [id]` → `/sessions [id]`, `/compact`, `/thinking`, `/minimize`, `/quit`.
+Alias (jalan, tidak diiklankan di `/help`): `/models` → `/model`, `/providers` → `/provider`, `/usage` & `/cost` → `/status`, `/resume [id]` → `/sessions [id]`, `/quit`. Nama lama `/sync`, `/work-mode`, `/history`, `/compact`, `/thinking`, `/expand`, `/minimize`, dan `/fold` sudah pensiun (tidak ada alias) — `/help` dan pesan did-you-mean menuntun ke penggantinya.
 
 Perintah tersembunyi (sengaja tak tampil di `/help`/dropdown, per-sesi): `/unrestric` — jembatan jail luar workspace + bash-guard + allowlist dibuka, kredensial git sempit diteruskan, tetapi file sensitif/state minicode tetap ditolak; gerbang = kepercayaan operator (toggle; footer menampilkan `○` merah). Detail di [Keamanan](security.md).
 
@@ -60,9 +57,9 @@ Did-you-mean: typo `/sessoons` → `Did you mean /sessions?` (jarak ≤ 2).
 | `ctrl+j` | Baris baru (multiline; Enter tetap submit) |
 | `ctrl+w` | Hapus satu kata sebelum kursor |
 | `ctrl+u` | Kosongkan baris (di filter: kosongkan query) |
-| `ctrl+o` | Putar tool call compact/expanded (juga `/compact`) |
-| `ctrl+t` | Toggle tampilan thinking expanded/minimized (juga `/thinking`) |
-| `esc` | Tutup dropdown/picker; dua-tahap di form (tekan-1 bersihkan field, tekan-2 batal); busy = batalkan turn |
+| `ctrl+o` | Putar tool call compact/expanded (juga `/view compact`) |
+| `ctrl+t` | Toggle tampilan thinking expanded/minimized (juga `/view thinking`) |
+| `esc` | Tutup dropdown/picker; dua-tahap di form (tekan-1 bersihkan field, tekan-2 batal); busy = batalkan turn; idle + composer kosong: dua Esc dalam 500 ms membuka picker `/undo` |
 | `ctrl+c` | Salin selection (TUI); tanpa selection = no-op. Abort turn pakai `Esc` (`Esc` dua kali dalam 1,5 dtk, atau `Ctrl+D` baris-kosong, saat abort macet) |
 | `ctrl+d` | Keluar saat baris kosong; saat busy baris-kosong = abort turn lalu keluar |
 

@@ -104,8 +104,7 @@ Three rules hold this domain together:
    the tool runs.
 
 Boundary of the **todo** subsystem: todo files stay flat — no dependency field in
-`TodoItem`, no user surface (`/tasks`), `/undo` only reverts the file (todos stay
-`completed`), and no TTL/GC for todo files outside SQLite. Dependencies/graph and
+`TodoItem`, no user surface (`/tasks`), `/undo` restores files and conversation via a branch session but leaves todo status untouched, and no TTL/GC for todo files outside SQLite. Dependencies/graph and
 scheduling **do exist**, but in a separate subsystem: the TaskGraph + Scheduler in
 `src/task/` operate on the TaskStore (`.minicode/tasks.db`), not on todo files;
 `todo_write` may only touch it through a canonical `taskId` (`src/tools/todo.ts`),
@@ -167,7 +166,7 @@ after 1 h; process sparkle; no bullet separator; `src/ui/tui/app.ts` renders the
 composer dots and one spacer above the footer per frame); a single-box composite
 popup (`/model`, `/provider`, `/sessions`, forms, approvals) via
 `openAltScreen`/`paintRegion`; dimmed thinking without a transcript marker (composer
-dots; content via `/expand`); an actionable error message in red once per failure
+dots; content via `/view expand`); an actionable error message in red once per failure
 (`takePendingError`). Command status/confirmation (sync, auth, config, spinner) uses
 colour only, without icons.
 

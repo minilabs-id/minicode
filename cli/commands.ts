@@ -5,7 +5,19 @@ import type { Usage } from "../src/policy/usage.ts"
 import { refreshProviderModels } from "../src/providers/provision.ts"
 import type { RuntimeProductionMode } from "../src/runtime/production-execution.ts"
 import { resolveSessionDisplayTarget } from "../src/session/identity.ts"
-import { listSessions, loadSession } from "../src/session/persistence.ts"
+import {
+  listSessions,
+  loadSession,
+  messageHead,
+  resolveUserTurnBoundary,
+  resolveUserTurnBoundaryByOrdinal,
+} from "../src/session/persistence.ts"
+import {
+  listUserTurns,
+  readRewindRecord,
+  restoreRewindTarget,
+  rewindToTurn,
+} from "../src/session/rewind.ts"
 import type { Skill } from "../src/skills/loader.ts"
 import type { ProductionSchedulerHandle } from "../src/task/production-scheduler.ts"
 import {
@@ -13,6 +25,7 @@ import {
   type SchedulerObservability,
 } from "../src/task/scheduler-observability.ts"
 import { type MsgKey, t } from "../src/ui/i18n/locale.ts"
+import { formatError } from "../src/ui/render/errors.ts"
 import { formatUsd } from "../src/ui/render/money.ts"
 import { sanitizeAnsiLine } from "../src/ui/render/sanitize.ts"
 import { c } from "../src/ui/render/theme.ts"
@@ -134,39 +147,24 @@ export function persistModelChoice(m: string, modelRef: { current?: string }): v
 
 export const BUILTIN_COMMANDS: BuiltinCommand[] = [
   { name: "help", descKey: "help.desc.help" },
-  { name: "provider", descKey: "help.desc.provider" },
+  { name: "provider", args: "[sync]", descKey: "help.desc.provider" },
   { name: "model", descKey: "help.desc.model" },
   { name: "context", descKey: "help.desc.context" },
-  { name: "sync", descKey: "help.desc.sync" },
   { name: "status", descKey: "help.desc.status" },
-  { name: "sessions", descKey: "help.desc.sessions" },
+  { name: "sessions", args: "[id|history|branches]", descKey: "help.desc.sessions" },
   { name: "init", descKey: "help.desc.init" },
   { name: "exit", descKey: "help.desc.exit" },
 ]
 
-/** Perintah yang ditangani DRIVER TUI (bukan handleBuiltinCommand) —
- * ditampilkan di /help agar bisa ditemukan, tapi sengaja TIDAK masuk dropdown
- * completion (di dropdown cukup /compact + builtin; /mode tak perlu
- * karena Tab/Shift+Tab sudah memutar mode tanpa baris baru).
- * /thinking = toggle TAMPILAN reasoning (expand/minimize), bukan effort;
- * effort diatur lewat picker /model (Enter).
- * Opsi A audit UX: undo/redo/clear/copy/history tidak punya duplikat lain. */
+// Registry bersama menjaga help dan discovery driver tetap konsisten.
 export const DRIVER_HELP_COMMANDS: BuiltinCommand[] = [
-  { name: "mode", args: "[name]", descKey: "help.desc.mode" },
-  { name: "work-mode", args: "[DISCUSS|BUILD]", descKey: "help.desc.work-mode" },
+  { name: "mode", args: "[discuss|build|auto|ask]", descKey: "help.desc.mode" },
   { name: "lang", args: "[en|id]", descKey: "help.desc.lang" },
-  { name: "undo", descKey: "help.desc.undo" },
+  { name: "undo", args: "[n|last|list]", descKey: "help.desc.undo" },
   { name: "redo", descKey: "help.desc.redo" },
   { name: "clear", descKey: "help.desc.clear" },
   { name: "copy", args: "[n]", descKey: "help.desc.copy" },
-  { name: "history", descKey: "help.desc.history" },
-  // View commands ditangani driver TUI; terdaftar di sini agar `/help full`
-  // dan `/help` ringkas memakai permukaan yang SAMA (grup View tak kosong).
-  { name: "compact", args: "[on|off]", descKey: "help.desc.compact" },
-  { name: "thinking", args: "[on|off]", descKey: "help.desc.thinking" },
-  { name: "expand", args: "[id]", descKey: "help.desc.expand" },
-  { name: "minimize", args: "[on|off]", descKey: "help.desc.minimize" },
-  { name: "fold", args: "[on|off]", descKey: "help.desc.fold" },
+  { name: "view", args: "[action]", descKey: "help.desc.view" },
   // [PHASE 6AB] Help-only, not in the dropdown: the scheduler is off in every
   // default session, so advertising it in completion would put a command that
   // always answers "not enabled" one keystroke away. It stays fully discoverable
@@ -180,14 +178,11 @@ export const DRIVER_HELP_COMMANDS: BuiltinCommand[] = [
 export const HELP_GROUPS: readonly { key: MsgKey; names: readonly string[] }[] = [
   {
     key: "help.gGeneral",
-    names: ["help", "status", "sessions", "history", "clear", "copy", "init", "exit"],
+    names: ["help", "status", "sessions", "clear", "copy", "init", "exit"],
   },
-  { key: "help.gModel", names: ["model", "context", "provider", "sync"] },
-  { key: "help.gMode", names: ["mode", "work-mode", "undo", "redo", "lang"] },
-  {
-    key: "help.gView",
-    names: ["compact", "thinking", "expand", "minimize", "fold"],
-  },
+  { key: "help.gModel", names: ["model", "context", "provider"] },
+  { key: "help.gMode", names: ["mode", "undo", "redo", "lang"] },
+  { key: "help.gView", names: ["view"] },
   { key: "help.gTask", names: ["scheduler"] },
 ]
 
@@ -295,11 +290,15 @@ function printStatus(ctx: CommandContext): void {
 /** Resume ke sesi by id: validasi + spawn anak stdio-inherit. Dipakai jalur
  * argumen langsung (`/sessions <id>`) dan pilihan picker popup.
  * Return true bila anak di-spawn (false = sesi tak ditemukan, tanpa jejak). */
-async function resumeById(target: string, ctx: CommandContext): Promise<boolean> {
+async function resumeById(
+  target: string,
+  ctx: CommandContext,
+  opts?: { allowEmpty?: boolean; env?: Record<string, string> },
+): Promise<boolean> {
   const canonical = resolveSessionDisplayTarget(target, ctx.cwd)
   const sess = loadSession(canonical, ctx.cwd)
-  if (!sess?.messages.length) {
-    console.log(t("sess.notFound", { id: sanitizeAnsiLine(target) }))
+  if (!sess || (!opts?.allowEmpty && !sess.messages.length)) {
+    printCommandLines([t("sess.notFound", { id: sanitizeAnsiLine(target) })])
     return false
   }
   // Anak stdio-inherit memakai terminal yang sama; App TUI sudah melepas
@@ -318,7 +317,7 @@ async function resumeById(target: string, ctx: CommandContext): Promise<boolean>
       ask: ctx.permissionMode?.toLowerCase() === "ask",
       schedulerEnabled: ctx.scheduler?.handle.enabled === true,
     }),
-    { stdio: "inherit", env: { ...process.env, MINICODE_RESUME_NEW: "1" } },
+    { stdio: "inherit", env: { ...process.env, MINICODE_RESUME_NEW: "1", ...opts?.env } },
   )
   process.stdin.pause()
   const code = await waitChildExit(child)
@@ -503,6 +502,161 @@ function schedulerStatusLines(ctx: CommandContext, ctl: SchedulerControl, out: s
   }
 }
 
+function encodeEnvText(text: string): string {
+  return Buffer.from(text, "utf8").toString("base64")
+}
+
+function oneLine(text: string, max = 88): string {
+  const flat = sanitizeAnsiLine(text).replace(/\s+/g, " ").trim()
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat
+}
+
+/**
+ * Satu writer untuk receipt `/undo`/`/redo`. Inventory OAP-008 menghitung
+ * literal `console.log`, jadi mengumpulkan baris di sini mencegah ledakan
+ * writer per-command tanpa mengubah output.
+ */
+function printCommandLines(lines: readonly string[]): void {
+  if (lines.length > 0) console.log(lines.join("\n"))
+}
+
+/**
+ * `/undo [n|list]`: percakapan dan berkas di-undo bersama.
+ *
+ * Ini menggantikan undo file-only lama. Cabang baru dibuat dari prefix sebelum
+ * prompt target, lalu proses resume anak dibuka dengan prompt itu sebagai draft
+ * composer. Sesi lama tetap utuh sebagai tujuan `/redo`.
+ */
+async function handleUndoCommand(args: string, ctx: CommandContext): Promise<void> {
+  const cwd = ctx.cwd ?? process.cwd()
+  const turns = listUserTurns(ctx.sessionId, cwd)
+  const out: string[] = []
+  if (turns.length === 0) {
+    printCommandLines([t("undo.none")])
+    return
+  }
+  const raw = args.trim().toLowerCase()
+  if (raw === "list") {
+    out.push(t("undo.listHead"))
+    for (const turn of turns) {
+      out.push(`  ${turn.ordinal}. ${oneLine(turn.prompt)}`)
+    }
+    printCommandLines(out)
+    return
+  }
+  let index: number
+  if (!raw && process.stdin.isTTY && process.stdout.isTTY) {
+    const { runPicker } = await import("../src/ui/screens/picker.ts")
+    let picked: string | undefined
+    await runPicker({
+      title: t("undo.listHead"),
+      showTitle: true,
+      filterable: true,
+      items: [...turns].reverse().map((turn) => ({
+        name: `${turn.ordinal}. ${oneLine(turn.prompt)}`,
+        provider: "",
+        value: String(turn.ordinal),
+      })),
+      onPick: (value) => {
+        picked = value
+      },
+      onCancel: () => {},
+    })
+    if (!picked) return
+    index = Number(picked) - 1
+  } else if (!raw || raw === "last") {
+    index = turns.length - 1
+  } else {
+    const n = Number(raw)
+    if (!Number.isInteger(n) || n < 1) {
+      printCommandLines([t("undo.usage", { max: turns.length })])
+      return
+    }
+    index = n - 1
+  }
+  const target = turns[index]
+  if (!target) {
+    printCommandLines([t("undo.range", { n: raw, max: turns.length })])
+    return
+  }
+
+  try {
+    const beforeSeq =
+      target.eventSeq < 0
+        ? resolveUserTurnBoundaryByOrdinal(ctx.sessionId, target.ordinal, cwd)
+        : resolveUserTurnBoundary(ctx.sessionId, target.prompt, target.ts, cwd)
+    const result = await rewindToTurn({
+      sourceSessionId: ctx.sessionId,
+      target,
+      cwd,
+      beforeSeq,
+      allowFiles:
+        (ctx.workMode === "BUILD" || ctx.workMode === "EXECUTE") &&
+        ctx.permissionMode !== undefined &&
+        !["readonly", "plan"].includes(ctx.permissionMode.toLowerCase()),
+    })
+    const notice = encodeEnvText(t("undo.branchNotice", { n: target.ordinal, id: ctx.sessionId }))
+    await resumeById(result.branchId, ctx, {
+      allowEmpty: true,
+      env: { MINICODE_REWIND_DRAFT: "1", MINICODE_REWIND_NOTICE: notice },
+    })
+  } catch (error) {
+    printCommandLines([t("undo.failed", { msg: formatError(error) })])
+  }
+}
+
+/**
+ * `/redo`: hanya berlaku tepat setelah `/undo` di cabang tersebut. Turn baru
+ * setelah undo membuat record basi — menolak lebih aman daripada menimpa kerja
+ * baru dengan snapshot lama.
+ */
+async function handleRedoCommand(ctx: CommandContext): Promise<void> {
+  const cwd = ctx.cwd ?? process.cwd()
+  const record = await readRewindRecord(ctx.sessionId, cwd)
+  if (!record || record.branchSessionId !== ctx.sessionId) {
+    printCommandLines([t("redo.none")])
+    return
+  }
+  if (
+    record.safety &&
+    ((ctx.workMode !== "BUILD" && ctx.workMode !== "EXECUTE") ||
+      ctx.permissionMode === undefined ||
+      ["readonly", "plan"].includes(ctx.permissionMode.toLowerCase()))
+  ) {
+    printCommandLines([t("undo.filesDenied")])
+    return
+  }
+  if (!loadSession(record.sourceSessionId, cwd)) {
+    printCommandLines([t("sess.notFound", { id: sanitizeAnsiLine(record.sourceSessionId) })])
+    return
+  }
+  const branch = loadSession(ctx.sessionId, cwd)
+  const hasNewWork =
+    (record.branchMessageHead !== undefined &&
+      messageHead(ctx.sessionId, cwd) > record.branchMessageHead) ||
+    (record.branchUserTurns !== undefined &&
+      listUserTurns(ctx.sessionId, cwd).length > record.branchUserTurns) ||
+    (record.branchMessageHead === undefined &&
+      record.branchUserTurns === undefined &&
+      (branch?.turnCount ?? 0) > record.targetOrdinal - 1)
+  if (hasNewWork) {
+    printCommandLines([t("redo.stale")])
+    return
+  }
+  try {
+    const restored = await restoreRewindTarget(record, cwd)
+    const notice = encodeEnvText(
+      t("redo.branchNotice", { id: record.sourceSessionId, files: restored.length }),
+    )
+    await resumeById(record.sourceSessionId, ctx, {
+      allowEmpty: true,
+      env: { MINICODE_REWIND_NOTICE: notice },
+    })
+  } catch (error) {
+    printCommandLines([t("redo.failed", { msg: formatError(error) })])
+  }
+}
+
 export async function handleBuiltinCommand(
   rawInput: string,
   ctx: CommandContext,
@@ -579,6 +733,16 @@ export async function handleBuiltinCommand(
       console.log(t("cmd.bye"))
       return { handled: true, shouldExit: true }
 
+    case "undo": {
+      await handleUndoCommand(args, ctx)
+      return { handled: true }
+    }
+
+    case "redo": {
+      await handleRedoCommand(ctx)
+      return { handled: true }
+    }
+
     case "model": {
       const { runModelManager } = await import("./model-manager.ts")
       // `/model mimo` = buka manager dengan filter awal (tanpa ini query
@@ -593,16 +757,6 @@ export async function handleBuiltinCommand(
       return { handled: true }
     }
 
-    case "provider": {
-      const { runProviderManager } = await import("./provider-manager.ts")
-      await runProviderManager({
-        cwd: ctx.cwd,
-        currentModel: ctx.currentModel,
-        setModelOverride: ctx.setModelOverride,
-        allowLocalConfig: ctx.allowLocalConfig,
-      })
-      return { handled: true }
-    }
     case "status": {
       // Selalu cetak: di TUI ditangkap ke transkrip (permukaan baca), di
       // one-shot/pipe ke scrollback. Jendela info dihapus bersama REPL linier
@@ -635,10 +789,18 @@ export async function handleBuiltinCommand(
       return { handled: true }
     }
 
-    case "sync": {
-      // Re-detect model dari semua provider -> config diperbarui otomatis.
-      // Meneruskan flag local sesi: tanpa opt-in /sync tak boleh menghubungi
-      // endpoint dari repo tak dikenal (audit #07 P0).
+    case "provider": {
+      if (args.toLowerCase() !== "sync") {
+        const { runProviderManager } = await import("./provider-manager.ts")
+        await runProviderManager({
+          cwd: ctx.cwd,
+          currentModel: ctx.currentModel,
+          setModelOverride: ctx.setModelOverride,
+          allowLocalConfig: ctx.allowLocalConfig,
+        })
+        return { handled: true }
+      }
+      // Opt-in lokal tetap mengawal endpoint repo saat sinkronisasi.
       console.log(`\n${t("cmd.syncing")}`)
       const { updated, failed } = await refreshProviderModels({
         cwd: ctx.cwd,
@@ -680,6 +842,26 @@ export async function handleBuiltinCommand(
     case "resume":
     case "sessions": {
       if (cmd === "resume" && !args) return { handled: false }
+      if (cmd === "sessions" && args.toLowerCase() === "branches") {
+        const cwd = ctx.cwd ?? process.cwd()
+        const out: string[] = []
+        for (const row of listSessions(ctx.cwd)) {
+          const record = await readRewindRecord(row.id, cwd)
+          if (!record || record.branchSessionId !== row.id) continue
+          out.push(
+            t("sess.branchLine", {
+              branch: sanitizeAnsiLine(record.branchSessionId),
+              source: sanitizeAnsiLine(record.sourceSessionId),
+              n: record.targetOrdinal,
+              prompt: oneLine(record.prompt),
+            }),
+          )
+        }
+        printCommandLines(
+          out.length ? [t("sess.branchesTitle"), ...out] : [t("sess.branchesEmpty")],
+        )
+        return { handled: true }
+      }
       const rows = listSessions(ctx.cwd).slice(0, 25)
       if (rows.length === 0) {
         console.log(`\n${t("cmd.noSessions")}`)

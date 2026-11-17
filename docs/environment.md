@@ -20,6 +20,8 @@ Variabel yang paling menentukan perilaku (sisanya referensi di bawah):
 | `MINICODE_WORK_MODE` | `DISCUSS` \| `BUILD` → operating mode (sama `--work-mode`; default `DISCUSS`; `BUILD` dipetakan ke `EXECUTE` internal; flag menang atas env; nilai tak dikenal gagal ke `DISCUSS` dengan peringatan) |
 | `MINICODE_HOOKS` | `1` → jalankan hook `pre/post-run` dari `~/.minicode/hooks/*.js` & `.minicode/hooks/*.js` (konteks di env `MINICODE_HOOK_CTX`; env hook disanitasi tanpa secret; dilewati bila sesi dibatalkan) |
 | `MINICODE_SESSION_TTL_DAYS` | TTL sesi (default 30; `0` = selamanya) |
+| `MINICODE_REWIND_DRAFT` | Internal handoff `/undo`: `1` → TUI memuat prompt target dari record rewind ke composer cabang |
+| `MINICODE_REWIND_NOTICE` | Internal handoff `/undo`/`/redo`: notice base64 yang ditampilkan sekali di transkrip sesi anak |
 | `MINICODE_HOME` | Override home untuk DB lokal/global (sessions + vector); default `~` |
 | `MINICODE_TOKENIZERS` | `0`/`off` → nonaktifkan unduh tokenizer presisi on-demand dari HuggingFace (fallback estimator densitas). Default: aktif untuk model open (deepseek/qwen/mistral/gemma/phi); vocab di-cache di `~/.minicode/tokenizers/`, tak diunduh ulang |
 | `MINICODE_TELEMETRY` | `0`/`false`/`off` → matikan penulisan traces.jsonl |
@@ -84,7 +86,7 @@ Variabel yang paling menentukan perilaku (sisanya referensi di bawah):
 | `MINICODE_ASCII` | `1` → paksa glyph ASCII (`[OK]`, `>`, `.`) untuk konsol tanpa UTF-8 |
 | `MINICODE_BOX` | gaya sudut kotak popup: default **melengkung** (`╭╮╰╯`); `square` → lancip (`┌┐└┘`); `ascii` → `+-|` (sama dengan `MINICODE_ASCII=1`). Untuk terminal yang merender glyph melengkung jelek |
 | `MINICODE_SCRIM` | `none` → paksa scrim backdrop jadi `faint` saja (tanpa latar gelap `48;5;236`) — diagnostik/tema terminal yang memetakan 256-warna aneh |
-| `MINICODE_COMPACT` | `1` → tool call ringkas, `0` → expanded. Default: compact di TUI, expanded di one-shot/exec (juga `/compact`, Ctrl+O) |
+| `MINICODE_COMPACT` | `1` → tool call ringkas, `0` → expanded. Default: compact di TUI, expanded di one-shot/exec (juga `/view compact`, Ctrl+O) |
 | `MINICODE_JUSTIFY` | `1` → aktifkan rata kanan-kiri (justify) keluaran teks model. Default: mati (opt-in) — justify menyuntik spasi yang mengubah teks asli saat di-copy/–pipe |
 | `MINICODE_DROPDOWN` | `0` → matikan floating dropdown, pakai hint inline (konsol legacy) |
 | `MINICODE_MOUSE_SELECTION` | `0`/`false`/`off`/`no` → matikan mouse tracking TUI; default `1` untuk drag selection + wheel |
@@ -92,9 +94,9 @@ Variabel yang paling menentukan perilaku (sisanya referensi di bawah):
 | `MINICODE_BELL` | `0` → matikan bell `\x07` saat approval (aksesibilitas) |
 | `MINICODE_STATUSLINE` | `rich` → statusline turn menampilkan token kumulatif + biaya sesi (default hemat) |
 | `MINICODE_A11Y` | `1` → live-region approval untuk screen reader (baris polos tanpa ANSI) |
-| `MINICODE_SHOW_THINKING` | reasoning model tersembunyi SECARA DEFAULT (`false`); `1` → paksa terlihat (atau `/thinking` / `Ctrl+T` / `--verbose`), `0` → paksa tersembunyi |
-| `MINICODE_MINIMIZE_ACTIVITY` | ON secara default di TUI; `0` → transparan (baris per-tool). Lipat aktivitas tool per turn jadi satu ringkasan (detail via `/expand`) |
-| `MINICODE_ACTIVITY_PANEL` | `0` → matikan panel aktivitas (default AKTIF di TUI; `/fold` toggle); `1` → paksa aktif juga di jalur linear/one-shot |
+| `MINICODE_SHOW_THINKING` | reasoning model tersembunyi SECARA DEFAULT (`false`); `1` → paksa terlihat (atau `/view thinking` / `Ctrl+T` / `--verbose`), `0` → paksa tersembunyi |
+| `MINICODE_MINIMIZE_ACTIVITY` | ON secara default di TUI; `0` → transparan (baris per-tool). Lipat aktivitas tool per turn jadi satu ringkasan (detail via `/view expand`) |
+| `MINICODE_ACTIVITY_PANEL` | `0` → matikan panel aktivitas (default AKTIF di TUI; `/view fold` toggle); `1` → paksa aktif juga di jalur linear/one-shot |
 | `MINICODE_AUTORESUME_BG` | `0` → nonaktifkan auto-resume turn TUI saat job background selesai (default aktif; sekali per job, hanya bila tidak ada turn berjalan) |
 | `MINICODE_TURN_AUTO_RESUME` | `0` → nonaktifkan resume otomatis turn setelah kegagalan provider **transien** (`server`/`network`; default aktif). Retry provider dan resume turn berbagi **satu anggaran pemulihan** (`src/policy/recovery-budget.ts`): total 45 dtk dan kuota 6 percobaan untuk satu panggilan logis, dengan full jitter dan `Retry-After` sebagai floor. Berbagi satu anggaran mencegah *retry amplification* (angka terpisah per lapisan membuat biaya berkali: ≈82 dtk untuk provider mati). Kegagalan terminal tidak dipulihkan: `rate_limit` (429 permanen/spend-cap tidak pulih), `auth`, `invalid_request`, `context_length_exceeded`, `budget_exceeded`, `max_steps_exceeded`, dan abort user |
 | `MINICORE_THINKING` | `off` → kirim `enable_thinking:false` ke OpenAI-compat (DeepSeek). Alias lama `MINICODE_THINKING` masih dihormati |

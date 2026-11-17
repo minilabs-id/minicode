@@ -40,7 +40,7 @@ Batas: snapshot memakai `git add -A`, jadi file ber-`.gitignore` tidak ikut (dis
 
 **Non-repo (fallback).** Snapshot isi file dengan cap `WORKSPACE_SNAPSHOT_LIMIT`.
 
-`/undo` ke sebelum turn, `/redo` ke sesudahnya. Manifest `.minicode/checkpoints/` cap 20 terbaru. Turn tanpa perubahan tidak membuat checkpoint. Pointer dari marker jurnal (bukan kebenaran mutlak) — crash di tengah diadopsi dari marker valid berikutnya.
+`/undo [n|list]` memulihkan berkas DAN percakapan sebagai satu operasi: berkas dikembalikan dari checkpoint pertama pada/sejak batas turn, lalu sesi cabang dibuat dari prefix sebelum prompt target; sesi asli tetap utuh dan prompt target dibuka sebagai draft composer. `/redo` mengembalikan workspace ke snapshot pra-undo dan membuka sesi asli; redo ditolak bila cabang sudah punya turn baru. Edit berkas manual di luar turn tidak dideteksi — redo memulihkan snapshot pra-undo. Manifest `.minicode/checkpoints/` cap 20 terbaru. Checkpoint direkam untuk turn sukses, gagal, maupun di-cancel; prompt yang gagal tetap durable sebagai event presentasi (kernel membuang input tanpa progres dari messages) agar bisa di-undo. Turn tanpa perubahan tidak membuat checkpoint. Pointer dari marker jurnal (bukan kebenaran mutlak) — crash di tengah diadopsi dari marker valid berikutnya.
 
 ## Recovery journal
 

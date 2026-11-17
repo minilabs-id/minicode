@@ -24,7 +24,6 @@ import {
   provenanceMark,
   verificationMark,
 } from "../src/presentation/projection.ts"
-import { redoLastCheckpoint, undoLastCheckpoint } from "../src/session/checkpoint.ts"
 import { renderSkill } from "../src/skills/loader.ts"
 import { listBackgroundJobs, onBackgroundJobFinished } from "../src/tools/bash.ts"
 import {
@@ -59,27 +58,11 @@ import {
 } from "./commands.ts"
 import type { CliSession } from "./setup.ts"
 
-// [mode-architecture] Approval axis (PermissionMode) = AUTO/ASK; operating axis
-// (WorkMode) = DISCUSS/BUILD, dikelola terpisah via /work-mode. Nilai
-// internal tetap lowercase (auto/ask) dan EXECUTE (identitas BUILD).
+// Dua sumbu mode berbagi popup, bukan otoritas.
 const PERMISSION_MODES = ["auto", "ask"] as const
 const WORK_MODE_CYCLE = ["DISCUSS", "EXECUTE"] as const
-// /expand [id]: tanpa arg = semua entry store; dengan id = satu tool.
-const DRIVER_COMMANDS = [
-  "/compact",
-  "/thinking",
-  "/expand",
-  "/minimize",
-  "/fold",
-  "/mode",
-  "/work-mode",
-  "/lang",
-  "/clear",
-  "/copy",
-  "/history",
-  "/undo",
-  "/redo",
-]
+const VIEW_ACTIONS = ["compact", "thinking", "expand", "minimize", "fold"] as const
+const DRIVER_COMMANDS = ["/view", "/mode", "/lang", "/clear", "/copy", "/undo", "/redo"]
 
 function fmtCtx(n: number): string | undefined {
   if (!Number.isFinite(n) || n <= 0) return undefined
@@ -153,6 +136,21 @@ async function captureConsole(fn: () => Promise<void>): Promise<string[]> {
     console.error = origErr
   }
   return flush()
+}
+
+/**
+ * Env teks dari proses induk (rewind) di-decode base64 agar newline/karakter
+ * shell tidak rusak. Batas panjang mencegah env raksasa membebani composer.
+ */
+function decodeEnvText(name: string): string | undefined {
+  const raw = process.env[name]
+  if (!raw) return undefined
+  try {
+    const text = Buffer.from(raw, "base64").toString("utf8")
+    return text.length > 0 && text.length <= 200_000 ? text : undefined
+  } catch {
+    return undefined
+  }
 }
 
 export async function runTui(ctx: CliSession): Promise<void> {
@@ -447,6 +445,69 @@ export async function runTui(ctx: CliSession): Promise<void> {
     clearUnrestrictedBackup(wasUnrestricted)
   }
 
+  function setPermissionAxis(next: (typeof PERMISSION_MODES)[number]): void {
+    permissions?.setMode(next)
+    mode = next
+    // Perubahan izin eksplisit tidak boleh menggeser sumbu kerja.
+    modeBeforeUnrestricted = null
+    workModeBeforeUnrestricted = null
+  }
+
+  async function modePopup(): Promise<void> {
+    const { openAltScreen } = await import("../src/ui/runtime/screen.ts")
+    const { runForm } = await import("../src/ui/screens/form.ts")
+    app.suspend()
+    const screen = openAltScreen()
+    try {
+      if (!screen.ok || !canRenderModal(screen.cols, screen.rows)) {
+        transcript.pushInfo([c.muted(t("gate.tuiPicker", { title: t("tui.modeTitle") }))])
+        return
+      }
+      const work = displayWorkMode(workModeControl?.getWorkMode() ?? "DISCUSS")
+      const permission = mode === "ask" ? "Ask" : "Auto"
+      const result = await runForm(
+        {
+          title: t("tui.modeTitle"),
+          fields: [
+            {
+              id: "work",
+              label: t("tui.modeWork"),
+              kind: "select",
+              options: ["Discuss", "Build"],
+              initial: work === "BUILD" ? 1 : 0,
+              validate: (value) =>
+                !workModeControl && value.toUpperCase() !== work
+                  ? t("tui.workModeUnavailable")
+                  : null,
+            },
+            {
+              id: "permission",
+              label: t("tui.modePermission"),
+              kind: "select",
+              options: ["Auto", "Ask"],
+              initial: permission === "Ask" ? 1 : 0,
+              validate: (value) =>
+                !permissions && value !== permission ? t("tui.permissionUnavailable") : null,
+            },
+          ],
+        },
+        screen,
+      )
+      if (result.cancelled || !result.values) return
+      const nextWork = parseWorkModeValue(result.values.work ?? "")
+      if (nextWork && displayWorkMode(nextWork) !== work) workModeControl?.setWorkMode(nextWork)
+      if (result.values.permission !== permission) {
+        setPermissionAxis(
+          result.values.permission?.toLowerCase() as (typeof PERMISSION_MODES)[number],
+        )
+      }
+    } finally {
+      screen.clearRegion()
+      screen.close()
+      app.resume()
+    }
+  }
+
   async function runBuiltin(
     q: string,
     recordOutput = true,
@@ -493,6 +554,9 @@ export async function runTui(ctx: CliSession): Promise<void> {
       case "scheduler":
         return t("sched.title")
       case "sessions":
+        return q.trim().split(/\s+/)[1]?.toLowerCase() === "branches"
+          ? t("sess.branchesTitle")
+          : t("sess.title")
       case "resume":
         return t("sess.title")
       case "model":
@@ -678,7 +742,7 @@ export async function runTui(ctx: CliSession): Promise<void> {
     }
     const spaceIdx = line.indexOf(" ")
     const name = (spaceIdx === -1 ? line.slice(1) : line.slice(1, spaceIdx)).toLowerCase()
-    const args = spaceIdx === -1 ? "" : line.slice(spaceIdx + 1).trim()
+    let args = spaceIdx === -1 ? "" : line.slice(spaceIdx + 1).trim()
 
     if (name === "") {
       await helpConcise()
@@ -695,51 +759,33 @@ export async function runTui(ctx: CliSession): Promise<void> {
       app.clearView()
       return
     }
-    // [mode-architecture] /mode = PermissionMode (persetujuan AUTO/ASK) SAJA.
     if (name === "mode") {
-      if (args) {
-        const norm = args.toLowerCase()
-        if (!(PERMISSION_MODES as readonly string[]).includes(norm)) {
-          transcript.pushInfo([c.muted(t("tui.unknownMode", { a: args, modes: "AUTO, ASK" }))])
-          return
-        }
-        const wasUnrestricted = mode === "unrestricted"
-        mode = norm
-        permissions?.setMode(norm as (typeof PERMISSION_MODES)[number])
-        clearUnrestrictedBackup(wasUnrestricted)
-      } else {
-        togglePermissionMode()
-      }
-      app.repaint()
-      transcript.pushInfo([c.muted(t("tui.modeLine", { m: mode }))])
-      return
-    }
-    // [mode-architecture] /work-mode = WorkMode (operating mode) SAJA.
-    // Aksi operator EKSPLISIT untuk operating mode; Tab/Shift+Tab = pintasan.
-    if (name === "work-mode") {
-      const current = workModeControl?.getWorkMode() ?? "DISCUSS"
-      const currentDisplay = displayWorkMode(current)
       if (!args) {
-        transcript.pushInfo([c.muted(t("tui.workModeUsage", { m: currentDisplay }))])
+        await modePopup()
         return
       }
-      const next = parseWorkModeValue(args)
-      if (!next) {
+      const nextWork = parseWorkModeValue(args)
+      if (nextWork) {
+        if (!workModeControl) {
+          transcript.pushInfo([c.muted(t("tui.workModeUnavailable"))])
+          return
+        }
+        workModeControl.setWorkMode(nextWork)
+        transcript.pushInfo([c.muted(t("tui.workModeLine", { m: displayWorkMode(nextWork) }))])
+      } else if ((PERMISSION_MODES as readonly string[]).includes(args.toLowerCase())) {
+        if (!permissions) {
+          transcript.pushInfo([c.muted(t("tui.permissionUnavailable"))])
+          return
+        }
+        setPermissionAxis(args.toLowerCase() as (typeof PERMISSION_MODES)[number])
+        transcript.pushInfo([c.muted(t("tui.modeLine", { m: mode }))])
+      } else {
         transcript.pushInfo([
-          c.muted(t("tui.workModeUnknown", { a: args, modes: "DISCUSS, BUILD" })),
+          c.muted(t("tui.unknownMode", { a: args, modes: "DISCUSS, BUILD, AUTO, ASK" })),
         ])
         return
       }
-      if (!workModeControl) {
-        // Sesi tanpa kontrol WorkMode (handler izin terinjeksi = policy, bukan
-        // mode) - tolak, jangan diam-diam tampak berubah.
-        transcript.pushInfo([c.muted(t("tui.workModeUnavailable"))])
-        return
-      }
-      workModeControl.setWorkMode(next)
-      const label = displayWorkMode(next)
       app.repaint()
-      transcript.pushInfo([c.muted(t("tui.workModeLine", { m: label }))])
       return
     }
     // /unrestric — full akses tanpa gerbang (jail + bash-guard + sandbox/allowlist).
@@ -801,18 +847,52 @@ export async function runTui(ctx: CliSession): Promise<void> {
       app.showToast(t("tui.langLine", { v: next }))
       return
     }
-    if (name === "compact" || name === "thinking" || name === "fold") {
+    let viewAction = ""
+    if (name === "view") {
+      if (!args) {
+        const { runPicker } = await import("../src/ui/screens/picker.ts")
+        let picked: string | undefined
+        app.suspend()
+        try {
+          await runPicker({
+            title: t("tui.viewTitle"),
+            showTitle: true,
+            items: VIEW_ACTIONS.map((action) => ({
+              name: `${action} — ${t(`help.desc.${action}`)}`,
+              provider: "",
+              value: action,
+            })),
+            onPick: (value) => {
+              picked = value
+            },
+            onCancel: () => {},
+          })
+        } finally {
+          app.resume()
+        }
+        if (picked) return submit(`/view ${picked}`)
+        return
+      }
+      const parts = args.split(/\s+/)
+      viewAction = parts.shift()!.toLowerCase()
+      args = parts.join(" ")
+      if (!(VIEW_ACTIONS as readonly string[]).includes(viewAction)) {
+        transcript.pushInfo([c.muted(t("tui.viewUse"))])
+        return
+      }
+    }
+    if (viewAction === "compact" || viewAction === "thinking" || viewAction === "fold") {
       const parsed = parseToggleArg(args)
       if (parsed === "invalid") {
-        transcript.pushInfo([c.muted(t("tui.toggleUse", { cmd: name }))])
+        transcript.pushInfo([c.muted(t("tui.toggleUse", { cmd: viewAction }))])
         return
       }
       const toggleLine =
-        name === "compact"
+        viewAction === "compact"
           ? t("tui.compactLine", {
               v: t(ui.setCompactMode(parsed) ? "state.compact" : "state.expanded"),
             })
-          : name === "thinking"
+          : viewAction === "thinking"
             ? t("tui.thinkingSet", {
                 v: t(ui.setReasoningVisible(parsed) ? "state.expanded" : "state.minimized"),
               })
@@ -822,7 +902,7 @@ export async function runTui(ctx: CliSession): Promise<void> {
       transcript.pushInfo([c.muted(toggleLine)])
       return
     }
-    if (name === "expand") {
+    if (viewAction === "expand") {
       const sections = args ? ctx.expandContent(args) : ctx.expandAllContent()
       const views = args ? [] : ui.collapsedSectionsSnapshot()
       if (!sections.length && !views.length) {
@@ -852,7 +932,7 @@ export async function runTui(ctx: CliSession): Promise<void> {
       await showCommandOutput(t("out.titleExpand"), lines)
       return
     }
-    if (name === "minimize") {
+    if (viewAction === "minimize") {
       const parsed = parseToggleArg(args)
       if (parsed === "invalid") {
         transcript.pushInfo([c.muted(t("tui.minUse"))])
@@ -868,19 +948,10 @@ export async function runTui(ctx: CliSession): Promise<void> {
       return
     }
     if (name === "undo" || name === "redo") {
-      const currentWm = workModeControl ? workModeControl.getWorkMode() : "EXECUTE"
-      if (currentWm !== "EXECUTE") {
-        transcript.pushInfo([c.muted(t("tui.undoInDiscuss"))])
-        return
-      }
-      if (name === "undo") {
-        const res = await undoLastCheckpoint(sessionId, cwd)
-        transcript.pushInfo([res.message, ...res.restoredFiles])
-        return
-      }
-      const res = await redoLastCheckpoint(sessionId, cwd)
-      transcript.pushInfo([res.message, ...res.reappliedFiles])
-      return
+      // Daftar turn adalah readout panjang → jendela command, sama seperti
+      // /history. Receipt undo/redo yang pendek tetap di transkrip.
+      if (name === "undo" && args.trim().toLowerCase() === "list") return delegateBuiltin(line)
+      return popupBuiltin(line)
     }
     if (name === "copy") {
       const count = parseCopyCount(args)
@@ -894,10 +965,9 @@ export async function runTui(ctx: CliSession): Promise<void> {
     if (name === "cost" || name === "usage") return delegateBuiltin("/status")
     if (name === "models" || name === "model")
       return popupBuiltin(`/model${args ? ` ${args}` : ""}`)
-    if (name === "providers" || name === "provider") return popupBuiltin("/provider")
-    if (name === "history") {
+    if (name === "sessions" && args.toLowerCase() === "history") {
       const disk = await loadHistory().catch(() => [])
-      const inMem = app.getHistory().filter((h) => h !== "/history")
+      const inMem = app.getHistory().filter((h) => h.trim().toLowerCase() !== "/sessions history")
       const merged: string[] = []
       for (const entry of [...disk, ...inMem]) {
         if (merged[merged.length - 1] !== entry) merged.push(entry)
@@ -906,9 +976,12 @@ export async function runTui(ctx: CliSession): Promise<void> {
       await showCommandOutput(t("out.titleHistory"), lines.length ? lines : [t("tui.historyEmpty")])
       return
     }
+    if (name === "sessions" && args.toLowerCase() === "branches") return delegateBuiltin(line)
     if (name === "sessions" || name === "resume")
       return popupBuiltin(`/${name}${args ? ` ${args}` : ""}`)
-    if (name === "sync") {
+    if ((name === "provider" || name === "providers") && args.toLowerCase() !== "sync")
+      return popupBuiltin("/provider")
+    if ((name === "provider" || name === "providers") && args.toLowerCase() === "sync") {
       // Tampilkan progres "Syncing models…" langsung di kotak Layer 2 selama
       // probe jaringan berjalan, lalu transisi ke jendela hasil tanpa kedip.
       app.suspend()
@@ -935,12 +1008,9 @@ export async function runTui(ctx: CliSession): Promise<void> {
       let syncLines: string[] = []
       try {
         paintSyncProgress()
-        ;({ lines: syncLines } = await runBuiltin("/sync"))
-      } finally {
+        ;({ lines: syncLines } = await runBuiltin("/provider sync"))
         process.stdout.removeListener("resize", onResize)
         app.clearRegion()
-      }
-      try {
         const nonBlank = syncLines.filter((l) => l.trim().length > 0)
         const out =
           nonBlank.length > 1 && nonBlank[0]?.trim() === t("cmd.syncing")
@@ -948,6 +1018,8 @@ export async function runTui(ctx: CliSession): Promise<void> {
             : syncLines
         if (out.length) await showCommandOutput(t("out.titleSync"), out)
       } finally {
+        process.stdout.removeListener("resize", onResize)
+        app.clearRegion()
         app.resume()
       }
       return
@@ -1053,7 +1125,20 @@ export async function runTui(ctx: CliSession): Promise<void> {
     },
   }
 
-  const app = new TuiApp(transcript, host)
+  const loadRewindDraft = process.env.MINICODE_REWIND_DRAFT === "1"
+  const rewindNotice = decodeEnvText("MINICODE_REWIND_NOTICE")
+  delete process.env.MINICODE_REWIND_DRAFT
+  delete process.env.MINICODE_REWIND_NOTICE
+  let initialDraft: string | undefined
+  if (loadRewindDraft) {
+    try {
+      const { readRewindRecord } = await import("../src/session/rewind.ts")
+      const record = await readRewindRecord(sessionId, cwd ?? process.cwd())
+      if (record?.branchSessionId === sessionId) initialDraft = record.prompt
+    } catch {}
+  }
+  const app = new TuiApp(transcript, host, { initialDraft })
+  if (rewindNotice) transcript.pushInfo([c.muted(sanitizeAnsiLine(rewindNotice))])
   // Approval sebagai warga TUI: blok pertanyaan + keputusan tercatat di
   // transkrip dan terlihat sebelum menjawab (tanpa sink = tulis langsung).
   const { setApprovalSink } = await import("../src/ui/tui/transcript.ts")

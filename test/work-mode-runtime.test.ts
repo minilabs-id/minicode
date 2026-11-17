@@ -7,7 +7,7 @@
 // 3. Hooks mengikuti WorkMode AKTIF (bukan snapshot saat session dibuat).
 // 4. Delegasi berikutnya mewarisi WorkMode parent yang aktif.
 // 5. WorkMode tak bisa dinaikkan otomatis oleh argumen delegasi/anak.
-// 6. Command `/work-mode` benar-benar mengubah state (TUI end-to-end).
+// 6. Command `/mode` benar-benar mengubah state (TUI end-to-end).
 // 7. Footer mencerminkan kombinasi WorkMode + permission mode.
 //
 // WorkMode adalah lapis intent di ATAS permission mode: tidak pernah
@@ -15,7 +15,7 @@
 // dilewati oleh ceiling WorkMode.
 
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtempSync } from "node:fs"
+import { mkdirSync, mkdtempSync } from "node:fs"
 import { rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -518,7 +518,7 @@ describe("8. jalur produksi createCliSession — wiring composition root, G1, & 
   })
 })
 
-describe("7. command /work-mode (TUI end-to-end)", () => {
+describe("7. command /mode (TUI end-to-end)", () => {
   const makeControl = (initial: WorkMode) => {
     let wm = initial
     return {
@@ -531,14 +531,22 @@ describe("7. command /work-mode (TUI end-to-end)", () => {
   const fakeSession = (control: ReturnType<typeof makeControl>): CliSession => {
     const bus = { on: () => () => {}, emit: () => {} }
     const noop = async () => {}
+    const cwd = tmpRoot()
+    let permission: PermissionMode = "auto"
+    mkdirSync(join(cwd, ".minicode"), { recursive: true })
     return {
       session: { events: bus as never, contextTokens: 0 },
       cfg: { providers: [] },
-      cwd: tmpdir(),
+      cwd,
       sessionId: "wm-tui",
       modelRef: {} as { current?: string },
       permissionMode: "auto",
-      permissions: undefined,
+      permissions: {
+        getMode: () => permission,
+        setMode: (next: PermissionMode) => {
+          permission = next
+        },
+      },
       workMode: "EXECUTE",
       workModeControl: control,
       sessionTools: [],
@@ -557,15 +565,15 @@ describe("7. command /work-mode (TUI end-to-end)", () => {
     } as unknown as CliSession
   }
 
-  test("/work-mode DISCUSS dan BUILD mengubah WorkMode aktif; footer ikut berubah", async () => {
+  test("/mode DISCUSS dan BUILD mengubah WorkMode aktif; footer ikut berubah", async () => {
     const control = makeControl("EXECUTE")
     tty = installFakeTty({ columns: 80, rows: 24 })
     const runP = runTui(fakeSession(control))
     await tty.ready()
     await tty.waitForOutput((o) => o.includes("00.00.00"))
-    await tty.send("/work-mode DISCUSS")
+    await tty.send("/mode DISCUSS")
     await tty.send(KEY.enter)
-    // Perubahan /work-mode langsung merender label di footer in-place (tanpa toast penutup footer).
+    // Perubahan /mode langsung merender label di footer in-place (tanpa toast penutup footer).
     await tty.waitForOutput(() =>
       /Discuss/.test(stripAnsi(tty!.screen()[tty!.screen().length - 1] ?? "")),
     )
@@ -574,7 +582,7 @@ describe("7. command /work-mode (TUI end-to-end)", () => {
     expect(discussFooter).not.toContain("work mode:")
     expect(control.getWorkMode()).toBe("DISCUSS")
     // BUILD diterima → identitas internal EXECUTE, ditampil Build.
-    await tty.send("/work-mode BUILD")
+    await tty.send("/mode BUILD")
     await tty.send(KEY.enter)
     await tty.waitForOutput(() => control.getWorkMode() === "EXECUTE")
     expect(control.getWorkMode()).toBe("EXECUTE")
@@ -583,7 +591,7 @@ describe("7. command /work-mode (TUI end-to-end)", () => {
     await runP
   })
 
-  test("/undo dan /redo ditolak saat WorkMode DISCUSS (Temuan #10)", async () => {
+  test("/undo tetap tersedia di DISCUSS untuk percakapan-saja (tanpa turn = pesan jelas)", async () => {
     const control = makeControl("DISCUSS")
     tty = installFakeTty({ columns: 80, rows: 24 })
     const runP = runTui(fakeSession(control))
@@ -591,13 +599,13 @@ describe("7. command /work-mode (TUI end-to-end)", () => {
     await tty.waitForOutput((o) => o.includes("00.00.00"))
     await tty.send("/undo")
     await tty.send(KEY.enter)
-    await tty.waitForOutput((o) => o.includes("undo/redo unavailable in DISCUSS mode"))
+    await tty.waitForOutput((o) => o.includes("No user turn to undo"))
     await tty.send("/exit")
     await tty.send(KEY.enter)
     await runP
   })
 
-  test("/unrestric state machine: /mode ask atau Shift+Tab saat unrestricted memulihkan WorkMode semula (Temuan #3)", async () => {
+  test("/mode ask saat unrestricted hanya mengubah izin", async () => {
     const control = makeControl("DISCUSS")
     tty = installFakeTty({ columns: 80, rows: 24 })
     const runP = runTui(fakeSession(control))
@@ -609,8 +617,8 @@ describe("7. command /work-mode (TUI end-to-end)", () => {
     expect(control.getWorkMode()).toBe("EXECUTE")
     await tty.send("/mode ask")
     await tty.send(KEY.enter)
-    await tty.waitForOutput(() => control.getWorkMode() === "DISCUSS")
-    expect(control.getWorkMode()).toBe("DISCUSS")
+    await tty.waitForScreen((f) => f[f.length - 1]!.includes("Ask"))
+    expect(control.getWorkMode()).toBe("EXECUTE")
     await tty.send("/exit")
     await tty.send(KEY.enter)
     await runP
@@ -622,28 +630,60 @@ describe("7. command /work-mode (TUI end-to-end)", () => {
     const runP = runTui(fakeSession(control))
     await tty.ready()
     await tty.waitForOutput((o) => o.includes("00.00.00"))
-    await tty.send("/work-mode PLAN")
+    await tty.send("/mode PLAN")
     await tty.send(KEY.enter)
-    await tty.waitForOutput((o) => o.includes("unknown work mode"))
+    await tty.waitForOutput((o) => o.includes("unknown mode"))
     expect(control.getWorkMode()).toBe("DISCUSS")
     await tty.send("/exit")
     await tty.send(KEY.enter)
     await runP
   })
 
-  test("tanpa argumen: tampilkan mode aktif + pemakaian", async () => {
+  test("/mode popup mengatur kedua sumbu independen dan batal tidak mengubah state", async () => {
     const control = makeControl("DISCUSS")
-    tty = installFakeTty({ columns: 80, rows: 24 })
-    const runP = runTui(fakeSession(control))
-    await tty.ready()
-    await tty.waitForOutput((o) => o.includes("00.00.00"))
-    await tty.send("/work-mode")
-    await tty.send(KEY.enter)
-    await tty.waitForOutput((o) => o.includes("/work-mode <DISCUSS|BUILD>"))
-    expect(control.getWorkMode()).toBe("DISCUSS")
-    await tty.send("/exit")
-    await tty.send(KEY.enter)
-    await runP
+    const session = fakeSession(control)
+    tty = installFakeTty({ columns: 90, rows: 24 })
+    const runP = runTui(session)
+    try {
+      await tty.ready()
+      await tty.waitForOutput((o) => o.includes("00.00.00"))
+      await tty.send("/mode")
+      await tty.send(KEY.enter)
+      await tty.waitForScreen(
+        (f) => f.some((l) => l.includes("Work mode")) && f.some((l) => l.includes("Permission")),
+      )
+      expect(control.getWorkMode()).toBe("DISCUSS")
+      expect(session.permissions?.getMode()).toBe("auto")
+      await tty.send(KEY.right)
+      await tty.send(KEY.enter)
+      await tty.waitForScreen((f) => f[f.length - 1]!.includes("Build"))
+      expect(control.getWorkMode()).toBe("EXECUTE")
+      expect(session.permissions?.getMode()).toBe("auto")
+
+      await tty.send("/mode")
+      await tty.send(KEY.enter)
+      await tty.waitForScreen((f) => f.some((l) => l.includes("Permission")))
+      await tty.send(KEY.tab)
+      await tty.send(KEY.right)
+      await tty.send(KEY.enter)
+      await tty.waitForScreen((f) => f[f.length - 1]!.includes("Ask"))
+      expect(control.getWorkMode()).toBe("EXECUTE")
+      expect(session.permissions?.getMode()).toBe("ask")
+
+      await tty.send("/mode")
+      await tty.send(KEY.enter)
+      await tty.waitForScreen((f) => f.some((l) => l.includes("Work mode")))
+      await tty.send(KEY.left)
+      await tty.send(KEY.esc, 90)
+      await tty.send(KEY.esc, 90)
+      await tty.waitForScreen((f) => f.some((l) => l.includes("minicode ›")))
+      expect(control.getWorkMode()).toBe("EXECUTE")
+      expect(session.permissions?.getMode()).toBe("ask")
+    } finally {
+      await tty.send("\x15/exit")
+      await tty.send(KEY.enter)
+      await runP
+    }
   })
 
   test("/mode = PermissionMode (AUTO/ASK), tak mengubah WorkMode; Shift+Tab = toggle", async () => {

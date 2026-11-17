@@ -53,9 +53,9 @@ Perubahan v7.19 (remediasi audit & ergonomi UX):
 Perubahan v7.18 (jendela output command):
 
 1. **Output command readout tampil sebagai JENDELA di atas chat.** `/help`,
-   `/status`, `/context`, `/history`, `/expand`, `/sync`, `/init`, `/scheduler`
-   (dan alias `/cost`/`/usage`) tidak lagi dicetak ke transkrip. Output-nya
-   dibuka di overlay read-only `runOutputWindow` (`src/ui/screens/
+   `/status`, `/context`, `/history`, `/expand`, `/sync`, `/init`, `/scheduler`,
+   `/undo list` (dan alias `/cost`/`/usage`) tidak lagi dicetak ke transkrip.
+   Output-nya dibuka di overlay read-only `runOutputWindow` (`src/ui/screens/
    output-window.ts`) dengan judul, body, dan hint; transkrip/chat tidak
    tersentuh dan tidak bergeser. Receipt aksi pendek (`/undo`, `/redo`,
    `/copy`, toggle) tetap di transkrip.
@@ -308,7 +308,7 @@ proteksi").
 | Stream | Isi | Catatan |
 |---|---|---|
 | stdout | Permanent output pada non-interaktif; frame TUI saat sesi interaktif | `App` satu-satunya pemilik frame interaktif; machine output tetap murni |
-| stderr | Human-facing progress/diagnostic: ledger tool (`› …` hijau/merah), reasoning (default tersembunyi/minimized; `MINICODE_SHOW_THINKING=1` atau `/thinking` / `Ctrl+T` / `--verbose` menampilkan), warning, error | Boleh transient rendering bila stderr TTY |
+| stderr | Human-facing progress/diagnostic: ledger tool (`› …` hijau/merah), reasoning (default tersembunyi/minimized; `MINICODE_SHOW_THINKING=1` atau `/view thinking` / `Ctrl+T` / `--verbose` menampilkan), warning, error | Boleh transient rendering bila stderr TTY |
 | keduanya | Warna hanya bila stream TTY (`stdout.isTTY`); `NO_COLOR` menang; TERM/COLORTERM env TIDAK menyalakan warna pada pipe/redirect | Lihat `src/ui/render/theme.ts` `colorLevel()` |
 
 Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
@@ -437,8 +437,8 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
   pernah menutup diri di sana).
 - **Jendela output command** (`src/ui/screens/output-window.ts`, v7.18):
   overlay read-only di ATAS transkrip untuk readout command (`/help`, `/status`,
-  `/context`, `/history`, `/expand`, `/sync`, `/init`, `/scheduler`, alias
-  `/cost`/`/usage`). Kotak berjudul + body ber-scroll (`↑↓`, `PgUp/PgDn`,
+  `/context`, `/history`, `/expand`, `/sync`, `/init`, `/scheduler`, `/undo list`,
+  alias `/cost`/`/usage`). Kotak berjudul + body ber-scroll (`↑↓`, `PgUp/PgDn`,
   `Home/End`) + hint `↑↓ gulir  Esc batal`; tutup `Esc`/`Enter`/`Ctrl+C`/
   `Ctrl+D`; idle 90 dtk. Chat/transkrip tidak tersentuh. Non-TTY/terlalu
   kecil/setup gagal → fallback transkrip (output tak hilang). Receipt aksi
@@ -448,7 +448,7 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
   baris kursor (aman: input App beku saat busy; Esc/Ctrl+C = abort + deny).
 - Layar tak mampu (non-TTY, `rows < 10`, `TERM=dumb`): view menolak BERSUARA
   + batal (fail-closed). TAK BOLEH diam.
-- `/status`, `/history`, `/help`, `/context`, `/expand` = jendela output
+- `/status`, `/sessions history`, `/help`, `/context`, `/view expand` = jendela output
   command read-only di atas chat (v7.18), bukan dump transkrip; `/help` ringkas
   (terkelompok ≤8 baris, penuh via `/help full`, pintasan via `/help keys`);
   pilihan `/model` persist antar sesi + struk `model: x` di transkrip.
@@ -535,6 +535,8 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
      Enter pun sunyi; berlaku juga saat layar MENCIUT: abort+scroll selalu lolos
      agar turn bisa dibatalkan tanpa kill -9; abort pertama menampilkan status
      `Stopping` + hint keluar sekali, abort kedua dalam 1,5 detik menutup sesi).
+     Saat idle dan composer kosong, dua Esc dalam 500 ms membuka picker `/undo`;
+     Esc yang membersihkan teks, selection, atau dropdown tidak ikut gesture ini.
      Ini adalah selection buffer TUI, bukan native terminal selection. Idle
      menampilkan timer redup di footer dan prompt `minicode ›`; prompt hilang
      saat busy, lalu otomatis muncul kembali kosong setelah turn selesai.
@@ -571,7 +573,10 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
      sama (marker per run).
 
 18. Prompt multiline (Ctrl+J newline), histori memori-sesi (tak persist ke
-    berkas histori lama). `/copy [n]` menyalin 1–10 turn terakhir (default 1,
+    berkas histori lama). Draft hasil undo mempertahankan newline dan Unicode,
+    tidak otomatis dikirim atau membuka dropdown; escape terminal dibuang.
+    Handoff draft/notice dikonsumsi sekali agar tidak diwariskan saat pindah sesi.
+    `/copy [n]` menyalin 1–10 turn terakhir (default 1,
     oldest-to-newest) melalui OSC 52.
 19. Dropdown `/` inline berbingkai; Enter pada menu melengkapi + kirim.
 20. Lebar kotak popup **diskalakan dari lebar layar secara dinamis saat resize**:
@@ -596,9 +601,9 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
      ketikan apa pun me-reset kedua timer.
 22. Thinking tersembunyi SECARA DEFAULT (hidden/minimized) agar transkrip
      tetap bersih: composer tetap memakai dots clock saat thinking dan detail
-     penuh disimpan ke buffer `/expand`. User dapat membukanya kapan saja lewat
-     `/thinking`, `Ctrl+T`, `--verbose`, atau `MINICODE_SHOW_THINKING=1`: saat
-     dibuka dengan panel aktivitas ON (default TUI; `/fold`), transkrip
+     penuh disimpan ke buffer `/view expand`. User dapat membukanya kapan saja lewat
+     `/view thinking`, `Ctrl+T`, `--verbose`, atau `MINICODE_SHOW_THINKING=1`: saat
+     dibuka dengan panel aktivitas ON (default TUI; `/view fold`), transkrip
      menampilkan AREA thinking = blok live maks 10 baris visual terakhir
      (header `+ thinking`, penanda `… N baris lagi`), lalu saat fase berakhir
      diringkas SATU baris (`+ thinking · N baris`); dengan panel OFF,
@@ -611,7 +616,7 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
      terlihat sebelum menjawab; non-TTY = deny/null fail-closed; stdout
      di-pipe tanpa sink TUI = deny/null (prompt tak terlihat + mencemari
      output program bila dipaksa).
-24. `/expand` query Content Store (buka-ulang identik, tidak sekali-habis);
+24. `/view expand` query Content Store (buka-ulang identik, tidak sekali-habis);
      dengan id membaca satu tool, tanpa id membaca seluruh entry store yang
      masih hidup; miss → durable sqlite → penanda retensi. Pilihan `/model`
      persist antar sesi + struk `model: x`; `/help` ringkas (penuh via
@@ -706,10 +711,12 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
     hooks diblokir pada `DISCUSS` untuk semua PM, dan `--verify` ditolak
     fail-closed saat startup bila digabung `DISCUSS` (exit 2) serta dilewati
     otomatis saat mode turun ke `DISCUSS` di TUI.
-    **Command `/work-mode <DISCUSS|BUILD>`:** dua nilai produk yang dapat
-    dipilih operator; `EXECUTE` hanya nama internal dan ditolak sebagai input.
-    Tanpa argumen → tampilkan mode aktif + usage; nilai invalid → pesan
-    kesalahan dan mode AKTIF TIDAK berubah; sesi tanpa kontrol WorkMode
+    **Command `/mode [discuss|build|auto|ask]`:** satu pintu untuk kedua sumbu
+    (menggantikan `/work-mode` yang pensiun tanpa alias). Argumen `DISCUSS`/
+    `BUILD` mengubah WorkMode; `EXECUTE` hanya nama internal dan ditolak sebagai
+    input; `AUTO`/`ASK` mengubah PermissionMode. Tanpa argumen → popup pilihan
+    kedua sumbu; nilai invalid → pesan kesalahan dan mode AKTIF TIDAK berubah;
+    sesi tanpa kontrol WorkMode
     (handler izin terinjeksi = policy, bukan mode) → ditolak, bukan
     diam-diam tampak berubah. Transisi berlaku pada SESI YANG SEDANG
     BERJALAN: ceiling permission dievaluasi per pemanggilan tool, daftar tool
@@ -733,10 +740,10 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
     `exec --json` lewat field `summary.workMode` dengan nilai produk `DISCUSS`
     atau `BUILD` — bukan teks dekoratif. ACP memakai `params.workMode`
     (terstruktur) dan tak menambah baris
-    dekoratif. WorkMode selalu dibedakan tegas dari PermissionMode (`[work-mode]`
-    vs `/mode`) dan dari status sesi.
+    dekoratif. WorkMode selalu dibedakan tegas dari PermissionMode (baris
+    `[work-mode]` non-TUI vs nilai footer TUI) dan dari status sesi.
     **Pemisahan dari PermissionMode:** `Tab` memutar WorkMode (`Discuss` ↔ `Build`);
-    `Shift+Tab` dan `/mode` mengubah PermissionMode. PermissionMode menentukan
+    `Shift+Tab` dan `/mode auto|ask` mengubah PermissionMode. PermissionMode menentukan
     pengawasan persetujuan (`AUTO`/`ASK`) dan Tool Access Policy menentukan
     capability. WorkMode memilih postur (diskusi & rencana vs implementasi) dan hanya
     mempersempit akses.
@@ -755,8 +762,9 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
     di samping spark.
 
 36. **Output command readout = jendela overlay di atas chat (v7.18).**
-    `/help`, `/status`, `/context`, `/history`, `/expand`, `/sync`, `/init`,
-    `/scheduler`, dan alias `/cost`/`/usage` membuka `runOutputWindow`
+    `/help`, `/status`, `/context`, `/sessions history`, `/view expand`,
+    `/provider sync`, `/init`, `/scheduler`, `/undo list`, dan alias `/cost`/`/usage`
+    membuka `runOutputWindow`
     (`paintRegion` + `dialogBox` berjudul + body ber-scroll + `hintLine`)
     alih-alih mencetak ke transkrip; chat tidak berubah/bergeser. Navigasi
     `↑↓`/`PgUp/PgDn`/`Home/End`; tutup `Esc`/`Enter`/`Ctrl+C`/`Ctrl+D`; idle
@@ -783,12 +791,13 @@ kegagalan · pesan error TUI = formatter kanonik (`formatError`,
 ANSI dibuang, body provider diringkas + dipotong; `e.message` mentah tak
 pernah tampil · thinking: dots clock / alir thinking terbaca · popup: konten redup di
 belakang + kotak terpusat (form di dalam) + Esc tutup · approval tercatat ·
-`/status`, `/history`, `/help`, `/context` & `/expand` tampil di jendela output
+`/status`, `/sessions history`, `/help`, `/context` & `/view expand` tampil di jendela output
 command di atas chat (v7.18) ·
-`/mode` = permission mode · `/work-mode` = WorkMode (intent layer) ·
-`/fold` = lipat aktivitas tool per turn (`MINICODE_MINIMIZE_ACTIVITY`, ON di TUI) —
+`/mode` = satu pintu dua sumbu (`discuss|build` = WorkMode intent layer,
+`auto|ask` = permission mode) ·
+`/view fold` = lipat aktivitas tool per turn (`MINICODE_MINIMIZE_ACTIVITY`, ON di TUI) —
 baris ledger per-tool dirangkum jadi SATU baris ringkas (`n tools · nama · x ok · y gagal`),
-tidak hilang diam-diam; detail dibuka via `/expand` ·
+tidak hilang diam-diam; detail dibuka via `/view expand` ·
 tabel markdown dirender kotak ber-garis (opencode-like) ber-`wrap` (konten panjang
 tidak kepotong) + margin kiri 3 kolom (adaptif di lebar < 36); area teks jawaban
 (paragraf, heading, daftar, blockquote, code block) ber-margin kiri 3 kolom
@@ -846,6 +855,15 @@ panjang).
 - `test/output-window.test.ts` — I36 (judul/body/hint, scroll ↓/`j`/`k`/wheel +
   counter posisi di judul, sembunyikan hint scroll bila pas 1 layar, salin isi
   dengan `c` lewat `onCopy`, Esc menutup, non-TTY fallback false, lebar outputWindowWidth).
+- `test/pty.test.ts` — handoff undo/redo percakapan lewat terminal nyata:
+  sesi sumber utuh, cabang kosong, draft tidak otomatis dikirim; exit code Windows
+  tetap tidak diklaim.
+- `test/cli-commands.test.ts` — picker `/undo` terbaru-dulu, batal mempertahankan
+  histori; `/redo` menolak mode baca-saja dan sumber hilang sebelum menulis berkas.
+- `test/tui-app.test.ts` — I14 gesture Esc Esc idle; mengetik memutus gesture,
+  Esc menghapus draft tidak dihitung, dan abort/quit saat busy tetap terjaga.
+- `test/tui-app.test.ts` + `test/tui-lang.test.ts` — I18 draft awal/handoff rewind:
+  multiline dan Unicode tetap utuh, escape dibuang, tidak auto-submit, env sekali pakai.
 - `test/tui-app.test.ts` — I1/I13/I14/I17-I20 (baris indikator dipotong ke
   lebar frame walau locale id 51 kolom; logo kecil pojok kiri atas saat boot kosong tanpa teks welcome;
   `Tab` autolengkap dropdown `/` vs putar WorkMode saat menu tertutup; klik pada
@@ -877,7 +895,7 @@ panjang).
   literal).
 - `test/screen-buffer.test.ts` — parser frame harness (unit).
 - `test/tui-transcript.test.ts` — I7/I12/I17/I22 (ledger satu baris per tool, cap 5000 + marker evict, `total()` monotonik kebal evict, viewport, thinking minimized/expanded).
-- `test/thinking-area.test.ts` — I22 area thinking: blok live maks 10 baris (header/`… N baris lagi`), ringkasan 1 baris + detail `/expand` saat turn selesai, tanpa duplikasi, dan fallback legacy saat panel OFF.
+- `test/thinking-area.test.ts` — I22 area thinking: blok live maks 10 baris (header/`… N baris lagi`), ringkasan 1 baris + detail `/view expand` saat turn selesai, tanpa duplikasi, dan fallback legacy saat panel OFF.
 - `test/presentation-projections.test.ts` — I12/I17/I32 (projection
   snapshot, running/elapsed, status terminal, retry/child grouping, summary,
   marker evict + `total()` monotonik, dan parity flag OFF) + F-AGENT-1
@@ -942,7 +960,7 @@ panjang).
   bisa menyelundupkan CSI C1 (`U+009B`) — buffer composer dilukis apa adanya,
   jadi gate-nya ada di `prompt-engine` sebelum buffer terbentuk. Jalur pesan
   error layar (`picker`, `model-manager`/`provider-manager` fail-open) dan
-  hasil probe jaringan `cli/commands.ts` (`/sync`) memakai `cleanUntrusted` /
+  hasil probe jaringan `cli/commands.ts` (`/provider sync`) memakai `cleanUntrusted` /
   `sanitizeAnsiLine`; hook `?25h` loading-bar didaftarkan lazy agar modul yang
   sekadar di-import tidak menulis byte ke alt-screen.
 - `test/approval-tui.test.ts` — I23 (blok + keputusan tercatat, deny;
@@ -963,8 +981,9 @@ panjang).
   dievaluasi per pemanggilan tool; transisi BUILD/EXECUTE↔DISCUSS↔PLAN pada sesi
   yang sama; daftar tool yang dilihat kernel ikut berubah; hooks mengikuti
   WorkMode aktif; delegasi mewarisi WorkMode parent terbaru; argumen
-  delegasi tak bisa menaikkan WorkMode; `/work-mode` end-to-end lewat TUI
-  termasuk nilai invalid; `/mode` + Shift+Tab tak menyentuh WorkMode; footer
+  delegasi tak bisa menaikkan WorkMode; `/mode` end-to-end lewat TUI (WorkMode
+  dan PermissionMode, termasuk nilai invalid dan popup dua sumbu); Shift+Tab
+  tak menyentuh WorkMode; footer
   memakai label title case; Tab mengubah WorkMode dan Shift+Tab tidak).
 - `test/work-mode-contract.test.ts` — I35 (ceiling handler WorkMode di atas
   handler PM: 18 sel matriks, gerbang approval `PLAN × PM` termasuk `web_fetch`/
@@ -1013,10 +1032,10 @@ panjang).
 - `test/theme.test.ts` — I6 (strip DCS/APC/PM/SOS + final CSI non-huruf).
 - `test/ansi-fragmentation.test.ts` — I6/I8 (setiap titik split ≡ string utuh).
 - `test/non-tty-output.test.ts` — I6.
-- `test/thinking-truncation.test.ts` — I12 (buffer thinking >200 KB → `/expand`
+- `test/thinking-truncation.test.ts` — I12 (buffer thinking >200 KB → `/view expand`
   membawa marker truncasi).
 - `test/collapse.test.ts`, `test/presentation-expand.test.ts`,
-  `test/presentation-store.test.ts` — **I24** (semantik `/expand` pada Content
+  `test/presentation-store.test.ts` — **I24** (semantik `/view expand` pada Content
   Store: buka-ulang identik, dengan id vs tanpa id, miss → durable sqlite +
   penanda retensi).
 - `test/ui-combined.test.ts` — DIHAPUS bersama chrome.

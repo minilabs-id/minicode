@@ -22,7 +22,7 @@ Review this diff: {{args}}
 Important behaviour:
 
 - A skill is **not a tool** — it extends the first prompt, so it is still subject to the same permission mode.
-- The `/` dropdown offers builtin commands, driver commands (`/compact`/`/thinking`/`/expand`/...), and installed skills. `Tab` is NOT autocomplete — it cycles WorkMode (`Shift+Tab` cycles PermissionMode).
+- The `/` dropdown offers builtin commands, driver commands (`/view`/`/mode`/`/undo`/...), and installed skills. `Tab` is NOT autocomplete — it cycles WorkMode (`Shift+Tab` cycles PermissionMode).
 
 ## AGENTS.md: project instructions
 

@@ -13,7 +13,12 @@ function daemonApprovalsMigrated(db: Database): boolean {
     const cols = db.prepare("PRAGMA table_info(daemon_approvals)").all() as { name: string }[]
     if (!cols.some((c) => c.name === "invocation_id")) return false
     const sessCols = db.prepare("PRAGMA table_info(sessions)").all() as { name: string }[]
-    return sessCols.some((c) => c.name === "work_mode")
+    return (
+      sessCols.some((c) => c.name === "work_mode") &&
+      !!db
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'turn_ledger'")
+        .get()
+    )
   } catch {
     return false
   }
@@ -114,6 +119,13 @@ export function openSessionHandle(cwd?: string, local = false): Database {
     CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, created_at INTEGER, cwd TEXT, system TEXT, writer_epoch INTEGER NOT NULL DEFAULT 0, default_thread_id TEXT NULL, work_mode TEXT NULL);
     CREATE TABLE IF NOT EXISTS messages (session_id TEXT, seq INTEGER, role TEXT, content TEXT, toolCalls TEXT, toolCallId TEXT, name TEXT, reasoning TEXT, is_error INTEGER, ts INTEGER, thread_id TEXT NULL, event_id TEXT NULL, run_id TEXT NULL, migrated INTEGER NOT NULL DEFAULT 0, migrated_compacted INTEGER NOT NULL DEFAULT 0, projection_note TEXT NULL, PRIMARY KEY(session_id, seq));
     CREATE TABLE IF NOT EXISTS turns (session_id TEXT, turn_idx INTEGER, usage TEXT, ts INTEGER, PRIMARY KEY(session_id, turn_idx));
+    CREATE TABLE IF NOT EXISTS turn_ledger (
+      session_id TEXT NOT NULL, ordinal INTEGER NOT NULL, run_id TEXT NOT NULL,
+      prompt TEXT NOT NULL, status TEXT NOT NULL, before_seq INTEGER NOT NULL,
+      before_event_seq INTEGER NOT NULL, before_messages TEXT NOT NULL,
+      checkpoint_id TEXT NULL, started_at INTEGER NOT NULL, ended_at INTEGER NULL,
+      PRIMARY KEY(session_id, ordinal)
+    );
     CREATE TABLE IF NOT EXISTS presentation_events (
       session_id TEXT NOT NULL,
       event_seq INTEGER NOT NULL,

@@ -919,6 +919,9 @@ export function purgeExpired(db: Database, now = Date.now()): number {
   // P2.4: yatim Thread + Run + proyeksi ikut pola yang sama (tabel kosong
   // hingga P2.5/2.7 menulis; nihil-op hingga saat itu).
   try {
+    // turn_ledger juga tabel baru: handle mentah (purge CLI, fixture uji) belum
+    // tentu punya tabelnya, jadi orphan-cleanup-nya ikut jalur best-effort.
+    db.prepare("DELETE FROM turn_ledger WHERE session_id NOT IN (SELECT id FROM sessions)").run()
     db.prepare("DELETE FROM session_aliases WHERE canonical NOT IN (SELECT id FROM sessions)").run()
     db.prepare(
       "DELETE FROM session_takeovers WHERE session_id NOT IN (SELECT id FROM sessions)",
@@ -1091,6 +1094,162 @@ export function loadSession(
 }
 
 /**
+ * Batas pesan untuk rewind berdasarkan event `user.message` durable.
+ *
+ * Prompt yang gagal sebelum persist TIDAK punya baris messages, jadi mencocokkan
+ * teks saja bisa memilih prompt lama yang identik. Event timestamp menjadi
+ * pengikat utama: prompt persisten dicocokkan exact (pilih yang paling dekat
+ * dengan event), sedangkan prompt yang hilang memakai prefix pesan sebelum
+ * timestamp event. Mengembalikan `seq` pertama yang HARUS DIBUANG.
+ */
+export function resolveUserTurnBoundary(
+  sessionId: string,
+  prompt: string,
+  eventTs: number,
+  cwd?: string,
+): number {
+  const db = open(cwd)
+  try {
+    const sess = db
+      .prepare("SELECT default_thread_id FROM sessions WHERE id = ?")
+      .get(sessionId) as { default_thread_id: string | null } | null
+    const tid = sess?.default_thread_id ?? DEFAULT_THREAD_ID
+    const rows = db
+      .prepare(
+        "SELECT seq, role, content, ts FROM messages WHERE session_id = ? AND (thread_id = ? OR thread_id IS NULL) ORDER BY seq",
+      )
+      .all(sessionId, tid) as {
+      seq: number
+      role: string
+      content: string
+      ts: number | null
+    }[]
+    let matched: { seq: number; distance: number } | null = null
+    let before: { seq: number; ts: number } | null = null
+    let firstAtOrAfter: { seq: number; ts: number } | null = null
+    for (const row of rows) {
+      if (typeof row.ts === "number") {
+        if (row.ts < eventTs) {
+          if (!before || row.ts > before.ts || (row.ts === before.ts && row.seq > before.seq)) {
+            before = { seq: row.seq, ts: row.ts }
+          }
+        } else if (
+          !firstAtOrAfter ||
+          row.ts < firstAtOrAfter.ts ||
+          (row.ts === firstAtOrAfter.ts && row.seq < firstAtOrAfter.seq)
+        ) {
+          firstAtOrAfter = { seq: row.seq, ts: row.ts }
+        }
+      }
+      if (row.role !== "user") continue
+      const content = parseContent(row.content)
+      if (content !== prompt) continue
+      // Prompt persisten ditulis saat turn selesai, jadi timestamp-nya TIDAK
+      // boleh mendahului event. Syarat ini mencegah prompt berulang yang GAGAL
+      // ("lanjut" kedua kali) dicocokkan ke prompt lama yang teksnya sama —
+      // tanpa itu rewind memotong turn yang seharusnya dipertahankan.
+      if (typeof row.ts === "number" && row.ts < eventTs - 1000) continue
+      const distance =
+        typeof row.ts === "number" ? Math.abs(row.ts - eventTs) : Number.MAX_SAFE_INTEGER
+      if (
+        !matched ||
+        distance < matched.distance ||
+        (distance === matched.distance && row.seq > matched.seq)
+      ) {
+        matched = { seq: row.seq, distance }
+      }
+    }
+    if (matched && (!firstAtOrAfter || matched.seq <= firstAtOrAfter.seq)) return matched.seq
+    // Prompt tanpa baris exact (mis. konten multimodal) atau prompt yang gagal
+    // tetap punya batas di pesan PERTAMA pada/after timestamp event: pesan itu
+    // milik turn target (bila parsial tersimpan) atau turn berikutnya. Memakai
+    // "pesan terakhir sebelum event" akan ikut menyalin turn sesudah target.
+    if (firstAtOrAfter) return firstAtOrAfter.seq
+    return before ? before.seq + 1 : 0
+  } finally {
+    db.close()
+  }
+}
+
+/**
+ * Batas untuk sesi legacy tanpa presentation event: ordinal user message =
+ * sumber kebenaran langsung. Mengembalikan seq pesan user ke-`ordinal`
+ * (1-based), atau 0 bila ordinal di luar jangkauan.
+ */
+export function resolveUserTurnBoundaryByOrdinal(
+  sessionId: string,
+  ordinal: number,
+  cwd?: string,
+): number {
+  const db = open(cwd)
+  try {
+    const sess = db
+      .prepare("SELECT default_thread_id FROM sessions WHERE id = ?")
+      .get(sessionId) as { default_thread_id: string | null } | null
+    const tid = sess?.default_thread_id ?? DEFAULT_THREAD_ID
+    const rows = db
+      .prepare(
+        "SELECT seq, content FROM messages WHERE session_id = ? AND (thread_id = ? OR thread_id IS NULL) AND role = 'user' ORDER BY seq",
+      )
+      .all(sessionId, tid) as { seq: number; content: string }[]
+    return rows[ordinal - 1]?.seq ?? 0
+  } finally {
+    db.close()
+  }
+}
+
+const FILE_MUTATION_TOOLS = new Set([
+  "write_file",
+  "edit",
+  "apply_patch",
+  "multi_edit",
+  "notebook_edit",
+  "delete_file",
+  "move_file",
+  "copy_file",
+])
+
+/**
+ * Deteksi tool yang secara eksplisit mengubah berkas pada/after batas turn.
+ * Dipakai rewind untuk menolak undo jika checkpoint tidak tersedia: memilih
+ * "percakapan saja" saat berkas berubah akan membuat chat dan workspace
+ * berpisah. Bash tidak dimasukkan (bisa read-only); event `file.changed`
+ * menjadi sinyal tambahan di pemanggil.
+ */
+export function hasExplicitFileMutationAtOrAfter(
+  sessionId: string,
+  boundarySeq: number,
+  cwd?: string,
+): boolean {
+  const db = open(cwd)
+  try {
+    const rows = db
+      .prepare(
+        "SELECT toolCalls FROM messages WHERE session_id = ? AND seq >= ? AND toolCalls != '' ORDER BY seq",
+      )
+      .all(sessionId, boundarySeq) as { toolCalls: string }[]
+    for (const row of rows) {
+      const calls = parseContent(row.toolCalls)
+      if (!Array.isArray(calls)) continue
+      for (const call of calls) {
+        if (typeof call !== "object" || call === null) continue
+        const fn = (call as { function?: { name?: unknown }; name?: unknown }).function
+        const name =
+          typeof fn?.name === "string"
+            ? fn.name
+            : typeof (call as { name?: unknown }).name === "string"
+              ? (call as { name: string }).name
+              : ""
+        if (FILE_MUTATION_TOOLS.has(name)) return true
+      }
+    }
+    return false
+  } finally {
+    db.close()
+  }
+}
+
+/**
  * Meta sesi TANPA decode histori pesan. Jalur resume hanya butuh turnCount/
  * workMode/system/cwd; histori penuh dibaca SEKALI lewat `loadThreadHistoryWithSeq`.
  * Memisahkan meta dari decode menutup bug perf: dulu resume memanggil `loadSession`
@@ -1160,6 +1319,130 @@ export function loadThreadHistoryWithSeq(
       .all(sessionId, threadId) as StoredMessageRow[]
     const decoded = decodeMessageRows(rows)
     return decoded.map((message, i) => ({ seq: rows[i]!.seq, message }))
+  } finally {
+    db.close()
+  }
+}
+
+export interface SessionTurnRecord {
+  ordinal: number
+  runId: string
+  prompt: string
+  status: "RUNNING" | "COMPLETED" | "FAILED" | "INTERRUPTED"
+  beforeSeq: number
+  beforeEventSeq: number
+  beforeMessages: unknown[]
+  checkpointId: string | null
+  startedAt: number
+  endedAt: number | null
+}
+
+export function listSessionTurns(id: string, cwd?: string): SessionTurnRecord[] {
+  const db = open(cwd)
+  try {
+    const rows = db
+      .prepare("SELECT * FROM turn_ledger WHERE session_id = ? ORDER BY ordinal")
+      .all(id) as {
+      ordinal: number
+      run_id: string
+      prompt: string
+      status: SessionTurnRecord["status"]
+      before_seq: number
+      before_event_seq: number
+      before_messages: string
+      checkpoint_id: string | null
+      started_at: number
+      ended_at: number | null
+    }[]
+    return rows.map((row) => ({
+      ordinal: row.ordinal,
+      runId: row.run_id,
+      prompt: row.prompt,
+      status: row.status,
+      beforeSeq: row.before_seq,
+      beforeEventSeq: row.before_event_seq,
+      beforeMessages: JSON.parse(row.before_messages),
+      checkpointId: row.checkpoint_id,
+      startedAt: row.started_at,
+      endedAt: row.ended_at,
+    }))
+  } finally {
+    db.close()
+  }
+}
+
+export function beginSessionTurn(
+  id: string,
+  info: {
+    runId: string
+    prompt: string
+    beforeMessages: readonly unknown[]
+    beforeEventSeq: number
+  },
+  cwd: string,
+  opts: { expectedEpoch: number },
+): SessionTurnRecord {
+  const db = open(cwd)
+  try {
+    return db.transaction(() => {
+      assertWriterEpochInTxn(db, id, opts.expectedEpoch)
+      const max = db
+        .prepare("SELECT MAX(ordinal) AS n FROM turn_ledger WHERE session_id = ?")
+        .get(id) as { n: number | null }
+      const legacy = db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM presentation_events WHERE session_id = ? AND type = 'user.message'",
+        )
+        .get(id) as { n: number }
+      const ordinal = Math.max(max.n ?? 0, legacy.n) + 1
+      const record: SessionTurnRecord = {
+        ordinal,
+        runId: info.runId,
+        prompt: String(scrubStoredValue(info.prompt)),
+        status: "RUNNING",
+        beforeSeq: info.beforeMessages.length,
+        beforeEventSeq: info.beforeEventSeq,
+        beforeMessages: [...info.beforeMessages],
+        checkpointId: null,
+        startedAt: Date.now(),
+        endedAt: null,
+      }
+      db.prepare(
+        "INSERT INTO turn_ledger (session_id, ordinal, run_id, prompt, status, before_seq, before_event_seq, before_messages, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run(
+        id,
+        ordinal,
+        info.runId,
+        record.prompt,
+        record.status,
+        record.beforeSeq,
+        record.beforeEventSeq,
+        JSON.stringify(scrubStoredValue(record.beforeMessages)),
+        record.startedAt,
+      )
+      return record
+    })()
+  } finally {
+    db.close()
+  }
+}
+
+export function settleSessionTurn(
+  id: string,
+  ordinal: number,
+  status: Exclude<SessionTurnRecord["status"], "RUNNING">,
+  checkpointId: string | null,
+  cwd: string,
+  opts: { expectedEpoch: number },
+): void {
+  const db = open(cwd)
+  try {
+    db.transaction(() => {
+      assertWriterEpochInTxn(db, id, opts.expectedEpoch)
+      db.prepare(
+        "UPDATE turn_ledger SET status = ?, checkpoint_id = ?, ended_at = ? WHERE session_id = ? AND ordinal = ?",
+      ).run(status, checkpointId, Date.now(), id, ordinal)
+    })()
   } finally {
     db.close()
   }
@@ -2938,6 +3221,7 @@ async function deleteSessionCompletely(id: string, cwd?: string): Promise<void> 
   const txn = db.transaction(() => {
     db.prepare("DELETE FROM messages WHERE session_id = ?").run(id)
     db.prepare("DELETE FROM turns WHERE session_id = ?").run(id)
+    db.prepare("DELETE FROM turn_ledger WHERE session_id = ?").run(id)
     db.prepare("DELETE FROM presentation_events WHERE session_id = ?").run(id)
     db.prepare("DELETE FROM sessions WHERE id = ?").run(id)
     // P2.9: anak Sub-Agent milik sesi yang dihapus ikut dibersihkan (garis
@@ -2952,6 +3236,7 @@ async function deleteSessionCompletely(id: string, cwd?: string): Promise<void> 
       db.prepare("DELETE FROM threads WHERE session_id = ?").run(kid.id)
       db.prepare("DELETE FROM messages WHERE session_id = ?").run(kid.id)
       db.prepare("DELETE FROM turns WHERE session_id = ?").run(kid.id)
+      db.prepare("DELETE FROM turn_ledger WHERE session_id = ?").run(kid.id)
       db.prepare("DELETE FROM presentation_events WHERE session_id = ?").run(kid.id)
       db.prepare("DELETE FROM sessions WHERE id = ?").run(kid.id)
     }
@@ -3066,7 +3351,19 @@ export async function branchSession(
   srcId: string,
   dstId: string,
   cwd?: string,
-  opts?: { expectedEpoch?: number },
+  opts?: {
+    expectedEpoch?: number
+    /** Prefix messages: hanya baris dengan seq < sebelumSeq yang disalin. */
+    beforeSeq?: number
+    /** Prefix turn: hanya turns/presentation_events dengan turn < id ini. */
+    beforeTurnId?: number
+    /** Prefix event presisi: hanya event_seq < nilai ini (mengalahkan beforeTurnId). */
+    beforeEventSeq?: number
+    /** Prefix turns berbasis waktu simpan (lebih tahan turnId duplikat). */
+    beforeTurnTs?: number
+    beforeMessages?: readonly unknown[]
+    beforeOrdinal?: number
+  },
 ): Promise<number> {
   if (!dstId || !/^[\w.-]{1,64}$/.test(dstId)) throw new Error("invalid branch session id")
   const db = open(cwd)
@@ -3074,14 +3371,19 @@ export async function branchSession(
   let copied = 0
   const txn = db.transaction(() => {
     if (opts?.expectedEpoch !== undefined) assertWriterEpochInTxn(db, dstId, opts.expectedEpoch)
-    const src = db.prepare("SELECT cwd, system FROM sessions WHERE id = ?").get(srcId) as {
+    const src = db
+      .prepare("SELECT cwd, system, work_mode FROM sessions WHERE id = ?")
+      .get(srcId) as {
       cwd: string
       system: string
+      work_mode: string | null
     } | null
     if (!src) throw new Error(`session not found: ${srcId}`)
+    if (db.prepare("SELECT id FROM sessions WHERE id = ?").get(dstId))
+      throw new Error(`branch destination already exists: ${dstId}`)
     db.prepare(
-      "INSERT OR REPLACE INTO sessions (id, created_at, updated_at, cwd, system) VALUES (?, ?, ?, ?, ?)",
-    ).run(dstId, now, now, src.cwd, src.system)
+      "INSERT INTO sessions (id, created_at, updated_at, cwd, system, work_mode) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run(dstId, now, now, src.cwd, src.system, src.work_mode)
     // P2.2: cabang = garis otoritas BARU. Epoch sumber tak diwarisi (0):
     // penulis cabang mulai dari generasi awal domainnya sendiri.
     db.prepare("UPDATE sessions SET writer_epoch = 0, updated_at = ? WHERE id = ?").run(now, dstId)
@@ -3093,11 +3395,19 @@ export async function branchSession(
       DEFAULT_THREAD_ID,
       dstId,
     )
-    const rows = db
-      .prepare(
-        "SELECT seq, role, content, toolCalls, toolCallId, name, reasoning, is_error, ts, thread_id, event_id, run_id, migrated, migrated_compacted, projection_note FROM messages WHERE session_id = ? ORDER BY seq",
-      )
-      .all(srcId) as {
+    const rows = (
+      opts?.beforeSeq === undefined
+        ? db
+            .prepare(
+              "SELECT seq, role, content, toolCalls, toolCallId, name, reasoning, is_error, ts, thread_id, event_id, run_id, migrated, migrated_compacted, projection_note FROM messages WHERE session_id = ? ORDER BY seq",
+            )
+            .all(srcId)
+        : db
+            .prepare(
+              "SELECT seq, role, content, toolCalls, toolCallId, name, reasoning, is_error, ts, thread_id, event_id, run_id, migrated, migrated_compacted, projection_note FROM messages WHERE session_id = ? AND seq < ? ORDER BY seq",
+            )
+            .all(srcId, opts.beforeSeq)
+    ) as {
       seq: number
       role: string
       content: string
@@ -3117,7 +3427,30 @@ export async function branchSession(
     const ins = db.prepare(
       "INSERT INTO messages (session_id, thread_id, seq, role, content, toolCalls, toolCallId, name, reasoning, is_error, ts, event_id, run_id, migrated, migrated_compacted, projection_note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
-    for (const r of rows) {
+    const branchRows =
+      opts?.beforeMessages === undefined
+        ? rows
+        : opts.beforeMessages.map((message, seq) => {
+            const tuple = normalizeMessageTupleForDedup(message as StoredMsg)
+            return {
+              seq,
+              role: tuple[0],
+              content: tuple[1],
+              toolCalls: tuple[2],
+              toolCallId: tuple[3],
+              name: tuple[4],
+              reasoning: tuple[5],
+              is_error: tuple[6],
+              ts: now,
+              thread_id: DEFAULT_THREAD_ID,
+              event_id: allocateHistoryEventId(),
+              run_id: null,
+              migrated: 0,
+              migrated_compacted: 0,
+              projection_note: null,
+            }
+          })
+    for (const r of branchRows) {
       ins.run(
         dstId,
         r.thread_id ?? DEFAULT_THREAD_ID,
@@ -3140,7 +3473,12 @@ export async function branchSession(
         r.projection_note,
       )
     }
-    copied = rows.length
+    copied = branchRows.length
+    if (opts?.beforeOrdinal !== undefined) {
+      db.prepare(
+        "INSERT INTO turn_ledger SELECT ?, ordinal, run_id, prompt, status, before_seq, before_event_seq, before_messages, checkpoint_id, started_at, ended_at FROM turn_ledger WHERE session_id = ? AND ordinal < ?",
+      ).run(dstId, srcId, opts.beforeOrdinal)
+    }
     // P2.4: baris Thread ikut disalin (identitas komposit membuat lineage
     // menunjuk dalam-dst secara otomatis; read_only warisan tetap; tanpa
     // traversal/merge — data saja). Head dihitung ulang per thread.
@@ -3151,18 +3489,48 @@ export async function branchSession(
       .prepare("SELECT thread_id FROM threads WHERE session_id = ?")
       .all(dstId) as { thread_id: string }[]
     for (const t of dstThreads) recomputeThreadHeadInTxn(db, dstId, t.thread_id)
-    const turns = db
-      .prepare("SELECT turn_idx, usage, ts FROM turns WHERE session_id = ? ORDER BY turn_idx")
-      .all(srcId) as { turn_idx: number; usage: string; ts: number }[]
+    const turns = (
+      opts?.beforeTurnTs !== undefined
+        ? db
+            .prepare(
+              "SELECT turn_idx, usage, ts FROM turns WHERE session_id = ? AND ts <= ? ORDER BY turn_idx",
+            )
+            .all(srcId, opts.beforeTurnTs)
+        : opts?.beforeTurnId === undefined
+          ? db
+              .prepare(
+                "SELECT turn_idx, usage, ts FROM turns WHERE session_id = ? ORDER BY turn_idx",
+              )
+              .all(srcId)
+          : db
+              .prepare(
+                "SELECT turn_idx, usage, ts FROM turns WHERE session_id = ? AND turn_idx < ? ORDER BY turn_idx",
+              )
+              .all(srcId, opts.beforeTurnId)
+    ) as { turn_idx: number; usage: string; ts: number }[]
     const insT = db.prepare(
       "INSERT INTO turns (session_id, turn_idx, usage, ts) VALUES (?, ?, ?, ?)",
     )
     for (const t of turns) insT.run(dstId, t.turn_idx, t.usage, t.ts)
-    const events = db
-      .prepare(
-        "SELECT event_seq, type, turn_id, ts, payload FROM presentation_events WHERE session_id = ? ORDER BY event_seq",
-      )
-      .all(srcId) as {
+    const events = (
+      opts?.beforeEventSeq !== undefined
+        ? db
+            .prepare(
+              "SELECT event_seq, type, turn_id, ts, payload FROM presentation_events WHERE session_id = ? AND event_seq < ? ORDER BY event_seq",
+            )
+            .all(srcId, opts.beforeEventSeq)
+        : opts?.beforeTurnId === undefined
+          ? db
+              .prepare(
+                "SELECT event_seq, type, turn_id, ts, payload FROM presentation_events WHERE session_id = ? ORDER BY event_seq",
+              )
+              .all(srcId)
+          : db
+              .prepare(
+                "SELECT event_seq, type, turn_id, ts, payload FROM presentation_events WHERE session_id = ? AND turn_id < ? ORDER BY event_seq",
+              )
+              .all(srcId, opts.beforeTurnId)
+    ) as {
       event_seq: number
       type: string
       turn_id: number

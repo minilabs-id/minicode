@@ -14,6 +14,7 @@
 // lingkungan yang seharusnya mendukungnya).
 
 import { describe, expect, test } from "bun:test"
+import { listSessions, loadSession } from "../src/session/persistence.ts"
 import {
   cleanEnvForChild,
   decideSgrGate,
@@ -224,6 +225,33 @@ describe("PTY: boot & kontrak layar", () => {
       tui.dispose()
     }
   })
+
+  ptyTest(
+    "undo/redo percakapan melewati handoff proses tanpa mengirim draft otomatis",
+    async () => {
+      await withTui({}, async (tui) => {
+        await tui.waitFor((raw) => raw.includes("00.00.00"))
+        tui.send("prompt salah\r")
+        await tui.waitFor((raw) => raw.includes("PTJ-TURN-OK"), 30000)
+        const source = listSessions(tui.cwd)[0]!.id
+        const messages = loadSession(source, tui.cwd)!.messages
+        tui.send("/undo last\r")
+        await tui.waitFor((raw) => raw.includes("Original session kept"), 30000)
+        const branch = listSessions(tui.cwd).find((s) => s.id !== source)!.id
+        expect(loadSession(branch, tui.cwd)?.messages).toEqual([])
+        expect(loadSession(source, tui.cwd)?.messages).toEqual(messages)
+        await tui.waitFor(
+          (raw) => parseScreenBuffer(raw, 100, 30).some((line) => line.includes("prompt salah")),
+          10000,
+        )
+        tui.send("\x15/redo\r")
+        await tui.waitFor((raw) => raw.includes("Redo: workspace restored"), 30000)
+        expect(loadSession(source, tui.cwd)?.messages).toEqual(messages)
+        tui.send("/exit\r")
+        await tui.exit()
+      })
+    },
+  )
 
   ptyTest("turn penuh: submit → jawaban model → idle timer", async () => {
     await withTui({}, async (tui) => {

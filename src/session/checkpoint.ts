@@ -359,14 +359,46 @@ export async function beginTurnSnapshot(
 ): Promise<
   | { mode: "git"; tree: string }
   | { mode: "files"; snapshots: FileSnapshot[] }
-  | { mode: "unavailable"; reason: "git-snapshot-failed" }
+  | { mode: "unavailable"; reason: string }
 > {
   const shadow = await snapshotTree(cwd, sessionId, "pre")
   if (shadow) return { mode: "git", tree: shadow.tree }
   // Fallback file snapshot dibatasi 200 path. Memakainya saat repo Git gagal
   // membuat snapshot dapat memberi kesan rollback lengkap padahal parsial.
   if (await isGitRepo(cwd)) return { mode: "unavailable", reason: "git-snapshot-failed" }
-  return { mode: "files", snapshots: await snapshotWorkspace(cwd, LIMITS.WORKSPACE_SNAPSHOT_LIMIT) }
+  try {
+    return { mode: "files", snapshots: await snapshotCompleteWorkspace(cwd) }
+  } catch (error) {
+    return { mode: "unavailable", reason: (error as Error).message }
+  }
+}
+
+export async function snapshotCompleteWorkspace(cwd: string): Promise<FileSnapshot[]> {
+  const snapshots: FileSnapshot[] = []
+  let bytes = 0
+  const visit = async (directory: string): Promise<void> => {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const absolute = resolve(directory, entry.name)
+      if (isOwnedState(absolute) || isSensitive(absolute) || entry.name === "node_modules") continue
+      if (entry.isSymbolicLink() || isRealPathOutsideRoot(absolute, cwd))
+        throw new Error("workspace snapshot cannot cover symlinks")
+      if (entry.isDirectory()) {
+        await visit(absolute)
+        continue
+      }
+      if (!entry.isFile()) throw new Error("workspace snapshot contains unsupported entries")
+      const content = await readFile(absolute)
+      bytes += content.length
+      if (snapshots.length >= 5000 || bytes > 32 * 1024 * 1024)
+        throw new Error("workspace snapshot exceeds safety budget")
+      snapshots.push({
+        path: relative(cwd, absolute).replace(/\\/g, "/"),
+        content: new TextDecoder("utf-8", { fatal: true }).decode(content),
+      })
+    }
+  }
+  await visit(resolve(cwd))
+  return snapshots
 }
 
 /** Rekam checkpoint dari tree git pre/post turn. */
@@ -503,6 +535,178 @@ async function applyCheckpoint(
   const snaps = direction === "undo" ? cp.snapshots : cp.redoSnapshots
   if (!snaps) throw new Error(`checkpoint ${cp.id} does not have ${direction} data`)
   return applySnapshots(snaps, cwd)
+}
+
+export type WorkspaceSafetySnapshot =
+  | { mode: "git"; tree: string }
+  | { mode: "files"; snapshots: FileSnapshot[] }
+
+export async function captureWorkspaceSafety(
+  sessionId: string,
+  cwd: string,
+): Promise<WorkspaceSafetySnapshot> {
+  const snapshot = await beginTurnSnapshot(sessionId, cwd)
+  if (snapshot.mode === "unavailable")
+    throw new Error(`workspace snapshot unavailable: ${snapshot.reason}`)
+  return snapshot
+}
+
+export async function workspaceChangedPaths(
+  before: WorkspaceSafetySnapshot,
+  after: WorkspaceSafetySnapshot,
+  cwd: string,
+): Promise<string[]> {
+  if (before.mode !== after.mode) throw new Error("workspace snapshot mode changed")
+  let paths: string[]
+  if (before.mode === "git" && after.mode === "git") {
+    const changes = await diffTrees(cwd, before.tree, after.tree, true)
+    paths = changes.flatMap((change) => [change.path, ...(change.from ? [change.from] : [])])
+  } else {
+    const first = new Map(
+      (before as { snapshots: FileSnapshot[] }).snapshots.map((s) => [s.path, s.content]),
+    )
+    const last = new Map(
+      (after as { snapshots: FileSnapshot[] }).snapshots.map((s) => [s.path, s.content]),
+    )
+    paths = [...new Set([...first.keys(), ...last.keys()])].filter(
+      (path) => (first.get(path) ?? null) !== (last.get(path) ?? null),
+    )
+  }
+  return [...new Set(paths)].filter(
+    (path) => !isOwnedState(resolve(cwd, path)) && !isSensitive(resolve(cwd, path)),
+  )
+}
+
+export async function applyWorkspacePaths(
+  snapshot: WorkspaceSafetySnapshot,
+  paths: readonly string[],
+  cwd: string,
+): Promise<string[]> {
+  for (const path of paths) {
+    const absolute = resolve(cwd, path)
+    if (
+      isPathOutsideRoot(absolute, cwd) ||
+      isRealPathOutsideRoot(absolute, cwd) ||
+      isSensitive(absolute) ||
+      isOwnedState(absolute)
+    )
+      throw new Error(`unsafe restore path: ${path}`)
+  }
+  if (snapshot.mode === "git")
+    return (await restoreTree(cwd, snapshot.tree, { paths, strict: true })).applied
+  const contents = new Map(snapshot.snapshots.map((s) => [s.path, s.content]))
+  const applied: string[] = []
+  for (const path of paths) {
+    const content = contents.get(path) ?? null
+    if (content === null) await rm(resolve(cwd, path), { force: true })
+    else await atomicWriteText(resolve(cwd, path), content)
+    applied.push(path)
+  }
+  return applied
+}
+
+/** Pulihkan snapshot safety; dipakai rollback undo dan arah redo rewind. */
+export async function restoreWorkspaceSafety(
+  snapshot: WorkspaceSafetySnapshot,
+  cwd: string = process.cwd(),
+): Promise<string[]> {
+  if (snapshot.mode === "git") {
+    const res = await restoreTree(cwd, snapshot.tree)
+    return [...res.applied, ...res.skipped.map((s) => `${s} (skipped)`)]
+  }
+  return applySnapshots(snapshot.snapshots, cwd)
+}
+
+/**
+ * Undo berkas ke keadaan SEBELUM turn target, bukan hanya checkpoint terakhir.
+ *
+ * Checkpoint dipilih dari **timestamp event prompt**, bukan nomor turn:
+ * `state.turnCount` hanya maju pada turn sukses, sehingga turn gagal dan turn
+ * berikutnya bisa berbagi nomor yang sama. Checkpoint pertama pada/after
+ * timestamp target adalah titik file-change pertama sejak batas; treeBefore-nya
+ * tepat keadaan workspace di batas itu.
+ *
+ * Snapshot safety diambil SEBELUM apply agar kegagalan di tengah restore bisa
+ * dikembalikan dan redo punya keadaan tujuan yang utuh.
+ */
+export async function undoFilesToTurn(
+  sessionId: string,
+  targetEventTs: number,
+  cwd: string = process.cwd(),
+  opts?: { fallbackTurn?: number; beforeTs?: number },
+): Promise<{
+  noCheckpoint: boolean
+  checkpoint?: Checkpoint
+  restoredFiles: string[]
+  safety?: WorkspaceSafetySnapshot
+}> {
+  const manifestPath = getManifestPath(sessionId, cwd)
+  return withCheckpointLock(manifestPath, async () => {
+    const manifest = await loadCheckpointManifest(sessionId, cwd)
+    const timed =
+      targetEventTs > 0
+        ? manifest.checkpoints.find((cp) => {
+            const ts = Date.parse(cp.timestamp)
+            return (
+              Number.isFinite(ts) &&
+              ts >= targetEventTs &&
+              (opts?.beforeTs === undefined || ts < opts.beforeTs)
+            )
+          })
+        : undefined
+    const checkpoint =
+      timed ??
+      (opts?.fallbackTurn !== undefined && opts.beforeTs === undefined
+        ? manifest.checkpoints.find((cp) => cp.turn >= opts.fallbackTurn!)
+        : undefined)
+    if (!checkpoint) return { noCheckpoint: true, restoredFiles: [] }
+
+    const pre = await beginTurnSnapshot(sessionId, cwd)
+    if (pre.mode === "unavailable") {
+      throw new Error(`workspace safety snapshot unavailable: ${pre.reason}`)
+    }
+    const safety: WorkspaceSafetySnapshot =
+      pre.mode === "git"
+        ? { mode: "git", tree: pre.tree }
+        : { mode: "files", snapshots: pre.snapshots }
+    let restoredFiles: string[]
+    try {
+      restoredFiles = await applyCheckpoint(checkpoint, "undo", cwd)
+    } catch (error) {
+      await restoreWorkspaceSafety(safety, cwd).catch(() => {})
+      throw error
+    }
+
+    // Pointer manifest sumber TIDAK diubah di sini: rewind membuat cabang dan
+    // membiarkan sesi sumber utuh untuk /redo. Karena itu marker undo (yang
+    // menyatakan newIndex) juga tidak ditulis — marker basi justru bisa
+    // diadopsi rekonsiliasi sebagai pointer yang salah.
+    return { noCheckpoint: false, checkpoint, restoredFiles, safety }
+  })
+}
+
+/** Salin checkpoint sebelum timestamp event prompt ke manifest sesi cabang. */
+export async function copyCheckpointPrefix(
+  srcSessionId: string,
+  dstSessionId: string,
+  beforeTimestamp: number,
+  cwd: string = process.cwd(),
+): Promise<number> {
+  const src = await loadCheckpointManifest(srcSessionId, cwd)
+  const checkpoints = src.checkpoints.filter((cp) => {
+    const ts = Date.parse(cp.timestamp)
+    return Number.isFinite(ts) && ts < beforeTimestamp
+  })
+  if (checkpoints.length === 0) return 0
+  await saveCheckpointManifest(
+    {
+      sessionId: dstSessionId,
+      currentIndex: checkpoints.length - 1,
+      checkpoints,
+    },
+    cwd,
+  )
+  return checkpoints.length
 }
 
 export async function undoLastCheckpoint(

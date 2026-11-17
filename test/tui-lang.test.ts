@@ -102,6 +102,57 @@ describe("/lang end-to-end", () => {
     } catch {}
   }
 
+  test("handoff rewind mempertahankan draft multiline dan dikonsumsi sekali", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "minicode-draft-"))
+    tmpRoots.push(cwd)
+    mkdirSync(join(cwd, ".minicode", "rewinds"), { recursive: true })
+    const draft = "baris satu\n中文\nbaris terakhir"
+    writeFileSync(
+      join(cwd, ".minicode", "rewinds", "lang-test.json"),
+      JSON.stringify({
+        v: 1,
+        branchSessionId: "lang-test",
+        sourceSessionId: "source",
+        targetOrdinal: 1,
+        targetTurnId: 0,
+        prompt: draft,
+        safety: null,
+      }),
+    )
+    const previousDraft = process.env.MINICODE_REWIND_DRAFT
+    const previousNotice = process.env.MINICODE_REWIND_NOTICE
+    process.env.MINICODE_REWIND_DRAFT = "1"
+    process.env.MINICODE_REWIND_NOTICE = Buffer.from("Rewind notice").toString("base64")
+    const submitted: string[] = []
+    const session = fakeSession()
+    session.cwd = cwd
+    session.runPromptWithVerify = async (prompt) => {
+      submitted.push(prompt)
+    }
+    tty = installFakeTty({ columns: 90, rows: 24 })
+    let runP: Promise<void> | null = runTui(session)
+    try {
+      await tty.ready()
+      await tty.waitForScreen((f) => f.some((line) => line.includes("baris terakhir")))
+      expect(submitted).toEqual([])
+      expect(process.env.MINICODE_REWIND_DRAFT).toBeUndefined()
+      expect(process.env.MINICODE_REWIND_NOTICE).toBeUndefined()
+      await tty.send(KEY.enter)
+      await waitForState(() => submitted.length === 1)
+      expect(submitted).toEqual([draft])
+      await tty.send("/exit")
+      await tty.send(KEY.enter)
+      await runP
+      runP = null
+    } finally {
+      await closeTuiIfRunning(tty, runP)
+      if (previousDraft === undefined) delete process.env.MINICODE_REWIND_DRAFT
+      else process.env.MINICODE_REWIND_DRAFT = previousDraft
+      if (previousNotice === undefined) delete process.env.MINICODE_REWIND_NOTICE
+      else process.env.MINICODE_REWIND_NOTICE = previousNotice
+    }
+  })
+
   test("/lang id ganti locale sesi + simpan permanen", async () => {
     tty = installFakeTty({ columns: 80, rows: 24 })
     let runP: Promise<void> | null = runTui(fakeSession())
@@ -211,8 +262,7 @@ describe("/lang end-to-end", () => {
       // v7.18: hasil command tampil di jendela overlay, bukan transkrip.
       const out = await tty.waitForOutput((o) => o.includes("Commands:"))
       for (const b of BUILTIN_COMMANDS) expect(out, b.name).toContain(`/${b.name}`)
-      for (const n of ["/mode", "/lang", "/compact", "/expand", "/minimize"])
-        expect(out, n).toContain(n)
+      for (const n of ["/mode", "/lang", "/view"]) expect(out, n).toContain(n)
       await tty.send(KEY.esc, 90)
       await tty.waitForScreen((f) => f.some((l) => l.includes("minicode ›")))
       await tty.send("/exit")

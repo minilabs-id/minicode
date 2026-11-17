@@ -44,7 +44,7 @@ append-only
 scrollback, tanpa alternate screen. `provider:text` → `sanitizeAnsi` PER CHUNK
 → `streamBuffer` → `flushBuf` (line-buffered) → `flushLine` (fence-state +
 `decorateMarkdown` + `formatWrapped`) → `stdout`. Jawaban bisa minimize
-(buffer 1MB + marker, dibuka via `/expand`).
+(buffer 1MB + marker, dibuka via `/view expand`).
 
 Tahap E — garis status transient `src/ui/assistant/turn-status.ts`: satu baris
 `stderr` untuk shell/linier, hidup hanya di fase sunyi (latch
@@ -80,7 +80,7 @@ Tahap H — primitif render `src/ui/render/`: `sanitize.ts` (hanya SGR lolos),
 `markdown.ts` + `highlight.ts` (fence-state per baris, konten utuh),
 `width.ts` (kolom: CJK/emoji 2, potong aman-SGR), `wrap.ts` (lebar dibaca
 per baris → aman resize), `theme.ts` (getter warna/glyph, jangan di-`const`),
-`errors.ts` (pesan actionable + redact), `collapse.ts` (buffer `/expand`
+`errors.ts` (pesan actionable + redact), `collapse.ts` (buffer `/view expand`
 200KB/entry, 500KB total), `markdown-table.ts`/`table-grid.ts` (pipe-table
 model), `diff.ts`/`table.ts`/`money.ts`/`format.ts`,
 `activity-group.ts`/`activity-panel.ts` (panel aktivitas: klasifikasi tool →
@@ -97,7 +97,7 @@ Tahap I — view murni vs controller: `src/ui/screens/` (props + callback,
 tanpa IO) digerakkan `cli/` (`tui.ts`, `commands.ts`, `wizard.ts`,
 `model-manager.ts`, `provider-manager.ts`, `src/ui/approval/prompt.ts` via DI `ask`,
 `setupWhenEmpty`, `setSubAgentSessionFactory`). Readout command (`/help`,
-`/status`, `/context`, `/history`, `/expand`, `/sync`, `/scheduler`) dirender
+`/status`, `/context`, `/sessions history`, `/view expand`, `/provider sync`, `/scheduler`) dirender
 `output-window.ts` sebagai jendela ber-scroll di atas chat (v7.18–v7.19, reflow saat
 resize, counter judul, scroll wheel/`j`/`k`/`Space`, dan salin `c` opsional); jendela
 interaktif command (`/model`, `/provider`, `/sessions`, picker) berbagi
@@ -116,7 +116,7 @@ I = bisa diinterupsi, L = bisa tiba setelah completion.
 | assistant text | provider stream | stdout/TUI wrap ber-indentasi gantung (margin kiri 3 kolom adaptif, jeda antar-poin/heading/blok) + code fence 3-spasi; pipe-table-aligned di TTY, source sanitized di non-TTY | ya | tidak (E1) | tidak | ya (abort) | tidak (detach flush 1x, E6) |
 | tool call | model → kernel | `› nama target` muted (compact: diam) | tidak | tidak | tidak | ya | tidak |
 | tool result | tool → executor | ledger hijau/merah; minimize → `+ label` + buffer; panel aktivitas ON → baris grup per keluarga tool (`+ explore · N tools · N ok`) | tidak | tidak | tidak | ya | tidak |
-| reasoning | provider extension | default tersembunyi (TUI composer tetap dots clock, isi disimpan ke `/expand`); bila dibuka (`/thinking` / `Ctrl+T` / `MINICODE_SHOW_THINKING=1` / `--verbose`), panel aktivitas ON → AREA thinking live maks 10 baris (`+ thinking`, ringkas 1 baris saat turn selesai); panel OFF → alir per baris | ya | tidak | tidak | ya | tidak |
+| reasoning | provider extension | default tersembunyi (TUI composer tetap dots clock, isi disimpan ke `/view expand`); bila dibuka (`/view thinking` / `Ctrl+T` / `MINICODE_SHOW_THINKING=1` / `--verbose`), panel aktivitas ON → AREA thinking live maks 10 baris (`+ thinking`, ringkas 1 baris saat turn selesai); panel OFF → alir per baris | ya | tidak | tidak | ya | tidak |
 | thinking effort | picker `/model` | badge + level per model | tidak | tidak | tidak | tidak | tidak |
 | usage | provider extension | verbose saja; masuk budget watcher | ya | tidak | ya (tail pasca-finish) | ya | ya (diabaikan aman) |
 | compaction | kernel loop | `── compacted: <reason>` kuning, reason verbatim | tidak | tidak | tidak | tidak | tidak |
@@ -171,7 +171,7 @@ satu chunk lolos `sanitizeAnsi` (by-design) lalu ditulis ke pipe apa adanya
 (`out="\u001b[31mRed\u001b[0m\n"`), melanggar kontrak non-TTY deterministik.
 Perbaikan terkecil: strip SGR (atau render via `c.*`) saat `!isTTY`.
 
-F3 LOW — buffer thinking `/expand` membuang kepala diam-diam
+F3 LOW — buffer thinking `/view expand` membuang kepala diam-diam
 (`thinkingBuf.slice(-200_000)` tanpa marker seperti `, capped 1MB` pada
 answer). Informasi diagnostik hilang tanpa jejak.
 

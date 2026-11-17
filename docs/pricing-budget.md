@@ -46,4 +46,4 @@ minicode --budget 0.05 --budget-strict "task ketat"
 | `Total` | `usage.getSession()` | Kumulatif sesi = Input + Output (tak pernah di-reset) |
 | `Cost` | tabel harga offline | Estimasi, atau `N/A` bila model tak dikenal — **tanpa fetch** |
 
-Aturan praktis: `Turn` besar + `Context` kecil = turn ini boros di jendela sempit (saatnya `/compact` atau `/clear`); `Total` besar + `Cost: N/A` = model tanpa harga, `--budget` fail-closed (dianggap over). Kurva token per sesi bisa direplay dari `.minicode/step-traces.jsonl` (kolom `totalTokens` per baris, monoton naik); `minicode stats` menampilkan peak-nya (`Peak tok`).
+Aturan praktis: `Turn` besar + `Context` kecil = turn ini boros di jendela sempit (saatnya `/view compact` atau `/clear`); `Total` besar + `Cost: N/A` = model tanpa harga, `--budget` fail-closed (dianggap over). Kurva token per sesi bisa direplay dari `.minicode/step-traces.jsonl` (kolom `totalTokens` per baris, monoton naik); `minicode stats` menampilkan peak-nya (`Peak tok`).

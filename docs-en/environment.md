@@ -21,6 +21,8 @@ The variables that most determine behaviour (the rest are referenced below):
 | `MINICODE_WORK_MODE` | `DISCUSS` \| `PLAN` \| `BUILD` -> operating mode (same as `--work-mode`; default `DISCUSS`; `BUILD` maps to the internal `EXECUTE`; the flag beats the env var; an unknown value falls back to `DISCUSS` with a warning) |
 | `MINICODE_HOOKS` | `1` -> run `pre/post-run` hooks from `~/.minicode/hooks/*.js` & `.minicode/hooks/*.js` (context in the `MINICODE_HOOK_CTX` env; hook env is sanitised without secrets; skipped when the session is cancelled) |
 | `MINICODE_SESSION_TTL_DAYS` | Session TTL (default 30; `0` = forever) |
+| `MINICODE_REWIND_DRAFT` | Internal `/undo` handoff: `1` -> the TUI loads the target prompt from the rewind record into the branch composer |
+| `MINICODE_REWIND_NOTICE` | Internal `/undo`/`/redo` handoff: base64 notice shown once in the child session transcript |
 | `MINICODE_HOME` | Override the home for local/global DBs (sessions + vector); default `~` |
 | `MINICODE_TOKENIZERS` | `0`/`off` -> disable on-demand precise tokenizer downloads from HuggingFace (fall back to the density estimator). Default: enabled for open models (deepseek/qwen/mistral/gemma/phi); vocabularies are cached in `~/.minicode/tokenizers/` and not re-downloaded |
 | `MINICODE_TELEMETRY` | `0`/`false`/`off` -> disable writing traces.jsonl |
@@ -85,7 +87,7 @@ The variables that most determine behaviour (the rest are referenced below):
 | `MINICODE_ASCII` | `1` -> force ASCII glyphs (`[OK]`, `>`, `.`) for consoles without UTF-8 |
 | `MINICODE_BOX` | popup box corner style: default **rounded** (`+`-style curves); `square` -> sharp; `ascii` -> `+-|` (same as `MINICODE_ASCII=1`). For terminals that render rounded glyphs badly |
 | `MINICODE_SCRIM` | `none` -> force the backdrop scrim to `faint` only (no dark `48;5;236` background) — diagnostics/terminals that map 256-colour oddly |
-| `MINICODE_COMPACT` | `1` -> compact tool calls, `0` -> expanded. Default: compact in the TUI, expanded in one-shot/exec (also `/compact`, Ctrl+O) |
+| `MINICODE_COMPACT` | `1` -> compact tool calls, `0` -> expanded. Default: compact in the TUI, expanded in one-shot/exec (also `/view compact`, Ctrl+O) |
 | `MINICODE_JUSTIFY` | `1` -> enable justified model text output. Default: off (opt-in) — justification injects spaces that change the original text when copied/piped |
 | `MINICODE_DROPDOWN` | `0` -> disable the floating dropdown, use inline hints (legacy consoles) |
 | `MINICODE_MOUSE_SELECTION` | `0`/`false`/`off`/`no` -> disable TUI mouse tracking; default `1` for drag selection + wheel |
@@ -94,8 +96,8 @@ The variables that most determine behaviour (the rest are referenced below):
 | `MINICODE_STATUSLINE` | `rich` -> the turn status line also shows cumulative tokens + session cost (thrifty by default) |
 | `MINICODE_A11Y` | `1` -> live-region approval for screen readers (plain lines without ANSI) |
 | `MINICODE_SHOW_THINKING` | model reasoning is visible BY DEFAULT; `0` -> minimized (marker only), `1` -> force visible |
-| `MINICODE_MINIMIZE_ACTIVITY` | ON by default in the TUI; `0` -> transparent (one line per tool). Folds per-turn tool activity into one summary (details via `/expand`) |
-| `MINICODE_ACTIVITY_PANEL` | `0` -> disable the activity panel (ACTIVE by default in the TUI; `/fold` toggles); `1` -> force it on in the linear/one-shot path too |
+| `MINICODE_MINIMIZE_ACTIVITY` | ON by default in the TUI; `0` -> transparent (one line per tool). Folds per-turn tool activity into one summary (details via `/view expand`) |
+| `MINICODE_ACTIVITY_PANEL` | `0` -> disable the activity panel (ACTIVE by default in the TUI; `/view fold` toggles); `1` -> force it on in the linear/one-shot path too |
 | `MINICODE_AUTORESUME_BG` | `0` -> disable TUI turn auto-resume when a background job finishes (enabled by default; once per job, only when no turn is running) |
 | `MINICODE_TURN_AUTO_RESUME` | `0` -> disable automatic turn resume after a **transient** provider failure (`server`/`network`; enabled by default). Provider retry and turn resume share **one recovery budget** (`src/policy/recovery-budget.ts`): 45 s total and a quota of 6 attempts for one logical call, with full jitter and `Retry-After` as a floor. Sharing one budget prevents *retry amplification* (separate per-layer counts multiply the cost: ~82 s for a dead provider). Terminal failures are not recovered: `rate_limit` (a permanent 429/spend-cap does not recover), `auth`, `invalid_request`, `context_length_exceeded`, `budget_exceeded`, `max_steps_exceeded`, and user abort |
 | `MINICORE_THINKING` | `off` -> send `enable_thinking:false` to OpenAI-compat (DeepSeek). The old `MINICODE_THINKING` alias is still honoured |

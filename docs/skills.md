@@ -22,7 +22,7 @@ Review this diff: {{args}}
 Perilaku penting:
 
 - Skill **bukan tool** — ia memanjangkan prompt pertama, jadi tetap tunduk pada permission mode yang sama.
-- Dropdown `/` menawarkan perintah builtin, driver command (`/compact`/`/thinking`/`/expand`/…), dan skill terpasang. `Tab` BUKAN autocomplete — ia memutar WorkMode (`Shift+Tab` memutar PermissionMode).
+- Dropdown `/` menawarkan perintah builtin, driver command (`/view`/`/mode`/`/undo`/…), dan skill terpasang. `Tab` BUKAN autocomplete — ia memutar WorkMode (`Shift+Tab` memutar PermissionMode).
 
 ## AGENTS.md: instruksi proyek
 

@@ -31,7 +31,7 @@ Hard security (path jail luar workspace, sensitive-file, owned-state, bash-guard
 
 - Semakin otonom → semakin cepat, semakin besar blast radius bila model salah paham. Tidak ada mode yang membuat model lebih bijak — mode hanya mengatur **apa yang boleh terjadi**.
 - `allowlist` (otomatis saat tanpa sandbox OS) paling ketat untuk shell, tetapi model tetap bisa menulis file via tool terjail — pahami beda sumbunya: allowlist membatasi *perintah*, jail membatasi *file*.
-- Ganti mode kapan pun: flag saat start, `Tab`/`Shift+Tab` atau `/mode`+`/work-mode` saat TUI berjalan.
+- Ganti mode kapan pun: flag saat start, `Tab`/`Shift+Tab` atau `/mode` (popup dua sumbu) saat TUI berjalan.
 
 ## Lanjut
 

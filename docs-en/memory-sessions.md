@@ -40,7 +40,7 @@ Limit: snapshots use `git add -A`, so `.gitignore`d files are excluded (delibera
 
 **Non-repo (fallback).** File-content snapshots with a `WORKSPACE_SNAPSHOT_LIMIT` cap.
 
-`/undo` goes to before the turn, `/redo` to after it. Manifests in `.minicode/checkpoints/` are capped at the newest 20. A turn with no changes creates no checkpoint. The pointer comes from a journal marker (not absolute truth) — a crash mid-way is adopted from the next valid marker.
+`/undo [n|list]` restores files AND conversation as one operation: files return to the first checkpoint at/after the turn boundary, then a branch session is created from the prefix before the target prompt; the original session stays intact and the target prompt opens as a composer draft. `/redo` restores the workspace to the pre-undo snapshot and opens the original session; redo is refused when the branch already has a new turn. Manual file edits outside turns are not detected — redo restores the pre-undo snapshot. Manifests in `.minicode/checkpoints/` are capped at the newest 20. Checkpoints are recorded for successful, failed, and cancelled turns; failed prompts remain durable as presentation events (the kernel discards no-progress input from messages) so they stay undoable. A turn with no changes creates no checkpoint. The pointer comes from a journal marker (not absolute truth) — a crash mid-way is adopted from the next valid marker.
 
 ## Recovery journal
 

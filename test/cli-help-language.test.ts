@@ -54,15 +54,26 @@ describe("/help: kelengkapan & ukuran", () => {
     const teks = (await run("/help")).join("\n")
     for (const cmd of ["/help", "/provider", "/model", "/status", "/sessions", "/init", "/exit"])
       expect(teks, cmd).toContain(cmd)
-    // Opsi A audit UX: perintah driver (undo/redo/clear/copy/history) tampil
-    // DI /HELP tapi TIDAK di dropdown completion (lihat DRIVER_HELP_COMMANDS).
-    for (const cmd of ["/undo", "/redo", "/clear", "/copy", "/history"])
+    for (const cmd of ["/undo", "/redo", "/clear", "/copy", "/mode", "/view"])
       expect(teks, cmd).toContain(cmd)
-    // Grup View WAJIB terisi di full help — dulu heading-nya kosong karena
-    // command driver tidak terdaftar di BUILTIN/DRIVER registry.
-    for (const cmd of ["/compact", "/thinking", "/expand", "/minimize", "/fold"])
-      expect(teks, cmd).toContain(cmd)
-    for (const cmd of ["/models", "/providers", "/cost", "/resume", "/theme"])
+    expect(teks).toContain("[id|history|branches]")
+    expect(teks).toContain("compact, thinking, expand, minimize, fold")
+    for (const cmd of [
+      "/models",
+      "/providers",
+      "/cost",
+      "/resume",
+      "/theme",
+      "/work-mode",
+      "/sync",
+      "/history",
+      "/branches",
+      "/compact",
+      "/thinking",
+      "/expand",
+      "/minimize",
+      "/fold",
+    ])
       expect(teks, cmd).not.toContain(cmd)
   })
 
@@ -78,7 +89,7 @@ describe("/help: kelengkapan & ukuran", () => {
 describe("BUILTIN_COMMANDS: setiap perintah yang ditangani terdaftar", () => {
   // Perintah yang berfungsi tapi tidak terdaftar tidak muncul di /help DAN tidak
   // bisa dilengkapi dengan Tab — user tidak punya cara menemukannya.
-  const DITANGANI = ["help", "init", "exit", "model", "provider", "sync", "sessions", "status"]
+  const DITANGANI = ["help", "init", "exit", "model", "provider", "context", "sessions", "status"]
 
   test("tidak ada perintah yang hilang dari daftar", () => {
     const terdaftar = new Set(BUILTIN_COMMANDS.map((b) => b.name))
@@ -120,7 +131,7 @@ describe("BUILTIN_COMMANDS: setiap perintah yang ditangani terdaftar", () => {
 })
 
 describe("konsistensi bahasa keluaran", () => {
-  const PERINTAH = ["/sync", "/status", "/sessions", "/exit", "/model"]
+  const PERINTAH = ["/provider sync", "/status", "/sessions", "/exit", "/model"]
 
   for (const cmd of PERINTAH) {
     test(`${cmd} tidak memuat frasa Inggris yang pernah bocor`, async () => {

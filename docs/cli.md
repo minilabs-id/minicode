@@ -56,7 +56,7 @@ Subcommand di-route di `cli/router.ts` (`stats`, `sessions`, `mcp`, `config`, `s
 | `--max-steps <n>` | Batas langkah tool (default 50) |
 | `--context-window <n>` | Ukuran jendela konteks (token) |
 | `--session <id>` | ID sesi (default random, disanitasi) |
-| `--work-mode <m>` | `DISCUSS` \| `BUILD` (default: `DISCUSS`). **Work Mode**: `DISCUSS` = investigasi & perencanaan read-only, `BUILD` = implementasi. Persetujuan hanya `AUTO`/`ASK` (default `AUTO`). Lihat [TUI](repl.md) untuk `/work-mode` |
+| `--work-mode <m>` | `DISCUSS` \| `BUILD` (default: `DISCUSS`). **Work Mode**: `DISCUSS` = investigasi & perencanaan read-only, `BUILD` = implementasi. Persetujuan hanya `AUTO`/`ASK` (default `AUTO`). Lihat [TUI](repl.md) untuk `/mode` |
 | `--enable-scheduler` | Opt-in scheduler otonom (default **off**). Tanpa flag ini, scheduler tidak dibangun sama sekali dan `/scheduler` menjawab "not enabled". Eksekusi manual saja lewat `/scheduler run` — tidak ada timer; turn otonom bersifat read-only. Lihat `/scheduler status` dan `/scheduler stop` |
 | `--runtime <mode>` | `off` (default) \| `constructed` \| `owned`. Arsitektur eksekusi: `off` = perilaku sekarang, tak berubah; `constructed` = runtime + jurnal durable dibangun, turn masih jalan jalur lama; `owned` = setiap turn di-admit lewat runtime (kernel + jurnal durable) dan admission yang ditolak menjalankan tak apa pun. Nilai tak dikenal = `off` |
 
@@ -70,7 +70,7 @@ Batas berubah otomatis saat `/model` mengganti model. MiniCode juga membatasi
 keluaran stream berdasarkan ruang tersisa setelah system prompt, tools, dan
 riwayat dihitung.
 
-Di TUI, **Tab** meng-toggle Work Mode (`Discuss` ↔ `Build`) dan **Shift+Tab** meng-toggle Permission Mode (`Auto` ↔ `Ask`). `/mode <AUTO|ASK>` mengubah persetujuan; `/work-mode <DISCUSS|BUILD>` mengubah operating mode. Footer menampilkan Work Mode di kiri dan Permission Mode berwarna cyan di kanan, dekat penggunaan konteks; pada terminal sempit label dipadatkan.
+Di TUI, **Tab** meng-toggle Work Mode (`Discuss` ↔ `Build`) dan **Shift+Tab** meng-toggle Permission Mode (`Auto` ↔ `Ask`). `/mode auto|ask` mengubah persetujuan; `/mode discuss|build` mengubah operating mode. Footer menampilkan Work Mode di kiri dan Permission Mode berwarna cyan di kanan, dekat penggunaan konteks; pada terminal sempit label dipadatkan.
 
 ## Kapan memakai apa
 

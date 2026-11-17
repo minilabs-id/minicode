@@ -35,7 +35,7 @@ Detail lengkap + kontrak FROZEN-nya di [Kontrak Terminal](TERMINAL_CONTRACT.md).
 Beberapa keputusan desain lahir dari tidak mau berpura-pura:
 
 - **Angka tidak ditulis permanen** di dokumentasi — jalankan `bun test` / `bun run gate:coverage` / lihat CI. Halaman yang mengklaim jumlah test akan usang begitu dipush.
-- **Kegagalan dilaporkan apa adanya**: `auth login` menampilkan error server tanpa dipercantik; `minicode sync`/`/sync` jujur `{updated, failed}`; sandbox yang tidak tersedia **tidak** dilabeli aman — default turun ke `allowlist` dengan alasan dicetak sekali.
+- **Kegagalan dilaporkan apa adanya**: `auth login` menampilkan error server tanpa dipercantik; `minicode sync`/`/provider sync` jujur `{updated, failed}`; sandbox yang tidak tersedia **tidak** dilabeli aman — default turun ke `allowlist` dengan alasan dicetak sekali.
 - **Ukur, bukan klaim**: bash-guard divalidasi korpus serangan + perintah sah (jalankan `bun run gate:bash`). Lihat [Keamanan](security.md).
 - **Skor benchmark dilaporkan apa adanya** beserta batas validitasnya (lingkungan, ukuran sampel). Lihat [Verify & Benchmark](verify-benchmark.md).
 

@@ -96,6 +96,8 @@ describe("t()", () => {
       "tui.thinkingSet",
       "tui.modeLine",
       "tui.langLine",
+      // Judul popup /mode: "Mode" adalah istilah teknis yang sama di id.
+      "tui.modeTitle",
       // "Turn" adalah istilah produk yang dipakai konsisten di id/en.
       "one.turnHead",
       // "Tool" adalah istilah produk (bukan diterjemahkan menjadi Alat).

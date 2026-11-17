@@ -33,7 +33,7 @@ Hard security (path jail outside the workspace, sensitive files, owned state, ba
 
 - More autonomy means faster work and a larger blast radius when the model misunderstands. No mode makes the model wiser — a mode only governs **what is allowed to happen**.
 - `allowlist` (automatic when there is no OS sandbox) is the strictest option for the shell, but the model can still write files through jailed tools — understand the difference: the allowlist constrains *commands*, the jail constrains *files*.
-- Change modes any time: a start flag, `Tab`/`Shift+Tab`, or `/mode`+`/work-mode` while the TUI is running.
+- Change modes any time: a start flag, `Tab`/`Shift+Tab`, or `/mode` (two-axis popup) while the TUI is running.
 
 ## Next
 

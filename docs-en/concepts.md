@@ -33,7 +33,7 @@ Full details and their FROZEN contract: [Terminal Contract](../TERMINAL_CONTRACT
 Several design decisions come from refusing to pretend:
 
 - **Numbers are not written permanently** in the docs — run `bun test` / `bun run gate:coverage` / check CI. A page claiming a test count goes stale the moment it is pushed.
-- **Failures are reported as they are**: `auth login` shows the raw server error; `minicode sync`/`/sync` honestly returns `{updated, failed}`; an unavailable sandbox is **not** labelled safe — the default falls back to `allowlist` and the reason is printed once.
+- **Failures are reported as they are**: `auth login` shows the raw server error; `minicode sync`/`/provider sync` honestly returns `{updated, failed}`; an unavailable sandbox is **not** labelled safe — the default falls back to `allowlist` and the reason is printed once.
 - **Measure, do not claim**: bash-guard is validated against an attack corpus plus legitimate commands (run `bun run gate:bash`). See [Security](security.md).
 - **Benchmark scores are reported as-is** with their validity limits (environment, sample size). See [Verify & Benchmark](verify-benchmark.md).
 

@@ -19,26 +19,23 @@ outside the dictionary fail the test.
 | `/help` | Short command list, grouped by category (Session/Model/Mode/View/Task) |
 | `/help full` | Full grouped list with descriptions (alias `/help all`); a bare `/help` from non-TTY also shows this |
 | `/help keys` | Complete keyboard shortcuts (alias `/help tombol`) |
-| `/provider` | Manage providers: popup — preset picker + form (URL/key/scope/override), delete (`d`, states how many models are lost), edit (`e`) |
+| `/provider [sync]` | Manage providers: popup — preset picker + form (URL/key/scope/override), delete (`d`, states how many models are lost), edit (`e`). `sync` refreshes the model list of every provider (only says restart when there really are new models) |
 | `/model [search]` | Popup of all `provider::model` (argument = initial filter; type inside to search live, Ctrl+U clears, Esc leaves the filter). Del = delete (confirm). Enter = select + set thinking effort (`default/low/medium/high`, stored on the provider, applies to the next session; Esc = cancel entirely). Non-default effort shows a `[low\|medium\|high]` badge |
 | `/context [value]` | Table of the effective context window per model plus where each value came from (`manual`/`endpoint`/`katalog`/`models.dev`/`flag`/`default aman`). With an argument: set it for the active model (`128k`, `1m`, `1024x1024`, `auto`) — effective on the next turn. Details in [Configuration](config.md) |
-| `/sync` | Refresh the model list of every provider (only says restart when there really are new models) |
-| `/undo` | Revert the last turn's file changes |
-| `/redo` | Re-apply what was reverted |
-| `/sessions` | With no argument = resume picker popup; `/sessions <id>` = resume directly |
+| `/undo [n\|list]` | Undo conversation **and** files back to before turn `n` (no argument: newest-first picker; `last`: the last turn). `Esc Esc` with an empty composer opens the picker. The original session stays intact; the target prompt opens as a draft in the branch session. `list` shows turn numbers. In DISCUSS, undo that touches files is refused; conversation-only undo remains allowed |
+| `/redo` | Return to the source session after `/undo` and restore the workspace to its pre-undo state; refused if a new turn already exists in the branch |
+| `/sessions [id\|history\|branches]` | With no argument = resume picker popup; `<id>` = resume directly; `history` = the last 20 prompt entries; `branches` = undo branch list |
 | `/status` | Runtime + **cumulative session** usage & cost |
-| `/mode [AUTO\|ASK]` | Change approval supervision; with no argument it toggles AUTO/ASK |
-| `/work-mode [DISCUSS\|PLAN\|BUILD]` | WorkMode bounds how the agent works. `DISCUSS` is read-only, `PLAN` uses the plan ceiling, `BUILD` adds no ceiling (internal identity `EXECUTE`). With no argument it shows the active mode + usage; an invalid value is rejected and the active mode is unchanged. Tab and `/work-mode` change WorkMode; Shift+Tab and `/mode` change PermissionMode. |
+| `/mode [discuss\|build\|auto\|ask]` | With no argument = two-axis popup: WorkMode (`discuss`/`build`) + PermissionMode (`auto`/`ask`). WorkMode bounds how the agent works: `DISCUSS` is read-only investigation/planning, `BUILD` adds no ceiling (internal identity `EXECUTE`). An invalid value is rejected and the active mode is unchanged. Tab/Shift+Tab remain quick shortcuts. |
 | `/lang [en\|id]` | UI language; with no argument it shows the active one |
 | `/init` | Create `AGENTS.md` for this project |
 | `/copy [n]` | Copy the last `n` turns (default `1`, maximum `10`) via OSC 52 |
 | `/clear` | Clear the transcript (the viewport goes empty) |
-| `/expand` | Open the content of tool/thinking hidden by the compact ledger (one-shot, drains it all) |
-| `/history` | The last 20 prompt entries |
+| `/view [action]` | With no argument = view action popup. `compact` cycles compact/full tool output; `thinking` shows/hides reasoning; `expand [id]` opens the content of tool/thinking hidden by the compact ledger (one-shot, drains it all); `minimize` folds tools + answers; `fold` toggles the activity panel |
 | `/exit` | Quit (the only exit; `/quit` alias). After exiting, a session summary header is printed: the `minicode` wordmark + Session/Model/Usage (tokens, cost, duration) |
 | `/scheduler [status\|run\|stop]` | Production scheduler control. **Off by default** in every session (needs the `--enable-scheduler` flag); without the flag the command answers "not enabled". It stays visible in `/help` so an operator who enabled the flag can find it. |
 
-Aliases (work, not advertised in `/help`): `/models` -> `/model`, `/providers` -> `/provider`, `/usage` & `/cost` -> `/status`, `/resume [id]` -> `/sessions [id]`, `/compact`, `/thinking`, `/minimize`, `/quit`.
+Aliases (work, not advertised in `/help`): `/models` -> `/model`, `/providers` -> `/provider`, `/usage` & `/cost` -> `/status`, `/resume [id]` -> `/sessions [id]`, `/quit`. The old names `/sync`, `/work-mode`, `/history`, `/compact`, `/thinking`, `/expand`, `/minimize`, and `/fold` are retired (no alias) — `/help` and did-you-mean point to their replacements.
 
 Hidden commands (deliberately absent from `/help`/the dropdown, per session): `/unrestric` — the out-of-workspace jail + bash-guard + allowlist bridge is opened, narrow git credentials are forwarded, but sensitive files/MiniCode state are still denied; the gate is operator trust (toggle; the footer shows a red `o`). Details in [Security](security.md).
 
@@ -63,9 +60,9 @@ Did-you-mean: the typo `/sessoons` yields `Did you mean /sessions?` (distance <=
 | `ctrl+j` | New line (multiline; Enter still submits) |
 | `ctrl+w` | Delete one word before the cursor |
 | `ctrl+u` | Clear the line (in a filter: clear the query) |
-| `ctrl+o` | Cycle tool call compact/expanded (also `/compact`) |
-| `ctrl+t` | Toggle thinking expanded/minimized (also `/thinking`) |
-| `esc` | Close a dropdown/picker; two-stage in a form (press 1 clears the field, press 2 cancels); while busy = cancel the turn |
+| `ctrl+o` | Cycle tool call compact/expanded (also `/view compact`) |
+| `ctrl+t` | Toggle thinking expanded/minimized (also `/view thinking`) |
+| `esc` | Close a dropdown/picker; two-stage in a form (press 1 clears the field, press 2 cancels); while busy = cancel the turn; idle with an empty composer: two Esc within 500 ms opens the `/undo` picker |
 | `ctrl+c` | Copy the selection (TUI); with no selection it is a no-op. Abort a turn with `Esc` (double `Esc` within 1.5 s, or `Ctrl+D` on an empty line, when the abort stalls) |
 | `ctrl+d` | Quit on an empty line; while busy on an empty line = abort the turn then quit |
 
