@@ -8,6 +8,16 @@ import { join } from "node:path"
 
 const repoRoot = process.cwd()
 
+// Submodul internal hasil pemecahan barrel persistence tetap SATU domain owner.
+const SESSION_PERSISTENCE_FILES = [
+  "src/session/persistence.ts",
+  "src/session/db/schema.ts",
+  "src/session/db/runs.ts",
+] as const
+const SESSION_PERSISTENCE_SET = new Set<string>(SESSION_PERSISTENCE_FILES)
+const readPersistenceBundle = (): string =>
+  SESSION_PERSISTENCE_FILES.map((f) => readFileSync(f, "utf8")).join("\n")
+
 function tracked(pattern: RegExp): string[] {
   const r = spawnSync("git", ["ls-files"], { cwd: repoRoot, encoding: "utf8", timeout: 30_000 })
   if (r.status !== 0) return []
@@ -83,10 +93,10 @@ test("[ARCHITECTURE-GUARD] scope P2: belum ada artefak P3+ di produksi", () => {
   expect(hits).toEqual([])
   // Peta alias P2.1 WAJIB ada tepat satu: tabel di persistence + resolver.
   // (identity.ts baru & belum ter-commit → existsSync, bukan git ls-files.)
-  expect(readFileSync("src/session/persistence.ts", "utf8").includes("session_aliases")).toBe(true)
+  const persist = readPersistenceBundle()
+  expect(persist.includes("session_aliases")).toBe(true)
   expect(existsSync(join(repoRoot, "src", "session", "identity.ts"))).toBe(true)
   // Pagar epoch P2.2 WAJIB ada: kolom + CAS + takeover + modul authority.
-  const persist = readFileSync("src/session/persistence.ts", "utf8")
   expect(persist.includes("writer_epoch")).toBe(true)
   expect(persist.includes("session_takeovers")).toBe(true)
   expect(persist.includes("REFUSED_STALE_EPOCH")).toBe(true)
@@ -109,15 +119,14 @@ test("[ARCHITECTURE-GUARD] P2.3: kerangka tanpa aktivasi runtime", () => {
   const prodFiles = [...tracked(/^cli\/.*\.ts$/), ...tracked(/^src\/.*\.ts$/)]
   const threadWriters = prodFiles.filter(
     (f) =>
-      f !== "src/session/persistence.ts" &&
-      /INSERT\s+INTO\s+threads\b/i.test(readFileSync(f, "utf8")),
+      !SESSION_PERSISTENCE_SET.has(f) && /INSERT\s+INTO\s+threads\b/i.test(readFileSync(f, "utf8")),
   )
   expect(threadWriters).toEqual([])
   // P2.6: run TIDAK dorman lagi, tapi tetap satu writer kanonik — tak boleh
   // ada prod file lain yang menyuntik baris run di luar persistence.ts.
   const runWriters = prodFiles.filter(
     (f) =>
-      f !== "src/session/persistence.ts" && /INSERT\s+INTO\s+runs\b/i.test(readFileSync(f, "utf8")),
+      !SESSION_PERSISTENCE_SET.has(f) && /INSERT\s+INTO\s+runs\b/i.test(readFileSync(f, "utf8")),
   )
   expect(runWriters).toEqual([])
   // P2.7: proyeksi TIDAK dorman lagi, tapi tetap satu writer kanonik — tak
@@ -125,7 +134,7 @@ test("[ARCHITECTURE-GUARD] P2.3: kerangka tanpa aktivasi runtime", () => {
   // persistence.ts.
   const projectionWriters = prodFiles.filter(
     (f) =>
-      f !== "src/session/persistence.ts" &&
+      !SESSION_PERSISTENCE_SET.has(f) &&
       /INSERT\s+INTO\s+history_projections\b/i.test(readFileSync(f, "utf8")),
   )
   expect(projectionWriters).toEqual([])
@@ -265,7 +274,7 @@ test("[ARCHITECTURE-GUARD] P2.2: nilai epoch tak pernah dari input pemanggil", (
 test("[ARCHITECTURE-GUARD] P2.2: baris sessions hanya ditulis persistence.ts", () => {
   const writers = tracked(/^src\/.*\.ts$/).filter(
     (f) =>
-      f !== "src/session/persistence.ts" &&
+      !SESSION_PERSISTENCE_SET.has(f) &&
       /INSERT\s+INTO\s+sessions|UPDATE\s+sessions\s+SET/i.test(readFileSync(f, "utf8")),
   )
   expect(writers).toEqual([])
@@ -296,7 +305,7 @@ test("[ARCHITECTURE-GUARD] P2.5: satu allocator per jenis id, tanpa update event
   // allocateHistoryEventId (evt_, P2.5), allocateRunId (run_, P2.6), dan
   // allocateChildSessionId (sub_, P2.9). Semuanya identitas BERBEDA; tak ada
   // id P1 yang dipromosi diam-diam.
-  const persist = readFileSync("src/session/persistence.ts", "utf8")
+  const persist = readPersistenceBundle()
   expect(persist.split("randomUUID()").length - 1).toBe(3)
   expect(persist.includes("export function allocateHistoryEventId")).toBe(true)
   expect(persist.includes("export function allocateRunId")).toBe(true)
@@ -329,7 +338,7 @@ test("[ARCHITECTURE-GUARD] P2.5: satu allocator per jenis id, tanpa update event
 })
 
 test("[ARCHITECTURE-GUARD] P2.9: Sub-Agent kanonik, berpagar, dan terisolasi", () => {
-  const persist = readFileSync("src/session/persistence.ts", "utf8")
+  const persist = readPersistenceBundle()
   const setup = readFileSync("cli/setup.ts", "utf8")
   const task = readFileSync("src/tools/task.ts", "utf8")
 
@@ -412,7 +421,7 @@ test("[ARCHITECTURE-GUARD] P2.9: tak ada vendor改动 & writer child di persiste
   // Penulis sessions/threads/runs tetap SATU owner (persistence.ts).
   const writers = tracked(/^src\/.*\.ts$/).filter(
     (f) =>
-      f !== "src/session/persistence.ts" &&
+      !SESSION_PERSISTENCE_SET.has(f) &&
       /INSERT\s+INTO\s+sessions|UPDATE\s+sessions\s+SET|INSERT\s+INTO\s+runs\b/i.test(
         readFileSync(f, "utf8"),
       ),
@@ -564,7 +573,7 @@ test("[ARCHITECTURE-GUARD] P2.8: perakitan konteks baca-saja, tanpa Run/budget/v
 
 test("[ARCHITECTURE-GUARD] P2.8: persistence tak pernah mengimpor perakitan konteks", () => {
   // Arah dependensi satu-way: context-assembly → persistence. Never bolak-balik.
-  const persist = readFileSync("src/session/persistence.ts", "utf8")
+  const persist = readPersistenceBundle()
   expect(persist.includes("context-assembly")).toBe(false)
   expect(persist.includes("assembleContext")).toBe(false)
   // Dan persistence tetap bebas vendor/context budget (warisan P2.7).
@@ -1066,6 +1075,7 @@ test("[ARCHITECTURE-GUARD] P2.11: UI state cannot become canonical session state
     const code = codeOnly(readProd(file))
     for (const forbidden of [
       "session/persistence",
+      "session/db/",
       "session/journal",
       "session/verification",
       "session/checkpoint",
@@ -1107,6 +1117,7 @@ test("[ARCHITECTURE-GUARD] P2.11: verification.observed is minted only by the ad
     "src/presentation/projection.ts",
     "src/presentation/model.ts",
     "cli/setup.ts",
+    "cli/bootstrap/presentation-bridge.ts",
   ]) {
     const code = codeOnly(readProd(file))
     expect(code.includes('type: "verification.observed"'), file).toBe(false)
@@ -1133,6 +1144,7 @@ test("[ARCHITECTURE-GUARD] P2.11: child presentation cannot leak child context",
     "cli/commands/acp.ts",
     "cli/commands/exec.ts",
     "cli/setup.ts",
+    "cli/bootstrap/presentation-bridge.ts",
   ]) {
     expect(codeOnly(readProd(file)).includes("finalText"), file).toBe(false)
   }
@@ -1181,10 +1193,10 @@ test("[ARCHITECTURE-GUARD] P2.11: reconstructed terminal cannot appear observed"
   const projection = codeOnly(readProd("src/presentation/projection.ts"))
   expect(projection).toContain("projectProvenance")
   expect(projection).toContain('"reconstructed"')
-  const setup = codeOnly(readProd("cli/setup.ts"))
-  const bridgeStart = setup.indexOf("export function toPresentationEvent")
+  const bridgeFile = codeOnly(readProd("cli/bootstrap/presentation-bridge.ts"))
+  const bridgeStart = bridgeFile.indexOf("export function toPresentationEvent")
   expect(bridgeStart).toBeGreaterThan(-1)
-  const rest = setup.slice(bridgeStart)
+  const rest = bridgeFile.slice(bridgeStart)
   const nextExport = rest
     .slice(30)
     .search(/\nexport (function|const|async function|interface|type) /)
@@ -1233,6 +1245,7 @@ test("[ARCHITECTURE-GUARD] P2.11: no P2.12 work enters P2.11", () => {
     "src/ui/assistant/simple.ts",
     ...machineProjectors(),
     "cli/setup.ts",
+    "cli/bootstrap/presentation-bridge.ts",
   ]) {
     const code = codeOnly(readProd(file))
     for (const forbidden of ["Desktop", "desktop", "P2.12", "long-running", "websocket"]) {

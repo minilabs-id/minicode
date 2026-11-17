@@ -254,6 +254,28 @@ export function createResponsesProvider(config: ResponsesConfig): ModelProvider 
               // response.completed → simpan id untuk chaining turn berikut.
               // Format nyata: {type:"response.completed", response:{id:"resp_…"}}.
               const dtype = data.type as string | undefined
+              if (dtype === "error" || dtype === "response.failed" || data.error) {
+                if (prev) lastResponseByModel.delete(modelKey)
+                const errRec =
+                  (data.error as Record<string, unknown> | undefined) ??
+                  (data.response as { error?: Record<string, unknown> } | undefined)?.error ??
+                  data
+                const msg = String(errRec.message ?? errRec.msg ?? JSON.stringify(errRec))
+                const code = String(errRec.code ?? errRec.type ?? "")
+                const combined = `${msg} ${code}`
+                const cat = /auth|401|403|unauthorized/i.test(combined)
+                  ? "auth"
+                  : /quota_exceeded|insufficient_quota|balance/i.test(combined)
+                    ? "unknown"
+                    : /rate|429/i.test(combined)
+                      ? "rate_limit"
+                      : /context_length|maximum context|prompt is too long|context window/i.test(
+                            msg,
+                          )
+                        ? "context_length_exceeded"
+                        : "server"
+                throw new ProviderError(cat, cat === "unknown" ? `402: ${msg}` : `${cat}: ${msg}`)
+              }
               if (dtype === "response.completed" || dtype === "completed") {
                 const resp = data.response as { id?: unknown; usage?: unknown } | undefined
                 const rid = resp?.id ?? data.id
@@ -391,14 +413,22 @@ export function createResponsesProvider(config: ResponsesConfig): ModelProvider 
                   typeof data.arguments === "string" ? data.arguments : "",
                 )
               }
-              const isToolEvent =
-                dtype === "response.output_item.added" ||
-                dtype === "response.function_call_arguments.delta" ||
-                dtype === "response.function_call_arguments.done" ||
-                dtype === "response.output_item.done" ||
-                dtype === "function_call"
+              // Abaikan event lifecycle/summary `.done`/`.added` agar teks utuh di
+              // `response.output_text.done` tidak digandakan setelah `.delta`.
+              const isNonDeltaEvent =
+                typeof dtype === "string" &&
+                (dtype.endsWith(".done") ||
+                  dtype.endsWith(".added") ||
+                  dtype === "response.created" ||
+                  dtype === "response.in_progress" ||
+                  dtype === "response.completed" ||
+                  dtype === "completed" ||
+                  dtype === "response.incomplete" ||
+                  dtype.startsWith("response.function_call") ||
+                  dtype.startsWith("response.reasoning") ||
+                  dtype === "function_call")
               const text =
-                reasoningText || isToolEvent
+                reasoningText || isNonDeltaEvent
                   ? undefined
                   : ((typeof rawDelta === "string" ? rawDelta : undefined) ??
                     drec.text ??

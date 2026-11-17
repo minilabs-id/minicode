@@ -216,6 +216,12 @@ export const EXECUTION_PATHS: Readonly<Record<string, RegisteredPath>> = {
     proof: "new Database",
     note: "History sesi + presentasi. Berdampingan dengan runtime journal, bukan menggantikannya.",
   },
+  "src/session/db/schema.ts": {
+    cls: "legacy-durable",
+    entry: "openSessionHandle/openSessionDb/openWorkspaceSessionDb (SQLite)",
+    proof: "new Database",
+    note: "Submodul DDL & buka koneksi sessions.db untuk persistence.",
+  },
   "src/session/turn-marker.ts": {
     cls: "legacy-durable",
     entry: "markTurnActive/checkStaleTurn",
@@ -225,8 +231,14 @@ export const EXECUTION_PATHS: Readonly<Record<string, RegisteredPath>> = {
   "src/task/store.ts": {
     cls: "legacy-durable",
     entry: "claimTask/acquireSessionAuthority (SQLite)",
-    proof: "new Database",
+    proof: "closeTaskStoreHandle",
     note: "TaskStore: domain claim/lease. BUKAN execution lifecycle (tetap begitu di M15).",
+  },
+  "src/task/db/schema.ts": {
+    cls: "legacy-durable",
+    entry: "handle/closeTaskStoreHandle (SQLite)",
+    proof: "new Database",
+    note: "Submodul DDL & buka koneksi tasks.db untuk TaskStore.",
   },
   "src/telemetry/trace.ts": {
     cls: "legacy-durable",

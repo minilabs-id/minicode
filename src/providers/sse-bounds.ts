@@ -51,10 +51,7 @@ export function boundedSseBody(
         if (done) {
           reachedEof = true
           if (lineBytes !== 0 || frameBytes !== 0) {
-            throw new ProviderError(
-              "invalid_request",
-              `${provider} returned an incomplete SSE frame`,
-            )
+            throw new ProviderError("network", `${provider} returned an incomplete SSE frame`)
           }
           controller.close()
           release()
@@ -68,6 +65,11 @@ export function boundedSseBody(
           )
         }
         for (const byte of value) {
+          if (byte === 0x0d) {
+            // CRLF: 0x0D ikut dihitung frameBytes, bukan lineBytes
+            frameBytes++
+            continue
+          }
           if (byte === 0x0a) {
             frameBytes++
             if (frameBytes > maxFrameBytes) {

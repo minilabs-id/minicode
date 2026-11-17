@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { runAcpSession } from "../cli/commands/acp.ts"
+import { dispatchAcpLine, runAcpSession } from "../cli/commands/acp.ts"
 import {
   describeActivity,
   elapsedVisible,
@@ -502,5 +502,80 @@ describe("P6 ACP lifecycle projection", () => {
       outcome: { decision: "deny", by: "system" },
     })
     expect(notes[notes.length - 1]).toMatchObject({ id: 31, result: { ok: true } })
+  })
+
+  test("I2/I6: linear non-TTY memisah stdout (teks model) vs stderr (ledger tool) tanpa cursor-control", () => {
+    setSessionLocale("en")
+    tty = installFakeTty({ columns: 100, rows: 24, isTTY: false })
+    const bus = createFakeBus()
+    let snapshot: UiPresentationSnapshot = { activities: [], turns: [] }
+    let presentationHandler: ((event: UiPresentationEvent) => void) | undefined
+    const detach = attachSimpleLogger(bus as never, {
+      getSnapshot: () => snapshot,
+      onPresentationEvent: (h) => {
+        presentationHandler = h
+        return () => {
+          presentationHandler = undefined
+        }
+      },
+    })
+    snapshot = { activities: [activity({ status: "denied" })], turns: [] }
+    presentationHandler?.({
+      type: "tool.denied",
+      seq: 1,
+      turnId: 1,
+      toolCallId: "call-1",
+      status: "denied",
+    })
+    bus.emit("provider:text", { text: "MODEL_OUT\n" })
+    bus.emit("turn:completed", {})
+    detach()
+    const out = tty.all()
+    const err = tty.allErr()
+    expect(out).toContain("MODEL_OUT")
+    expect(out).not.toContain("write_file")
+    expect(err).toContain("write_file src/a.ts [denied]")
+    expect(err).not.toContain("MODEL_OUT")
+    // Kontrak I2/I6: non-TTY bebas CSI/OSC cursor control.
+    const esc = String.fromCharCode(0x1b)
+    expect(out.includes(`${esc}[`) || out.includes(`${esc}]`)).toBe(false)
+    expect(err.includes(`${esc}[`) || err.includes(`${esc}]`)).toBe(false)
+  })
+
+  test("I28: ACP shutdown idle & run dengan shouldExit=true memanggil exit(0)", async () => {
+    const out: string[] = []
+    const codes: number[] = []
+    await dispatchAcpLine('{"id":9,"method":"shutdown"}', {
+      write: (line) => out.push(line),
+      runOne: async () => {},
+      flightActive: () => false,
+      cancelFlight: () => false,
+      isShuttingDown: () => false,
+      beginShutdown: () => {},
+      exit: (code) => {
+        codes.push(code)
+      },
+      warnMalformed: () => {},
+    })
+    expect(codes).toEqual([0])
+    expect(JSON.parse(out[0]!)).toMatchObject({ id: 9, result: { shuttingDown: true } })
+
+    const runCodes: number[] = []
+    const f = acpSetup()
+    await runAcpSession(
+      32,
+      { prompt: "x" },
+      {
+        write: () => {},
+        onDone: () => {},
+        startFlight: () => {},
+        shouldExit: () => true,
+        exit: (code) => {
+          runCodes.push(code)
+        },
+        createSession: f.createSession,
+      },
+    )
+    expect(runCodes).toEqual([0])
   })
 })

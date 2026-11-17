@@ -1,87 +1,110 @@
 // Pure arg-parsing helpers - dipisah dari cli/index.ts agar mudah diuji.
 import { sanitizeAnsiLine } from "../src/ui/render/sanitize.ts"
 
-const BOOLEAN_FLAGS = new Set([
-  "--verbose",
-  "--allow-all",
-  "--ask",
-  "--interactive",
-  "--tui", // alias usang: TUI fullscreen kini satu-satunya tampilan interaktif
-  "--verify",
-  "--allowlist",
-  "--json", // dipakai `exec --json` dan `--help --json`
-  "--budget-strict", // penegasan eksplisit fail-closed (kini juga default --budget)
-  "--allow-local-config", // opt-in: baca .minicode/config.json + allowlist lokal (default mati)
+export type CliFlagKind = "boolean" | "value" | "meta"
+
+export interface CliFlagSpec {
+  readonly kind: CliFlagKind
+}
+
+// Tabel deklaratif tunggal seluruh flag CLI yang dikenal parser — BOOLEAN_FLAGS,
+// VALUE_FLAGS, dan KNOWN_FLAGS diturunkan darinya agar tidak menyimpang.
+export const CLI_FLAG_SPECS: Readonly<Record<string, CliFlagSpec>> = {
+  // ── Flag meta ─────────────────────────────────────────────────────────────
+  "-h": { kind: "meta" },
+  "--help": { kind: "meta" },
+  "-v": { kind: "meta" },
+  "--version": { kind: "meta" },
+
+  // ── Flag boolean ──────────────────────────────────────────────────────────
+  "--verbose": { kind: "boolean" },
+  "--allow-all": { kind: "boolean" },
+  "-y": { kind: "boolean" }, // alias ringkas untuk --allow-all
+  "--ask": { kind: "boolean" },
+  "--interactive": { kind: "boolean" },
+  "--tui": { kind: "boolean" }, // alias usang: TUI fullscreen kini satu-satunya tampilan interaktif
+  "--verify": { kind: "boolean" },
+  "--allowlist": { kind: "boolean" },
+  "--json": { kind: "boolean" }, // dipakai `exec --json` dan `--help --json`
+  "--budget-strict": { kind: "boolean" }, // penegasan eksplisit fail-closed (kini juga default --budget)
+  "--allow-local-config": { kind: "boolean" }, // opt-in: baca .minicode/config.json + allowlist lokal (default mati)
   // flag boolean subcommand — harus di sini agar router tidak memakan token berikutnya sebagai nilai
-  "--allow-private",
-  "--jsonl",
-  "--all-tools",
-  "--global",
-  "--local",
-  "--auto-continue",
-  "--blocked",
-  "--closed",
-  "--force",
+  "--allow-private": { kind: "boolean" },
+  "--jsonl": { kind: "boolean" },
+  "--all-tools": { kind: "boolean" },
+  "--global": { kind: "boolean" },
+  "--local": { kind: "boolean" },
+  "--auto-continue": { kind: "boolean" },
+  "--blocked": { kind: "boolean" },
+  "--closed": { kind: "boolean" },
+  "--force": { kind: "boolean" },
   // [PHASE 6U] Experimental. Opt-in gate for autonomous Scheduler execution.
   // DEFAULT OFF. A CLI flag and not a config key or env var on purpose: env is
   // inherited by sub-agents and MCP servers, and config is inherited globally or
   // per-repo — both would let autonomous execution switch on without the person
   // running the process asking for it. See src/task/production-scheduler.ts.
-  "--enable-scheduler",
-])
-const VALUE_FLAGS = new Set([
-  "--cwd",
-  "--resume",
-  "--model",
-  "--provider",
-  "--session",
-  "--max-steps",
-  "--context-window",
-  "--timeout",
-  "--sandbox",
-  "--ratelimit",
-  "--budget",
-  "--tool-scope", // full | explore (read-only) — tanpa ini jadi kata prompt!
-  "--work-mode", // DISCUSS | BUILD — HARUS dikenal agar tak bocor ke prompt.
+  "--enable-scheduler": { kind: "boolean" },
+
+  // ── Flag bernilai ─────────────────────────────────────────────────────────
+  "--cwd": { kind: "value" },
+  "--resume": { kind: "value" },
+  "--model": { kind: "value" },
+  "--provider": { kind: "value" },
+  "--session": { kind: "value" },
+  "--max-steps": { kind: "value" },
+  "--context-window": { kind: "value" },
+  "--timeout": { kind: "value" },
+  "--sandbox": { kind: "value" },
+  "--ratelimit": { kind: "value" },
+  "--budget": { kind: "value" },
+  "--tool-scope": { kind: "value" }, // full | explore (read-only) — tanpa ini jadi kata prompt!
+  "--work-mode": { kind: "value" }, // DISCUSS | BUILD — HARUS dikenal agar tak bocor ke prompt.
+  "--mode": { kind: "value" }, // alias ringkas untuk --work-mode (DISCUSS | BUILD)
   // [P1 M15] Mode runtime produksi (off | constructed | owned). HARUS terdaftar:
   // flag tak dikenal menghentikan scan `hasFlag`/`getArg` (dianggap prompt
   // boundary), sehingga flag yang diletakkan SETELAH `--runtime` akan hilang
   // diam-diam — tepat kebocoran semantik yang ingin dicegah audit flag.
-  "--runtime",
-  "--output-format", // `exec --output-format=json`
-  "--prompt",
+  "--runtime": { kind: "value" },
+  "--output-format": { kind: "value" }, // `exec --output-format=json`
+  "--prompt": { kind: "value" },
   // subcommand flags — harus dikenal agar tidak bocor ke prompt one-shot
-  "--baseUrl",
-  "--apiKey",
-  "--id",
-  "--command",
-  "--args",
-  "--env",
-  "--header",
-  "--url",
-  "--match",
-  "--adopt-task",
-  "--max-turns",
-  "--port",
-  "--who",
-  "--scopes",
-  "--ttl",
-  "--hash",
-  "--status",
-  "--state",
-  "--priority",
-  "--min-age-days",
-  "--depends-on",
-  "--stale-days",
-  "--keep",
-  "--drop",
-  "--evidence",
-  "--task",
-  "--format",
-  "--out",
-])
+  "--baseUrl": { kind: "value" },
+  "--apiKey": { kind: "value" },
+  "--id": { kind: "value" },
+  "--command": { kind: "value" },
+  "--args": { kind: "value" },
+  "--env": { kind: "value" },
+  "--header": { kind: "value" },
+  "--url": { kind: "value" },
+  "--match": { kind: "value" },
+  "--adopt-task": { kind: "value" },
+  "--max-turns": { kind: "value" },
+  "--port": { kind: "value" },
+  "--who": { kind: "value" },
+  "--scopes": { kind: "value" },
+  "--ttl": { kind: "value" },
+  "--hash": { kind: "value" },
+  "--status": { kind: "value" },
+  "--state": { kind: "value" },
+  "--priority": { kind: "value" },
+  "--min-age-days": { kind: "value" },
+  "--depends-on": { kind: "value" },
+  "--stale-days": { kind: "value" },
+  "--keep": { kind: "value" },
+  "--drop": { kind: "value" },
+  "--evidence": { kind: "value" },
+  "--task": { kind: "value" },
+  "--format": { kind: "value" },
+  "--out": { kind: "value" },
+}
+
+const VALUE_FLAGS = new Set(
+  Object.entries(CLI_FLAG_SPECS)
+    .filter(([, spec]) => spec.kind === "value")
+    .map(([name]) => name),
+)
 export const valueFlags = VALUE_FLAGS
-const KNOWN_FLAGS = new Set([...BOOLEAN_FLAGS, ...VALUE_FLAGS, "-h", "--help", "-v", "--version"])
+const KNOWN_FLAGS = new Set(Object.keys(CLI_FLAG_SPECS))
 
 /** `--flag` atau `--flag=value` -> normalisasi ke nama flag murni. */
 export function flagNameOf(token: string): string | null {
@@ -240,7 +263,7 @@ export function resolveWorkModeFlag(getArg: (n: string) => string | undefined): 
   explicit: boolean
   warning?: string
 } {
-  const raw = getArg("--work-mode") ?? process.env.MINICODE_WORK_MODE
+  const raw = getArg("--work-mode") ?? getArg("--mode") ?? process.env.MINICODE_WORK_MODE
   if (raw === undefined) return { workMode: "DISCUSS", explicit: false }
   const parsed = parseWorkModeValue(raw)
   if (parsed) return { workMode: parsed, explicit: true }

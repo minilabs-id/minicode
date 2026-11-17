@@ -6,6 +6,7 @@ import { join } from "node:path"
 import {
   isDangerousLink,
   isHardlink,
+  isOwnedState,
   isPathOutsideRoot,
   isRealPathOutsideRoot,
   isSensitive,
@@ -114,4 +115,11 @@ test("isRealPathOutsideRoot: direktori sah di dalam root TIDAK ditolak", async (
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+test("isSensitive and isOwnedState strip NTFS ADS on intermediate segments while keeping drive letter", () => {
+  expect(isSensitive("C:\\repo\\.env:$DATA")).toBe(true)
+  expect(isSensitive("C:\\repo\\.env:$DATA\\sub")).toBe(true)
+  expect(isOwnedState("C:\\repo\\.minicode:$INDEX_ALLOCATION\\auth.json")).toBe(true)
+  expect(isSensitive("C:\\repo\\src\\index.ts")).toBe(false)
 })

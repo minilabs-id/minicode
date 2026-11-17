@@ -489,3 +489,59 @@ describe("F-AGENT-1: renderer linear (non-TTY) marker run", () => {
     }
   })
 })
+
+describe("I26: proyeksi presentasi menghormati locale id", () => {
+  test("status running/denied & thinking memakai kamus Indonesia saat locale id aktif", () => {
+    setSessionLocale("id")
+    const { transcript, setSnapshot, emitPresentation } = setup()
+    setSnapshot({
+      activities: [
+        activity({ toolCallId: "c1", status: "running", tsStart: Date.now() - 3000 }),
+        activity({ toolCallId: "c2", name: "write_file", target: "b.ts", status: "denied" }),
+      ],
+      turns: [],
+    })
+    emitPresentation({
+      type: "tool.denied",
+      seq: 2,
+      turnId: 1,
+      toolCallId: "c2",
+      status: "denied",
+    })
+    const view = transcript.view(120, 10, 0).join("\n")
+    expect(view).toContain("read_file a.ts … berjalan (3s)")
+    expect(view).toContain("write_file b.ts ditolak")
+  })
+
+  test("attachSimpleLogger memakai status Indonesia saat locale id aktif", () => {
+    const tty = installFakeTty({ columns: 100, rows: 24, isTTY: false })
+    setSessionLocale("id")
+    try {
+      const bus = createFakeBus()
+      let handler: ((event: UiPresentationEvent) => void) | undefined
+      const detach = attachSimpleLogger(bus as never, {
+        getSnapshot: () => ({
+          activities: [activity({ name: "write_file", target: "x.ts", status: "denied" })],
+          turns: [],
+        }),
+        onPresentationEvent: (h) => {
+          handler = h
+          return () => {
+            handler = undefined
+          }
+        },
+      })
+      handler?.({
+        type: "tool.denied",
+        seq: 1,
+        turnId: 1,
+        toolCallId: "call-1",
+        status: "denied",
+      })
+      detach()
+      expect(tty.allErr()).toContain("write_file x.ts [ditolak]")
+    } finally {
+      tty.restore()
+    }
+  })
+})

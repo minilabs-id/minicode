@@ -19,16 +19,14 @@ const DOTDOT_SEG_RE = /(?:^|[/\\])\.\.(?:[/\\]|$)/
  */
 function cleanPathForMatch(p: string): string {
   if (!p) return ""
-  const withoutAds = p.replace(/(:[a-zA-Z0-9_.$-]+)+$/, (m, _g, offset) => {
-    // Jangan kupas drive letter Windows seperti "C:" di awal path
-    if (offset === 1 && /^[a-zA-Z]:$/.test(p.slice(0, 2))) return m
-    return ""
-  })
-  return withoutAds
+  return p
     .split(/([/\\]+)/)
-    .map((seg) => {
+    .map((seg, i) => {
       if (!seg || /^[/\\]+$/.test(seg) || seg === "." || seg === "..") return seg
-      return seg.replace(/[.\s]+$/, "")
+      // Pertahankan drive letter Windows (mis. "C:") di segmen pertama
+      const noAds =
+        i === 0 && /^[a-zA-Z]:$/.test(seg) ? seg : seg.replace(/(:[a-zA-Z0-9_.$-]+)+$/, "")
+      return noAds.replace(/[.\s]+$/, "")
     })
     .join("")
 }

@@ -161,7 +161,14 @@
 //   src/constants.ts           ~0,8 KiB  (PROVIDER_IDLE_TIMEOUT_MS + alasannya)
 // Naik 96 KiB dengan ruang sisa ~114 KiB: menampung ~110 KiB pekerjaan nyata
 // sebelum perlu keputusan lagi. Tetap alarm regresi, bukan target ukuran.
-export const PACK_SIZE_BUDGET_KIB = 4352
+// [Re-baseline 4.352 -> 4.608 KiB (4,50 MiB), margin modularisasi & hardening v0.30.0]
+// Disetujui eksplisit oleh pemilik repo (2026-11-17: "perbaiki Arsitektur,
+// Testability, Docs & Packaging, tambahkan margin ... rilis versi baru 0.30.0").
+// Ukuran aktual pasca hardening TipRouter menyentuh 4.351 KiB (margin 1 KiB),
+// sehingga pemecahan modul `cli/bootstrap/*`, `src/session/db/*`, `src/task/db/*`
+// serta penyempurnaan wire Responses/ergonomi membutuhkan ruang napas ~256 KiB.
+// Tetap alarm regresi `node_modules`/`test/`, bukan target bebas membengkak.
+export const PACK_SIZE_BUDGET_KIB = 4608
 
 /**
  * True bila ukuran paket (KiB) masih di dalam budget.

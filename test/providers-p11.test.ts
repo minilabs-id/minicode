@@ -189,12 +189,16 @@ test("detect: path /responses → hint responses (wire dari probe)", async () =>
     new Response(JSON.stringify({ data: [{ id: "gpt-5" }] }), {
       status: 200,
     })) as unknown as typeof fetch
-  clearDetectCache()
-  const r = await detectModels("https://api.openai.com/v1/responses", "k")
-  expect(r.providerHint).toBe("responses")
-  clearDetectCache()
-  const r2 = await detectModels("https://api.anthropic.com/v1", "k")
-  expect(r2.providerHint).toBe("anthropic")
+  try {
+    clearDetectCache()
+    const r = await detectModels("https://api.openai.com/v1/responses", "k")
+    expect(r.providerHint).toBe("responses")
+    clearDetectCache()
+    const r2 = await detectModels("https://api.anthropic.com/v1", "k")
+    expect(r2.providerHint).toBe("anthropic")
+  } finally {
+    globalThis.fetch = origFetch
+  }
 })
 
 test("reasoningEffort: low/medium/high → budget thinking, lain → undefined", () => {
@@ -288,4 +292,61 @@ test("router: 429 ganda → menyerah (tidak loop selamanya)", async () => {
     err = e
   }
   expect(err instanceof ProviderError).toBe(true)
+})
+
+test("responses: response.output_text.done dan response.content_part.done tidak menggandakan teks", async () => {
+  const srv = Bun.serve({
+    port: 0,
+    fetch: () =>
+      new Response(
+        sseBody([
+          JSON.stringify({ type: "response.output_text.delta", delta: "DONE" }),
+          JSON.stringify({ type: "response.output_text.done", text: "DONE" }),
+          JSON.stringify({ type: "response.content_part.done", part: { text: "DONE" } }),
+          JSON.stringify({ type: "response.completed", response: { id: "resp_nodup" } }),
+        ]),
+        { headers: { "content-type": "text/event-stream" } },
+      ),
+  })
+  try {
+    const p = createResponsesProvider({
+      baseUrl: `http://127.0.0.1:${srv.port}/v1`,
+      models: ["m"],
+    })
+    expect(await collect(p)).toEqual(["DONE"])
+  } finally {
+    srv.stop(true)
+  }
+})
+
+test("responses: error mid-stream (response.failed) melempar ProviderError", async () => {
+  const srv = Bun.serve({
+    port: 0,
+    fetch: () =>
+      new Response(
+        sseBody([
+          JSON.stringify({
+            type: "response.failed",
+            response: { error: { code: "rate_limit_exceeded", message: "429 busy" } },
+          }),
+        ]),
+        { headers: { "content-type": "text/event-stream" } },
+      ),
+  })
+  try {
+    const p = createResponsesProvider({
+      baseUrl: `http://127.0.0.1:${srv.port}/v1`,
+      models: ["m"],
+    })
+    let caught: unknown
+    try {
+      await collect(p)
+    } catch (e) {
+      caught = e
+    }
+    expect(caught).toBeInstanceOf(ProviderError)
+    expect((caught as ProviderError).category).toBe("rate_limit")
+  } finally {
+    srv.stop(true)
+  }
 })

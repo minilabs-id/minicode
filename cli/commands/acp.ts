@@ -506,7 +506,13 @@ export async function runAcpSession(
       try {
         const persist = (ctx as { persistCurrent?: (usage: unknown) => Promise<void> })
           .persistCurrent
-        if (typeof persist === "function") await persist(ctx.usage.getSession(ctx.modelRef.current))
+        if (typeof persist === "function") {
+          const turnUsage =
+            typeof ctx.usage.get === "function"
+              ? ctx.usage.get(ctx.modelRef.current)
+              : ctx.usage.getSession(ctx.modelRef.current)
+          await persist(turnUsage)
+        }
         // P2.2: respons sukses sudah terkirim di atas (tepat-sekali per run);
         // histori yang tak durable dilaporkan via stderr diagnostik, bukan
         // pesan protokol kedua.

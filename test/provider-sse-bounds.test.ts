@@ -81,6 +81,29 @@ test("provider SSE: accepts fragmented valid UTF-8 frames within configured boun
   )
 })
 
+test("provider SSE: accepts valid CRLF (\\r\\n\\r\\n) frames without false incomplete frame error", async () => {
+  const bytes = encoder.encode('data: {"foo":"bar"}\r\n\r\ndata: [DONE]\r\n\r\n')
+  const source = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(bytes)
+      controller.close()
+    },
+  })
+  const reader = boundedSseBody(source, new AbortController().signal, "test", {
+    maxFrameBytes: 64,
+    maxTotalBytes: 128,
+  }).getReader()
+  const chunks: Uint8Array[] = []
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    chunks.push(value)
+  }
+  expect(new TextDecoder().decode(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))))).toBe(
+    'data: {"foo":"bar"}\r\n\r\ndata: [DONE]\r\n\r\n',
+  )
+})
+
 test("provider tool args: deltas and parallel pending calls share byte limits", () => {
   const bounds = { maxArgumentBytes: 5, maxPendingBytes: 7 }
   const first = appendToolArgument("", 0, "1234", 0, "test", bounds)

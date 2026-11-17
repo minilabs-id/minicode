@@ -68,43 +68,28 @@ prefix-compare 10 ms.
 
 ## Task system (state kerja durable)
 
-Task state **bukan** chat history dan **bukan** tool trace. Owner semantiknya
-`src/tools/todo.ts`; `.minicode/todos/<id>.json` adalah satu-satunya sumber
-kebenaran, dan `plan.updated` (event durable untuk ACP/`exec --json`) hanyalah
-**proyeksi** dari file itu.
+Task state **bukan** chat history dan **bukan** tool trace. Sumber kebenaran durable adalah `TaskStore` di SQLite lokal workspace (`.minicode/tasks.db`, `src/task/store.ts` + `src/task/db/{types,schema}.ts`), sedangkan `src/tools/todo.ts` menjadi adapter model/tool (memperbarui `.minicode/todos/<id>.json` + menyinkronkan ke `TaskStore` via `synchronizeCanonicalTasks` di `src/task/sync.ts`), dan `plan.updated` (event durable untuk ACP/`exec --json`) adalah proyeksi downstream (`syncTodoViewsFromTaskStore`).
 
 ```text
-todo_write (model) ─► normalizeTodos ─► .minicode/todos/<id>.json   (state)
-                            │                    ▲
-                            │                    │ setCompletionEvidence
-                            │            bukti verify terakhir
-                            ▼
-                     plan.updated (proyeksi, terbit SETELAH tool sukses)
+todo_write (model) ─► normalizeTodos ─► .minicode/todos/<id>.json (snapshot proyeksi)
+                            │                    │
+                            │                    ▼
+                            │         synchronizeCanonicalTasks ─► .minicode/tasks.db (TaskStore: authority)
+                            │                                            ▲
+                            ▼                                            │ setCompletionEvidence
+                     plan.updated (proyeksi downstream SETELAH sukses) ─┘
 ```
 
 Tiga aturan yang menjaga domain ini:
 
-1. **Identitas sesi kanonik (P2.1).** Todo terikat ke `sid` kanonik dari
+1. **Identitas sesi kanonik (P2.1) & ID kanonik TaskStore (P4A).** Todo terikat ke `sid` kanonik dari
     `resolveSessionIdentity` (`src/session/identity.ts`), bukan id volatil
     proses (`bootId`). `--resume` tanpa `--session` tidak lagi menempa id
-    acak; `--resume` tak dikenal gagal eksplisit (`SESSION_NOT_FOUND`).
-2. **Completion butuh bukti.** `setCompletionEvidence()` menyuntikkan verdict   (`unverified` | `passed` | `failed`) dari composition root. `failed` menolak
+    acak; `--resume` tak dikenal gagal eksplisit (`SESSION_NOT_FOUND`). Alokasi `taskId` kanonik sepenuhnya milik `TaskStore`.
+2. **Completion butuh bukti.** `setCompletionEvidence()` menyuntikkan verdict (`unverified` | `passed` | `failed` | `stale`) dari composition root. `failed` menolak
    `completed` → task jadi `blocked` + alasannya, dan hasilnya dilaporkan ke
-   model. Default `unverified` menjaga pemakaian tanpa `--verify` tetap
-   POSSIBLE; yang dilarang adalah completion diam-diam tanpa jejak.
-3. **Satu normalizer, dua store.** `planFromTodos` ( adaptor) memanggil
-   `normalizeTodos` yang sama dengan file, sehingga status/cap/`blocked` tidak
-   bisa berbeda arah — dan plan event terbit di `execution:completed`, bukan
-   dari argumen sebelum tool jalan.
-
-Batas subsystem **todo**: file todo tetap datar — tanpa field dependency di
-`TodoItem`, tanpa surface user (`/tasks`), `/undo` hanya revert file (todo
-tetap `completed`), dan tanpa TTL/GC untuk file todo di luar SQLite.
-Dependency/graph dan scheduler **sudah ada**, tetapi pada subsystem terpisah:
-TaskGraph + Scheduler di `src/task/` beroperasi di atas TaskStore
-(`.minicode/tasks.db`), bukan di atas file todo; `todo_write` hanya boleh
-menyentuhnya lewat `taskId` kanonik (`src/tools/todo.ts`), dan control
-surface-nya `/scheduler` (off by default).
+   model; `requireVerified && unverified` menahan klaim di `VERIFYING` / menurunkannya sesuai gerbang verifikasi. Default `unverified` menjaga pemakaian tanpa `--verify` tetap berjalan; yang dilarang adalah completion diam-diam tanpa jejak.
+3. **Satu otoritas status, satu jalur proyeksi.** `TaskStore` adalah satu-satunya otoritas mutasi/reconcile/claim (`TaskAuthority`: `LEGACY` vs `SCHEDULER`), sementara `TaskGraph` dan `ProductionScheduler` di `src/task/` beroperasi di atas `.minicode/tasks.db`; `todo_write` dan `/openwork` membaca serta menyinkronkan melalui adapter `src/task/sync.ts` dan `syncTodoViewsFromTaskStore` — dan `plan.updated` hanya terbit di `execution:completed`, bukan dari argumen sebelum tool jalan. (`/undo` tetap hanya me-revert berkas workspace, tidak membalik status task durable).
 
 ## Bukti verifikasi (P2.10)
 
@@ -133,7 +118,7 @@ Enam primitif tampilan (semuanya di dalam TUI fullscreen saat interaktif): trans
 - `src/session/verification.ts` + `src/tools/evidence.ts`: identitas invokasi milik aplikasi, intent/receipt yang di-await, observasi eksplisit, idempotency, dan korelasi efek anak — semuanya di jurnal mutasi yang sama.
 
 - `src/ui/render/`: `theme.ts` (getter `c`/`glyphs`, palet level-aware 16/256/truecolor), `width.ts` (kolom), `sanitize.ts` (hanya SGR lewat), `ledger.ts` (status word/glyph/paint + run-marker bersama untuk TUI & linear), `hint.ts` (grammar hint `kunci label` spasi-only), `list.ts` (`listRow` marker `›` + kolom tetap), `notice.ts` (notice sukses/error/info), `markdown.ts`, `markdown-table.ts` (parser pipe-table streaming), `table-grid.ts` (grid budget terminal), `cells.ts` (framebuffer sel grapheme+SGR + diff "tulis-ulang ekor" untuk penulisan inkremental), `composer-wrap.ts` (wrap composer inkremental), `highlight.ts diff.ts table.ts wrap.ts money.ts errors.ts`.
-- `src/presentation/`: `events.ts` mendefinisikan event presentasi dan registry durability; `adapter.ts` memetakan runtime ke `DomainEvent`; `reducer.ts`/`model.ts` membangun state replayable dan ringkasan turunan; `store.ts` menyimpan referensi konten; `projection.ts` membentuk envelope `minicode.output.v1` dan kategori error machine. `src/session/persistence.ts` menyimpan log `presentation_events` dan `messages` dengan fidelity `reasoning`/`is_error`. `cli/setup.ts` memiliki bridge exhaustive `toPresentationEvent()`; renderer TUI/linear/machine memakai keputusan policy via injeksi `PresentationPolicy`.
+- `src/presentation/`: `events.ts` mendefinisikan event presentasi dan registry durability; `adapter.ts` memetakan runtime ke `DomainEvent`; `reducer.ts`/`model.ts` membangun state replayable dan ringkasan turunan; `store.ts` menyimpan referensi konten; `projection.ts` membentuk envelope `minicode.output.v1` dan kategori error machine. `src/session/persistence.ts` dibantu `src/session/db/{schema,runs}.ts` menyimpan log `presentation_events`, `runs`, dan `messages` dengan fidelity `reasoning`/`is_error`. `src/task/store.ts` dibantu `src/task/db/{types,schema}.ts` mengelola `.minicode/tasks.db`. `cli/setup.ts` (delegating bridge presentasi via `cli/bootstrap/presentation-bridge.ts`) memiliki bridge exhaustive `toPresentationEvent()`; renderer TUI/linear/machine memakai keputusan policy via injeksi `PresentationPolicy`.
 - `src/policy/`: `context.ts` (estimator sadar-densitas kode/JSON + kalibrasi usage), `context-window.ts` + `context-window-catalog.ts` (resolve window: config → katalog → models.dev → default 128K alias → 32K), `bpe.ts` + `tokenizer-registry.ts` (tokenizer BPE presisi on-demand dari HuggingFace, cache lokal, fallback densitas), `compaction.ts` (kompaksi LLM + mekanikal, anti-drift/anti-thrash, prefer provider sesi), `usage.ts`/`pricing.ts` (estimas biaya + models.dev).
 - `src/ui/input/`: `askLine`, `prompt-engine` (grapheme `Intl.Segmenter`, streaming decoder, bracket-paste, mouse X10/SGR press/drag/release + wheel dinormalisasi; selection app-level di TUI).
 - `src/ui/screens/`: view murni `picker/wizard/model-manager/provider-manager/form/dialog/output-window`; `output-window.ts` = jendela readout command ber-scroll di atas chat (v7.18).

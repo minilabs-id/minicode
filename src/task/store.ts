@@ -25,12 +25,55 @@
 //
 // All SQL lives here. Other subsystems may only use the domain API.
 
-import { Database } from "bun:sqlite"
 import { randomUUID } from "node:crypto"
-import { LIMITS } from "../constants.ts"
-import { resolveLocalDbPath, withSqliteBusyRetrySync } from "../lib/db-path.ts"
-import { scrubSecrets } from "../policy/scrub.ts"
-import type { CompletionEvidence } from "../tools/todo.ts"
+import {
+  closeTaskStoreHandle,
+  dbFile,
+  handle,
+  j,
+  legacyDigest,
+  parseStringArrayStrict,
+  resetTaskStoreHandles,
+  rowToTask,
+  txDepth,
+} from "./db/schema.ts"
+import {
+  ADOPTABLE_STATUS_SET,
+  ADOPTABLE_STATUSES,
+  type AttemptRecordOutcome,
+  buildVerificationTaskEvidence,
+  CLAIMABLE_STATUSES,
+  type ExecutionLineage,
+  type ExecutionOwner,
+  type ExecutionOwnership,
+  emitTaskTransition,
+  type LineageReconcileOutcome,
+  MAX_DEPENDS_ON,
+  MAX_EVIDENCE,
+  type NewTaskInput,
+  nowIso,
+  type PatchOptions,
+  setTaskTransitionSink,
+  sqlList,
+  TASK_DATA_VERSION,
+  type TaskAuthorityMode,
+  type TaskDuplicateOutcome,
+  type TaskDuplicateRequest,
+  type TaskDuplicateResult,
+  type TaskMerge,
+  type TaskPatch,
+  type TaskRow,
+  type TaskStoreOptions,
+  type TaskTransfer,
+  type TaskTransferOutcome,
+  type TaskTransferRequest,
+  type TaskTransferResult,
+  type TaskTransition,
+  type TaskTransitionKind,
+  type UnfinishedWorkItem,
+  type UpsertOptions,
+  type VerificationGateOutcome,
+} from "./db/types.ts"
 import {
   type ClaimOutcome,
   IllegalTaskTransitionError,
@@ -40,11 +83,8 @@ import {
   isTerminalTaskStatus,
   type ReconcileOutcome,
   type Task,
-  type TaskAcceptance,
   TaskAuthorityLostError,
   TaskError,
-  type TaskEvidence,
-  type TaskProvenance,
   type TaskSnapshot,
   type TaskStatus,
   type TaskVerification,
@@ -52,947 +92,34 @@ import {
 } from "./model.ts"
 import type { SessionAuthority } from "./session-authority.ts"
 
-const TASK_DB_FILENAME = "tasks.db"
-
-/**
- * P2.3 (Session 4): satu sink transisi process-wide. `src/task` tidak boleh
- * mengimpor presentation; composition root memasang sink untuk memproyeksikan
- * transisi AUTHORITATIVE (setelah commit DB) menjadi event `task.status`.
- * Satu sesi agent per proses (lihat guard single-session), jadi sink tunggal
- * cukup dan tidak membocorkan lintas sesi.
- */
-export type TaskTransitionKind = "created" | "updated" | "claimed"
-export interface TaskTransition {
-  kind: TaskTransitionKind
-  task: Task
-  previousStatus: TaskStatus | null
+export type {
+  AttemptRecordOutcome,
+  ExecutionLineage,
+  ExecutionOwner,
+  ExecutionOwnership,
+  LineageReconcileOutcome,
+  NewTaskInput,
+  PatchOptions,
+  TaskAuthorityMode,
+  TaskDuplicateOutcome,
+  TaskDuplicateRequest,
+  TaskDuplicateResult,
+  TaskMerge,
+  TaskPatch,
+  TaskStoreOptions,
+  TaskTransfer,
+  TaskTransferOutcome,
+  TaskTransferRequest,
+  TaskTransferResult,
+  TaskTransition,
+  TaskTransitionKind,
+  UnfinishedWorkItem,
+  UpsertOptions,
+  VerificationGateOutcome,
 }
+export { buildVerificationTaskEvidence, legacyDigest, resetTaskStoreHandles, setTaskTransitionSink }
 
-let taskTransitionSink: ((transition: TaskTransition) => void) | null = null
-
-export function setTaskTransitionSink(sink: ((transition: TaskTransition) => void) | null): void {
-  taskTransitionSink = sink
-}
-
-/** Emit SETELAH commit; kegagalan observer tak boleh menggagalkan transisi. */
-function emitTaskTransition(
-  kind: TaskTransitionKind,
-  task: Task,
-  previousStatus: TaskStatus | null,
-): void {
-  try {
-    taskTransitionSink?.({ kind, task, previousStatus })
-  } catch {}
-}
-
-/** Bounds so the JSON columns cannot grow without limit. */
-const MAX_DEPENDS_ON = 32
-const MAX_EVIDENCE = 32
-
-/** Shape of the data, not of the table: this rises when column SEMANTICS
- *  change, not merely when a column is added. */
-// [PHASE 6K] Deliberately NOT bumped. `TASK_DATA_VERSION` is an existing
-// contract (taskstore.test.ts "H" asserts `ensureDataVersion() === 1`, and that
-// a newer writer is refused rather than downgraded), and bumping it would be a
-// semantic change outside the scope of D3/D4/D5.
-//
-// It is also unnecessary. The lineage migration decides from
-// `PRAGMA table_info`, not from this stamp, precisely because a stamp can lie
-// and the schema cannot. The stamp is written as bookkeeping; the migration's
-// correctness does not depend on it. If a future change makes the SCHEMA itself
-// version-dependent, that change should bump this constant deliberately.
-const TASK_DATA_VERSION = 1
-
-const SCHEMA_ATTEMPTS = 8
-const SCHEMA_BACKOFF_MS = 25
-
-function withBusyRetrySync<T>(fn: () => T, attempts = SCHEMA_ATTEMPTS): T | null {
-  return withSqliteBusyRetrySync(fn, { attempts, backoffMs: SCHEMA_BACKOFF_MS })
-}
-
-interface TaskRow {
-  session_id: string
-  task_id: string
-  title: string
-  status: string
-  task_order: number
-  parent_id: string | null
-  depends_on_json: string | null
-  blocked_reason: string | null
-  verification_json: string | null
-  evidence_json: string | null
-  acceptance_json: string | null
-  provenance_json: string | null
-  created_at: string
-  updated_at: string
-  revision: number
-  exec_generation: number
-  attempt_generation: number | null
-  /** [PHASE 6P] Kolom terpisah dari status/lineage; lihat `ExecutionOwner`. */
-  execution_owner: string | null
-}
-
-/**
- * [PHASE 6I] Execution lineage for one task, read through a dedicated accessor so
- * it never becomes part of the public `Task` shape.
- *
- * `execGeneration` is the CURRENT execution generation. It advances ONLY when
- * `claimTask` accepts a claim - never on a title, order, dependency, parent,
- * blockedReason, evidence, verification or status write. That invariance is the
- * whole point: it makes the lineage decision immune to arbitrary task mutation,
- * which is what 6G D1 proved revision could not be.
- *
- * `attemptGeneration` is the generation whose execution attempt reached its end,
- * or `null` when no attempt of the current generation has completed. It records
- * that an ATTEMPT ENDED - never that the task is correct or complete.
- *
- * It is NOT a task status, NOT a lock, NOT a lease, NOT a counter of attempts
- * and NOT a history: exactly one generation is retained, and evidence lives on
- * the task row so it cannot outlive the task.
- */
-export interface ExecutionLineage {
-  readonly execGeneration: number
-  readonly attemptGeneration: number | null
-}
-
-/**
- * [PHASE 6P] Who owns the CURRENT in-flight state of a task.
- *
- * This is a FOURTH, separate fact. It is deliberately NOT folded into
- * `TaskStatus`, `ExecutionLineage`, or `Task`:
- *
- *   status             WHAT the task is (pending, in-flight, done, …)
- *   execution_owner    WHOSE in-flight state it is
- *   exec_generation    WHICH execution generation is current
- *   attempt_generation whether that generation's attempt reached its end
- *
- * WHY IT EXISTS (6N F1, proved in 6O §5.2). `IN_PROGRESS` is overloaded: it is
- * written both by `claimTask` (a Scheduler-owned execution) and by the
- * model-facing path (`todo_write` → `synchronizeCanonicalTasks` → `patchTask`,
- * where it is the agent's plan cursor — see `src/tools/todo.ts:15-19`).
- * Reconciliation used to read *every* `IN_PROGRESS`/`VERIFYING` without a
- * completion marker as stranded Scheduler work, so it reverted the user's cursor.
- *
- * The information needed to tell those apart DID NOT EXIST in the other columns.
- * Two histories are byte-identical under `(status, exec_generation,
- * attempt_generation)` and demand opposite actions:
- *
- *   H2  claim → crash                     → IN_PROGRESS/1/NULL → REVERT
- *   H5  claim → crash → reconcile → user
- *       marks IN_PROGRESS                 → IN_PROGRESS/1/NULL → LEAVE
- *
- * `exec_generation > 0` does not separate them (both are 1, and reconcile never
- * resets the counter), and `attempt_generation` is NULL in both. This column is
- * the missing fact: it records whether a reconcile already ended that claim.
- *
- * STATE MODEL — the only two values:
- *   'scheduler'  the current in-flight status was established by `claimTask` and
- *                has NOT been reconciled away. The Scheduler may recover it.
- *   null         no Scheduler execution owns this task. Either never claimed, or
- *                ownership was released (by a reconcile, or by any status write
- *                that leaves the Scheduler-owned in-flight states). The Scheduler
- *                must NOT touch it.
- *
- * TRANSITIONS (and only these):
- *   set   'scheduler'  by `claimTask`, in the SAME statement that advances
- *                      `exec_generation` and writes IN_PROGRESS — so ownership and
- *                      generation can never disagree.
- *   clear null         by `reconcileStranded` / `reconcileIfNoCompletedAttempt`
- *                      (reverting releases it), and by ANY other writer that
- *                      moves the task OUT of RECONCILABLE_STATUSES.
- *   keep  unchanged    by a status write that STAYS inside
- *                      RECONCILABLE_STATUSES, and by every non-status write
- *                      (title, order, dependency, evidence, …). A title edit does
- *                      not end a claim.
- *
- * WHY A WRITE THAT STAYS `IN_PROGRESS` KEEPS OWNERSHIP. A user writing
- * `IN_PROGRESS` onto a task whose claim is stranded does not end the stranded
- * execution; it only re-states the agent's plan cursor on top of it. The
- * Scheduler's generation is still dead, so the row is still recoverable (6O
- * history H3/H6). Releasing ownership there would strand the generation forever.
- * Ownership is released when the task LEAVES the in-flight states — which is
- * also exactly what a reconcile does.
- *
- * IT IS NOT: a lock, a lease, a heartbeat, a priority, a completion claim, a
- * verification, or evidence of anything. It grants no authority over the task
- * beyond "the Scheduler may revert this in-flight state", and it is never
- * consulted for readiness, identity, or dependency semantics.
- */
-export type ExecutionOwner = "scheduler"
-
-/** Result shape for `getExecutionOwnership`. `null` = no such task. */
-export interface ExecutionOwnership {
-  readonly executionOwner: ExecutionOwner | null
-}
-
-/** `task_meta` key holding the current incarnation of a session id. */
 const incarnationKey = (sessionId: string): string => `session_incarnation:${sessionId}`
-
-/**
- * [PHASE 6Q] Outcome of `recordAttemptReturned`.
- *
- * [DESIGN DECISION] This used to be `void` and it THREW whenever the guarded
- * UPDATE matched no row. That is what made 6N F2 a wedge rather than an error: the
- * throw escaped `cycle()`, so the Scheduler never reached the line that clears its
- * own claim, and it kept both the claim and the session ownership forever.
- *
- * "The row I claimed is gone" and "the generation moved" are NOT persistence
- * failures - they are the ordinary outcomes of a session being deleted under a
- * running execution, or of a later generation superseding an earlier one. The
- * protection 6I wanted is preserved exactly (NOTHING IS WRITTEN when the guard
- * does not match); what changes is that the caller is TOLD, instead of being
- * destroyed by it. Genuine SQL errors still throw.
- */
-export type AttemptRecordOutcome =
-  /** The completion marker for this generation was written. */
-  | "RECORDED"
-  /** The task row no longer exists - the session was deleted under this execution. */
-  | "TASK_GONE"
-  /** The row exists but this generation is no longer current. Nothing was written. */
-  | "SUPERSEDED"
-  /**
-   * The session was deleted (or deleted and recreated) since this execution was
-   * claimed, so the row that exists - if any - belongs to a DIFFERENT incarnation.
-   * This is the cross-generation guard; nothing was written.
-   */
-  | "SESSION_SUPERSEDED"
-
-/**
- * [PHASE 6I] Outcome of `reconcileIfNoCompletedAttempt`.
- *
- * Distinct from the 6B `ReconcileOutcome` because the decision now also carries
- * lineage meaning: `RECONCILED` means "this execution generation has no recorded
- * completion, so it is stranded", whereas `NOT_STRANDED` means the current
- * generation DID record completion (or the row is not reconcilable at all).
- * `REFUSED_NO_OWNERSHIP` keeps 6B's fail-closed contract.
- */
-export type LineageReconcileOutcome =
-  | "RECONCILED"
-  | "NOT_STRANDED"
-  | "REJECTED_STALE"
-  | "NOT_FOUND"
-  | "REFUSED_NO_OWNERSHIP"
-
-/**
- * [P14] Status yang boleh DIPINDAHKAN ke sesi lain.
- *
- * Kenapa bukan "semua status": memindahkan pekerjaan yang sudah COMPLETED atau
- * CANCELLED akan menghidupkan kembali pekerjaan yang sudah ditutup — persis
- * larangan P14. Status di luar daftar ini = terminal/UNKNOWN dan harus
- * ditangani operator, bukan diadopsi diam-diam.
- */
-const ADOPTABLE_STATUSES: readonly TaskStatus[] = [
-  "PENDING",
-  "IN_PROGRESS",
-  "VERIFYING",
-  "BLOCKED",
-  "FAILED",
-  "RETRYING",
-]
-
-const ADOPTABLE_STATUS_SET: ReadonlySet<TaskStatus> = new Set(ADOPTABLE_STATUSES)
-
-/**
- * [P14] Satu baris ledger transfer. TIDAK mengandung token otoritas: token
- * adalah kredensial proses, bukan bukti yang boleh menetap di database.
- *
- * Ledger ini adalah BUKTI ASAL, bukan otoritas kedua. Status task tetap
- * dibaca dari tabel `tasks`; ledger hanya menjawab "task id ini pernah
- * berpindah dari sesi mana ke sesi mana, pada revisi/generasi apa".
- */
-export interface TaskTransfer {
-  readonly transferId: string
-  readonly taskId: string
-  readonly fromSessionId: string
-  readonly fromIncarnation: number
-  readonly toSessionId: string
-  readonly toIncarnation: number
-  readonly expectedRevision: number
-  readonly newRevision: number
-  readonly status: string
-  readonly execGeneration: number
-  readonly attemptGeneration: number | null
-  readonly executionOwner: ExecutionOwner | null
-  readonly transferredAt: string
-}
-
-export interface TaskTransferRequest {
-  readonly taskId: string
-  readonly fromSessionId: string
-  readonly fromIncarnation: number
-  readonly toSessionId: string
-  readonly toIncarnation: number
-  readonly expectedRevision: number
-  /** Token yang HARUS masih memegang lease sesi sumber. */
-  readonly sourceOwnerToken: string
-  /** Token yang HARUS masih memegang lease sesi tujuan. */
-  readonly targetOwnerToken: string
-  /** Satu jam logis untuk seluruh pemeriksaan + mutasi. */
-  readonly now?: number
-}
-
-export type TaskTransferOutcome =
-  | "TRANSFERRED"
-  | "NOT_FOUND"
-  | "REFUSED_SELF_TRANSFER"
-  | "REJECTED_STALE_SOURCE_INCARNATION"
-  | "REJECTED_STALE_TARGET_INCARNATION"
-  | "REJECTED_STALE_REVISION"
-  | "REFUSED_NO_SOURCE_AUTHORITY"
-  | "REFUSED_NO_TARGET_AUTHORITY"
-  | "REFUSED_STATUS"
-  | "REFUSED_TARGET_ID_CONFLICT"
-  | "REFUSED_UNRESOLVED_RELATION"
-  | "REFUSED_CORRUPT_STATE"
-
-export interface TaskTransferResult {
-  readonly outcome: TaskTransferOutcome
-  readonly task: Task | null
-  readonly transfer: TaskTransfer | null
-  readonly detail: string
-  /**
-   * Id relasi (parent/dependency) yang tidak bisa dibuktikan berasal dari sesi
-   * sumber yang sama. Kosong kecuali outcome `REFUSED_UNRESOLVED_RELATION`.
-   */
-  readonly unresolvedRelations: readonly string[]
-}
-
-/**
- * [P14] Satu item inventaris open-work lintas sesi.
- *
- * `Task` sengaja tetap bentuk kanoniknya; fakta eksekusi dan provenance
- * transfer berada DI SAMPINGNYA, bukan dicampur ke dalam `Task`. Discovery
- * tidak pernah memberi otoritas: tidak ada lease yang diakuisisi dan tidak
- * ada baris yang ditulis.
- */
-export interface UnfinishedWorkItem {
-  readonly sessionId: string
-  readonly sessionIncarnation: number
-  readonly task: Task
-  readonly execGeneration: number
-  readonly attemptGeneration: number | null
-  readonly executionOwner: ExecutionOwner | null
-  readonly transferredFromSessionId: string | null
-  readonly transferredAt: string | null
-}
-
-/**
- * [P14.3] Satu baris ledger dedup. Append-only.
- *
- * `duplicateId` adalah task yang DINYATAKAN operator sebagai unit kerja yang
- * sama dengan `survivorId`, lalu ditutup sebagai CANCELLED (BUKAN COMPLETED —
- * menyelesaikan duplikat adalah inferensi yang dilarang). `evidence` adalah
- * teks operator yang direkam utuh: kemiripan judul tidak pernah cukup, dan
- * ledger inilah bukti bahwa keputusan itu eksplisit, bukan otomatis.
- */
-export interface TaskMerge {
-  readonly mergeId: string
-  readonly sessionId: string
-  readonly survivorId: string
-  readonly duplicateId: string
-  readonly evidence: string
-  readonly survivorStatus: string
-  readonly duplicateStatus: string
-  readonly duplicateRevision: number
-  readonly mergedAt: string
-}
-
-export interface TaskDuplicateRequest {
-  readonly sessionId: string
-  readonly survivorId: string
-  readonly duplicateId: string
-  /** WAJIB non-kosong: alasan operator bahwa ini unit kerja yang sama. */
-  readonly evidence: string
-  /** Revisi duplikat yang dilihat operator (read-then-write, bukan CAS). */
-  readonly expectedRevision?: number
-}
-
-export type TaskDuplicateOutcome =
-  | "DECLARED"
-  | "NOT_FOUND"
-  | "REFUSED_SELF_MERGE"
-  | "REFUSED_NO_EVIDENCE"
-  | "REFUSED_TERMINAL_DUPLICATE"
-  | "REJECTED_STALE_REVISION"
-
-export interface TaskDuplicateResult {
-  readonly outcome: TaskDuplicateOutcome
-  /** Duplikat setelah ditutup (CANCELLED, revisi +1), atau null saat ditolak. */
-  readonly duplicate: Task | null
-  readonly survivor: Task | null
-  readonly merge: TaskMerge | null
-  readonly detail: string
-}
-
-const DDL = `
-CREATE TABLE IF NOT EXISTS tasks (
-  session_id TEXT NOT NULL,
-  task_id TEXT NOT NULL,
-  title TEXT NOT NULL,
-  status TEXT NOT NULL,
-  task_order INTEGER NOT NULL,
-  parent_id TEXT,
-  depends_on_json TEXT,
-  blocked_reason TEXT,
-  verification_json TEXT,
-  evidence_json TEXT,
-  acceptance_json TEXT,
-  provenance_json TEXT,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  revision INTEGER NOT NULL,
-  exec_generation INTEGER NOT NULL DEFAULT 0,
-  attempt_generation INTEGER,
-  execution_owner TEXT,
-  PRIMARY KEY (session_id, task_id)
-);
-CREATE INDEX IF NOT EXISTS idx_tasks_session_order ON tasks(session_id, task_order);
-CREATE TABLE IF NOT EXISTS task_meta (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS session_authority (
-  -- [PHASE 6X] One row per (session, incarnation): a bounded, self-expiring
-  -- claim on the RIGHT TO SCHEDULE, never proof of liveness.
-  session_id       TEXT    NOT NULL,
-  incarnation      INTEGER NOT NULL,
-  owner_token      TEXT    NOT NULL,
-  owner_pid        INTEGER NOT NULL,
-  acquired_at      INTEGER NOT NULL,
-  lease_expires_at INTEGER NOT NULL,
-  -- Keyed by incarnation as well as session, so a session deleted and recreated
-  -- (6Q bumps the incarnation) can never inherit its predecessor's lease.
-  PRIMARY KEY (session_id, incarnation)
-);
-
-CREATE TABLE IF NOT EXISTS task_transfers (
-  -- [P14] Ledger transfer lintas sesi. APPEND-ONLY: tidak ada UPDATE/DELETE di
-  -- jalur produksi. Token otoritas sengaja TIDAK disimpan — yang dicatat adalah
-  -- fakta yang tidak berubah (identitas, revisi, generasi, status) supaya
-  -- operator bisa mengaudit asal task tanpa memegang kredensial proses.
-  transfer_id        TEXT    PRIMARY KEY,
-  task_id            TEXT    NOT NULL,
-  from_session_id    TEXT    NOT NULL,
-  from_incarnation   INTEGER NOT NULL,
-  to_session_id      TEXT    NOT NULL,
-  to_incarnation     INTEGER NOT NULL,
-  expected_revision  INTEGER NOT NULL,
-  new_revision       INTEGER NOT NULL,
-  status             TEXT    NOT NULL,
-  exec_generation    INTEGER NOT NULL,
-  attempt_generation INTEGER,
-  execution_owner    TEXT,
-  transferred_at     TEXT    NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_task_transfers_from ON task_transfers(from_session_id, task_id);
-CREATE INDEX IF NOT EXISTS idx_task_transfers_to ON task_transfers(to_session_id, task_id);
-CREATE TABLE IF NOT EXISTS task_merges (
-  -- [P14.3] Ledger dedup EKSPLISIT operator. Append-only. Satu-satunya penulis
-  -- adalah declareTaskDuplicate, di transaksi yang sama dengan status CANCELLED
-  -- duplikat. Kolom evidence WAJIB: kemiripan judul bukan bukti, operator
-  -- yang menyatakan alasannya dan teks itu disimpan utuh untuk audit
-  -- (tanpa token otoritas — sama seperti task_transfers).
-  merge_id          TEXT    PRIMARY KEY,
-  session_id        TEXT    NOT NULL,
-  survivor_id       TEXT    NOT NULL,
-  duplicate_id      TEXT    NOT NULL,
-  evidence          TEXT    NOT NULL,
-  survivor_status   TEXT    NOT NULL,
-  duplicate_status  TEXT    NOT NULL,
-  duplicate_revision INTEGER NOT NULL,
-  merged_at         TEXT    NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_task_merges_session ON task_merges(session_id, duplicate_id);
-`
-
-/**
- * The DDL as INDIVIDUAL statements.
- *
- * [PHASE 1 FIX] The artifact passed the whole script to a single `db.exec()`.
- * Measured under a held write lock, that does not fail the way the code
- * assumed: bun runs the script past the blocked `CREATE TABLE` and the next
- * statement (`CREATE INDEX ... ON tasks`) then fails with
- * `no such table: main.tasks` — a NON-busy error. A retry keyed on
- * SQLITE_BUSY therefore never engaged, and the caller saw a misleading error
- * after the full 3s busy_timeout. Running one statement at a time means a lock
- * conflict surfaces as SQLITE_BUSY on the statement that actually needs the
- * lock, which is exactly what the retry can act on.
- */
-const DDL_STATEMENTS: readonly string[] = DDL.split(";")
-  .map((s) => s.trim())
-  .filter((s) => s.length > 0)
-
-/** Handle cache per path, as with `sessions.db`, so `initialize()` does not run
- *  the DDL on every operation. */
-const handles = new Map<string, Database>()
-const initialized = new Set<string>()
-
-/** Depth of in-flight `withTransaction` calls, per db path.
- *
- *  Exists for two reasons:
- *   1. `close`/`resetTaskStoreHandles` must not yank the connection out from
- *      under an open transaction - that would leave a half-applied unit of work
- *      with no rollback path.
- *   2. It makes the transaction boundary observable, so a caller cannot open a
- *      transaction and then escape it by reaching for a different connection. */
-const txDepth = new Map<string, number>()
-
-function openTxPaths(): string[] {
-  return [...txDepth.entries()].filter(([, d]) => d > 0).map(([p]) => p)
-}
-
-/** Throw if `p` currently has an open transaction. */
-function assertNoOpenTx(p: string, what: string): void {
-  if ((txDepth.get(p) ?? 0) > 0) {
-    throw new TaskError(
-      "TASK_TX_ACTIVE",
-      `cannot ${what} while a TaskStore transaction is open for this database`,
-    )
-  }
-}
-
-function dbFile(cwd?: string): string {
-  return resolveLocalDbPath(TASK_DB_FILENAME, cwd)
-}
-
-/**
- * [PHASE 6K] Bring an existing `tasks` table up to the current lineage schema.
- *
- * WHY THIS EXISTS (Phase 6J D3, HIGH): `CREATE TABLE IF NOT EXISTS tasks (...)`
- * is a NO-OP when the table already exists. SQLite does not add columns. So a
- * database created before Phase 6I never received `exec_generation` /
- * `attempt_generation`, and because `createTask` names them, task creation
- * failed outright on any pre-6I installation - on the LEGACY path, with the
- * Scheduler still disabled.
- *
- * WHY SCHEMA INTROSPECTION rather than only a version stamp: a version stamp
- * can lie (a 6F database may carry a stale or absent `data_version`), whereas
- * `PRAGMA table_info` reports what is actually there. The stamp is still
- * written so `dataVersion()` reflects reality, but the DECISION is made from
- * the schema.
- *
- * PROPERTIES, each load-bearing:
- *   - IDEMPOTENT: a column is added only when absent, so running twice is a
- *     no-op, and a partially migrated database converges.
- *   - NON-DESTRUCTIVE: no row is deleted, updated, or reordered. `ADD COLUMN`
- *     only appends.
- *   - COMPATIBLE WITH EXISTING ROWS: the defaults are exactly the 6H
- *     semantics for a row that predates lineage - `exec_generation = 0`
- *     ("never claimed") and `attempt_generation = NULL` ("never attempted").
- *     `revision`, `status`, `task_id` and every relationship are untouched.
- *   - NO INFERENCE: a pre-lineage row is NOT given a generation derived from
- *     its revision. 6H explicitly declined that, and it is what caused D1.
- *   - TRANSACTIONAL: both ALTERs run in one transaction, so an interruption
- *     leaves the table in its previous state rather than half-migrated.
- */
-function migrateExecutionLineageSchema(db: Database): void {
-  const present = new Set(
-    (db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[]).map((r) => r.name),
-  )
-  // No `tasks` table at all: the DDL above just created it with the columns.
-  if (present.size === 0) return
-
-  const needsExec = !present.has("exec_generation")
-  const needsAttempt = !present.has("attempt_generation")
-  if (!needsExec && !needsAttempt) return
-
-  const run = db.transaction(() => {
-    if (needsExec) {
-      // NOT NULL with a non-null default is required by SQLite for ADD COLUMN,
-      // and it backfills every existing row with 0 = "never claimed".
-      db.exec("ALTER TABLE tasks ADD COLUMN exec_generation INTEGER NOT NULL DEFAULT 0")
-    }
-    if (needsAttempt) {
-      // Deliberately nullable with NO default: existing rows read as NULL,
-      // which is exactly 6H's "no attempt of the current generation".
-      db.exec("ALTER TABLE tasks ADD COLUMN attempt_generation INTEGER")
-    }
-  })
-  try {
-    withBusyRetrySync(() => {
-      run()
-      return true
-    })
-  } catch (e) {
-    throw new TaskError(
-      "TASK_MIGRATION_FAILURE",
-      `lineage migration failed: ${(e as Error).message}`,
-    )
-  }
-  // Record the schema version so `dataVersion()` is no longer fiction.
-  try {
-    const cur = db.prepare("SELECT value FROM task_meta WHERE key = ?").get("data_version") as
-      | { value: string }
-      | null
-      | undefined
-    const n = cur ? Number(cur.value) : 0
-    if (!Number.isFinite(n) || n < TASK_DATA_VERSION) {
-      db.prepare(
-        "INSERT INTO task_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-      ).run("data_version", String(TASK_DATA_VERSION))
-    }
-  } catch {
-    // The version stamp is bookkeeping, not correctness. A failure to record it
-    // must never prevent the store from opening.
-  }
-}
-
-/**
- * [PHASE 6P] Add `execution_owner` to a database that predates it.
- *
- * Same decision procedure as `migrateExecutionLineageSchema` — decide from
- * `PRAGMA table_info`, never from a version stamp, because a stamp can lie and
- * the schema cannot. Kept as a SEPARATE function so the 6P change is
- * independently reviewable and independently idempotent, and so the older
- * function's documented properties are not silently redefined.
- *
- * PROPERTIES, each load-bearing:
- *   - IDEMPOTENT: added only when absent, so repeated opens are a no-op and a
- *     partially migrated database converges.
- *   - ADDITIVE / NON-DESTRUCTIVE: `ADD COLUMN` only. No row is updated, deleted,
- *     reordered or rewritten. Same guarantee as the 6I migration.
- *   - COMPATIBLE WITH EXISTING ROWS: nullable with no default, so every existing
- *     row reads back as `NULL` = "no Scheduler execution owns this task".
- *   - TRANSACTIONAL: the ALTER runs in one transaction, so an interruption leaves
- *     the table as it was rather than half-migrated.
- *
- * NO BACKFILL — DELIBERATE, and it is the important decision here.
- *
- * It is tempting to backfill `'scheduler'` onto every pre-6P row that looks like a
- * stranded claim (`status IN (IN_PROGRESS, VERIFYING) AND exec_generation > 0`).
- * That would be a GUESS, and it is provably wrong in one direction and
- * un-recoverable in the other:
- *
- *   - A pre-6P row can ALSO be history H5: claim → crash → 6B `reconcileStranded`
- *     (status → PENDING) → a user turn marks IN_PROGRESS. That is the same
- *     `(IN_PROGRESS, exec>0, att NULL)` shape, and backfilling would mark
- *     interactive work as Scheduler-owned and revert it — reintroducing 6N F1
- *     on upgraded databases.
- *   - Not backfilling leaves a pre-6P genuinely stranded claim unrecovered. Its
- *     row stays IN_PROGRESS, which is not-eligible, so its dependents stay
- *     unready. This is an availability cost, and it is a MANUAL/OPERATOR cost,
- *     not a correctness one: no execution is corrupted, nothing is lost.
- *
- * The ambiguity in legacy rows is IRREDUCIBLE — the fact was never recorded, and
- * 6I's "NO INFERENCE" rule (a pre-lineage row is not given a generation derived
- * from its revision) forbids manufacturing it. Inventing ownership would be the
- * same error one column over. So: additive only, no inference, and the
- * behaviour change is stated rather than hidden.
- */
-function migrateExecutionOwnershipSchema(db: Database): void {
-  const present = new Set(
-    (db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[]).map((r) => r.name),
-  )
-  // No `tasks` table at all: the DDL above just created it with the column.
-  if (present.size === 0) return
-  if (present.has("execution_owner")) return
-
-  try {
-    withBusyRetrySync(() => {
-      // Nullable with NO default: existing rows read as NULL, which is exactly
-      // "no Scheduler execution owns this task" - the safe direction, because it
-      // forbids reconciliation rather than permitting it.
-      db.exec("ALTER TABLE tasks ADD COLUMN execution_owner TEXT")
-      return true
-    })
-  } catch (e) {
-    throw new TaskError(
-      "TASK_MIGRATION_FAILURE",
-      `execution-ownership migration failed: ${(e as Error).message}`,
-    )
-  }
-}
-
-function handle(cwd?: string): Database {
-  const p = dbFile(cwd)
-  const existing = handles.get(p)
-  if (existing) return existing
-  // [Phase 7 / Live #1] Sama dengan persistence.ts: buka koneksi + PRAGMA
-  // setup dalam retry. `new Database(p)` dan `PRAGMA journal_mode=WAL`
-  // bisa gagal SQLITE_BUSY saat beberapa proses membuka tasks.db bersamaan.
-  // busy_timeout diatur SEBELUM journal_mode (peralihan WAL butuh exclusive
-  // lock sesaat yang langsung gagal tanpa busy_timeout).
-  let db: Database
-  const opened = withBusyRetrySync(() => {
-    const d = new Database(p)
-    try {
-      d.exec(`PRAGMA busy_timeout=${LIMITS.SQLITE_BUSY_TIMEOUT_MS}`)
-    } catch {}
-    return d
-  })
-  if (!opened) {
-    throw new TaskError(
-      "TASK_DB_INIT_FAILURE",
-      `cannot open ${p} after ${SCHEMA_ATTEMPTS} busy-retry attempts`,
-    )
-  }
-  db = opened
-  // [Audit #3 RL-3] WAL + DDL/migrasi dibungkus SATU guard pasca-konstruksi agar
-  // kegagalan IOERR/CORRUPT menutup handle (bukan bocor) — WAL sebelumnya di luar guard.
-  try {
-    if (!initialized.has(p)) {
-      // Sama dengan persistence.ts: PRAGMA WAL dibungkus retry (peralihan WAL
-      // butuh exclusive lock sesaat).
-      const walOk = withBusyRetrySync(() => {
-        db.exec(
-          `PRAGMA journal_mode=WAL; PRAGMA busy_timeout=${LIMITS.SQLITE_BUSY_TIMEOUT_MS}; PRAGMA synchronous=NORMAL; PRAGMA journal_size_limit=${LIMITS.SQLITE_WAL_SIZE_LIMIT_BYTES}; PRAGMA wal_autocheckpoint=${LIMITS.SQLITE_WAL_AUTOCHECKPOINT_PAGES};`,
-        )
-        return true
-      })
-      if (walOk === null) {
-        process.stderr.write(`[warn] taskstore: wal setup deferred, retry next open: ${p}\n`)
-      }
-      try {
-        const { chmodSync } = require("node:fs") as typeof import("node:fs")
-        chmodSync(p, 0o600)
-      } catch {}
-    }
-    // D2: the artifact ran this bare and could therefore throw SQLITE_BUSY before
-    // any retry. Bounded retry now. On failure the handle is closed and dropped
-    // from the cache, exactly as the artifact did, so the next call retries from a
-    // clean state instead of handing out a half-built connection.
-    for (const stmt of DDL_STATEMENTS) {
-      const ok = withBusyRetrySync(() => {
-        db.exec(stmt)
-        return true
-      })
-      if (ok === null) throw new Error(`schema init did not complete: ${stmt.slice(0, 40)}`)
-    }
-    // [PHASE 6K] `CREATE TABLE IF NOT EXISTS` cannot add a column to an
-    // existing table, so a database created before 6I never receives the
-    // execution-lineage columns and every statement naming them fails. The
-    // migration runs here, on the same open path, immediately after the DDL.
-    migrateExecutionLineageSchema(db)
-    // [PHASE 6P] Same open path, immediately after, so a database that already
-    // has the lineage columns but predates 6P still receives `execution_owner`.
-    migrateExecutionOwnershipSchema(db)
-    initialized.add(p)
-  } catch (e) {
-    try {
-      db.close()
-    } catch {}
-    handles.delete(p)
-    throw new TaskError("TASK_DB_INIT_FAILURE", `schema init failed: ${(e as Error).message}`)
-  }
-  handles.set(p, db)
-  return db
-}
-
-function parseJson<T>(raw: string | null, fallback: T): T {
-  if (!raw) return fallback
-  try {
-    const v = JSON.parse(raw) as T
-    return v ?? fallback
-  } catch {
-    // A corrupt column must NOT drop the whole task. Fall back to a neutral
-    // shape and the task still reads as present.
-    return fallback
-  }
-}
-
-/**
- * [P14] Parse relasi secara KETAT — berbeda dari `parseJson` yang sengaja
- * memaafkan kolom rusak untuk pembacaan biasa.
- *
- * Transfer lintas sesi memindahkan baris yang relasinya akan ditafsirkan ulang
- * di namespace sesi lain. Menebak `[]` dari JSON rusak berarti memindahkan task
- * tanpa dependency yang sebenarnya ada — persis "deduplication menyatukan tugas
- * yang berbeda" yang dilarang P14. `null` = tidak bisa dibuktikan, jadi tolak.
- */
-function parseStringArrayStrict(raw: string | null): string[] | null {
-  if (raw === null || raw.trim() === "") return []
-  try {
-    const v: unknown = JSON.parse(raw)
-    if (!Array.isArray(v)) return null
-    if (v.some((x) => typeof x !== "string")) return null
-    return v as string[]
-  } catch {
-    return null
-  }
-}
-
-function rowToTask(r: TaskRow): Task {
-  return {
-    id: r.task_id,
-    sessionId: r.session_id,
-    title: r.title,
-    status: (isTaskStatus(r.status) ? r.status : "PENDING") as TaskStatus,
-    order: r.task_order,
-    parentId: r.parent_id,
-    dependsOn: parseJson<string[]>(r.depends_on_json, []),
-    blockedReason: r.blocked_reason,
-    verification: parseJson<TaskVerification | null>(r.verification_json, null),
-    evidence: parseJson<TaskEvidence[]>(r.evidence_json, []),
-    acceptance: parseJson<TaskAcceptance | null>(r.acceptance_json, null),
-    provenance: parseJson<TaskProvenance>(r.provenance_json, {
-      origin: "runtime",
-      source: "unknown",
-    }),
-    createdAt: r.created_at,
-    updatedAt: r.updated_at,
-    revision: r.revision,
-  }
-}
-
-function nowIso(): string {
-  return new Date().toISOString()
-}
-
-function j(value: unknown): string | null {
-  return value === null || value === undefined ? null : JSON.stringify(value)
-}
-
-/** Shape that may arrive from the model/caller. Task ids are already validated
- *  by the allocator; this struct is never stored as-is. */
-export interface NewTaskInput {
-  title: string
-  status: TaskStatus
-  order: number
-  parentId?: string | null
-  dependsOn?: string[]
-  blockedReason?: string | null
-  verification?: TaskVerification | null
-  evidence?: TaskEvidence[]
-  acceptance?: TaskAcceptance | null
-  provenance: TaskProvenance
-}
-
-export interface TaskPatch {
-  title?: string
-  status?: TaskStatus
-  /** Display position. Unlike `id`, `order` may change at any time and `id`
-   *  never does. */
-  order?: number
-  parentId?: string | null
-  dependsOn?: string[]
-  blockedReason?: string | null
-  verification?: TaskVerification | null
-  evidence?: TaskEvidence[]
-  acceptance?: TaskAcceptance | null
-}
-
-export interface UpsertOptions {
-  /** Evidence used by the completion gate. Default `unverified` so a TaskStore
-   *  called without DI cannot silently refuse `completed`.
-   *  [PHASE 1] inert: the only reader was the deferred `synchronizeTasks`. */
-  evidence?: CompletionEvidence
-  /** Revision that MUST match (optimistic). `undefined` = no check.
-   *
-   *  [Fase 1 / LOOP-INV-01] The check now runs INSIDE the write transaction and
-   *  the UPDATE carries `AND revision = ?`, so it is a real compare-and-swap
-   *  (one writer wins, the loser gets `TASK_STALE_REVISION` and changes
-   *  nothing). Previously it was a read-then-write outside the transaction and
-   *  two concurrent writers could both pass it. */
-  expectedRevision?: number
-}
-
-/**
- * [Fase 1] Opsi khusus `patchTask` untuk dua jaminan baru.
- */
-export interface PatchOptions extends UpsertOptions {
-  /**
-   * [LOOP-INV-02] Permit EKSPLISIT untuk keluar dari status terminal
-   * (`COMPLETED`/`CANCELLED`). Tanpa ini, transisi tersebut ditolak dengan
-   * `IllegalTaskTransitionError`.
-   *
-   * Ini bukan pelonggaran diam-diam: reopen tetap mungkin (operator yang salah
-   * merge harus bisa membatalkannya), tetapi setiap pemanggil yang
-   * melakukannya menyatakannya di kode dan bisa diaudit lewat grep, bukan
-   * tersembunyi sebagai efek samping "tulis status apa saja".
-   */
-  allowReopen?: boolean
-  /**
-   * [LOOP-INV-13] Token lease milik pemanggil. Bila diberikan, `patchTask`
-   * memverifikasi token itu masih memegang `session_authority` untuk sesi ini.
-   * Token basi/tersingkir = `TaskAuthorityLostError`, tanpa menulis apa pun.
-   *
-   * `undefined` = pemanggil tanpa identitas lease (CLI interaktif / operator).
-   * Mode itu sengaja tetap diizinkan supaya sesi tunggal tanpa kontensi tidak
-   * berubah perilakunya.
-   */
-  authorityToken?: string
-}
-
-/**
- * [Fase 3 / LOOP-INV-12, LOOP-G21] Hasil verifikasi terstruktur untuk mengunci
- * transisi dari `VERIFYING` ke `COMPLETED` (lulus) atau `BLOCKED` (gagal).
- */
-export interface VerificationGateOutcome {
-  readonly ok: boolean
-  readonly verdict: "passed" | "failed" | "stale"
-  readonly exitCode?: number | null
-  readonly command?: string
-  readonly summary?: string
-  readonly integrityOk?: boolean
-  readonly timestamp?: string
-}
-
-/** Format satu rekaman `TaskEvidence` berjenis `"verify"` secara deterministik. */
-export function buildVerificationTaskEvidence(outcome: VerificationGateOutcome): TaskEvidence {
-  const at = outcome.timestamp ?? nowIso()
-  const payload = {
-    verdict: outcome.verdict,
-    ok: outcome.ok,
-    exitCode: outcome.exitCode ?? (outcome.ok ? 0 : 1),
-    ...(outcome.command ? { command: scrubSecrets(outcome.command).slice(0, 200) } : {}),
-    summary: scrubSecrets(
-      outcome.summary ?? (outcome.ok ? "verification passed" : "verification failed"),
-    ).slice(0, 500),
-    ...(typeof outcome.integrityOk === "boolean" ? { integrityOk: outcome.integrityOk } : {}),
-    timestamp: at,
-  }
-  return {
-    kind: "verify",
-    detail: JSON.stringify(payload),
-    at,
-  }
-}
-
-/**
- * PHASE 6B: authority mode.
- *
- * `LEGACY` (the default, and the only mode in production today) preserves the
- * historical behaviour where any writer may author `IN_PROGRESS`.
- *
- * `SCHEDULER` closes that door: `IN_PROGRESS` may then be authored ONLY by
- * `claimTask`. Model-facing `todo_write` therefore fails closed with
- * `TASK_AUTHORITY_VIOLATION` instead of creating a claim.
- *
- * Activation is explicit and per-instance. There is no environment variable, no
- * module-level flag, and no automatic activation on `initialize()`.
- */
-export type TaskAuthorityMode = "LEGACY" | "SCHEDULER"
-
-export interface TaskStoreOptions {
-  /**
-   * PHASE 6B. Defaults to `"LEGACY"`. Must be opted into by a composition root.
-   * Tests must assert that no production path sets this.
-   */
-  authority?: TaskAuthorityMode
-}
-
-/**
- * Render a status allow-list as a SQL literal list.
- *
- * The values are module-private compile-time constants (`TaskStatus` members),
- * never caller input, so this needs no escaping. It exists so the claim and
- * reconcile predicates read as one auditable statement each, instead of string
- * concatenation repeated per call site.
- */
-function sqlList(statuses: readonly TaskStatus[]): string {
-  return statuses.map((s) => `'${s}'`).join(", ")
-}
-
-/**
- * PHASE 6B: the only status a claim may transition from.
- *
- * `COMPLETED`, `CANCELLED` and `FAILED` are irreversible and are therefore not
- * claimable — which is what stops a claim from resurrecting finished or
- * abandoned work. `IN_PROGRESS` and `VERIFYING` are excluded because a second
- * claim of in-flight work is exactly the double-claim the primitive prevents.
- */
-const CLAIMABLE_STATUSES: readonly TaskStatus[] = ["PENDING"]
 
 /**
  * PHASE 6B: the only statuses reconciliation may revert.
@@ -2673,18 +1800,7 @@ export class TaskStore {
 
   /** Close the handle. For tests and explicit shutdown only. */
   static close(cwd?: string): void {
-    const p = dbFile(cwd)
-    // Closing the connection under an open transaction would abandon a
-    // half-applied unit of work with no way to roll it back.
-    assertNoOpenTx(p, "close the store")
-    const db = handles.get(p)
-    if (db) {
-      try {
-        db.close()
-      } catch {}
-      handles.delete(p)
-      initialized.delete(p)
-    }
+    closeTaskStoreHandle(cwd)
   }
 
   // ── transaction boundary (Phase 4A.2) ─────────────────────────────────────
@@ -2875,32 +1991,4 @@ export class TaskStore {
     const a = this.getSessionAuthority(sessionId)
     return a !== null && a.ownerToken === ownerToken && a.leaseExpiresAt > now
   }
-}
-
-/** Discard the handle cache. For hermetic tests only. */
-export function resetTaskStoreHandles(): void {
-  // Refuse while any transaction is open, for the same reason `close` does.
-  const open = openTxPaths()
-  if (open.length > 0) {
-    throw new TaskError(
-      "TASK_TX_ACTIVE",
-      `cannot reset task store handles while ${open.length} transaction(s) are open`,
-    )
-  }
-  for (const db of handles.values()) {
-    try {
-      db.close()
-    } catch {}
-  }
-  handles.clear()
-  initialized.clear()
-}
-
-/** Legacy-source fingerprint, used by migration so a re-import of identical
- *  content changes nothing. */
-export function legacyDigest(raw: string): string {
-  // `scrubSecrets` is used so a secret accidentally present in the legacy file
-  // is neither hashed nor leaked through the marker.
-  const { createHash } = require("node:crypto") as typeof import("node:crypto")
-  return createHash("sha256").update(scrubSecrets(raw)).digest("hex").slice(0, 32)
 }

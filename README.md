@@ -34,7 +34,7 @@ minicode providers               # inspect configured providers
 minicode exec "task" --json      # machine-readable event stream
 ```
 
-WorkMode controls how the agent works (`DISCUSS`, `PLAN`, or `BUILD`); permission settings and tool access policy control which actions require approval or are available. Read [Choosing a mode](docs/choosing-mode.md) before granting write or execution access. `--sandbox docker` requests an isolated container for shell execution; the [security guide](docs/security.md) explains the remaining boundaries.
+WorkMode controls how the agent works (`DISCUSS` or `BUILD`); permission settings and tool access policy control which actions require approval or are available. Read [Choosing a mode](docs/choosing-mode.md) before granting write or execution access. `--sandbox docker` requests an isolated container for shell execution; the [security guide](docs/security.md) explains the remaining boundaries.
 
 ## Documentation
 

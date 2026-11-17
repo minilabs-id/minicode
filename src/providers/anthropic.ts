@@ -104,13 +104,24 @@ export function createAnthropicProvider(config: AnthropicConfig): ModelProvider 
       const effectiveMaxTokens = legacyBudget
         ? Math.max(config.maxTokens ?? 8192, legacyBudget + 1024)
         : (config.maxTokens ?? 8192)
-      // Fase 7: cache prefix percakapan (system+tools+histori) — tandai pesan
-      // stabil terakhir (kedua dari akhir; yang terakhir = pesan user saat ini)
-      // agar tool result besar ikut ter-cache tiap turn (bukan dikirim ulang).
+      // Fase 7: sematkan cache_control pada blok konten stabil terakhir.
       const messagesPayload = toAnthropicMessages(request.messages)
       if (enableCache && messagesPayload.length >= 2) {
-        const lastStable = messagesPayload[messagesPayload.length - 2] as Record<string, unknown>
-        lastStable.cache_control = { type: "ephemeral" }
+        const lastStable = messagesPayload[messagesPayload.length - 2] as {
+          role: string
+          content: unknown
+        }
+        if (Array.isArray(lastStable.content) && lastStable.content.length > 0) {
+          const lastBlock = lastStable.content[lastStable.content.length - 1] as Record<
+            string,
+            unknown
+          >
+          lastBlock.cache_control = { type: "ephemeral" }
+        } else if (typeof lastStable.content === "string") {
+          lastStable.content = [
+            { type: "text", text: lastStable.content, cache_control: { type: "ephemeral" } },
+          ]
+        }
       }
       const body = JSON.stringify({
         model: request.model ?? config.defaultModel ?? config.models[0],

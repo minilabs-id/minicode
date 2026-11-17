@@ -675,6 +675,7 @@ export class Transcript {
     this.thinkingBuf = ""
     this.thinkingTail = ""
     this.thinkingArea = []
+    this.thinkingRowId = null
     this.evicted = 0
     this.hasEvictMarker = false
     this.runningMemo = null
@@ -1884,6 +1885,9 @@ export class Transcript {
     if (index < 0) return false
     this.lines[index] = line
     this.rowCache.delete(id)
+    this.committedProjection = null
+    this.projectedBase = null
+    this.runningMemo = null
     return true
   }
 

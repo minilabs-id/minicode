@@ -77,12 +77,16 @@ export async function buildDoctorReport(cwd?: string, allowLocal?: boolean): Pro
     memoryRows: memRows,
     sandboxOs: osSandbox,
     sandboxDocker: docker,
-    // Tanpa isolasi OS (semua Windows) permission default turun ke allowlist —
+    // Tanpa isolasi OS (termasuk Windows tanpa Docker) permission default turun ke allowlist —
     // lebih baik membatasi daripada berlabel aman palsu.
     fallbackNote:
       osSandbox === "none" && !docker
-        ? "no OS/docker sandbox: default permission falls back to allowlist"
-        : "sandbox available",
+        ? process.platform === "win32"
+          ? "no native Windows sandbox (Docker not detected): default permission falls back to allowlist"
+          : "no OS/docker sandbox: default permission falls back to allowlist"
+        : osSandbox === "none" && docker
+          ? "Docker sandbox available (no native OS sandbox)"
+          : "sandbox available",
     configGlobal: existsSync(globalConfigPath()),
     configLocal: existsSync(resolve(cwd ?? ".", ".minicode", "config.json")),
     hardening: { bashGuard, jail, scrub, perms },

@@ -1203,4 +1203,32 @@ describe("TuiApp", () => {
     await tty!.send(KEY.ctrlD)
     await runP
   })
+
+  test("I5: submit gagal dan cancel turn tidak meninggalkan popup / yatim atau membocorkan input", async () => {
+    const { app, calls, screenText } = setup()
+    const runP = app.run()
+    await tty!.ready()
+    await tty!.waitForOutput((o) => o.includes("00.00.00"))
+    // Buka dropdown `/`, ketik `/boom` (melempar error), submit: menu tertutup, error tampil, composer siap terima input bersih.
+    await tty!.send("/")
+    expect(screenText()).toContain("    model")
+    await tty!.send("boom")
+    await tty!.send(KEY.enter)
+    await tty!.waitForScreen((rows) => rows.some((l) => l.includes("gagal disengaja")))
+    expect(screenText()).not.toContain("    model")
+    await tty!.send("abc")
+    expect(screenText()).toContain("minicode › abc")
+    await tty!.send(KEY.ctrlU)
+
+    // Masuk turn `/slow` lalu batalkan via Esc: tidak ada popup sisa, input berikutnya utuh.
+    await tty!.send("/slow")
+    await tty!.send(KEY.enter)
+    await waitForCall(calls, "/slow")
+    await tty!.send(KEY.esc, 90)
+    expect(screenText()).toContain("abort sent")
+    expect(screenText()).not.toContain("    model")
+    await tty!.send(KEY.ctrlD)
+    await runP
+    expect(tty!.all()).toContain("\x1b[?1049l")
+  })
 })

@@ -6,7 +6,7 @@ Perubahan v7.19 (remediasi audit & ergonomi UX):
    dan memiliki kandidat, `Tab` melengkapi nama command terpilih (atau kandidat
    teratas) ke composer (`menuOpen` menutup tanpa eksekusi langsung); ketika
    dropdown tertutup atau tidak ada kandidat, `Tab` tetap memutar `WorkMode`
-   (`Discuss → Plan → Build`).
+   (`Discuss ↔ Build`).
 2. **Jendela output command interaktif penuh.** `runOutputWindow` menghitung ulang
    wrap dan lebar kotak secara dinamis saat `resize`, mempertahankan posisi
    scroll proporsional, menampilkan counter posisi di judul saat scrollable,
@@ -1110,10 +1110,10 @@ tetap UNVERIFIED; keberadaan implementasi saja bukan bukti UAT.
 |---|---|---|
 | I14 — "berlaku juga saat layar MENCIUT: abort+scroll selalu lolos" | Terimplementasi (`src/ui/tui/app.ts`: PgUp/PgDn dan Esc diintercept sebelum `tooSmall()`) | Ditutup: `test/tui-app.test.ts` membuktikan scroll posisi baca bertahan saat layar dipulihkan dan Esc memanggil abort; `Ctrl+D` tetap jalan keluar terakhir. |
 | I13/I17 — "satu baris kosong memisahkan composer dari footer" | Terimplementasi (`src/ui/tui/app.ts` merender satu spacer per frame) | Ditutup: `test/tui-app.test.ts` meng-assert baris spacer dalam frame penuh 14 baris. |
-| I20 — lebar kotak popup tetap per permukaan | Terimplementasi | `test/tui-app.test.ts` menandai salah satu test-nya sebagai `(I20)`, padahal test itu milik I13 (status bar). Lebar popup diverifikasi di `test/tui-geometry.test.ts` + `test/dialog.test.ts`; label di `tui-app` menyesatkan. |
-| I5 — tak ada popup yatim / input bocor setelah success/failure/cancel/SIGINT/session end | Tak terverifikasi | `test/turn-status.test.ts` dan `test/statusline-bun-guard.test.ts` tidak meng-assert apa pun soal popup yatim atau kebocoran input. |
-| I26 pada jalur presentasi | i18n ada dan dijaga terpisah | `test/presentation-projections.test.ts` mengunci locale `en` di setiap test dan tak pernah menguji locale `id`; klaim i18n dijaga `test/i18n.test.ts` + `test/i18n-hardcode.test.ts`. |
-| I2/I6/I28 pada proyeksi linear/ACP | Alur linear/ACP ada | `test/presentation-linear-acp.test.ts` tak meng-assert split stdout/stderr, absence cursor-control, maupun exit code secara langsung. |
+| I20 — lebar kotak popup tetap per permukaan | Terimplementasi | Ditutup: label di `test/tui-app.test.ts` kini bertanda `(I13)`, dan lebar kotak popup diverifikasi di `test/tui-geometry.test.ts` + `test/dialog.test.ts`. |
+| I5 — tak ada popup yatim / input bocor setelah success/failure/cancel/SIGINT/session end | Terimplementasi | Ditutup untuk dropdown `/` + submit error + abort/Esc di `test/tui-app.test.ts` (`I5`) dan arbiter transient `test/turn-status.test.ts`; SIGINT/POSIX tetap teruji di `test/tui-signal.test.ts` + `test/pty.test.ts`. |
+| I26 pada jalur presentasi | Terimplementasi | Ditutup: `test/presentation-projections.test.ts` kini memverifikasi locale `id` di transcript & logger linier bersama `test/i18n.test.ts` + `test/i18n-hardcode.test.ts`. |
+| I2/I6/I28 pada proyeksi linear/ACP | Terimplementasi | Ditutup: `test/presentation-linear-acp.test.ts` kini meng-assert split stdout/stderr non-TTY, bebas CSI/OSC cursor control (`I2/I6`), dan exit code `0` ACP (`I28`). |
 | I3 — kepemilikan frame tunggal selama alternate-screen | `App` merender frame ke stdout; `simple` quiet dan transient stderr ditahan selama layar dimiliki TUI | Ditutup untuk jalur yang diuji: `test/terminal-contract.test.ts` memastikan printer linear quiet tetap tidak menulis, `test/pty.test.ts` mengamati frame produksi, dan `test/writer-inventory.test.ts` mengunci daftar writer. Suite PTY berjalan pada CI Linux; Windows ConPTY tidak menjalankan seluruh kasus PTY. |
 | UI-COMPAT-01 — startup TUI gagal | Non-TTY/terminal tak mampu menolak fullscreen tanpa fallback linear; diagnostik stderr dan exit 1 | Ditutup: `test/tui-startup-failure.test.ts` menguji CLI produksi via subprocess; `test/pty.test.ts` menguji terminal di bawah minimum tanpa `?1049h`. Exit code PTY hanya diklaim jika platform mengembalikan angka. |
 | UI-RENDER-02 — exception render melewati teardown | `TuiApp.run()` melakukan cleanup idempoten di `finally`; write frame melempar ke owner | Ditutup untuk initial paint, writer frame, dan event repaint: `test/tui-app.test.ts` + `test/screen.test.ts` memverifikasi alt-screen, raw mode, listener, subscription, timer dan sync-update. Sinyal POSIX diperiksa terpisah; Windows melewati test sinyal POSIX. |

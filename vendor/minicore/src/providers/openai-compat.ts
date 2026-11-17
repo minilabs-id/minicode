@@ -153,6 +153,13 @@ export function createOpenAICompatProvider(config: OpenAICompatConfig): ModelPro
         }
       };
       for await (const chunk of sse(response.body, signal)) {
+        if (chunk.error && (typeof chunk.error === "object" || typeof chunk.error === "string")) {
+          const e = typeof chunk.error === "object" ? (chunk.error as Record<string, unknown>) : { message: String(chunk.error) };
+          const msg = String(e.message ?? e.msg ?? JSON.stringify(chunk.error));
+          const c = String(e.code ?? e.type ?? "");
+          const cat = /auth|401|403/i.test(msg + c) ? "auth" : /rate|quota|429/i.test(msg + c) ? "rate_limit" : /context/i.test(msg) ? "context_length_exceeded" : "server";
+          throw new ProviderError(cat, `${cat === "server" ? "server error" : cat}: ${msg}`);
+        }
         const usage = chunk.usage as {
           prompt_tokens?: number;
           completion_tokens?: number;

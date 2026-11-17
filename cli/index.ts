@@ -351,7 +351,7 @@ if (args.includes("-h") || args.includes("--help")) {
 
 // -- flag parsing --
 const verbose = hasFlag(args, "--verbose")
-const allowAll = hasFlag(args, "--allow-all")
+const allowAll = hasFlag(args, "--allow-all") || hasFlag(args, "-y")
 const ask = hasFlag(args, "--ask")
 const interactive = hasFlag(args, "--interactive")
 const allowlist = hasFlag(args, "--allowlist") || process.env.MINICODE_PERMISSION === "allowlist"
@@ -740,7 +740,8 @@ if (enterRepl) {
       overBudget = true
     } else if (b != null && u.cost != null && u.cost > b * 0.8)
       process.stderr.write(c.yellow(`[budget] ${formatUsd(u.cost)} / ${formatUsd(b)} (80% used)\n`))
-    await persistCurrent(u)
+    // persistCurrent menyimpan pemakaian turn (usage.get()), bukan total sesi.
+    await persistCurrent(usage.get(modelRef.current))
     // P2.2: histori yang tak durable = kegagalan jujur (bukan exit 0 diam).
     if (ctx.isWriterStale()) {
       throw new Error(`[writer] stale writer, history NOT durable: ${ctx.writerStaleNote()}`)

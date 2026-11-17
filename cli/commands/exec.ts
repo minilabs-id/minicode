@@ -62,12 +62,7 @@ function machineFailure(prompt: string, e: unknown): Record<string, unknown> {
 }
 
 export async function handleExec(
-  // P11.2 — router mengirim argv scoped TANPA token subcommand ("exec"):
-  // flag global yang dikenal (sebelum subcommand) + semua token sesudahnya.
-  // Irisan lokal `args[0] === "exec"` lama hanya benar bila exec token
-  // pertama; dengan flag global mendahului ("--json exec ..."), token
-  // routing bocor ke prompt + summary mesin. Handler mempercayai argv yang
-  // sudah scoped — jangan iris lagi di sini.
+  // P11.2 — argv scoped tanpa token subcommand ("exec").
   subArgs: string[],
   getArg: (name: string) => string | undefined,
 ): Promise<never> {
@@ -78,12 +73,7 @@ export async function handleExec(
   // Bersihkan state submit_result dari run sebelumnya — tanpa ini, exec
   // berturut-turut dalam proses sama bisa membaca hasil run lama.
   clearSubmittedResult()
-  // Prompt diambil lewat promptFromArgs() — satu implementasi yang sama dengan
-  // jalur non-exec. Versi sebelumnya menyaring dengan `a !== getArg("--model")`,
-  // yang hanya membuang NILAI dari dua flag (`--model`, `--cwd`); nilai flag lain
-  // ikut masuk ke prompt. `exec "tes" --provider gorouter --timeout 60000` benar-
-  // benar mengirim "tes gorouter 60000" ke model, dan model membalas dengan
-  // menebak-nebak soal "gorouter" dan "60000".
+  // Prompt diambil lewat promptFromArgs() — selaras dengan jalur non-exec.
   const prompt = promptFromArgs(subArgs) || (rawGetArg(subArgs, "--prompt") ?? "")
   const jsonMode = hasFlag(subArgs, "--json") || rawGetArg(subArgs, "--output-format") === "json"
   const cwdRaw = getArg("--cwd")
@@ -92,7 +82,7 @@ export async function handleExec(
   const providerOverride = getArg("--provider")
   // P2.1: flag mentah; identitas kanonik diputus di resolver (satu sanitizer).
   const sessionFlag = getArg("--session") ?? ""
-  const allowAll = hasFlag(subArgs, "--allow-all")
+  const allowAll = hasFlag(subArgs, "--allow-all") || hasFlag(subArgs, "-y")
   const ask = hasFlag(subArgs, "--ask")
   const allowlistFlag = hasFlag(subArgs, "--allowlist")
   // Sama seperti jalur interaktif: OS sandbox otomatis, dan tanpa isolasi nyata
@@ -312,7 +302,7 @@ export async function handleExec(
           : `[budget] cost unknown (model without pricing) with ${ue.totalTokens} tokens spent - over budget, stopping.`
       unsubMachine()
       unsubText()
-      await ctx.persistCurrent(ctx.usage.getSession(ctx.modelRef.current))
+      await ctx.persistCurrent(ctx.usage.get(ctx.modelRef.current))
       await ctx.close()
       if (jsonMode)
         writeMachineLine(JSON.stringify(machineFailure(effectivePrompt, new Error(msg))))
@@ -321,7 +311,7 @@ export async function handleExec(
     }
     unsubMachine()
     unsubText()
-    await ctx.persistCurrent(ue)
+    await ctx.persistCurrent(ctx.usage.get(ctx.modelRef.current))
     // P2.2: histori yang tak durable = kegagalan jujur (bukan exit 0). Diperiksa
     // SEBELUM menulis machineSummary(true) agar stdout JSONL tidak pernah
     // memancarkan dua summary terminal yang saling bertentangan (ok:true lalu ok:false).
@@ -391,7 +381,7 @@ export async function handleExec(
     unsubMachine()
     unsubText()
     try {
-      await ctx.persistCurrent(ctx.usage.getSession(ctx.modelRef.current))
+      await ctx.persistCurrent(ctx.usage.get(ctx.modelRef.current))
     } catch {}
     await ctx.close()
     process.exit(1)

@@ -18,6 +18,33 @@ const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
 export type ToolScope = "full" | "explore"
 
+const MCP_WIRE_TOOLS = ["mcp_list", "mcp_call", "mcp_read", "mcp_prompt"] as const
+const LSP_WIRE_TOOLS = [
+  "lsp_diagnostics",
+  "lsp_definition",
+  "lsp_references",
+  "lsp_hover",
+  "lsp_symbols",
+  "lsp_workspace_symbols",
+] as const
+
+/**
+ * Daftar tool yang skemanya aman disembunyikan dari wire API ketika kapabilitas
+ * runtime-nya tidak aktif (MCP/LSP kosong, sandbox none, atau non-interaktif),
+ * agar token prompt awal hemat tanpa mengubah registry izin/WorkMode kanonik.
+ */
+export function computeUnavailableWireTools(
+  cfg: Pick<MinicodeConfig, "mcpServers" | "lspServers">,
+  opts: { sandboxMode?: string; interactiveAsk?: boolean } = {},
+): Set<string> {
+  const hidden = new Set<string>()
+  if (!cfg.mcpServers?.length) for (const n of MCP_WIRE_TOOLS) hidden.add(n)
+  if (!cfg.lspServers?.length) for (const n of LSP_WIRE_TOOLS) hidden.add(n)
+  if (!opts.sandboxMode || opts.sandboxMode === "none") hidden.add("code_run")
+  if (opts.interactiveAsk === false) hidden.add("ask_user")
+  return hidden
+}
+
 // WorkMode ceiling (DISCUSS menyatukan diskusi + perencanaan; EXECUTE = BUILD).
 // Invariant INV-WM1 & #7: WorkMode TIDAK PERNAH memperluas akses; `visible`
 // diselaraskan penuh dengan `callable` di handler:

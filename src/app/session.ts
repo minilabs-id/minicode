@@ -180,6 +180,14 @@ export function createRecoveryLedger(now: () => number = Date.now): RecoveryLedg
 export const cappedRecovery = {
   onError(error: ProviderError, attempt: number): RecoveryAction {
     const category = error.category
+    // 402 / kuota habis tidak akan sembuh dengan retry — fail-fast.
+    if (
+      category === "unknown" &&
+      (/\b402\b/.test(error.message) ||
+        /quota_exceeded|insufficient_quota|exceeded its quota/i.test(error.message))
+    ) {
+      return { type: "throw" }
+    }
     const ra = error.retryAfterMs
     const saneRetryAfter =
       ra != null && Number.isFinite(ra) && ra >= 0
@@ -401,6 +409,9 @@ export async function createMinicodeSession(
      * ini perilaku identik seperti sebelumnya.
      */
     beforeToolEffect?: (call: { id: string; name: string; args: unknown }) => Promise<void>
+    /** Tool tak-tersedia yang skemanya disembunyikan pada request wire LLM
+     * (tidak mengubah registry `tools`/permission kanonik). */
+    hiddenWireTools?: ReadonlySet<string>
   },
 ): Promise<Session> {
   // Normalisasi root sekali di composition agar ToolContext selalu memiliki path tepercaya.
@@ -450,6 +461,7 @@ export async function createMinicodeSession(
     noProgress,
     onNoProgress,
     approvalBindings: _approvalBindings,
+    hiddenWireTools,
     ...rest
   } = opts
   if (!provider) throw new Error("createMinicodeSession: provider is required")
@@ -848,7 +860,11 @@ export async function createMinicodeSession(
       let calibration = calibrationFor(estimatorModel)
       let estimator = (text: string) => preciseEstimator(estimatorModel, text)
       let admittedFactor = calibration.snapshot().factor
-      const tools = req.tools ?? []
+      const rawTools = req.tools ?? []
+      const tools =
+        hiddenWireTools && hiddenWireTools.size > 0
+          ? rawTools.filter((t) => !hiddenWireTools.has(t.name))
+          : rawTools
       const localInputTokens =
         estimateMessages(req.messages, minicodeEstimator) +
         estimateSystem(system, minicodeEstimator) +
@@ -926,7 +942,14 @@ export async function createMinicodeSession(
           throw error
         }
 
-        for await (const event of provider.stream({ ...req, system }, requestController.signal)) {
+        for await (const event of provider.stream(
+          {
+            ...req,
+            system,
+            ...(hiddenWireTools && hiddenWireTools.size > 0 ? { tools } : {}),
+          },
+          requestController.signal,
+        )) {
           if (event.type === "extension" && event.kind === "effective-model") {
             const effective = event.data as { effective?: unknown; provider?: unknown } | undefined
             if (

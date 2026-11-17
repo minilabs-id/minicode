@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.30.0] - 2026-11-17
+
+### Added & Changed — Arsitektur, Modularisasi, & Efisiensi Wire
+
+- **Modularisasi tiga god file dengan kompatibilitas barrel**: Memecah jembatan presentasi (`cli/bootstrap/presentation-bridge.ts`), inisialisasi skema & persistence `runs` sesi (`src/session/db/schema.ts`, `src/session/db/runs.ts`), dan tipe + skema `TaskStore` (`src/task/db/types.ts`, `src/task/db/schema.ts`) dengan re-export utuh serta tanpa pelanggaran batas lapisan maupun inventaris writer.
+- **Deklarasi tunggal flag CLI & diagnostik Windows jujur**: Menyatukan daftar flag parser (`CLI_FLAG_SPECS`) di `cli/args.ts` untuk `BOOLEAN_FLAGS`/`VALUE_FLAGS`/`KNOWN_FLAGS`, menambah alias `-y` dan `--mode`, serta memperjelas catatan sandbox Windows non-Docker pada `cli/commands/doctor.ts`.
+- **Pemangkasan skema tool tak tersedia di wire LLM**: Menambahkan `computeUnavailableWireTools` (`src/app/tool-layer.ts`) dan `hiddenWireTools` di sesi runtime agar tool MCP/LSP/sandbox/interaktif yang tidak aktif tidak ikut dikirim ke wire model tanpa mengubah registry otorisasi kanonik.
+- **Penyesuaian margin budget kemasan**: Menaikkan `PACK_SIZE_BUDGET_KIB` dari `4352` ke `4608` KiB (4,50 MiB) untuk ruang modul baru sambil mempertahankan pengecekan integritas paket.
+- **Sinkronisasi dokumentasi & kartu benchmark**: Memperbarui `docs/architecture.md`, `docs/TERMINAL_CONTRACT.md`, `README.md` (2 mode `DISCUSS | BUILD`, otoritas SQLite `TaskStore`), serta mencatat observasi benchmark live TipRouter pada `bench/HARNESS-CARD.md`.
+
+### Fixed & Hardened — Provider Wire, Usage Persistence, Path Jail & Kontrak TUI
+
+- **Kelengkapan stream `/v1/responses` & TipRouter**: Memperbaiki penanganan event terminal `.done` (mencegah teks ganda), propagasi error mid-stream (`response.failed`/`error`) pada `src/providers/responses.ts`, penanganan `chunk.error` di `vendor/minicore/src/providers/openai-compat.ts`, penempatan `cache_control` pada block konten Anthropic (`src/providers/anthropic.ts`), klasifikasi EOF terpotong SSE (`src/providers/sse-bounds.ts`), dan fail-fast HTTP `402` / `quota_exceeded` pada `cappedRecovery`.
+- **Akurasi token turn & stabilitas IO Windows**: Mengalihkan `persistCurrent` memakai delta pemakaian turn (`usage.get()`, dengan fallback kompatibel di `cli/commands/acp.ts`), mengekstrak `renameWithRetry` di `src/lib/atomic-write.ts`, serta menormalkan NTFS alternate data streams (ADS) per segmen pada `src/policy/jail.ts`.
+- **Transkrip TUI & penutupan gap kontrak**: Membersihkan `thinkingRowId` pada `Transcript.clear()` + invalidasi cache pada `replaceEntry()`, menutup gap test kontrak terminal `I5`, `I26`, `I2/I6/I28`, dan menambah `test/harness-v30-regressions.test.ts`.
+
 ## [0.28.0] - 2026-11-17
 
 ### Added & Changed — penyatuan WorkMode (DISCUSS | BUILD) & audit command

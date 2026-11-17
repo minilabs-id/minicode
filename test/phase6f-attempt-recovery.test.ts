@@ -973,7 +973,11 @@ describe("J. migration, legacy, static architecture", () => {
         users.push(relative(root, files[i]!).replace(/\\/g, "/"))
       }
     })
-    expect(users).toEqual(["src/task/store.ts"])
+    expect(users.sort()).toEqual([
+      "src/task/db/schema.ts",
+      "src/task/db/types.ts",
+      "src/task/store.ts",
+    ])
   }, 60_000)
 
   test("J7. production constructs a Scheduler in exactly ONE gated place", async () => {
