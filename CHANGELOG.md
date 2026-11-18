@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.31.1] - 2026-11-18
+
+### Fixed — Status run terminal tidak lagi hilang
+
+- **`runState()` mempertahankan status run terakhir yang sudah terminal** (`INTERRUPTED`/`FAILED`/`COMPLETED`) sampai turn berikutnya mulai, bukan langsung mengosongkan `runId`/`status` saat run ditutup. Sebelumnya penutupan run yang segera (agar tak ada `RUNNING` yatim) membuat konsumen daemon harus menangkap status terminal  lewat balapan polling — `run.interrupt` bisa gagal teramati sebagai `INTERRUPTED` di runner cepat (regresi deterministik di CI Linux sejak perubahan ledger turn). `runId` pada status terminal juga tetap tersedia, sehingga `run.interrupt` pada run yang sudah selesai ditolak sebagai `RUN_TERMINAL`, bukan "tidak ada run" (`cli/setup.ts`).
+
 ## [0.31.0] - 2026-11-18
 
 ### Added — Informasi tambahan saat turn berjalan (steering)

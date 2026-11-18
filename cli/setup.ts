@@ -465,9 +465,11 @@ export interface CliSession {
   persistCurrent: (usageData: unknown) => Promise<void>
   runPromptWithVerify: (prompt: string, signal?: AbortSignal) => Promise<void>
   /**
-   * P2.3 daemon: identitas/status run LIVE untuk operator control. runId
-   * berasal dari jurnal Run kanonik (bukan id sintetis daemon); status
-   * RUNNING selama turn belum terminal. Absen = belum ada run di sesi ini.
+   * P2.3 daemon: identitas/status run untuk operator control. runId berasal
+   * dari jurnal Run kanonik (bukan id sintetis daemon); status RUNNING selama
+   * turn berjalan, lalu status terminal terakhir (INTERRUPTED/FAILED/COMPLETED)
+   * tetap terbaca sampai turn berikutnya mulai. Absen (null) = belum ada run
+   * di sesi ini.
    */
   runState: () => {
     runId: string | null
@@ -785,6 +787,15 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   // sehingga kursor tak pernah maju di baris terminal). Crash di antaranya =
   // baris RUNNING → kuburan resume (tombstone) menandainya INTERRUPTED/UNKNOWN.
   let currentRunId: string | null = null
+  // Run terakhir yang sudah terminal, dipertahankan sampai turn berikutnya
+  // mulai. `markPreviousRunTerminal` sengaja menutup run segera (agar tak ada
+  // RUNNING yatim), tetapi konsumen `runState()` berhak melihat outcome
+  // INTERRUPTED/FAILED/COMPLETED yang baru terjadi — tanpa ini status terminal
+  // hanya bisa tertangkap balapan polling sebelum baris DB ditutup.
+  let lastTerminalRun: {
+    runId: string
+    status: "COMPLETED" | "FAILED" | "INTERRUPTED"
+  } | null = null
   let lastTurnOutcome: "completed" | "failed" | "interrupted" | null = null
   // [Fase 1 / LOOP-INV-03] Handle jurnal yang dipakai barrier pre-efek.
   // Deklarasi SEBELUM session dibuat agar closure `beforeToolEffect` di bawah
@@ -798,6 +809,15 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     const outcome = lastTurnOutcome
     currentRunId = null
     lastTurnOutcome = null
+    lastTerminalRun = {
+      runId,
+      status:
+        outcome === "completed"
+          ? "COMPLETED"
+          : outcome === "interrupted"
+            ? "INTERRUPTED"
+            : "FAILED",
+    }
     // [Fase 1 / LOOP-INV-06, LOOP-INV-10] Hanya run yang berakhir NORMAL yang
     // membersihkan `pending_tool_ids`. Untuk INTERRUPTED/FAILED daftar sengaja
     // DIBIARKAN: ia bukti forensik bahwa operasi masih terbuka, dan recovery
@@ -2678,6 +2698,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     const created = createRun(sessionId, thread.thread_id, cwd, { expectedEpoch })
     transitionRun(created.run_id, "RUNNING", cwd, { expectedEpoch })
     currentRunId = created.run_id
+    lastTerminalRun = null
     // [Fase 1 / LOOP-INV-10] Ikat pelacakan in-flight ke run yang baru hidup.
     // Sejak titik ini setiap tool yang dieksekusi dicatat durable ke
     // `runs.pending_tool_ids` sebelum efeknya, lalu dilepas saat selesai.
@@ -3735,19 +3756,20 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     uiState,
     persistCurrent,
     runPromptWithVerify,
-    runState: () => ({
-      runId: currentRunId,
-      status:
-        currentRunId === null
-          ? null
-          : lastTurnOutcome === "completed"
+    runState: () => {
+      if (currentRunId === null) return lastTerminalRun ?? { runId: null, status: null }
+      return {
+        runId: currentRunId,
+        status:
+          lastTurnOutcome === "completed"
             ? "COMPLETED"
             : lastTurnOutcome === "failed"
               ? "FAILED"
               : lastTurnOutcome === "interrupted"
                 ? "INTERRUPTED"
                 : "RUNNING",
-    }),
+      }
+    },
     // P11.1 — baca TERAKHIR-menang: self-heal menimpa lastVerify tiap
     // siklus, jadi yang terbaca di sini selalu hasil final. Salin nilai
     // (bukan referensi) agar summary mesin tak bisa memutasi state sesi.
