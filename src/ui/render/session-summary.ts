@@ -13,6 +13,7 @@ import { renderLogoRows } from "./logo.ts"
 import { formatUsd } from "./money.ts"
 import { sanitizeAnsiLine, stripSgr } from "./sanitize.ts"
 import { c } from "./theme.ts"
+import { displayWidth } from "./width.ts"
 
 const WORDMARK = "minicode"
 
@@ -48,8 +49,17 @@ export function formatDuration(ms: number): string {
 
 /** Render kop: wordmark + detail sesi (baris demi baris). */
 export function renderSessionSummary(s: SessionSummary): string {
+  // Lebar kolom label DIHITUNG dari label terpanjang pada locale aktif, bukan
+  // angka mati 7: "Pemakaian" (9) dulu melewati kolom sehingga nilainya
+  // menjorok keluar dari kolom "Sesi"/"Model" dan kop jadi tidak rata.
+  const labelWidth = Math.max(
+    displayWidth(t("summary.session")),
+    displayWidth(t("summary.model")),
+    displayWidth(t("summary.usage")),
+  )
   // Parameter dinamai `text`, bukan `t`: `t` sudah dipakai untuk i18n.
-  const label = (text: string): string => c.muted(text.padEnd(7))
+  const label = (text: string): string =>
+    c.muted(text + " ".repeat(Math.max(0, labelWidth - displayWidth(text))))
   const cost = s.cost != null ? formatUsd(s.cost) : null
   // Fase 7 ukur: fraksi input dari cache; tampil hanya bila cache read > 0.
   const cacheRead = s.cacheReadTokens ?? 0
@@ -67,9 +77,9 @@ export function renderSessionSummary(s: SessionSummary): string {
     ...paintLogo(),
     "",
     paintWordmark(),
-    `${label(t("summary.session"))} ${c.gray(clean(s.sessionId))}`,
-    `${label(t("summary.model"))} ${c.gray(clean(s.model))}`,
-    `${label(t("summary.usage"))} ${s.totalTokens.toLocaleString()} ${t("summary.tokens")}${
+    `${label(t("summary.session"))}  ${c.gray(clean(s.sessionId))}`,
+    `${label(t("summary.model"))}  ${c.gray(clean(s.model))}`,
+    `${label(t("summary.usage"))}  ${s.totalTokens.toLocaleString()} ${t("summary.tokens")}${
       cost != null ? ` · ${cost}` : ""
     }${cachePart} · ${formatDuration(s.durationMs)}`,
   ]

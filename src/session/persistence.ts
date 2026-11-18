@@ -2875,6 +2875,73 @@ export function getProjectionStatus(
   }
 }
 
+// ── Provenance ringkasan (tahan restart) ────────────────────────────────────
+// Ditulis oleh PRODUSEN proyeksi (batas tepercaya), dibaca selector saat
+// proyeksi tak bisa dipakai. Tanpa ini ringkasan yang tersimpan sebagai baris
+// `messages` role user akan terbaca sebagai permintaan user setelah restart,
+// lalu ikut diringkas lagi — akar nesting "Previous context:" yang berulang.
+// Sengaja TIDAK diturunkan dari teks pesan: provenance tak boleh ditebak.
+
+export function saveHistorySummary(
+  sessionId: string,
+  threadId: string,
+  summaryText: string,
+  coveredSeq: number,
+  cwd?: string,
+  /** Teks baris kanonik ke-0 yang dipersist, bila pemanggil tahu PERSIS.
+   * Dipakai saat resume untuk pencocokan persis — tanpa ini provenance harus
+   * ditebak dari isi pesan, dan itu dilarang di lapisan ini. */
+  canonicalFirstText?: string,
+): void {
+  if (!summaryText) return
+  const db = open(cwd)
+  try {
+    db.prepare(
+      "INSERT INTO history_summaries (session_id, thread_id, covered_seq, summary_text, built_at, canonical_first_text) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(session_id, thread_id) DO UPDATE SET covered_seq = excluded.covered_seq, summary_text = excluded.summary_text, built_at = excluded.built_at, canonical_first_text = COALESCE(excluded.canonical_first_text, history_summaries.canonical_first_text)",
+    ).run(
+      sessionId,
+      threadId,
+      Math.max(0, Math.floor(coveredSeq)),
+      summaryText,
+      Date.now(),
+      canonicalFirstText ?? null,
+    )
+  } finally {
+    db.close()
+  }
+}
+
+export function getHistorySummary(
+  sessionId: string,
+  threadId: string,
+  cwd?: string,
+): { summaryText: string; coveredSeq: number; canonicalFirstText: string | null } | null {
+  const db = open(cwd)
+  try {
+    const row = db
+      .prepare(
+        "SELECT summary_text, covered_seq, canonical_first_text FROM history_summaries WHERE session_id = ? AND thread_id = ?",
+      )
+      .get(sessionId, threadId) as {
+      summary_text: string
+      covered_seq: number
+      canonical_first_text: string | null
+    } | null
+    if (!row?.summary_text) return null
+    return {
+      summaryText: row.summary_text,
+      coveredSeq: row.covered_seq,
+      canonicalFirstText: row.canonical_first_text,
+    }
+  } catch {
+    // DB lama tanpa tabel = tak ada provenance. Gagal-baca tidak boleh
+    // menggagalkan perakitan konteks (fallback kanonik tetap berfungsi).
+    return null
+  } finally {
+    db.close()
+  }
+}
+
 // Inti build DALAM txn pemanggil: validasi → hapus-baris-lama → sisipkan.
 // Dipakai buildProjection (mandiri) dan rebuildProjection (nama eksplisit).
 // summaryText dari PEMANGGIL (seam kompaksi yang ada) — lapisan ini tak pernah

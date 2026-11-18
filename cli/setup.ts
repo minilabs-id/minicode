@@ -22,7 +22,11 @@ import { homeDir } from "../src/lib/db-path.ts"
 import { closeAllLsp as lspCloseAll, setLspProcessSupervisor } from "../src/lsp/client.ts"
 import { closeAll as mcpCloseAll } from "../src/mcp/client.ts"
 import { addMemory, promoteOrRejectLessonsBySession } from "../src/memory/vector.ts"
-import { createLlmCompaction } from "../src/policy/compaction.ts"
+import {
+  createLlmCompaction,
+  isSyntheticSummary,
+  registerCompactionSummary,
+} from "../src/policy/compaction.ts"
 import {
   type AceFailureType,
   type ConsequenceDecision,
@@ -162,6 +166,7 @@ import {
   DEFAULT_THREAD_ID,
   ensureDefaultThread,
   failRun,
+  getHistorySummary,
   interruptRun,
   listPersistedTurns,
   loadPresentationEvents,
@@ -175,6 +180,7 @@ import {
   RefusedHistoryRewriteError,
   readWriterEpoch,
   type SessionTurnRecord,
+  saveHistorySummary,
   saveSession,
   saveSessionWorkMode,
   settleSessionTurn,
@@ -1119,7 +1125,44 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
         // kebenaran saat ini) dan teruskan ke selector — freshness dihitung
         // via assessContextFreshness (BUKAN hard-code "fresh"). Selector tetap
         // deskriptif; putusan publikasi tetap milik saveSession.
-        const selectorRows = rowsForSelector.map((r) => ({ seq: r.seq, message: r.message }))
+        // Provenance ringkasan TAHAN RESTART.
+        //
+        // Ringkasan kompaksi disimpan sebagai baris `messages` role user; status
+        // "sintetis" dulu hanya ada di WeakSet proses, jadi setelah resume ia
+        // terbaca sebagai permintaan user dan ikut diringkas lagi (nesting
+        // "Previous context:" yang menumpuk tiap siklus). Produsen proyeksi
+        // mencatat teksnya di `history_summaries`; di sini baris yang COCOK
+        // dengan catatan itu didaftarkan ulang sebagai sintetis.
+        const recordedSummary = (() => {
+          try {
+            return getHistorySummary(sessionId, defaultThread.thread_id, cwd)
+          } catch {
+            return null
+          }
+        })()
+        const rowsWithProvenance = (() => {
+          const mapped = rowsForSelector.map((r) => ({ seq: r.seq, message: r.message }))
+          const first = mapped[0]
+          if (!recordedSummary || !first || first.seq !== 0) return mapped
+          const text = (first.message as { content?: unknown }).content
+          if (typeof text !== "string" || text.length === 0) return mapped
+          // Pencocokan PERSIS dengan teks yang dicatat lapisan persist. Bukan
+          // heuristik gaya "Previous context": pesan user asli yang kebetulan
+          // memuat kata itu tidak boleh pernah didaftarkan sebagai sintetis.
+          const exact = recordedSummary.canonicalFirstText
+          if (!exact || exact !== text) return mapped
+          return [
+            {
+              ...first,
+              message: registerCompactionSummary(
+                first.message as Message,
+                recordedSummary.summaryText,
+              ),
+            },
+            ...mapped.slice(1),
+          ]
+        })()
+        const selectorRows = rowsWithProvenance
         const canonicalFrontier = deriveFrontierFromDurable({
           sessionId,
           threadId: defaultThread.thread_id,
@@ -1693,6 +1736,10 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       sessionId,
       permissionMode,
       restrictBash,
+      // Config `bashAllowlist` (lokal/global) kini benar-benar dipakai gate
+      // izin; dulu hanya di-parse lalu diabaikan sehingga edit config tampak
+      // tanpa efek. Env MINICODE_BASH_ALLOWLIST tetap menang.
+      ...(cfg.bashAllowlist ? { bashAllowlist: cfg.bashAllowlist } : {}),
       allowLocalConfig,
       // P12 S2.2 + P0.2 — WorkMode efektif sesi ini (termasuk pulihan resume).
       workMode: effectiveWorkMode,
@@ -3148,6 +3195,30 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
           throw e
         }
       }
+      // Provenance ringkasan TAHAN RESTART — dicatat di SINI karena hanya titik
+      // ini yang benar-benar tahu baris mana yang sintetis: `isSyntheticSummary`
+      // adalah keanggotaan WeakSet (fakta proses, bukan tebakan teks), dan
+      // `durableHistory[0]` adalah baris yang baru saja dipersist. Pencocokan
+      // saat resume memakai teks PERSIS, sehingga pesan user asli tak pernah
+      // salah didaftarkan sebagai ringkasan.
+      try {
+        const firstDurable = durableHistory[0] as Message | undefined
+        if (
+          firstDurable &&
+          isSyntheticSummary(firstDurable) &&
+          typeof firstDurable.content === "string" &&
+          firstDurable.content.length > 0
+        ) {
+          saveHistorySummary(
+            sessionId,
+            DEFAULT_THREAD_ID,
+            firstDurable.content,
+            1,
+            cwd,
+            firstDurable.content,
+          )
+        }
+      } catch {}
       // P3.4 — PRODUSEN proyeksi kanonik durable (best-effort, derived, epoch-
       // fenced). Menulis HANYA `history_projections` dari state kanonik yang
       // baru dipersist; TIDAK menyentuh `messages`/head/run. Kegagalan di sini

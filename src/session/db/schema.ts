@@ -255,6 +255,16 @@ export function openSessionHandle(cwd?: string, local = false): Database {
     CREATE UNIQUE INDEX IF NOT EXISTS udx_runs_single_running ON runs(session_id) WHERE status = 'RUNNING';
     CREATE TABLE IF NOT EXISTS history_projections (session_id TEXT NOT NULL, thread_id TEXT NOT NULL, projection_id TEXT NOT NULL, base_seq INTEGER NOT NULL DEFAULT 0, summary_text TEXT NOT NULL DEFAULT '', included_ranges TEXT NOT NULL DEFAULT '[]', built_at INTEGER NOT NULL, anchor_event_id TEXT NULL, PRIMARY KEY(session_id, thread_id, projection_id), CHECK(base_seq >= 0));
     CREATE INDEX IF NOT EXISTS idx_projections_thread ON history_projections(session_id, thread_id);
+    -- Provenance ringkasan yang TAHAN RESTART.
+    --
+    -- Ringkasan kompaksi disimpan sebagai baris messages role user, sedangkan
+    -- status "ini sintetis" dulu hanya hidup di WeakSet proses. Setelah restart
+    -- (atau saat proyeksi tidak bisa dipakai) ringkasan itu terbaca sebagai
+    -- pesan user biasa, lalu ikut diringkas sebagai "permintaan user" —
+    -- menghasilkan nesting "Previous context:" yang menumpuk tiap siklus.
+    -- Tabel ini ditulis oleh produsen proyeksi (batas tepercaya yang MEMANG
+    -- tahu teks itu ringkasan), tanpa menebak dari isi pesan.
+    CREATE TABLE IF NOT EXISTS history_summaries (session_id TEXT NOT NULL, thread_id TEXT NOT NULL, covered_seq INTEGER NOT NULL, summary_text TEXT NOT NULL, built_at INTEGER NOT NULL, canonical_first_text TEXT NULL, PRIMARY KEY(session_id, thread_id), CHECK(covered_seq >= 0));
   `)
       })
       withBusyRetrySync(() => {

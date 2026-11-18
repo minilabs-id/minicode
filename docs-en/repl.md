@@ -65,6 +65,12 @@ Did-you-mean: the typo `/sessoons` yields `Did you mean /sessions?` (distance <=
 | `esc` | Close a dropdown/picker; two-stage in a form (press 1 clears the field, press 2 cancels); while busy = cancel the turn; idle with an empty composer: two Esc within 500 ms opens the `/undo` picker |
 | `ctrl+c` | Copy the selection (TUI); with no selection it is a no-op. Abort a turn with `Esc` (double `Esc` within 1.5 s, or `Ctrl+D` on an empty line, when the abort stalls) |
 | `ctrl+d` | Quit on an empty line; while busy on an empty line = abort the turn then quit |
+| `enter` while a turn runs | **Steered in as additional information**: the line joins the ACTIVE turn's context at the next step boundary — before the next model request — so the model reads it within the same turn without discarding the work in flight (the transcript marks it `steered into the running turn`). If the turn already finished first, the line falls into the next-turn queue (`queued #n`) so it is never lost. A `/command` line is refused with a reason because UI commands need an idle prompt. `Esc` cancels the turn and drops the fallback queue (with a notice) |
+
+While a turn runs the composer stays live: the draft being typed replaces the
+activity status row whenever it is non-empty, so corrections or extra context can
+be prepared without stopping the turn. `Tab`, `Shift+Tab`, `Ctrl+O`, `Ctrl+T`,
+and `Ctrl+R` remain blocked until the turn ends.
 
 ## Consistency rules (contract I25)
 

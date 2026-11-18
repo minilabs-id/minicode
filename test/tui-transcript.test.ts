@@ -97,8 +97,10 @@ describe("Transcript", () => {
     })
     emit("tool.completed", { seq: 1, turnId: 1, toolCallId: "call-1", status: "completed" })
     const out = t.view(60, 2, 0).join("\n")
-    expect(out).toContain("write_file a.ts")
-    expect(out).toContain("completed")
+    expect(out).toContain("› write_file a.ts")
+    // Sukses tidak mencetak kata status: baris hijau sudah menyatakannya, dan
+    // daftar tool yang panjang jadi derau bila setiap baris berakhir "completed".
+    expect(out).not.toContain("completed")
   })
   test("ledger error satu baris merah diawali ›", () => {
     const { t, emit } = setupPresentation({
@@ -432,7 +434,8 @@ describe("Transcript UI audit regressions (Fase 3.2-3.4)", () => {
     bus.emit("provider:text", { text: "```ts\nconst a = 1\n```" })
     bus.emit("turn:completed", {})
     const out = t.view(60, 4, 0).join("\n")
-    expect(out).toContain(`${glyphs.dot} ts`)
+    // Bar yang sama dengan isi blok: `· ts` terbaca seperti poin daftar.
+    expect(out).toContain(`${glyphs.vLine} ts`)
     expect(out).toContain("const a = 1")
   })
 

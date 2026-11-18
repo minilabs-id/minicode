@@ -100,6 +100,9 @@ describe("t()", () => {
       "tui.modeTitle",
       // "Turn" adalah istilah produk yang dipakai konsisten di id/en.
       "one.turnHead",
+      "ts.turnHead",
+      // "ckpt" singkatan teknis checkpoint — sama di dua locale.
+      "ts.turnCkpt",
       // "Tool" adalah istilah produk (bukan diterjemahkan menjadi Alat).
       "appr.tool",
     ])

@@ -20,3 +20,17 @@ lalu pulihkan test tersebut.
 - shipped hash: `b714c2adc59ea720` (18 file)
 
 Perbarui referensi dengan `bun run vendor:minicore` (butuh `../minicore`).
+
+## Sentuhan host (di luar provenance sumber)
+
+Dicatat agar saat vendor di-upgrade dari upstream, perubahan ini tidak hilang:
+
+- `src/core/session.ts` — seam `Session.steer()` + antrean `pendingSteers`
+  (steering disisipkan di batas step, bukan tengah stream). Antrean dibersihkan
+  di `finally` `run()` supaya turn tetap transaksional; `safeTurnBoundary` juga
+  membuang `user` yang belum dibalas dari histori turn yang terputus.
+- `src/core/loop.ts` — `drainSteers()` di awal turn/awal step, dan penagihan
+  `stepIndex` untuk request lanjutan hasil steering (`usage.steps`/`maxSteps`).
+
+Kontrak seam: steering hanya diterima saat turn aktif (`steer()` = `false` saat
+idle); pesan yang belum tersalur ketika turn gagal hilang bersama turn itu.

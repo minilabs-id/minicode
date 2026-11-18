@@ -99,6 +99,12 @@ export function createOpenAICompatProvider(config: OpenAICompatConfig): ModelPro
       const buildBody = (withUsage: boolean): string =>
         JSON.stringify({
           model: request.model ?? config.defaultModel,
+          // Pagu output opsional (seam aditif `StreamRequest.maxTokens`).
+          // Tanpa ini panggilan sampingan seperti summarizer kompaksi boleh
+          // mengalir tanpa batas dan menabrak setiap watchdog waktu.
+          ...(request.maxTokens !== undefined && request.maxTokens > 0
+            ? { max_tokens: request.maxTokens }
+            : {}),
           messages: toMessages(request.messages, takeProviderMeta),
           tools: request.tools?.length ? toTools(request.tools) : undefined,
           stream: true,

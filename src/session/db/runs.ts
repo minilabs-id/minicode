@@ -384,6 +384,9 @@ export function tombstoneDeadRuns(
     return db.transaction(() => {
       if (opts?.expectedEpoch !== undefined)
         assertWriterEpochInTxn(db, sessionId, opts.expectedEpoch)
+      // `ended_at` SENGAJA dibiarkan NULL: kematian tak terobservasi tidak
+      // punya waktu selesai yang jujur, dan `recovery_status = 'UNKNOWN'`
+      // sudah membawa arti itu (kontrak P2.6, dikunci test run-foundation).
       const res = db
         .prepare(
           "UPDATE runs SET status = 'INTERRUPTED', recovery_status = 'UNKNOWN' WHERE session_id = ? AND status = 'RUNNING'",

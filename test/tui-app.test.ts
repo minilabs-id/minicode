@@ -72,6 +72,7 @@ function setup(
   const bus = createFakeBus()
   const transcript = new Transcript(bus as never)
   const calls: string[] = []
+  const enqueued: string[] = []
   const copied: string[] = []
   let abortCalls = 0
   let slowGate: (() => void) | null = null
@@ -95,6 +96,10 @@ function setup(
       if (text === "/leak")
         throw new Error(`proxy menolak: Authorization: Bearer ${SENTINEL_BEARER}`)
       if (text === "/slow") await new Promise<void>((r) => (slowGate = r))
+    },
+    enqueue: (text) => {
+      enqueued.push(text)
+      return true
     },
     copySelection: (text) => {
       copied.push(text)
@@ -124,6 +129,7 @@ function setup(
     transcript,
     app,
     calls,
+    enqueued,
     copied,
     abortCalls: () => abortCalls,
     releaseSlow,
@@ -804,26 +810,45 @@ describe("TuiApp", () => {
     await tty!.send(KEY.ctrlD)
     await runP
   })
-  test("submit saat busy diabaikan total, bukan antre diam-diam", async () => {
-    const { app, calls, releaseSlow } = setup()
+  test("turn berjalan: ketikan tampil, Enter mengantri (bukan submit kedua)", async () => {
+    const { app, calls, enqueued, releaseSlow, screenText } = setup()
     const runP = app.run()
     await tty!.ready()
     await tty!.waitForOutput((o) => o.includes("00.00.00"))
     await tty!.send("/slow")
     await tty!.send(KEY.enter)
     await waitForCall(calls, "/slow")
-    // Ketikan + Enter saat busy = sunyi total (paritas REPL: stdin busy hanya
-    // abort). Penolakan terjadi SEBELUM host.submit (tak antre diam-diam).
+    // Busy: composer hidup — draft terlihat di layar selagi model bekerja.
     await tty!.send("kedua")
+    expect(screenText()).toContain("kedua")
     await tty!.send(KEY.enter)
-    await new Promise((r) => setTimeout(r, 60))
+    // Antre lewat host.enqueue: TIDAK ada turn kedua yang balapan dengan yang
+    // sedang jalan (calls tetap satu), dan draft dibersihkan.
     expect(calls).toEqual(["/slow"])
+    expect(enqueued).toEqual(["kedua"])
     expect(tty!.all()).not.toContain("\x1b[?1049l")
     await releaseSlow()
-    // Baris kosong (beku) — langsung Ctrl+D untuk keluar.
     await tty!.send(KEY.ctrlD)
     await runP
-    void app
+  })
+  test("turn berjalan: Escape tetap abort, bukan membersihkan draft", async () => {
+    const { app, calls, enqueued, abortCalls, releaseSlow } = setup()
+    const runP = app.run()
+    await tty!.ready()
+    await tty!.waitForOutput((o) => o.includes("00.00.00"))
+    await tty!.send("/slow")
+    await tty!.send(KEY.enter)
+    await waitForCall(calls, "/slow")
+    await tty!.send("draf")
+    await tty!.send(KEY.esc, 90)
+    expect(abortCalls()).toBe(1)
+    expect(enqueued).toEqual([])
+    await releaseSlow()
+    // Draft sengaja TIDAK dibuang oleh Esc (Esc = abort turn, bukan editor):
+    // jadi ia masih ada saat idle → hapus dulu sebelum Ctrl+D keluar.
+    for (let i = 0; i < "draf".length; i++) await tty!.send(KEY.backspace)
+    await tty!.send(KEY.ctrlD)
+    await runP
   })
   test("non-TTY → started:false (fallback jujur, tanpa alt-screen)", async () => {
     const { app } = setup({ isTTY: false })
@@ -899,21 +924,30 @@ describe("TuiApp", () => {
     await tty!.send(KEY.ctrlD)
     await runP
   })
-  test("busy: semua input diabaikan kecuali abort + scroll", async () => {
-    const { app, calls, releaseSlow, screenText } = setup()
+  test("busy: Tab/Shift+Tab tetap ditahan, tapi ketikan hidup & Enter antre", async () => {
+    let cycles = 0
+    const { app, calls, enqueued, releaseSlow, screenText } = setup({
+      cycleWorkMode: () => {
+        cycles++
+      },
+    })
     const runP = app.run()
     await tty!.ready()
     await tty!.waitForOutput((o) => o.includes("00.00.00"))
     await tty!.send("/slow")
     await tty!.send(KEY.enter)
     await waitForCall(calls, "/slow")
-    // Ketikan + Enter + Tab saat busy: semua sunyi (bukan antre, bukan quit,
-    // bukan pindah mode). Hanya Esc (abort) + wheel/PgUp/PgDn + Ctrl+D kosong.
-    await tty!.send("zzz")
-    await tty!.send(KEY.enter)
+    // Tab (ganti WorkMode) tetap ditahan saat busy: memutasi mode di tengah
+    // turn = keputusan yang tak boleh terjadi tanpa turn berhenti dulu.
     await tty!.send(KEY.tab)
     await new Promise((r) => setTimeout(r, 60))
-    expect(screenText()).not.toContain("z")
+    expect(cycles).toBe(0)
+    // Ketikan hidup (draft terlihat) dan Enter mengantri, bukan submit kedua.
+    await tty!.send("zzz")
+    expect(screenText()).toContain("zzz")
+    await tty!.send(KEY.enter)
+    expect(enqueued).toEqual(["zzz"])
+    expect(calls).toEqual(["/slow"])
     expect(tty!.all()).not.toContain("\x1b[?1049l")
     await releaseSlow()
     await tty!.send(KEY.ctrlD)
@@ -1190,7 +1224,7 @@ describe("TuiApp", () => {
     expect(tty!.all()).toContain("\x1b[?1049l")
   })
 
-  test("zero-state tampilkan logo kecil di pojok kiri atas tanpa identitas welcome dan hilang saat mengetik", async () => {
+  test("zero-state tampilkan logo + satu baris hint (tanpa identitas) dan hilang saat mengetik", async () => {
     const { app, screenText } = setup()
     const runP = app.run()
     await tty!.ready()
@@ -1200,11 +1234,16 @@ describe("TuiApp", () => {
     expect(rows[0]).toContain("▄▄▄     ▄█▀█▄")
     expect(rows[1]).toContain("██▀▀█▄ ▄█▀  ██")
     expect(rows[4]).toContain("▀▀▀      ▀▀▀")
+    // Hint membantu orientasi; identitas (model/cwd) tetap tidak diulang
+    // karena footer sudah memuatnya.
+    expect(bodyText).toContain("type a message to start")
+    expect(bodyText).toContain("/help for commands")
     expect(bodyText).not.toContain("test-model")
     expect(bodyText).not.toContain("/kerja")
     expect(bodyText).not.toContain("Shift+Tab")
     await tty!.send("a")
     expect(screenText()).not.toContain("██▀▀█▄")
+    expect(screenText()).not.toContain("type a message to start")
     await tty!.send(KEY.backspace)
     await tty!.send(KEY.ctrlD)
     await runP

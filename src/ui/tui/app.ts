@@ -56,6 +56,15 @@ export interface TuiHost {
    * sebagai baris error (tak ada jalur diam).
    */
   submit(text: string): Promise<{ quit?: boolean } | undefined>
+  /**
+   * Kirim baris saat turn MASIH berjalan (Enter di composer yang hidup).
+   * Controller mengantrinya sebagai informasi tambahan: dikirim setelah turn
+   * aktif selesai, bukan disuntik ke tengah step provider (kernel tak punya
+   * seam untuk itu). `false` = ditolak (mis. baris `/slash` yang butuh idle),
+   * dan controller sudah menjelaskan alasannya ke transkrip. Absen = perilaku
+   * lama: input beku total saat busy.
+   */
+  enqueue?(text: string): boolean
   /** Batalkan turn yang berjalan (Esc saat busy). */
   abort(): void
   copySelection(text: string): boolean
@@ -76,6 +85,26 @@ export interface TuiRunResult {
 
 /** Tinggi maksimum blok input (baris logis di-wrap, kursor selalu terlihat). */
 const MAX_INPUT_ROWS = 5
+/**
+ * Tombol yang tetap dilayani saat turn berjalan: penyusun teks + Enter (antre).
+ * Semua tombol mode/overlay lain sengaja ditahan (lihat handleKey) supaya
+ * tidak ada state UI yang berubah di tengah turn.
+ */
+const BUSY_TYPING_KEYS = new Set([
+  "char",
+  "backspace",
+  "delete",
+  "enter",
+  "ctrl-j",
+  "ctrl-u",
+  "ctrl-w",
+  "left",
+  "right",
+  "up",
+  "down",
+  "home",
+  "end",
+])
 /** Tinggi maksimum dropdown — sisa ruang di atas transcript minimum 3 baris. */
 const MAX_DROPDOWN_ROWS = 8
 const MIN_ROWS = 10
@@ -807,17 +836,23 @@ export class TuiApp {
       if (key.type === "ctrl-d") this.quit()
       return
     }
-    // Saat turn berjalan SEMUA input dibekukan kecuali abort (Esc), scroll
-    // (mouse wheel/PgUp/PgDn di atas), dan Ctrl+D baris-kosong (= abort + quit,
-    // jalan keluar saat abort macet — kontrak I14).
+    // Saat turn berjalan input TIDAK lagi beku total (perubahan kontrak atas
+    // permintaan pemilik repo): tombol penyusun teks tetap jalan supaya koreksi
+    // bisa diketik selagi model bekerja, dan Enter mengantri sebagai informasi
+    // tambahan (`host.enqueue`). Yang tetap ditahan saat busy: Escape (abort),
+    // scroll/selection (di atas), Tab/Shift+Tab/Ctrl+O/Ctrl+T/Ctrl+R, karena
+    // semuanya memutasi mode atau membuka overlay yang tak boleh balapan dengan
+    // turn. Ctrl+D baris-kosong tetap abort + quit (I14, jalan keluar saat abort
+    // macet).
     if (this.isBusy()) {
       if (key.type === "ctrl-d" && !this.state.line) {
         try {
           this.host.abort()
         } catch {}
         this.quit()
+        return
       }
-      return
+      if (!BUSY_TYPING_KEYS.has(key.type)) return
     }
     if (key.type === "ctrl-d") {
       // Baris kosong = keluar (konvensi EOF); berisi = abaikan (I19).
@@ -968,6 +1003,22 @@ export class TuiApp {
 
   private async doSubmit(rawLine: string): Promise<void> {
     const line = rawLine.trim()
+    // Enter saat turn berjalan = antre, BUKAN turn kedua yang balapan dengan
+    // yang sedang jalan. Draft dibersihkan dan baris status aktivitas kembali
+    // tampil; pesannya dikirim controller setelah turn ini selesai.
+    if (this.isBusy()) {
+      this.state = createState()
+      this.preferredCol = null
+      this.histIdx = -1
+      this.editing = true
+      if (line) {
+        this.rememberHistory(line)
+        this.host.enqueue?.(line)
+      }
+      this.followTail()
+      this.paintCurrent()
+      return
+    }
     this.state = createState()
     this.preferredCol = null
     this.histIdx = -1
@@ -1393,13 +1444,22 @@ export class TuiApp {
     return truncateToWidth(sanitizeAnsiLine(content), width, "")
   }
 
+  /**
+   * Composer hidup bila sedang mengedit teks — termasuk saat busy dengan draft
+   * yang sudah diketik. Saat busy TANPA draft, slot composer tetap dipakai baris
+   * status aktivitas (dots/timer), jadi layar tidak menambah baris.
+   */
+  private composerLive(busy: boolean): boolean {
+    return this.editing && (!busy || this.state.line.length > 0)
+  }
+
   private composerRows(
     cols: number,
     snap: TuiStatusSnapshot,
     busy: boolean,
     now: number,
   ): string[] {
-    if (busy) {
+    if (busy && !this.composerLive(busy)) {
       const start = this.turnStartedAt || now
       const status = this.activityStatus(snap)
       const content = this.thinkingActive ? thinkingDots(now, start) : status
@@ -1430,7 +1490,7 @@ export class TuiApp {
   }
 
   private composerHeight(cols: number, busy = this.busy): number {
-    if (busy || !this.editing) return 1
+    if (!this.composerLive(busy)) return 1
     return Math.min(MAX_INPUT_ROWS, Math.max(1, this.composerLayout(cols).rows.length))
   }
 
@@ -2120,14 +2180,21 @@ export class TuiApp {
         return row.text
       })
     }
-    // Zero-state boot: tampilkan hanya logo kecil minicode di pojok kiri atas
-    // tanpa blok identitas/hint di atas prompt & footer agar tampilan awal clean.
+    // Zero-state boot: logo kecil minicode di pojok kiri atas + SATU baris hint
+    // redup. Identitas (model/cwd) tetap tidak diulang di sini karena footer
+    // sudah memuatnya — layar kosong tanpa petunjuk lebih membingungkan
+    // daripada sekadar tidak "penuh". Hint hilang begitu user mengetik atau
+    // sudah ada isi transkrip.
     if (this.transcript.total() === 0 && !busy && menu.length === 0 && !this.state.line) {
       const logoRows = renderLogoRows()
       if (viewH >= logoRows.length && width >= LOGO_WIDTH + 2) {
         for (let wi = 0; wi < logoRows.length; wi++) {
           body[wi] = `  ${c.accent(logoRows[wi]!)}`
         }
+        // Satu baris jeda di bawah logo, lalu hint — hanya bila tingginya cukup
+        // (terminal pendek tetap menampilkan logo saja tanpa memotong frame).
+        const hintRow = logoRows.length + 1
+        if (hintRow < viewH) body[hintRow] = `  ${c.muted(t("app.idleHint"))}`
       }
     }
 
@@ -2136,7 +2203,7 @@ export class TuiApp {
     let cursorRow: number
     let cursorCol = 1
     let composerOffset = 0
-    if (!busy && this.editing) {
+    if (this.composerLive(busy)) {
       const cursor = this.composerLayout(width)
       const winStart = Math.max(0, Math.min(allComposer.length - composerH, cursor.visIdx))
       composerOffset = winStart
@@ -2150,7 +2217,7 @@ export class TuiApp {
       // caret terlihat di tempat user akan mengetik.
       if (!busy) cursorCol = displayWidth(pf) + 1
     }
-    if (!busy && composerOffset === 0 && shownComposer[0]?.startsWith(pf)) {
+    if (this.composerLive(busy) && composerOffset === 0 && shownComposer[0]?.startsWith(pf)) {
       shownComposer = [
         `${c.accent(pf)}${shownComposer[0]!.slice(pf.length)}`,
         ...shownComposer.slice(1),

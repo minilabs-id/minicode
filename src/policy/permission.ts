@@ -208,8 +208,11 @@ const DEFAULT_BASH_ALLOWLIST = [
   // model memakainya) — tanpanya tiap baca berkas via shell di Windows
   // gagal allowlist walau guard sudah menganggapnya reader aman.
   "type *",
-  "head *",
-  "tail *",
+  // `head*`/`tail*` (tanpa spasi wajib): model menulis `... | head` dan
+  // `... | tail` tanpa argumen sepanjang waktu; pola `head *` menolak bentuk
+  // itu walau maksudnya jelas membaca.
+  "head*",
+  "tail*",
   "wc *",
   "grep *",
   "rg *",
@@ -217,6 +220,16 @@ const DEFAULT_BASH_ALLOWLIST = [
   "find *",
   "which *",
   "where *",
+  // Reader tambahan yang dipakai model setiap hari dan dulu TIDAK ada: sesi
+  // nyata mencatat 15 penolakan `sed -n '1,260p' file`. `sed -i` sengaja tidak
+  // dicantumkan (itu penulisan), dan bash-guard tetap memeriksa targetnya.
+  "sed -n *",
+  "sed --quiet *",
+  "more *",
+  "sort*",
+  "uniq*",
+  "cut *",
+  "diff *",
   // Menjalankan berkas skrip Node (mis. `node server.js`) — bukan REPL polos
   // (pola `*` butuh argumen) dan bukan eval inline (diblokir bash-guard).
   // Subsumes `node --version` (versi lama) sehingga entri itu tak lagi khusus.
@@ -413,17 +426,160 @@ function npmNpxSafe(cmd: string): boolean {
 }
 
 function matchBashAllowlist(cmd: string, pattern: string): boolean {
-  // prevent shell chaining bypass: if cmd contains ; & | and pattern does not explicitly allow them, deny.
   // F-20: newline adalah chaining juga (`echo hi\nenv`) — pola allowlist tak
-  // pernah mengandung newline sehingga multiline selalu deny di mode ini
-  // (fail-closed untuk mode paling ketat; skrip multiline sah milik auto).
+  // pernah mengandung newline sehingga multiline selalu deny di sini.
+  // Chaining `;`/`&&`/`|` TIDAK lagi ditolak di level ini: pemanggil memecah
+  // perintah menjadi segmen lebih dulu (lihat `splitShellSegments`), sehingga
+  // aturan lama "ada metakarakter = tolak semua" adalah sumber 81 dari 98
+  // penolakan allowlist pada sesi nyata.
   const trimmed = cmd.trim()
-  if (/[;&|\n]/.test(trimmed) && !/[;&|]/.test(pattern)) return false
+  if (/\n/.test(trimmed) && !/\n/.test(pattern)) return false
   const re = new RegExp(
     `^${pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`,
     "i",
   )
   return re.test(trimmed)
+}
+
+// Redirection NETRAL: hanya memindahkan/menduplikasi output (`2>&1`,
+// `2>/dev/null`, `>NUL`). Tidak mengubah perintah dan tidak menyentuh berkas
+// baru; `> file` dan `>> file` TIDAK termasuk — itu efek tulis.
+const NEUTRAL_REDIRECT_RE = /(?:^|\s)\d?>>?\s*(?:&\d|\/dev\/null\b|NUL\b)/gi
+
+function stripNeutralRedirections(cmd: string): string {
+  return cmd.replace(NEUTRAL_REDIRECT_RE, " ").replace(/\s+/g, " ").trim()
+}
+
+/**
+ * Pecah perintah majemuk pada operator tingkat atas (`;`, `&&`, `||`, `|`, `&`,
+ * newline). Kutip tunggal/ganda dihormati supaya `grep "a|b"` tidak terpecah.
+ *
+ * KENAPA dipecah, bukan ditolak: model menulis `grep -n x file 2>&1 | head`
+ * sepanjang hari, dan aturan lama menolak SELURUH perintah karena ada `|`
+ * padahal setiap tahapnya ada di allowlist. Memeriksa per segmen memberi
+ * keamanan yang sama (setiap tahap tetap harus cocok pola + lolos bash-guard)
+ * tanpa memaksa model menulis shell satu tahap.
+ */
+export function splitShellSegments(cmd: string): string[] {
+  const parts: string[] = []
+  let cur = ""
+  let quote: '"' | "'" | null = null
+  const push = () => {
+    const seg = cur.trim()
+    if (seg) parts.push(seg)
+    cur = ""
+  }
+  for (let i = 0; i < cmd.length; i++) {
+    const ch = cmd[i] as string
+    if (quote) {
+      cur += ch
+      if (ch === quote) quote = null
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      cur += ch
+      continue
+    }
+    if ((ch === "&" || ch === "|") && cmd[i + 1] === ch) {
+      push()
+      i++
+      continue
+    }
+    if (ch === ";" || ch === "|" || ch === "&" || ch === "\n") {
+      push()
+      continue
+    }
+    cur += ch
+  }
+  push()
+  return parts
+}
+
+type BashListDecision = { ok: true } | { ok: false; reason: string; command: string }
+
+/**
+ * Putuskan SATU perintah bash terhadap allowlist, segmen per segmen.
+ *
+ * Aturan lama (satu regex atas seluruh string + tolak jika ada `;|&`) membuat
+ * `grep -n x f 2>&1 | head` ditolak walau `grep *` dan `head *` keduanya ada
+ * di daftar. Hasilnya bukan keamanan tambahan, melainkan model yang buta repo:
+ * 81 dari 98 penolakan allowlist pada sesi nyata berasal dari bentuk majemuk
+ * yang seluruh tahapnya sudah diizinkan. Di sini setiap tahap diverifikasi
+ * sendiri (pola + npx-safety), sementara bash-guard tetap memeriksa perintah
+ * UTUH lebih dulu di pemanggil.
+ */
+function decideBashCommand(cmd: string, list: readonly string[], root: string): BashListDecision {
+  const cleaned = stripNeutralRedirections(cmd)
+  if (!cleaned) return { ok: false, reason: "empty command", command: cmd }
+  // Substitusi perintah / backtick = eksekusi kode di dalam argumen; tak pernah
+  // lolos di mode ini (bash-guard juga menolaknya lebih dulu).
+  if (/`|\$[()]/.test(cleaned))
+    return { ok: false, reason: "shell expansion/chaining unsafe", command: cmd }
+  // Redirection yang MASIH tersisa mengarah ke berkas. Menulis di dalam
+  // workspace tetap sah (perilaku lama: `echo hi > local.txt`), tetapi target
+  // di luar root / sensitif / state milik minicode ditolak — pemeriksaan yang
+  // sama dengan bash-guard, dilakukan di sini karena segmen yang dicocokkan
+  // tidak boleh membawa redirection. Sesudah diverifikasi, redirection dibuang
+  // dari string agar `echo hi` dicocokkan sebagai bentuk perintahnya.
+  let stripped = cleaned
+  const hadFileRedirection = /[<>]/.test(cleaned)
+  if (hadFileRedirection) {
+    // `<` ikut diperlakukan sama (baca dari berkas): target di luar root tetap
+    // ditolak, sedangkan `cat < file` di dalam workspace tidak boleh jadi
+    // regresi dari aturan lama yang tidak memeriksa redirection sama sekali.
+    const redirRe = /\d?[<>]{1,2}\s*("[^"]*"|'[^']*'|[^\s;|&]+)/g
+    for (const match of cleaned.matchAll(redirRe)) {
+      const raw = match[1] ?? ""
+      const target = raw.replace(/^(["'])(.*)\1$/, "$2")
+      if (!target || target.startsWith("&") || target.startsWith("$"))
+        return { ok: false, reason: "redirection unsafe", command: cmd }
+      if (
+        isCwdOutsideRoot(target, root) ||
+        isRealPathOutsideRoot(target, root) ||
+        isSensitive(target) ||
+        isOwnedState(target)
+      )
+        return { ok: false, reason: "redirection outside workspace", command: cmd }
+    }
+    // Operator dibuang, TARGET dipertahankan sebagai argumen. Kalau target ikut
+    // dibuang, `cat < local.txt` menyisakan `cat` telanjang dan ditolak pola
+    // `cat *` — over-block baru dari perubahan ini. Sebagai argumen biasa,
+    // bentuk perintahnya tetap realistis dan pola lama tetap berlaku.
+    stripped = cleaned.replace(redirRe, (_m, target: string) => ` ${target}`)
+    // Sisa `<`/`>` (operator tak dikenali) tetap ditolak.
+    if (/[<>]/.test(stripped)) return { ok: false, reason: "redirection unsafe", command: cmd }
+  }
+  const segments = splitShellSegments(stripped)
+  for (const seg of segments) {
+    // `cd` di dalam workspace sah (model memakainya untuk monorepo); target di
+    // luar root ditolak supaya segmen berikutnya tidak berjalan di luar jail.
+    if (/^cd\b/i.test(seg)) {
+      const target = seg
+        .replace(/^cd\b/i, "")
+        .trim()
+        .replace(/^(["'])(.*)\1$/, "$2")
+      if (!target) return { ok: false, reason: "cd without target", command: cmd }
+      if (isCwdOutsideRoot(target, root) || isRealPathOutsideRoot(target, root))
+        return { ok: false, reason: "jail: cwd outside workspace", command: cmd }
+      continue
+    }
+    // `-i`/`--in-place` mengubah pembaca menjadi penulis; pola `sed -n *` punya
+    // bentuk yang sama setelah normalisasi, jadi ditolak eksplisit di sini.
+    if (/(^|\s)(-i|--in-place)\b/.test(seg))
+      return { ok: false, reason: "in-place edit", command: cmd }
+    const matched = list.filter((pat) => matchBashAllowlist(seg, pat))
+    if (matched.length === 0) return { ok: false, reason: "no matching pattern", command: seg }
+    // Package runner menjalankan kode arbitrer dari registry, jadi ia tetap
+    // dilarang ber-redirection walau targetnya di dalam workspace — kontrak
+    // lama `npx tsc > file` = deny, dipertahankan.
+    if (
+      matched.some((p) => /^(npx|npm exec|bun x|bun run)\b/i.test(p)) &&
+      (!npmNpxSafe(seg) || hadFileRedirection)
+    )
+      return { ok: false, reason: "npm/npx unsafe", command: seg }
+  }
+  return { ok: true }
 }
 
 // F-APPROVAL-1: pratinjau diff ringkas + representatif (satu baris) untuk kartu
@@ -576,6 +732,12 @@ export function createPermissionHandler(
      * permission tetap `auto`/`ask`; ini hanya lapis kapabilitas bash.
      */
     restrictBash?: boolean
+    /** Pola bash tambahan dari config (`bashAllowlist` di config.json).
+     * Sebelumnya key ini di-parse `src/config.ts` tapi TIDAK pernah dibaca
+     * lapisan izin — user mengedit config dan tidak melihat efek apa pun.
+     * Precedence: env `MINICODE_BASH_ALLOWLIST` > config > default bawaan.
+     */
+    bashAllowlist?: readonly string[]
     /** Izinkan callback `ask` non-TTY (mis. `ApprovalBroker` daemon) untuk tool gated. */
     allowNonTtyAsk?: boolean
   } = {},
@@ -601,11 +763,20 @@ export function createPermissionHandler(
         .map((s) => s.trim())
         .filter(Boolean)
     : undefined
-  // Dua daftar: narrow (--allowlist = task tak-terpercaya) vs developer
-  // (restrictBash = fallback no-sandbox pada sesi TRUSTED). Env override
-  // MINICODE_BASH_ALLOWLIST (keputusan operator) menimpa KEDUANYA.
-  const bashAllowlist = envList ?? DEFAULT_BASH_ALLOWLIST
-  const devBashAllowlist = envList ?? DEFAULT_DEV_BASH_ALLOWLIST
+  // Tiga sumber dengan precedence jelas: env operator > config repo/user >
+  // default bawaan. Config NARROW menggantikan daftar narrow, tetapi pada
+  // daftar developer ia MENAMBAH — kalau menggantikan, satu entri config akan
+  // mematikan seluruh ekosistem run/test yang sudah dipercaya.
+  const configuredList =
+    Array.isArray(opts.bashAllowlist) && opts.bashAllowlist.length > 0
+      ? [...opts.bashAllowlist]
+      : undefined
+  const bashAllowlist = envList ?? configuredList ?? DEFAULT_BASH_ALLOWLIST
+  const devBashAllowlist =
+    envList ??
+    (configuredList
+      ? [...DEFAULT_DEV_BASH_ALLOWLIST, ...configuredList]
+      : DEFAULT_DEV_BASH_ALLOWLIST)
 
   async function getAllowlist(): Promise<string[]> {
     if (allowlistCache) return allowlistCache
@@ -732,20 +903,17 @@ export function createPermissionHandler(
         const cmd = (args?.cmd as string) ?? ""
         const br = bashDenyReason(cmd)
         if (br) return deny(call, `bash-guard: ${br}`)
-        const matched = bashAllowlist.filter((pat) => matchBashAllowlist(cmd, pat))
+        const decision = decideBashCommand(cmd, bashAllowlist, root)
+        if (decision.ok) return "allow"
         // Alasan actionable (keluhan eval: "no matching pattern" tanpa jalan
         // keluar membuat model retry buta): tulis/baca file = pakai tool file
         // terjail; shell penuh = operator pilih --allow-all/--sandbox docker.
-        if (matched.length === 0)
+        if (decision.reason === "no matching pattern")
           return deny(
             call,
-            `allowlist: no matching pattern for "${cmd.slice(0, 80)}" — file work: use read_file/write_file/edit; full shell: rerun with --allow-all / --sandbox docker / MINICODE_BASH_ALLOWLIST`,
+            `allowlist: no matching pattern for "${decision.command.slice(0, 80)}" — file work: use read_file/write_file/edit; full shell: rerun with --allow-all / --sandbox docker / MINICODE_BASH_ALLOWLIST`,
           )
-        if (matched.some((p) => /^(npx|npm exec|bun x|bun run)\b/i.test(p)) && !npmNpxSafe(cmd))
-          return deny(call, "allowlist: npm/npx unsafe")
-        if (/[;|&\n\r`]|[$][(]/.test(cmd))
-          return deny(call, "allowlist: shell expansion/chaining unsafe")
-        return "allow"
+        return deny(call, `allowlist: ${decision.reason}`)
       }
       if (isGated(call.name)) return deny(call, "allowlist: gated tool")
       if (FILE_WRITE_TOOLS.has(call.name)) return "allow"
@@ -824,16 +992,15 @@ export function createPermissionHandler(
         // Pakai daftar DEVELOPER (lebih luas) — sesi trusted di mesin sendiri,
         // bukan task tak-terpercaya (yang memakai daftar narrow via --allowlist).
         if (restrictBash) {
-          const matched = devBashAllowlist.filter((pat) => matchBashAllowlist(cmd, pat))
-          if (matched.length === 0)
-            return deny(
-              call,
-              `allowlist: no matching pattern for "${cmd.slice(0, 80)}" — file work: use read_file/write_file/edit; full shell: rerun with --allow-all / --sandbox docker / MINICODE_BASH_ALLOWLIST`,
-            )
-          if (matched.some((p) => /^(npx|npm exec|bun x|bun run)\b/i.test(p)) && !npmNpxSafe(cmd))
-            return deny(call, "allowlist: npm/npx unsafe")
-          if (/[;|&\n\r`]|[$][(]/.test(cmd))
-            return deny(call, "allowlist: shell expansion/chaining unsafe")
+          const decision = decideBashCommand(cmd, devBashAllowlist, root)
+          if (!decision.ok) {
+            if (decision.reason === "no matching pattern")
+              return deny(
+                call,
+                `allowlist: no matching pattern for "${decision.command.slice(0, 80)}" — file work: use read_file/write_file/edit; full shell: rerun with --allow-all / --sandbox docker / MINICODE_BASH_ALLOWLIST`,
+              )
+            return deny(call, `allowlist: ${decision.reason}`)
+          }
         }
         return "allow"
       }

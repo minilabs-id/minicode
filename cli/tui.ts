@@ -14,7 +14,10 @@
 //   modal) — transkrip fullscreen SUDAH permukaan baca; modal untuk info
 //   statis hanya menambah langkah. /model & /provider & /sessions = popup
 //   komposit (butuh interaksi pilih).
-// - busy = input beku total kecuali abort (Esc) dan scroll.
+// - busy = composer hidup; Enter MENYELIPKAN informasi tambahan ke turn aktif
+//   (kernel `Session.steer`, dibaca model di batas step berikutnya). Bila turn
+//   sudah selesai lebih dulu, baris diantrikan sebagai turn berikutnya; Esc =
+//   abort yang juga membuang antrean fallback. Perintah slash butuh idle.
 import { expandMentions } from "../src/app/mentions.ts"
 import { budgetStatus } from "../src/policy/usage.ts"
 import {
@@ -206,6 +209,11 @@ export async function runTui(ctx: CliSession): Promise<void> {
     ui.setMinimizeActivity(true)
   let warned80 = false
   let abort: AbortController | null = null
+  // Antrean FALLBACK untuk informasi tambahan: hanya dipakai bila kernel
+  // menolak steering (turn sudah selesai lebih dulu — race antara submit dan
+  // akhir turn). Pesannya lalu dikirim sebagai turn penuh berikutnya supaya
+  // tidak hilang. Jalur utama tetap `Session.steer` di `host.enqueue`.
+  const queuedPrompts: string[] = []
   /** Job background hidup (badge footer). Dihitung dari registry tool bash. */
   const countLiveBackgroundJobs = (): number =>
     listBackgroundJobs().reduce((n, j) => (j.done ? n : n + 1), 0)
@@ -633,7 +641,10 @@ export async function runTui(ctx: CliSession): Promise<void> {
     return shouldExit ? { quit: true } : {}
   }
 
-  async function runTurn(prompt: string): Promise<void> {
+  /**
+   * Satu turn tuntas (prompt → persist). Antrean dikuras oleh `runTurn`.
+   */
+  async function runTurnOnce(prompt: string): Promise<void> {
     const spent = usage.getSession(modelRef.current)
     const preStatus = budgetStatus(budget, spent.cost, budgetStrict ?? false, spent.totalTokens)
     if (preStatus === "over" && spent.cost != null && budget != null) {
@@ -660,6 +671,13 @@ export async function runTui(ctx: CliSession): Promise<void> {
       if (ctrl.signal.aborted) transcript.pushInfo([c.muted(t("tui.stopped"))])
     } finally {
       abort = null
+      // Abort membatalkan NIAT user: pesan yang sempat diantrikan tak boleh
+      // dikirim otomatis sesudahnya. Dibuang dengan pemberitahuan eksplisit
+      // (bukan hilang diam-diam).
+      if (ctrl.signal.aborted && queuedPrompts.length > 0) {
+        const dropped = queuedPrompts.splice(0, queuedPrompts.length).length
+        transcript.pushInfo([c.muted(t("tui.queueDropped", { n: String(dropped) }))])
+      }
     }
     const u = usage.get(modelRef.current)
     await persistCurrent(u)
@@ -678,6 +696,20 @@ export async function runTui(ctx: CliSession): Promise<void> {
       transcript.pushInfo([
         c.warning(t("tui.budget80", { spent: formatUsd(sess.cost), budget: formatUsd(budget) })),
       ])
+    }
+  }
+
+  /**
+   * Jalankan prompt lalu kuras antrean "informasi tambahan" yang masuk selagi
+   * turn berjalan. Loop (bukan rekursi) supaya backlog panjang tidak menumpuk
+   * stack, dan tiap pesan antre tetap jadi turn PENUH sendiri — sehingga model
+   * melihat hasil turn sebelumnya utuh sebelum membaca tambahan itu.
+   */
+  async function runTurn(prompt: string): Promise<void> {
+    let next: string | undefined = prompt
+    while (next !== undefined) {
+      await runTurnOnce(next)
+      next = queuedPrompts.shift()
     }
   }
 
@@ -1101,6 +1133,31 @@ export async function runTui(ctx: CliSession): Promise<void> {
     },
     listCommands: (prefix) => suggestions(prefix),
     submit,
+    // Enter saat turn berjalan: SELIPKAN ke turn aktif (steering, seperti
+    // "steer" di opencode) — kernel menambahkannya sebagai pesan user pada
+    // batas step berikutnya, jadi model membacanya di turn yang sama. Bila turn
+    // ternyata sudah selesai (balapan), jatuh ke antrean turn berikutnya supaya
+    // pesan tidak hilang. Perintah `/slash` ditolak: ia memutasi UI/mode dan
+    // butuh idle.
+    enqueue: (raw) => {
+      const line = raw.trim()
+      if (!line) return false
+      if (line.startsWith("/")) {
+        const name = line.split(/\s+/)[0] ?? line
+        transcript.pushInfo([c.muted(t("tui.busyCmd", { cmd: name }))])
+        return false
+      }
+      transcript.pushUser(line)
+      // `?.` menjaga fixture/komposisi lama yang belum punya seam ini (fail-safe:
+      // jatuh ke antrean, bukan crash di tengah turn).
+      if (ctx.session.steer?.(line)) {
+        transcript.pushInfo([c.muted(t("tui.steered"))])
+        return true
+      }
+      queuedPrompts.push(line)
+      transcript.pushInfo([c.muted(t("tui.queued", { n: String(queuedPrompts.length) }))])
+      return true
+    },
     copySelection: (text) => writeClipboardOsc52(text),
     abort: () => {
       abort?.abort()

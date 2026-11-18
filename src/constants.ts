@@ -54,7 +54,29 @@ export const LIMITS = {
    * mekanikal/LLM menarget budget token (0.5 = target 50% jendela). Sebelumnya
    * angka 0.5 tersebar inline di compaction.ts tanpa nama (magic number). */
   COMPACTION_SUMMARY_TARGET_RATIO: 0.5,
-  COMPACTION_LLM_TIMEOUT_MS: 10_000,
+  /** Backstop TOTAL untuk satu percobaan ringkasan LLM.
+   * Sebelumnya 10.000 ms — angka itu membunuh setiap panggilan ke provider
+   * yang lambat (sesi nyata mencatat `provider sent nothing for 60000ms`),
+   * sehingga 7 dari 7 kompaksi jatuh ke ringkasan mekanikal 4k yang lossy.
+   * Pagar sesungguhnya ada di dua timeout di bawah (first-byte & idle); nilai
+   * ini hanya jaring pengaman terakhir agar satu percobaan tak menggantung. */
+  COMPACTION_LLM_TIMEOUT_MS: 60_000,
+  /** Tunggu byte PERTAMA. Provider yang belum mengirim apa pun setelah batas
+   * ini dianggap menggantung: percobaan dibatalkan dan diulang, bukan ditunggu
+   * sampai backstop.
+   */
+  COMPACTION_LLM_FIRST_BYTE_TIMEOUT_MS: 25_000,
+  /** Jarak maksimum antar-chunk saat streaming ringkasan. Stream yang berhenti
+   * mengalir di tengah jalan (koneksi mati tanpa `finish`) juga harus gagal
+   * cepat, bukan menunggu backstop total.
+   */
+  COMPACTION_LLM_IDLE_TIMEOUT_MS: 15_000,
+  /** Anggaran waktu TOTAL untuk seluruh percobaan kompaksi LLM (retry ikut
+   * dihitung). Dipisah dari `RECOVERY_BUDGET_MS` (45 dtk) karena satu
+   * ringkasan 60 dtk sah-sah saja, sedangkan pemulihan panggilan chat biasa
+   * tetap harus berhenti di 45 dtk.
+   */
+  COMPACTION_LLM_BUDGET_MS: 90_000,
   /** BATAS ATAS ambang ukuran konteks (estimasi chars/token lokal) untuk
    * mengklasifikasi 400 `invalid_request` generik sebagai
    * `context_length_exceeded` alih-alih mati fatal. Di bawah ambang ini, 400

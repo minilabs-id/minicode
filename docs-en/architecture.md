@@ -35,6 +35,12 @@ historical checkpoint and does not change when the kernel is edited on the host.
 
 ## The flow of one prompt
 
+Steering: `Session.steer(text)` (called by the host when the user presses Enter
+while a turn runs) places the text in a kernel queue, and the loop injects it as
+a `user` message at a **step boundary** — before the next provider request, never
+mid-stream. With no active turn `steer()` returns `false` (it never buffers
+silently); the host then runs the text as the next turn.
+
 `prompt -> permission check -> validateArgs (kernel) -> executor (order/cap/abort-aware) -> P2.10 canonical tool wrapper (await EffectIntent -> execute -> await EffectReceipt) -> realpath+atomic tool -> checkpoint shadow-git + journal + step-trace -> compaction (synchronous mechanical; async LLM via the `compactAsync` seam) -> usage/pricing per-segment longest-key -> trace`.
 
 ## Context & durable state

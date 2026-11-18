@@ -1,4 +1,47 @@
-# Kontrak Terminal MiniCode (TUI fullscreen — v7.19, unreleased)
+# Kontrak Terminal MiniCode (TUI fullscreen — v7.21, unreleased)
+
+Perubahan v7.21 (steering transaksional & penagihan langkah):
+
+1. **Steering ikut transaksional dengan turn.** Pesan yang sudah diterima
+   kernel tetapi belum masuk konteks (turn abort/timeout/gagal) hilang bersama
+   turn itu; ia tidak boleh muncul sebagai `user` di depan prompt turn
+   berikutnya. Ekor histori yang ter-commit saat turn terputus juga tidak
+   menyisakan `user` yang belum dibalas. Sebelumnya sisa antrean bocor ke turn
+   berikutnya sehingga model membalas pesan dari turn yang sudah dibatalkan,
+   dan ekor `user` menggantung melanggar invariant role bergantian.
+2. **Request lanjutan untuk steering menagih anggaran langkah.** Turn yang
+   memakai dua request provider (jawaban + jawaban setelah steering) melaporkan
+   `usage.steps` dan dihitung `maxSteps`, sehingga rangkaian steering tidak
+   menjadi jalur bebas batas.
+
+Peta proteksi: `test/kernel-steer.test.ts` (steering masuk turn aktif, hilang
+saat abort, penagihan langkah), `test/tui-queue.test.ts` (fallback antrean saat
+kernel menolak steering).
+
+Perubahan v7.20 (perapian teks render & keterbacaan idle):
+
+1. **Ledger tool memakai chevron + status kondisional.** Baris terminal tool
+   kini `  › name target` untuk sukses, dan `  › name target · <status>: <pesan>`
+   hanya untuk status non-sukses (`failed`/`denied`/`cancelled`/`interrupted`).
+   Sebelumnya setiap baris (termasuk sukses) diakhiri kata status sehingga
+   daftar tool panjang menjadi derau, dan baris tanpa chevron tidak sesuai
+   grammar kontrak. Baris anak memakai aturan yang sama setelah `↳ run_<8>`.
+2. **Ringkasan turn melewati counter nol.** `turn N · <counter non-nol>` +
+   `ckpt <id>` hanya bila checkpoint ada + durasi. Baris lama selalu memuat
+   `0 ditolak · 0 dibatalkan · 0 terhenti` dan `ckpt —`.
+3. **Header code fence memakai bar blok.** Pembuka fence berbahasa tampil
+   `│ ts` (bar yang sama dengan isi blok) alih-alih `· ts` yang terbaca seperti
+   poin daftar — di TUI maupun renderer linear.
+4. **Zero-state idle ramah dibaca.** Logo tetap di pojok kiri atas, plus satu
+   baris hint redup `app.idleHint`; identitas tidak diduplikasi dari footer.
+5. **Kop sesi rata kolom.** Lebar label dihitung dari label terpanjang locale
+   aktif, bukan `padEnd(7)` mati — `Pemakaian` (9) dulu merusak perataan.
+
+Peta proteksi: `test/tui-transcript.test.ts` (ledger sukses `›`, header fence),
+`test/presentation-projections.test.ts` (status non-sukses ber-`·`, baris run
+anak, ringkasan turn), `test/activity-panel.test.ts` (alasan gagal tetap tampil),
+`test/tui-app.test.ts` (zero-state logo+hint), `test/session-summary.test.ts`
+(kop sesi), `test/i18n.test.ts` (kunci ringkasan turn di kedua locale).
 
 Perubahan v7.19 (remediasi audit & ergonomi UX):
 
@@ -19,9 +62,12 @@ Perubahan v7.19 (remediasi audit & ergonomi UX):
    input agar lebar field minimal tetap terjaga, dan menyaring byte kontrol C1
    (`\u0080–\u009f`); wizard menjaga pesan error sampai user menekan Enter/Esc.
 4. **Zero-state clean (logo kecil pojok kiri atas), ritme transkrip, seleksi akurat, & ASCII konsisten.**
-   Saat transkrip kosong dan idle, hanya logo kecil minicode (`14×9` half-block)
-   tampil di pojok kiri atas tanpa teks identitas/hint di atas prompt & footer,
-   dan tanpa menambah baris frame atau mengubah baris spacer. Transkrip
+   Saat transkrip kosong dan idle, logo kecil minicode (`14×9` half-block) tampil
+   di pojok kiri atas, diikuti SATU baris hint redup (`app.idleHint`: mulai /
+   `/help` / `Ctrl+D`) satu baris di bawahnya. Identitas (model/CWD) tidak
+   diulang karena footer sudah memuatnya; hint hilang begitu user mengetik atau
+   transkrip terisi, dan tidak ditambahkan bila tinggi viewport tak cukup (logo
+   saja). Jumlah baris frame tidak berubah dan baris spacer tetap. Transkrip
    menambahkan jeda antar-turn sebelum `pushUser`, header bahasa redup pada
    pembuka code fence berbahasa, serta pemetaan `displayStart` dan teks inline
    untuk akurasi `pointAt`/`columnAtOffset`. `Shift+Enter`/`Alt+Enter` modern
@@ -353,8 +399,25 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
   transkrip di belakang tetap tampil), `app.resume()` repaint penuh saat tutup.
   Tanpa suspend: byte masuk ke dua tempat (App + popup) dan frame App menimpa
   popup — dilarang.
-- Saat turn berjalan SEMUA input dibekukan kecuali abort (Esc) dan
-  scroll (mouse wheel, PgUp/PgDn). Enter saat busy = sunyi (bukan antre, bukan petunjuk).
+- Saat turn berjalan composer TETAP HIDUP: tombol penyusun teks (karakter,
+  Backspace/Delete, panah, Home/End, Ctrl+U/Ctrl+W, Ctrl+J) dilayani, dan
+  draft-nya terlihat di slot yang sama (menggantikan baris status aktivitas
+  selama draft tak kosong; status tetap terbaca dari `pinnedActivity` + timer
+  footer).  Enter saat busy menyelipkan baris itu sebagai **informasi tambahan**
+  (`TuiHost.enqueue` → `Session.steer`): kernel menambahkannya sebagai pesan
+  `user` pada batas step berikutnya — sebelum request provider selanjutnya —
+  sehingga model membacanya di turn yang SAMA (semantik "steer" opencode),
+  bukan menunggu turn selesai. Turn yang sudah selesai lebih dulu (balapan)
+  membuat kernel menolak steering; baris lalu jatuh ke antrean turn berikutnya
+  agar tidak hilang. Baris `/slash` ditolak dengan alasan
+  eksplisit (perintah UI butuh idle). Abort (Esc) membatalkan turn DAN
+  membuang antrean dengan pemberitahuan jumlahnya — niat user yang dibatalkan
+  tak boleh dieksekusi otomatis sesudahnya. Steering yang sudah diterima kernel
+  tetapi belum terkirim hilang bersama turn itu (transaksional, tidak bocor ke
+  turn berikutnya). Saat busy TANPA draft, slot tetap
+  berisi baris status aktivitas (dots + timer), jadi tinggi frame tidak
+  berubah. Tab/Shift+Tab/Ctrl+O/Ctrl+T/Ctrl+R tetap ditahan selama busy
+  (memutasi mode/membuka overlay di tengah turn = balapan state).
   Abort pertama menampilkan hint "tekan Esc lagi untuk keluar" di slot
   indikator SEKALI (anti keluar sesi tak sengaja saat double-tap "memastikan"
   — I14); abort kedua dalam 1,5 dtk = quit.
@@ -531,8 +594,10 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
      visual pertama/terakhir; Tab WorkMode / Shift+Tab PermissionMode; Ctrl+O/T
      compact/thinking; Ctrl+D baris-kosong
      keluar; Esc membersihkan selection lebih dulu, lalu batal input / abort
-     turn (busy: SEMUA input dibekukan kecuali abort, scroll, dan selection —
-     Enter pun sunyi; berlaku juga saat layar MENCIUT: abort+scroll selalu lolos
+     turn (busy: ketikan hidup & Enter menyelipkan informasi tambahan ke turn
+     aktif, dengan antrean sebagai fallback; Tab/Shift+Tab/Ctrl+O/T/R ditahan,
+     Esc = abort yang juga membuang antrean;
+     berlaku juga saat layar MENCIUT: abort+scroll selalu lolos
      agar turn bisa dibatalkan tanpa kill -9; abort pertama menampilkan status
      `Stopping` + hint keluar sekali, abort kedua dalam 1,5 detik menutup sesi).
      Saat idle dan composer kosong, dua Esc dalam 500 ms membuka picker `/undo`;
@@ -551,9 +616,11 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
      saat turn). Composer memakai tinggi tetap: prompt saat editing, dots saat
      reasoning, atau tool target; satu baris kosong selalu memisahkannya dari
      footer. Proyeksi presentasi: baris running di-pin dari snapshot, elapsed
-     tetap pada ledger tool, status tool final memakai warna + kata
-     (`completed`/`failed`/`denied`/`cancelled`/`interrupted`), retry dan grup
-     anak mengikuti model, serta ringkasan turn masuk sebagai system entry.
+     tetap pada ledger tool, status tool final memakai warna + kata hanya untuk
+     status NON-sukses (`failed`/`denied`/`cancelled`/`interrupted` dipisah
+     `·`; `completed` tidak mencetak kata karena baris hijau sudah menyatakan
+     hasilnya), retry dan grup anak mengikuti model, serta ringkasan turn masuk
+     sebagai system entry dengan counter nol dan `ckpt` kosong DILEWATI.
      **Retry provider:** setiap `model.delta`/`reasoning.delta` live membawa
      `attemptId`. Bila attempt gagal setelah mengirim konten, TUI membuang
      ekor attempt yang belum di-commit dan menambah diagnostic invalidasi.
@@ -785,7 +852,8 @@ jam; tanpa bullet separator; permission rata kanan dekat token konteks; label
 `Work Mode:`/`Permission Mode:` dihapus; `●` kuning = bash allow-list aktif,
 abu = tidak, `○` merah = unrestricted; badge `◷ N` bila job background hidup)
 + satu spacer sebelum footer · ledger tool
-`  › name target` (hijau) / merah saat error · error `pesan` berwarna merah sekali per
+`  › name target` (hijau) / `  › name target · <status>: pesan` (merah) saat error ·
+ringkasan turn `turn N · <counter non-nol> · ckpt <id> · <durasi>` · error `pesan` berwarna merah sekali per
 kegagalan · pesan error TUI = formatter kanonik (`formatError`,
 `src/ui/render/errors.ts`): credential di-redaksi (bearer/key/query), escape
 ANSI dibuang, body provider diringkas + dipotong; `e.message` mentah tak
@@ -808,7 +876,8 @@ retry/grup anak (anak ber-identitas run = baris `↳ run_<8>` sendiri; tanpa
 identitas run = hitungan `n child tools`), ringkasan turn, dan marker evict
 sesuai flag ·
 
-`Esc` saat turn = abort (+ hint sekali); busy = input beku total ·
+`Esc` saat turn = abort (+ hint sekali, antrean dibuang); busy = composer hidup, Enter menyelipkan
+info tambahan ke turn aktif (`steer` di batas step; fallback antrean) ·
 Mouse wheel = scroll transkrip, PgUp/PgDn = scroll, Shift+PgUp/PgDn = setengah
 halaman, Home/End (prompt kosong) = lompat top/ekor · indikator `↓ N baris baru` ·
 tab dihitung 8 kolom (batas atas stop
@@ -874,7 +943,9 @@ panjang).
   `repaint()` tak melukis saat suspended; boot/exit pairing, transcript
   viewport, mouse-wheel/drag-selection/PgUp/PgDn scroll + indikator, prompt
   editing, dots/timer, status bar, Esc-only abort, quit, suspend/resume,
-  busy-freeze, live repaint; I14: Home/End jump + Shift+PgUp/PgDn + hint abort
+  live repaint, dan busy-composer (draft tampil saat busy, Enter → `enqueue`
+  bukan submit kedua, Tab tetap ditahan, Esc membatalkan antrean); I14:
+  Home/End jump + Shift+PgUp/PgDn + hint abort
   pertama ada di `test/tui-audit-fixes.test.ts`, bukan di file ini; I17: kunci
   posisi baca saat stream masuk; basis monotonik ada di
   `test/tui-transcript.test.ts` + `test/presentation-projections.test.ts`;
@@ -894,14 +965,18 @@ panjang).
   ketika berbahasa, delimiter fence disembunyikan, isi fence dan gema user tetap
   literal).
 - `test/screen-buffer.test.ts` — parser frame harness (unit).
-- `test/tui-transcript.test.ts` — I7/I12/I17/I22 (ledger satu baris per tool, cap 5000 + marker evict, `total()` monotonik kebal evict, viewport, thinking minimized/expanded).
+- `test/tui-transcript.test.ts` — I7/I12/I17/I22 (ledger satu baris per tool
+  ber-chevron `›`, status sukses TIDAK mencetak kata status, header fence `│ ts`,
+  cap 5000 + marker evict, `total()` monotonik kebal evict, viewport, thinking
+  minimized/expanded).
 - `test/thinking-area.test.ts` — I22 area thinking: blok live maks 10 baris (header/`… N baris lagi`), ringkasan 1 baris + detail `/view expand` saat turn selesai, tanpa duplikasi, dan fallback legacy saat panel OFF.
 - `test/presentation-projections.test.ts` — I12/I17/I32 (projection
   snapshot, running/elapsed, status terminal, retry/child grouping, summary,
   marker evict + `total()` monotonik, dan parity flag OFF) + F-AGENT-1
   (baris per-run `↳ run_<8>`/`sub_<8>` untuk anak ber-identitas run; tiga anak
   paralel = tiga baris; anak tanpa identitas run tetap satu baris ledger induk
-  `n child tools`) + F-TASK-1 (baris ledger `t<n> <status> parent=… dependsOn=[…]
+  `n child tools`; status non-sukses dipisah `·`; ringkasan turn melewati
+  counter nol dan `ckpt` kosong) + F-TASK-1 (baris ledger `t<n> <status> parent=… dependsOn=[…]
   r<rev>`; jalur **linear** merender baris sama + proyeksi `normal`
   mempertahankan notice task — PROMPT 06 Area D).
 - `test/presentation-linear-acp.test.ts` — I33 (linear projection

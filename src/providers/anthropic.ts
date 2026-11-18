@@ -101,9 +101,13 @@ export function createAnthropicProvider(config: AnthropicConfig): ModelProvider 
       const adaptiveEffort =
         config.reasoningEffort && family === "claude-adaptive" ? config.reasoningEffort : undefined
       const legacyBudget = effortBudget ?? config.thinking
+      // `request.maxTokens` (seam aditif) menang atas budget global: panggilan
+      // sampingan seperti summarizer kompaksi butuh output pendek walau
+      // provider default-nya 8192. Budget thinking tetap harus dipenuhi.
+      const configuredMax = request.maxTokens ?? config.maxTokens
       const effectiveMaxTokens = legacyBudget
-        ? Math.max(config.maxTokens ?? 8192, legacyBudget + 1024)
-        : (config.maxTokens ?? 8192)
+        ? Math.max(configuredMax ?? 8192, legacyBudget + 1024)
+        : (configuredMax ?? 8192)
       // Fase 7: sematkan cache_control pada blok konten stabil terakhir.
       const messagesPayload = toAnthropicMessages(request.messages)
       if (enableCache && messagesPayload.length >= 2) {

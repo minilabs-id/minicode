@@ -117,6 +117,11 @@ export function createResponsesProvider(config: ResponsesConfig): ModelProvider 
         // membuangnya total (body tanpa field ini). Responses API punya
         // field khusus; jangan selipkan sebagai user message.
         ...(request.system?.trim() ? { instructions: request.system } : {}),
+        // Pagu output opsional (seam `StreamRequest.maxTokens`): summarizer
+        // kompaksi memakainya agar provider tidak mengalir tanpa batas.
+        ...(request.maxTokens !== undefined && request.maxTokens > 0
+          ? { max_output_tokens: request.maxTokens }
+          : {}),
         stream: true,
         store: false,
         ...(sendEffort ? { reasoning: { effort: sendEffort } } : {}),

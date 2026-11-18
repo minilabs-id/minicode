@@ -1,6 +1,7 @@
 // The heart of the kernel: one deterministic model → tool → observation loop.
 
 import { AgentError, ProviderError, abortError } from "./errors.ts";
+import type { ContextStore } from "./history.ts";
 import type { RecoveryAction } from "./errors.ts";
 import type { ExecutorDeps } from "./executor.ts";
 import type { StreamRequest, FinishReason } from "./provider.ts";
@@ -35,6 +36,10 @@ export async function executeTurn(
   s.state.turnCount++;
 
   const store = s.store;
+  // Normalnya antrean sudah kosong (finally run() sebelumnya menguburkannya),
+  // tetapi bila ada sisa ia didahulukan sebelum input baru supaya urutan
+  // percakapan tidak menempatkan informasi tambahan setelah pertanyaan pokok.
+  drainSteers(s, store);
   store.append({ role: "user", content: input });
 
   const steps: Step[] = [];
@@ -84,6 +89,12 @@ export async function executeTurn(
 
   while (true) {
     if (signal.aborted) throw abortError(signal);
+    // Batas step = titik sisip steering: pesan user yang dikirim selagi turn
+    // berjalan masuk ke store SEBELUM request provider berikutnya, jadi model
+    // membaca koreksi itu pada step yang sama (semantik "steer" opencode),
+    // bukan menunggu turn selesai. Urutan pesan tetap sah: `user` setelah
+    // `tool` dari step sebelumnya.
+    drainSteers(s, store);
     if (stepIndex >= maxSteps)
       throw new AgentError("max_steps_exceeded", `exceeded ${maxSteps} steps`, {
         // Host memakai jumlah langkah terpakai untuk menaikkan batas secara
@@ -314,6 +325,18 @@ export async function executeTurn(
     if (toolCalls.length === 0) {
       store.append({ role: "assistant", content: text, ...reasoningNote });
       finalText = text || undefined;
+      // Steering yang tiba SETELAH provider memutuskan selesai tetap dijawab
+      // di turn yang sama: lanjutkan loop (step baru) alih-alih menutup turn
+      // dengan pesan user menggantung tanpa balasan.
+      if (s.pendingSteers.length > 0) {
+        // Request lanjutan ini memakai anggaran langkah yang sama seperti step
+        // tool. Tanpa penagihan, `usage.steps` melaporkan 0 padahal provider
+        // sudah dipanggil dua kali, dan guard `maxSteps` tak bisa memutus
+        // rangkaian steering yang terus memicu request baru.
+        stepIndex++;
+        s.state.stepCount = stepIndex;
+        continue;
+      }
       break;
     }
 
@@ -382,6 +405,18 @@ export async function executeTurn(
   };
   s.state.stepCount = stepIndex;
   return result;
+}
+
+/**
+ * Pindahkan antrean steering ke store turn sebagai pesan `user` sungguhan.
+ * Dipanggil hanya di batas yang aman (awal turn, awal step) — bukan di tengah
+ * stream — supaya tidak ada pesan yang masuk tanpa balasan model.
+ */
+function drainSteers(s: SessionInternal, store: ContextStore): boolean {
+  if (s.pendingSteers.length === 0) return false
+  const pending = s.pendingSteers.splice(0, s.pendingSteers.length)
+  for (const text of pending) store.append({ role: "user", content: text })
+  return true
 }
 
 function buildRequest(s: SessionInternal, modelOverride?: string): StreamRequest {

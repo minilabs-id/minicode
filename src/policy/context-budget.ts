@@ -121,6 +121,34 @@ export function contextBudgetFor(windowTokens: number, maxOutputTokens?: number)
  * sedangkan jendela kecil bisa mencapainya sebelum benar-benar penuh. Tanpa
  * lantai proporsional, model 32k mustahil menempuh recovery.
  */
+/**
+ * Putuskan apakah 400/`unknown` generik layak diperlakukan sebagai kehabisan
+ * konteks (compact-and-retry).
+ *
+ * Dulu: `localInputTokens >= contextReclassifyThreshold(window)` — pada jendela
+ * besar itu berarti "≥50k token", sehingga HAMPIR SEMUA penolakan (skema tool,
+ * parameter tak didukung, kuirk gateway) dianggap konteks penuh. Sesi nyata
+ * menaikkan jendela 1M→2M karena 400 biasa lalu kompaksi baru berjalan di
+ * ~1.9M token. Sekarang butuh salah satu bukti:
+ *   1. provider sendiri menyebut konteks/panjang prompt, atau
+ *   2. estimasi lokal sudah melewati TITIK KOMPAKSI (bukan sekadar "besar").
+ */
+export function shouldReclassifyAsOverflow(input: {
+  localInputTokens: number
+  windowTokens: number
+  maxOutputTokens?: number
+  message: string
+}): boolean {
+  if (
+    /context[ _-]?(length|window)|maximum context|too many tokens|prompt is too long|reduce the (length|size)/i.test(
+      input.message,
+    )
+  )
+    return true
+  const budget = contextBudgetFor(input.windowTokens, input.maxOutputTokens)
+  return input.localInputTokens >= budget.compactTrigger
+}
+
 export function contextReclassifyThreshold(windowTokens: number): number {
   const cap = LIMITS.CONTEXT_RECLASSIFY_400_MIN_LOCAL_TOKENS
   const window = Number.isFinite(windowTokens) && windowTokens > 0 ? windowTokens : 0

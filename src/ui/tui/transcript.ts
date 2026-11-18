@@ -170,6 +170,14 @@ function shortLlmFailureReason(raw: string): string {
   return firstLine.replace(/\r$/, "").slice(0, 120)
 }
 
+type TurnCountKey =
+  | "ts.turnOk"
+  | "ts.turnFailed"
+  | "ts.turnDenied"
+  | "ts.turnCancelled"
+  | "ts.turnInterrupted"
+  | "ts.turnFiles"
+
 function formatElapsed(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000))
   if (seconds < 60) return `${seconds}s`
@@ -192,8 +200,10 @@ function clampCodeUnitBoundary(s: string, index: number): number {
 function renderAssistantLine(line: string, fenceState: FenceState): string | null {
   if (fenceState === "boundary") return null
   if (fenceState.startsWith("open:")) {
+    // Penanda bahasa memakai bar yang SAMA dengan isi blok (bukan `·`) supaya
+    // tak terbaca sebagai poin daftar di atas blok kode.
     const lang = fenceState.slice(5)
-    return lang ? c.dim(`${glyphs.dot} ${lang}`) : null
+    return lang ? c.dim(`${glyphs.vLine} ${lang}`) : null
   }
   if (fenceState === "inside") return line
   if (!/(?:\*{1,2}|`|^#{1,6}\s|~~|\[[^\]]+\]\()/.test(line)) return line
@@ -1598,7 +1608,11 @@ export class Transcript {
       : denyReason
         ? `: ${truncateToWidth(sanitizeAnsi(denyReason), 200, "…").split("\n")[0] ?? ""}`
         : ""
-    const line = `  ${name}${targetText} ${statusWord(status)}${retry}${child}${verificationMark}${provenanceMark}${message}`
+    // Format ledger: `› nama target` (kontrak grammar). Kata status HANYA
+    // dicetak saat bukan sukses: baris sukses berwarna hijau sudah menyatakan
+    // hasilnya, dan "selesai" di setiap baris membuat daftar tool jadi derau.
+    const statusSuffix = status === "completed" ? "" : ` ${glyphs.dot} ${statusWord(status)}`
+    const line = `  ${glyphs.arrow} ${name}${targetText}${statusSuffix}${retry}${child}${verificationMark}${provenanceMark}${message}`
     // Lipat aktivitas (opencode-like): saat minimizeActivity ATAU panel
     // aktivitas aktif, baris ledger per-tool TIDAK boleh menghilang diam-diam
     // — ditahan lalu dirangkum saat turn selesai (panel: per keluarga tool;
@@ -1641,7 +1655,8 @@ export class Transcript {
         ? `: ${truncateToWidth(sanitizeAnsi(String(event.message)), 200, "…").split("\n")[0] ?? ""}`
         : ""
     const markerText = marker ? `${marker} ` : ""
-    const line = `    ↳ ${markerText}${name}${targetText} ${statusWord(status)}${message}`
+    const statusSuffix = status === "completed" ? "" : ` ${glyphs.dot} ${statusWord(status)}`
+    const line = `    ↳ ${markerText}${name}${targetText}${statusSuffix}${message}`
     this.append(paintLedger(status, line), {
       kind: "activity",
       ...(event.seq !== undefined ? { seq: event.seq } : {}),
@@ -1802,17 +1817,24 @@ export class Transcript {
       if (this.summarizedTurns.has(event.turnId)) return
       this.summarizedTurns.add(event.turnId)
     }
-    const line = t("ts.turnSummary", {
-      turn: turnId,
-      ok: summary.toolsOk,
-      failed: summary.toolsFailed,
-      denied: summary.toolsDenied,
-      cancelled: summary.toolsCancelled,
-      interrupted: summary.toolsInterrupted,
-      files: summary.filesChanged,
-      ckpt: summary.checkpointId ?? "—",
-      secs: formatElapsed(summary.durationMs),
-    })
+    // Rakit per bagian dan LEWATI counter nol: baris lama selalu mencetak
+    // "0 dibatalkan · 0 terhenti" sehingga angka yang berarti tenggelam — dan
+    // ckpt "—" hanya menambah derau ketika turn tak membuat checkpoint.
+    const parts = [t("ts.turnHead", { turn: turnId })]
+    const counters: { value: number | undefined; key: TurnCountKey }[] = [
+      { value: summary.toolsOk, key: "ts.turnOk" },
+      { value: summary.toolsFailed, key: "ts.turnFailed" },
+      { value: summary.toolsDenied, key: "ts.turnDenied" },
+      { value: summary.toolsCancelled, key: "ts.turnCancelled" },
+      { value: summary.toolsInterrupted, key: "ts.turnInterrupted" },
+      { value: summary.filesChanged, key: "ts.turnFiles" },
+    ]
+    for (const { value, key } of counters) {
+      if (value != null && value > 0) parts.push(t(key, { n: value }))
+    }
+    if (summary.checkpointId) parts.push(t("ts.turnCkpt", { id: summary.checkpointId }))
+    parts.push(formatElapsed(summary.durationMs))
+    const line = parts.join(` ${glyphs.dot} `)
     this.append(c.muted(line), {
       kind: "system",
       ...(event.seq !== undefined ? { seq: event.seq } : {}),

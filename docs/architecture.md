@@ -30,6 +30,12 @@ diedit di host.
 
 ## Alur satu prompt
 
+Steering: `Session.steer(text)` (dipanggil host saat user menekan Enter selagi
+turn berjalan) menaruh teks di antrean kernel, dan loop menyuntiknya sebagai
+pesan `user` di **batas step** — sebelum request provider berikutnya — bukan di
+tengah stream. Tanpa turn aktif `steer()` mengembalikan `false` (tidak menampung
+diam-diam); host lalu menjalankannya sebagai turn berikutnya.
+
 `prompt → permission check → validateArgs (kernel) → executor (order/cap/abort-aware) → P2.10 canonical tool wrapper (await EffectIntent → execute → await EffectReceipt) → tool realpath+atomic → checkpoint shadow-git + journal + step-trace → compaction (mekanikal sinkron; LLM async via seam `compactAsync`) → usage/pricing per-segmen longest-key → trace`.
 
 ## Konteks & state durable

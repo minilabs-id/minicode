@@ -215,10 +215,10 @@ describe("panel aktivitas di Transcript (TUI)", () => {
       message: "unknown job id",
     })
     const visible = () => t.view(120, 20, 0).map(stripAnsi).join("\n")
-    expect(visible()).toContain("bash_output failed: unknown job id")
+    expect(visible()).toContain("bash_output · failed: unknown job id")
     expect(visible()).toContain("1 failed")
     emit({ type: "turn.completed", seq: 3, turnId: 1 })
-    expect(visible()).toContain("bash_output failed: unknown job id")
+    expect(visible()).toContain("bash_output · failed: unknown job id")
     expect(visible().match(/unknown job id/g)).toHaveLength(1)
   })
 

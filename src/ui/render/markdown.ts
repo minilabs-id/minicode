@@ -84,7 +84,8 @@ export function decorateMarkdown(text: string): string {
         fenceChar = fence.char
         fenceLen = fence.len
         fenceLang = fence.lang
-        if (fenceLang) out.push(`${margin}${c.dim(`${glyphs.dot} ${fenceLang}`)}`)
+        // Bar yang sama dengan isi blok: `· ts` terbaca seperti poin daftar.
+        if (fenceLang) out.push(`${margin}${c.dim(`${glyphs.vLine} ${fenceLang}`)}`)
       } else {
         if (fence.char === fenceChar && fence.len >= fenceLen) {
           inFence = false

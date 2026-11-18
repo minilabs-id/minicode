@@ -46,6 +46,7 @@ import {
   type ProjectionRow,
   type ProjectionState,
   SUMMARY_PROJECTION_ID,
+  saveHistorySummary,
 } from "./persistence.ts"
 
 /** Kebijakan produsen — input deterministik, tanpa state mutable. */
@@ -229,6 +230,16 @@ export function produceSummaryProjection(
     baseSeq,
     projectionId: SUMMARY_PROJECTION_ID,
   })
+  // Provenance tahan-restart: catat teks ringkasan yang SAMA (bukan turunan
+  // baru) agar selector bisa mengenalinya saat proyeksi tak bisa dipakai —
+  // mis. setelah shrink menginvalidasi proyeksi atau saat produsen gagal.
+  // Best-effort: kegagalan mencatat provenance tak boleh membatalkan proyeksi.
+  try {
+    // Tanpa `canonicalFirstText`: produsen TIDAK tahu baris kanonik mana yang
+    // sintetis, dan menebaknya dari teks dilarang. Provenance persis dicatat
+    // oleh lapisan persist (composition root) yang melihat pesan aslinya.
+    saveHistorySummary(sessionId, threadId, summaryText, row.base_seq, cwd)
+  } catch {}
   return {
     produced: true,
     row,

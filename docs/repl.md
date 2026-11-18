@@ -62,6 +62,12 @@ Did-you-mean: typo `/sessoons` → `Did you mean /sessions?` (jarak ≤ 2).
 | `esc` | Tutup dropdown/picker; dua-tahap di form (tekan-1 bersihkan field, tekan-2 batal); busy = batalkan turn; idle + composer kosong: dua Esc dalam 500 ms membuka picker `/undo` |
 | `ctrl+c` | Salin selection (TUI); tanpa selection = no-op. Abort turn pakai `Esc` (`Esc` dua kali dalam 1,5 dtk, atau `Ctrl+D` baris-kosong, saat abort macet) |
 | `ctrl+d` | Keluar saat baris kosong; saat busy baris-kosong = abort turn lalu keluar |
+| `enter` saat turn berjalan | **Selipkan sebagai informasi tambahan (steer)**: baris masuk ke konteks turn AKTIF pada batas step berikutnya — sebelum request model selanjutnya — jadi model membacanya di turn yang sama tanpa pekerjaan yang sedang berjalan dibatalkan (transkrip menandai `diselipkan ke turn yang berjalan`). Bila turn ternyata sudah selesai lebih dulu, baris jatuh ke antrean turn berikutnya (`diantrikan #n`) supaya tidak hilang. Baris `/perintah` ditolak dengan alasan karena perintah UI butuh idle. `Esc` membatalkan turn sekaligus membuang antrean fallback (dengan pemberitahuan) |
+
+Saat turn berjalan composer tetap hidup: draft yang sedang diketik tampil di slot
+composer (menggantikan baris status aktivitas selama draft tidak kosong), jadi
+koreksi/informasi tambahan bisa disiapkan tanpa menghentikan turn. `Tab`,
+`Shift+Tab`, `Ctrl+O`, `Ctrl+T`, dan `Ctrl+R` tetap ditahan sampai turn selesai.
 
 ## Aturan konsistensi (kontrak I25)
 

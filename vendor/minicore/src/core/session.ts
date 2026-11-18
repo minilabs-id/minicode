@@ -145,6 +145,19 @@ export interface Session {
   readonly contextTokens: number;
   run(input: string, opts?: { signal?: AbortSignal; model?: string }): Promise<TurnResult>;
   abort(): void;
+  /**
+   * Selipkan pesan user ke TURN YANG SEDANG BERJALAN (steering, seperti
+   * "steer" di opencode): pesan menjadi pesan `user` di store turn aktif pada
+   * batas step berikutnya — sebelum request provider — sehingga model melihatnya
+   * di turn yang sama tanpa menghentikan pekerjaan yang sedang berjalan.
+   *
+   * `false` = tidak diterima karena tidak ada turn aktif (pesan tidak disimpan
+   * diam-diam: pemanggil yang memutuskan menjalankannya sebagai turn berikutnya).
+   * Turn bersifat transaksional — pesan steering yang belum sempat masuk store
+   * (turn abort/timeout/gagal) hilang bersama turn itu, bukan menumpang ke
+   * prompt turn berikutnya.
+   */
+  steer(text: string): boolean;
 }
 
 /** Internal handle consumed by loop.ts. Not part of the public surface. */
@@ -174,6 +187,12 @@ export interface SessionInternal {
   readonly store: ContextStore;
   readonly events: EventBus;
   readonly state: SessionState;
+  /**
+   * Antrean steering (internal, dipakai loop.ts). Array-nya DIBAGI antara impl
+   * sesi dan turn yang berjalan — `{ ...impl }` menyalin referensinya, jadi
+   * `steer()` dari host terlihat oleh loop yang sedang menunggu provider/tool.
+   */
+  readonly pendingSteers: string[];
 }
 
 interface SessionImpl extends SessionInternal {
@@ -219,6 +238,7 @@ export function createSession(config: SessionConfig): Session {
     store,
     events,
     state,
+    pendingSteers: [],
     sessionAbort,
     running: false,
   };
@@ -292,11 +312,25 @@ export function createSession(config: SessionConfig): Session {
         timeout.cancel();
         joined.cleanup();
         impl.running = false;
+        // Steering yang belum sempat di-drain terkubur bersama turn ini. Tanpa
+        // ini sisa antrean (mis. pesan yang masuk tepat sebelum abort) bocor ke
+        // turn berikutnya sebagai `user` di depan prompt baru — percakapan
+        // menjadi bohong: model membalas pesan dari turn yang sudah dibatalkan.
+        impl.pendingSteers.length = 0;
         if (impl.sessionAbort.signal.aborted) impl.sessionAbort = new AbortController();
       }
     },
     abort() {
       if (impl.running) impl.sessionAbort.abort(new AgentError("aborted", "turn aborted"));
+    },
+    steer(text) {
+      const value = text.trim()
+      // Hanya turn AKTIF yang bisa diselipi. Saat idle, pesan tidak ditampung
+      // diam-diam: host harus menjalankannya sebagai prompt biasa agar tidak
+      // ada pesan yang "hilang" tanpa jejak.
+      if (!value || !impl.running) return false
+      impl.pendingSteers.push(value)
+      return true
     },
   };
 }
@@ -371,8 +405,9 @@ function withAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
  * B3 — batas commit aman untuk turn yang terputus (abort/timeout/error).
  *
  * `executeTurn` selalu memulai turnStore dengan prefix committed + SATU pesan
- * `user` (input), lalu per step menambah assistant(toolCalls) → tool results.
- * Abort bisa meninggalkan (a) hanya si `user` input, atau (b) `assistant(toolCalls)`
+ * `user` (input), lalu per step menambah assistant(toolCalls) → tool results;
+ * steering menambah `user` lain di batas step. Abort bisa meninggalkan (a) `user`
+ * yang belum dibalas — input awal maupun steering — atau (b) `assistant(toolCalls)`
  * yang hasilnya belum sempat di-append (orphan). Keduanya HARUS dibuang:
  * (a) karena menyimpannya membuat dua `user` berurutan pada run berikutnya
  * (invariant role bergantian → HTTP 400), (b) karena pasangan tool-call/result
@@ -383,14 +418,18 @@ function safeTurnBoundary(committedLen: number, messages: readonly Message[]): r
   let end = messages.length
   while (end > committedLen) {
     const last = messages[end - 1]
+    if (last?.role === "user") {
+      // Input/steering yang belum dibalas model: menyimpannya membuat run
+      // berikutnya mengirim dua `user` berurutan (ditolak provider) atau
+      // meninggalkan pesan yang tak pernah dijawab di histori.
+      end--
+      continue
+    }
     if (last && last.role === "assistant" && Array.isArray(last.toolCalls) && last.toolCalls.length > 0) {
       end-- // orphaned toolCalls tanpa hasil
-    } else {
-      break
+      continue
     }
-  }
-  if (end === committedLen + 1 && messages[committedLen]?.role === "user") {
-    end = committedLen // hanya input baru — tidak ada progres untuk dipertahankan
+    break
   }
   return messages.slice(0, end)
 }

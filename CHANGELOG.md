@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.31.0] - 2026-11-18
+
+### Added — Informasi tambahan saat turn berjalan (steering)
+
+- **Enter saat busy menyelipkan baris ke turn AKTIF**, bukan memulai turn kedua: `Session.steer` (kernel vendored) menaruh teks di antrean dan loop menyuntiknya sebagai pesan `user` di **batas step** — sebelum request provider berikutnya — sehingga model membacanya tanpa pekerjaan yang sedang berjalan dibatalkan. Composer tetap hidup selagi turn berjalan agar koreksi bisa disiapkan; tombol yang memutasi mode/overlay (`Tab`, `Shift+Tab`, `Ctrl+O`, `Ctrl+T`, `Ctrl+R`) tetap ditahan. Bila turn keburu selesai, baris jatuh ke antrean turn berikutnya (`diantrikan #n`); perintah slash tetap butuh idle; `Esc` membatalkan turn sekaligus membuang antrean fallback dengan pemberitahuan (`cli/tui.ts`, `src/ui/tui/app.ts`, `vendor/minicore/src/core/{session,loop}.ts`).
+- **Steering transaksional**: pesan yang sudah diterima kernel tetapi belum masuk konteks hilang bersama turn yang abort/gagal/timeout (tidak bocor ke prompt turn berikutnya), ekor histori yang ter-commit saat turn terputus tidak menyisakan `user` menggantung, dan request lanjutan hasil steering menagih `usage.steps` serta guard `maxSteps`. Kontrak `docs/TERMINAL_CONTRACT.md` v7.21, `docs/repl.md`, `docs/architecture.md`; test baru `test/kernel-steer.test.ts` dan `test/tui-queue.test.ts`.
+
+### Fixed — Audit alur sesi, kompaksi, izin & wire
+
+- **Kompaksi LLM tuntas**: watchdog dua fase (tak pernah mulai vs berhenti di tengah) dengan anggaran khusus kompaksi, pagu output eksplisit lewat seam `StreamRequest.maxTokens` (Anthropic/Responses/OpenAI-compat), usage dari stream kompaksi ikut tercatat, dan retry input setengah untuk ringkasan kosong/terlalu panjang. Provenance ringkasan disimpan tahan restart (`history_summaries`) sehingga setelah resume ringkasan tidak lagi dibaca sebagai permintaan user dan diringkas berulang (nesting `Previous context:`) (`src/policy/compaction.ts`, `src/session/{persistence,context-projection}.ts`, `cli/setup.ts`).
+- **Reklasifikasi 400 berbasis bukti**: eskalasi jendela konteks hanya terjadi bila teks provider menyebut konteks atau estimasi lokal melewati titik kompaksi; penolakan skema/parameter biasa tidak lagi memicu compact-and-retry dan eskalasi sia-sia, dan pesan error melaporkan angka yang jujur. Timeout provider dibedakan server/network/first-byte untuk anggaran retry (`src/app/session.ts`, `src/policy/recovery-budget.ts`, `vendor/minicore/src/core/provider.ts`).
+- **Allowlist bash tidak lagi over-block**: `head`/`tail` tanpa argumen, `sed -n`, dan rantai `;`/`&&`/`|` dievaluasi per segmen; redirection netral (`2>&1`, `2>/dev/null`, `>NUL`) tidak memblokir perintah, sementara target redirection di luar jail/sensitif tetap ditolak; config `bashAllowlist` kini benar-benar dipakai gate izin (`src/policy/permission.ts`, `cli/setup.ts`, test `test/allowlist-segments.test.ts`).
+- **Wire provider**: `chunk.error` openai-compat diteruskan, klasifikasi timeout server tidak lagi salah sebagai network/abort, dan `maxTokens` per-request dihormati (`src/providers/{anthropic,responses}.ts`, `vendor/minicore/src/providers/openai-compat.ts`).
+
+### Changed — Keterbacaan TUI
+
+- **Ledger tool `› nama target`** tanpa kata status untuk hasil sukses (baris hijau sudah menyatakannya), ringkasan turn hanya mencetak counter yang bukan nol, penanda bahasa blok kode memakai bar yang sama dengan isi blok, kolom label ringkasan sesi dihitung dari locale aktif, zero-state boot menampilkan logo kecil + satu hint redup, serta perapian teks idle/hint (`src/ui/tui/{transcript,app}.ts`, `src/ui/render/{markdown,session-summary}.ts`, `src/ui/i18n/{id,en}.ts`).
+
 ## [0.30.2] - 2026-11-17
 
 ### Fixed — Interaksi Mouse & Keyboard TUI

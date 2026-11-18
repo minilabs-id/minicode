@@ -4,6 +4,7 @@
 export const en = {
   "app.newBelow": "↓ {n} new lines below · PgDn to bottom",
   "app.abortHint": "abort sent — press Esc again to quit",
+  "app.idleHint": "type a message to start · /help for commands · Ctrl+D to quit",
   "tui.selectionCopied": "selection copied to clipboard",
   "tui.selectionCopyFailed": "selection could not be copied (OSC 52 unavailable)",
   "tui.selectionTooLarge": "selection too large to copy",
@@ -49,8 +50,16 @@ export const en = {
   "ts.statusInterrupted": "interrupted",
   "ts.retry": "↻ retry",
   "ts.childGroup": "{n} child tools",
-  "ts.turnSummary":
-    "turn {turn} · {ok} ok · {failed} failed · {denied} denied · {cancelled} cancelled · {interrupted} interrupted · {files} files · ckpt {ckpt} · {secs}",
+  // Ringkasan turn dirakit per-bagian: counter NOL tidak dicetak (dulu satu
+  // baris selalu memuat "0 denied · 0 cancelled · 0 interrupted").
+  "ts.turnHead": "turn {turn}",
+  "ts.turnOk": "{n} ok",
+  "ts.turnFailed": "{n} failed",
+  "ts.turnDenied": "{n} denied",
+  "ts.turnCancelled": "{n} cancelled",
+  "ts.turnInterrupted": "{n} interrupted",
+  "ts.turnFiles": "{n} files",
+  "ts.turnCkpt": "ckpt {id}",
   "form.required": "required",
   "form.invalidUrl": "invalid URL",
   "form.httpOnly": "must be http(s)",
@@ -285,6 +294,10 @@ export const en = {
   "tui.budgetUnknown":
     "[budget] cost unknown (model without pricing) with {tokens} tokens spent — over budget, new prompts rejected. /exit to quit.",
   "tui.stopped": "(stopped)",
+  "tui.steered": "steered into the running turn — the model reads it at the next step",
+  "tui.queued": "queued #{n} — sent after this turn finishes",
+  "tui.queueDropped": "{n} queued message(s) dropped because the turn was stopped",
+  "tui.busyCmd": "{cmd} is not available while a turn is running (Esc stops the turn)",
   "tui.budget80": "[budget] {spent} / {budget} (80% used)",
   "tui.copyNone": "(nothing to copy yet — run a prompt first)",
   "tui.copyOk": "copied {n} chars (OSC 52 — allow clipboard access in terminal if empty)",

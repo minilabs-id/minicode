@@ -95,7 +95,9 @@ describe("P5 transcript projection", () => {
       status: "denied",
     })
     const out = transcript.view(100, 4, 0).join("\n")
-    expect(out).toContain("read_file a.ts denied")
+    // Status non-sukses dipisah `·` dari target; sukses tidak mencetak kata
+    // status sama sekali (lihat test berikutnya).
+    expect(out).toContain("read_file a.ts · denied")
   })
 
   test("retry dan grup anak tetap satu baris ledger induk", () => {
@@ -130,8 +132,8 @@ describe("P5 transcript projection", () => {
       status: "completed",
     })
     const out = transcript.view(100, 4, 0).join("\n")
-    expect(out).toContain("delegate_task completed ↻ retry 1 child tools")
-    expect(out).not.toContain("read_file a.ts completed")
+    expect(out).toContain("delegate_task ↻ retry 1 child tools")
+    expect(out).not.toContain("read_file a.ts")
   })
 
   // F-AGENT-1: identitas run anak (childSessionId/runId) datang dari
@@ -173,10 +175,10 @@ describe("P5 transcript projection", () => {
     })
     const out = transcript.view(120, 20, 0).join("\n")
     // Induk tetap satu baris ringkasan delegasi…
-    expect(out).toContain("delegate_task completed")
+    expect(out).toContain("delegate_task")
     // …dan anak tampil sebagai baris run sendiri, keyed runId (menang atas
     // childSessionId karena identitas eksekusi, bukan identitas session).
-    expect(out).toContain("↳ run_abcdef01 read_file a.ts completed")
+    expect(out).toContain("↳ run_abcdef01 read_file a.ts")
   })
 
   test("F-AGENT-1: tanpa runId, marker jatuh ke childSessionId sub_<8>", () => {
@@ -198,7 +200,7 @@ describe("P5 transcript projection", () => {
     setSnapshot({ activities: [parent, child], turns: [] })
     emitPresentation({ type: "tool.completed", seq: 3, turnId: 1, toolCallId: child.toolCallId })
     const out = transcript.view(120, 20, 0).join("\n")
-    expect(out).toContain("↳ sub_fedcba98 grep a.ts completed")
+    expect(out).toContain("↳ sub_fedcba98 grep a.ts")
   })
 
   test("F-AGENT-1: tiga anak paralel = tiga baris run terpisah, bukan hitungan", () => {
@@ -334,7 +336,7 @@ describe("P5 transcript projection", () => {
       views.push(transcript.view(120, 20, 0))
     }
     expect(views[1]).toEqual(views[0])
-    expect(views[0]!.join("\n")).toContain("delegate_task completed")
+    expect(views[0]!.join("\n")).toContain("› delegate_task ↻ retry 1 child tools")
   })
 
   test("marker verifikasi/provenans identik lewat policy vs fallback (B1)", () => {
@@ -510,7 +512,7 @@ describe("I26: proyeksi presentasi menghormati locale id", () => {
     })
     const view = transcript.view(120, 10, 0).join("\n")
     expect(view).toContain("read_file a.ts … berjalan (3s)")
-    expect(view).toContain("write_file b.ts ditolak")
+    expect(view).toContain("write_file b.ts · ditolak")
   })
 
   test("attachSimpleLogger memakai status Indonesia saat locale id aktif", () => {

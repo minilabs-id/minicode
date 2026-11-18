@@ -27,7 +27,11 @@ import {
   createIncrementalTokenCounter,
   minicodeEstimator,
 } from "../policy/context.ts"
-import { contextBudgetFor, outputReserveFor } from "../policy/context-budget.ts"
+import {
+  contextBudgetFor,
+  outputReserveFor,
+  shouldReclassifyAsOverflow,
+} from "../policy/context-budget.ts"
 import { nextLadderStep } from "../policy/context-escalation.ts"
 import { DEFAULT_FALLBACK_CONTEXT_WINDOW_TOKENS } from "../policy/context-window.ts"
 import { parallelExecutor } from "../policy/executor.ts"
@@ -396,6 +400,8 @@ export async function createMinicodeSession(
      * Bila true, `auto` membatasi bash ke allow-list (fallback "no-sandbox").
      */
     restrictBash?: boolean
+    /** Pola bash tambahan dari config; diteruskan apa adanya ke gate izin. */
+    bashAllowlist?: readonly string[]
     /** S2.1: WorkMode adalah lapis intent TERPISAH dari PermissionMode.
      * Default EXECUTE = perilaku lama (base handler apa adanya). Nilai selain
      * EXECUTE memasang ceiling tipis di atas handler PM (lihat work-mode.ts);
@@ -537,6 +543,7 @@ export async function createMinicodeSession(
     writeConcurrency,
     permissionMode,
     restrictBash,
+    bashAllowlist,
     workMode: _workMode,
     allowNonTtyAsk,
     allowLocalConfig,
@@ -617,6 +624,7 @@ export async function createMinicodeSession(
         allowNonTtyAsk,
         allowLocalConfig: allowLocalConfig === true,
         restrictBash,
+        ...(bashAllowlist ? { bashAllowlist } : {}),
         onApprovalEvent,
         authorizedTools,
         // [Area B · PROMPT 06] Store per-sesi: persetujuan dari sesi A tak
@@ -1019,17 +1027,32 @@ export async function createMinicodeSession(
         },
       })
       let clientOverflowErr: ProviderError | undefined
+      // `reclassified` = 400 generik yang KITA duga kehabisan konteks. Kasus
+      // itu tidak boleh menaikkan jendela: sesi nyata menaikkan 1M→2M karena
+      // 400 biasa, lalu kompaksi baru berjalan di ~1.9M token (input turn
+      // membengkak 9,3 juta token). Eskalasi hanya untuk bukti overflow.
+      let reclassifiedOverflow = false
       const overflow = (
         actualInput = inputTokens,
         actualOutput = outputTokens,
         clientGuard = false,
+        reclassified = false,
       ) => {
         // context_length_exceeded agar kernel menempuh force_compact_and_retry,
         // plus eskalasi adaptif terikat (hanya jalur overflow, bukan 429/402/auth).
-        escalateContextWindow(model, actualInput + actualOutput, clientGuard)
+        if (!reclassified) escalateContextWindow(model, actualInput + actualOutput, clientGuard)
+        const total = actualInput + actualOutput
+        // Pesan harus jujur: dulu ia selalu menulis "exceeds" walau angka yang
+        // dilaporkan jauh di bawah jendela (mis. "input 334644 + 0 exceeds
+        // 2097152"), yang membuat diagnosis user salah arah.
+        const detail = reclassified
+          ? `the provider rejected this request (400) while the local estimate was ${actualInput} of ${limit} tokens, so it is being treated as a context overflow`
+          : total >= limit
+            ? `input ${actualInput} + output ${actualOutput} exceeds ${limit} tokens`
+            : `input ${actualInput} + output reserve ${reserve} reaches the ${limit}-token budget`
         const err = new ProviderError(
           "context_length_exceeded",
-          `context window budget reached for the selected model: input ${actualInput} + output ${actualOutput} exceeds ${limit} tokens; reduce the prompt/tools or select a larger context window`,
+          `context window budget reached for the selected model: ${detail}; reduce the prompt/tools or select a larger context window`,
         )
         if (clientGuard) clientOverflowErr = err
         return err
@@ -1114,7 +1137,11 @@ export async function createMinicodeSession(
           yield event as ProviderEvent
         }
       } catch (error) {
-        if (error instanceof ProviderError && error.category === "context_length_exceeded") {
+        if (
+          error instanceof ProviderError &&
+          error.category === "context_length_exceeded" &&
+          !reclassifiedOverflow
+        ) {
           escalateContextWindow(
             model,
             Math.max(inputTokens + outputTokens, limit),
@@ -1133,10 +1160,25 @@ export async function createMinicodeSession(
         // sehingga 400 generik selalu mati fatal.
         if (
           error instanceof ProviderError &&
-          (error.category === "invalid_request" || error.category === "unknown") &&
-          localInputTokens >= contextBudgetFor(limit, maxOutputTokens).reclassifyThreshold
+          (error.category === "invalid_request" || error.category === "unknown")
         ) {
-          throw overflow(inputTokens, outputTokens, false)
+          // Reklasifikasi dulu membabi-buta: SETIAP 400/unknown di atas 50k
+          // token lokal dianggap konteks kepanjangan. Akibatnya penolakan
+          // skema/parameter biasa memicu compact-and-retry + eskalasi jendela
+          // yang tak pernah menyelesaikan masalah. Sekarang butuh salah satu
+          // bukti: teks provider menyebut konteks, ATAU estimasi lokal sudah
+          // melewati titik kompaksi (bukan sekadar "cukup besar").
+          if (
+            shouldReclassifyAsOverflow({
+              localInputTokens,
+              windowTokens: limit,
+              ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+              message: error.message,
+            })
+          ) {
+            reclassifiedOverflow = true
+            throw overflow(inputTokens, outputTokens, false, true)
+          }
         }
         throw error
       } finally {
@@ -1357,6 +1399,15 @@ export async function createMinicodeSession(
     },
     abort() {
       core.abort()
+    },
+    /**
+     * Seam steering ke kernel: pesan diselipkan ke turn AKTIF di batas step
+     * berikutnya. Diteruskan apa adanya — keputusan "boleh/tidak" (ada turn
+     * aktif) milik kernel, sehingga host tak bisa menyelipkan pesan ke sesi
+     * idle lalu mengira sudah terkirim.
+     */
+    steer(text: string) {
+      return core.steer(text)
     },
   }
 }

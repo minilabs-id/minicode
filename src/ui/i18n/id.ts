@@ -5,6 +5,7 @@ import type { MsgKey } from "./locale.ts"
 export const id: Record<MsgKey, string> = {
   "app.newBelow": "↓ {n} baris baru di bawah · PgDn ke ekor",
   "app.abortHint": "abort terkirim — tekan Esc sekali lagi untuk keluar",
+  "app.idleHint": "ketik pesan untuk mulai · /help daftar perintah · Ctrl+D keluar",
   "tui.selectionCopied": "seleksi disalin ke clipboard",
   "tui.selectionCopyFailed": "seleksi tidak bisa disalin (OSC 52 tidak tersedia)",
   "tui.selectionTooLarge": "seleksi terlalu besar untuk disalin",
@@ -52,8 +53,17 @@ export const id: Record<MsgKey, string> = {
   "ts.statusInterrupted": "terhenti",
   "ts.retry": "↻ ulangi",
   "ts.childGroup": "{n} tool anak",
-  "ts.turnSummary":
-    "turn {turn} · {ok} ok · {failed} gagal · {denied} ditolak · {cancelled} dibatalkan · {interrupted} terhenti · {files} berkas · ckpt {ckpt} · {secs}",
+  // Ringkasan turn dirakit per-bagian: counter NOL tidak dicetak (dulu satu
+  // baris selalu memuat "0 ditolak · 0 dibatalkan · 0 terhenti" sehingga
+  // informasi nyata tenggelam).
+  "ts.turnHead": "turn {turn}",
+  "ts.turnOk": "{n} sukses",
+  "ts.turnFailed": "{n} gagal",
+  "ts.turnDenied": "{n} ditolak",
+  "ts.turnCancelled": "{n} dibatalkan",
+  "ts.turnInterrupted": "{n} terhenti",
+  "ts.turnFiles": "{n} berkas",
+  "ts.turnCkpt": "ckpt {id}",
   "form.required": "wajib diisi",
   "form.invalidUrl": "URL tidak valid",
   "form.httpOnly": "harus http(s)",
@@ -289,6 +299,10 @@ export const id: Record<MsgKey, string> = {
   "tui.budgetUnknown":
     "[budget] biaya tak diketahui (model tanpa harga) dengan {tokens} token terpakai — melebihi budget, prompt baru ditolak. /exit untuk keluar.",
   "tui.stopped": "(dihentikan)",
+  "tui.steered": "diselipkan ke turn yang berjalan — model membacanya pada step berikutnya",
+  "tui.queued": "diantrikan #{n} — dikirim setelah turn ini selesai",
+  "tui.queueDropped": "{n} pesan antre dibuang karena turn dihentikan",
+  "tui.busyCmd": "{cmd} tidak tersedia saat turn berjalan (Esc menghentikan turn)",
   "tui.budget80": "[budget] {spent} / {budget} (80% terpakai)",
   "tui.copyNone": "(belum ada yang disalin — jalankan prompt dulu)",
   "tui.copyOk": "tersalin {n} karakter (OSC 52 — izinkan akses clipboard di terminal bila kosong)",

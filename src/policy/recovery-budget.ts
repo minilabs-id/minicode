@@ -253,6 +253,12 @@ export function planRecovery(
   opts: {
     hasPrompt: boolean
     costBudgetExhausted?: boolean
+    /** Anggaran waktu total khusus pemanggil ini (ms). Default
+     * `RECOVERY_BUDGET_MS`. Dipakai panggilan yang memang boleh lebih lama
+     * dari satu request chat — mis. ringkasan kompaksi, yang butuh puluhan
+     * detik per percobaan secara sah — tanpa melonggarkan anggaran pemulihan
+     * turn biasa. */
+    budgetMs?: number
     /** Di-inject untuk uji deterministik. */
     random?: () => number
   },
@@ -269,7 +275,11 @@ export function planRecovery(
     return { action: "stop", reason: "attempts-exhausted" }
 
   const elapsed = state.nowMs - state.startedAtMs
-  const remainingMs = RECOVERY_BUDGET_MS - elapsed
+  const budgetMs =
+    opts.budgetMs !== undefined && Number.isFinite(opts.budgetMs) && opts.budgetMs > 0
+      ? opts.budgetMs
+      : RECOVERY_BUDGET_MS
+  const remainingMs = budgetMs - elapsed
   const attempt = state.attemptsUsed + 1
   const delayMs = recoveryDelay(attempt, failure.retryAfterMs, opts.random)
   // Perlu sisa untuk jeda ini DAN untuk percobaan sesudahnya. Kalau jeda saja

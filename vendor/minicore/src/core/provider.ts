@@ -29,6 +29,15 @@ export interface StreamRequest {
   readonly tools?: readonly ToolSchema[];
   readonly system?: string;
   readonly model?: string;
+  /**
+   * Optional OUTPUT cap for expensive side calls (e.g. the compaction
+   * summarizer). Additive host seam: adapters forward it as `max_tokens` /
+   * `max_output_tokens` when the provider supports that field, and omit it
+   * otherwise. Without a cap the provider is free to stream unbounded text,
+   * which is how a summary call turns into a multi-minute generation that
+   * every wall-clock guard then aborts.
+   */
+  readonly maxTokens?: number;
 }
 
 /** A model provider: normalized, stateless, and swappable. */
