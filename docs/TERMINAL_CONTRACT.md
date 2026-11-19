@@ -1,4 +1,4 @@
-# Kontrak Terminal MiniCode (TUI fullscreen — v7.40, unreleased)
+# Kontrak Terminal MiniCode (TUI fullscreen — v7.42, unreleased)
 
 > **Status & presedensi (dibaca dulu).** Entri v7.22 di bawah ini adalah
 > **catatan sejarah** dan sebagian besar sudah **ditimpa oleh v7.29+** (lihat
@@ -12,6 +12,34 @@
 > **Aturan presedensi:** versi tertinggi menang; bila kontradiksi, entri dengan
 > nomor versi terbesar yang berlaku. Entri lama tetap dipertahankan sebagai
 > sejarah, bukan gambaran tampilan saat ini.
+
+Perubahan v7.42 (unreleased — margin seragam & rekap tool):
+
+1. **Satu tepi untuk semua teks (kecuali footer).** Prompt `minicode ›`,
+   echo user, jawaban model, baris tool/finding, dan rekap aktivitas kini
+   memakai `ASSISTANT_LEFT_MARGIN = 3` yang sama — tidak ada lagi teks yang
+   mepet ke jendela atau "1–2 huruf nyangkut" di tepi kiri. Footer tetap
+   full-width. Jeda satu baris antara prompt & jawaban dipertahankan.
+2. **Rekap tool tanpa `+`.** Format `+ 2 commands · 1 edit` →
+   `2 commands · 1 edit`. Angka memakai `c.info` (lebih terang), label kategori
+   `c.gray` (lebih gelap), pemisah `c.faint` — hierarki visual tanpa tanda `+`.
+3. **Isolasi warna baris proses.** `paintLedger` mengawali tiap baris dengan
+   `\x1b[0m` saat color-on supaya SGR baris tool tidak bocor ke teks tetangga
+   (`c.*` hanya reset foreground ke default terminal). Mode mono tidak terkena.
+
+Peta proteksi: `test/tui-app.test.ts`, `test/audit-fix-clean-composer.test.ts`,
+`test/audit-fix-live-inline-status.test.ts`, `test/activity-fold.test.ts`,
+`test/theme.test.ts`, `test/footer-render.test.ts`.
+
+Perubahan v7.41 (unreleased — narasi progres, auto-recap sub-agent & hardening turn):
+
+- `# Communication`: direktif narasi after-delegasi, manajer saat kerja besar /
+  sendiri saat kecil, ganti cara saat tool/browser gagal.
+- Auto-recap sub-agent bounded (batch per turn, anti-loop, idle/abort guard,
+  `MINICODE_AUTORESUME_CHILD=0`), mirror `bgFinishedAuto`.
+- Hardening turn (abort/persist, budget flag, phantom rows, toolsCount live,
+  @-mention race, stranded bg job, idempotency produksi, approval argsHash,
+  finding render, parallel childLink, bash truncation, dll).
 
 Perubahan v7.40 (unreleased — audit total & remediasi mendalam):
 

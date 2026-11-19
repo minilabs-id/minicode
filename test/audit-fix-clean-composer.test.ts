@@ -120,9 +120,11 @@ describe("audit v7.29 — clean composer", () => {
     const frame = m.screen()
     // Tinggi frame tak berubah: tak ada baris progres yang disuntik.
     expect(frame).toHaveLength(rowsBefore)
-    // v7.30: prompt tetap `minicode › ` (spasi trailing); caret dikoreksi lewat cursorCol.
+    // v7.42: prompt kini diawali margin kiri 3 kolom (ASSISTANT_LEFT_MARGIN),
+    // mengikuti tepi teks asisten. Isi draft & invariant bersih tetap sama; hanya
+    // baris prompt yang bergeser 3 kolom — bukan penambahan status/progres.
     const draftRow = frame.find((line) => line.includes("minicode ›")) ?? ""
-    expect(draftRow).toBe("minicode › draf")
+    expect(draftRow).toBe("   minicode › draf")
     // Tak ada status/progres/tool/elapsed yang bocor ke composer.
     expect(draftRow).not.toMatch(/step \d|\.{1,3}|read_file|\(\d+s\)/)
     expect(m.text()).not.toMatch(/\b(Working|Thinking|Running)\b/)
@@ -145,7 +147,9 @@ describe("audit v7.29 — clean composer", () => {
     await m.send(KEY.enter)
     m.release()
     await new Promise((r) => setTimeout(r, 20))
-    expect(m.screen().find((line) => line.includes("minicode ›")) ?? "").toBe("minicode ›")
+    // v7.42: margin 3 kolom mengikuti promptFirst(); composer kosong tetap satu
+    // baris tanpa status/progres — yang berubah hanya leading margin-nya.
+    expect(m.screen().find((line) => line.includes("minicode ›")) ?? "").toBe("   minicode ›")
     await m.send(KEY.ctrlD)
     await runP
   })
@@ -157,7 +161,9 @@ describe("audit v7.29 — clean composer", () => {
     // Pasang fake TTY: tanpa isTTY, colorLevel() jadi 0 (pipe) dan warna tak
     // menyala — ini mekanisme, bukan perilaku yang diuji di sini.
     tty = installFakeTty({ columns: 60, rows: 14 })
-    const prompt = "minicode › "
+    // v7.42: sampel prompt memakai margin kiri 3 kolom yang sama dengan prompt
+    // composer baru; round-trip warna (accent → stripAnsi) tetap diuji setara.
+    const prompt = "   minicode › "
     delete process.env.MINICODE_COLOR
     const colored = c.accent(prompt)
     expect(colored).toContain("\x1b[")

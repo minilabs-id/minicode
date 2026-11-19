@@ -23,10 +23,21 @@ export function statusWord(status: UiToolStatus): string {
 
 /** Warna baris ledger berdasar status terminal (sukses/error/denied/lain). */
 export function paintLedger(status: UiToolStatus, line: string): string {
-  if (status === "failed") return c.error(line)
-  if (status === "denied") return c.warning(line)
-  if (status === "completed") return c.success(line)
-  return c.muted(line)
+  // v7.42: awali dengan reset penuh supaya baris proses/tool tidak mewarisi
+  // SGR dari baris sebelumnya (keluhan "warna/font bocor ke teks sekitar").
+  // `c.*` memakai `\x1b[39m` (reset foreground) — itu mengembalikan ke warna
+  // DEFAULT terminal, bukan ke warna induk, sehingga teks tetangga berubah.
+  // `\x1b[0m` di awal mengisolasi setiap baris secara deterministik; saat mono
+  // (NO_COLOR/MINICODE_COLOR=0) c.* jadi identitas & reset pun tak bermasalah.
+  const painted =
+    status === "failed"
+      ? c.error(line)
+      : status === "denied"
+        ? c.warning(line)
+        : status === "completed"
+          ? c.success(line)
+          : c.muted(line)
+  return process.env.MINICODE_COLOR === "0" || process.env.NO_COLOR ? painted : `\x1b[0m${painted}`
 }
 
 /**

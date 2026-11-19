@@ -201,11 +201,11 @@ describe("panel aktivitas di Transcript (TUI)", () => {
     expect(groupLines(t)).toHaveLength(0)
     emit({ type: "turn.completed", seq: 3, turnId: 1 })
     // Sebelumnya baris grup di-commit saat turn selesai; kini cukup satu
-    // baris kategori (`+ 1 read`) — bukan grup `+ explore`, bukan duplikasi.
+    // baris kategori (`1 read`, v7.42 tanpa `+`) — bukan grup `+ explore`, bukan duplikasi.
     expect(groupLines(t)).toHaveLength(0)
     const screen = t.view(80, 12, 0).map(stripAnsi).join("\n")
     expect(screen).not.toContain("+ explore")
-    expect(screen.split("\n").filter((l) => l.includes("+ 1 read"))).toHaveLength(1)
+    expect(screen.split("\n").filter((l) => l.includes("1 read"))).toHaveLength(1)
   })
 
   test("flat: tool gagal + alasan tetap tampil sebagai satu baris sebelum dan sesudah turn selesai", () => {

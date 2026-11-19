@@ -8,6 +8,11 @@
 //   "Saya petakan dulu…"      → 2 command · 2 read
 //   "Repo terpetakan…"        → 3 command · 1 edit · 10 subagent
 //   "Audit jalan, saya pantau" → …
+//
+// v7.42: ringkasan lipatan tak lagi memakai `+` ASCII di depan — sekarang
+// `"   N read · N command"` (margin 3 kolom + angka `c.info`, label `c.gray`).
+// Assertion di bawah mencocokkan angka+label tanpa `+`, tapi tetap memeriksa
+// jumlah dan ketiadaan duplikasi (kontrak lama tak dilonggarkan).
 
 import { describe, expect, test } from "bun:test"
 import type { UiPresentationActivity, UiPresentationSnapshot } from "../src/ui/contract.ts"
@@ -67,7 +72,7 @@ describe("v7.37 — ringkasan aktivitas DIPOTONG per segmen narasi", () => {
     expect(first).toBeGreaterThanOrEqual(0)
     expect(second).toBeGreaterThan(first)
     const between = lines.slice(first + 1, second).join("\n")
-    expect(between).toContain("+ 1 read")
+    expect(between).toContain("1 read")
   })
 
   test("hitungan di-RESET tiap segmen — tidak akumulatif", () => {
@@ -82,11 +87,13 @@ describe("v7.37 — ringkasan aktivitas DIPOTONG per segmen narasi", () => {
     h.say("SEGMEN-3")
 
     const text = h.t.view(80, 20, 0).join("\n")
-    expect(text).toContain("+ 1 read")
-    expect(text).toContain("+ 1 command")
-    expect(text).not.toContain("+ 2")
-    const atRead = text.indexOf("+ 1 read")
-    const atCommand = text.indexOf("+ 1 command")
+    expect(text).toContain("1 read")
+    expect(text).toContain("1 command")
+    // v7.42: tanpa `+`, "tidak akumulatif" diuji dengan memastikan tak ada
+    // kategori yang hitungannya mencapai 2 (bukan sekadar mencari "+ 2").
+    expect(text).not.toMatch(/2 (command|read|edit|subagent|thought|other)/)
+    const atRead = text.indexOf("1 read")
+    const atCommand = text.indexOf("1 command")
     expect(atRead).toBeLessThan(atCommand)
   })
 
@@ -116,7 +123,7 @@ describe("v7.37 — ringkasan aktivitas DIPOTONG per segmen narasi", () => {
     h.say("SEGMEN-BERIKUTNYA")
 
     const text = h.t.view(80, 16, 0).join("\n")
-    expect(text).toContain("+ 1 read")
+    expect(text).toContain("1 read")
     expect(text).toContain("failed")
   })
 
@@ -133,13 +140,13 @@ describe("v7.37 — ringkasan aktivitas DIPOTONG per segmen narasi", () => {
       h.t
         .view(80, 16, 0)
         .join("\n")
-        .match(/\+ 1 read/g)?.length,
+        .match(/\b1 read\b/g)?.length,
     ).toBe(1)
     h.tool("c2")
-    // Tool segmen 2 memunculkan live row "+ 1 command" (bukan "+ 2").
+    // v7.42: live row "1 command" (bukan "2 command" — tak ada akumulasi).
     const text = h.t.view(80, 16, 0).join("\n")
-    expect(text).toContain("+ 1 command")
-    expect(text).not.toContain("+ 2")
+    expect(text).toContain("1 command")
+    expect(text).not.toMatch(/2 (command|read|edit|subagent|thought|other)/)
   })
 
   test("turn tutup: sisa segmen terakhir di-flush, tanpa duplikasi", () => {
@@ -154,8 +161,9 @@ describe("v7.37 — ringkasan aktivitas DIPOTONG per segmen narasi", () => {
     h.finish()
 
     const text = h.t.view(80, 20, 0).join("\n")
-    expect(text.match(/\+ 1 read/g)?.length).toBe(1)
-    expect(text.match(/\+ 1 command/g)?.length).toBe(1)
+    // v7.42: hitung kemunculan angka+label untuk menjaga kontrak "tanpa duplikasi".
+    expect(text.match(/\b1 read\b/g)?.length).toBe(1)
+    expect(text.match(/\b1 command\b/g)?.length).toBe(1)
   })
 
   test("daftar nama tool hanya saat per-tool ditahan (minimizeActivity)", () => {
@@ -185,6 +193,6 @@ describe("v7.37 — ringkasan aktivitas DIPOTONG per segmen narasi", () => {
     h.tool("c1")
     const rows = h.t.view(80, 12, 0)
     expect(rows.length).toBe(12)
-    expect(rows.some((r) => r.includes("+ 1 read"))).toBe(true)
+    expect(rows.some((r) => r.includes("1 read"))).toBe(true)
   })
 })

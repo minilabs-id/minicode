@@ -1,5 +1,5 @@
-// Audit fix: satu baris ringkas per turn untuk pemakaian tool (OpenCode-style
-// `+ 5 command · 3 edit · 1 thought`) + penghapusan marker "step" dari area
+// Audit fix: satu baris ringkas per turn untuk pemakaian tool (v7.42:
+// `5 command · 3 edit · 1 thought`, tanpa `+`) + penghapusan marker "step" dari area
 // chat/prompt. Baris ini sekaligus separator antar turn. Hermetic: fake bus,
 // tanpa TTY/jaringan — rendering layar penuh diuji tui-app.test.ts.
 import { describe, expect, test } from "bun:test"
@@ -36,9 +36,13 @@ function setup(opts: { minimizeActivity?: boolean; activityPanel?: boolean } = {
   }
 }
 
-/** Baris ringkas = satu-satunya baris yang diawali spasi lalu "+ ". */
+/**
+ * Baris ringkas = baris bermargin kiri yang diawali angka kategori.
+ * v7.42: tanda `+` dihapus, jadi deteksi `/^\s+\d+\s+\p{L}/u` (spasi,
+ * angka, spasi, huruf pertama label) — bukan lagi `/^\s+\+\s/`.
+ */
 function summaryLines(lines: string[]): string[] {
-  return lines.filter((l) => /^\s+\+\s/.test(l))
+  return lines.filter((l) => /^\s+\d+\s+\p{L}/u.test(l))
 }
 
 describe("compact tool summary per turn", () => {
@@ -70,7 +74,8 @@ describe("compact tool summary per turn", () => {
     const lines = screen()
     const summaries = summaryLines(lines)
     expect(summaries).toHaveLength(1)
-    expect(summaries[0]).toContain("+ 2 command")
+    // v7.42: format rekap tanpa `+` (angka lebih terang, label lebih gelap).
+    expect(summaries[0]).toContain("2 command")
     expect(summaries[0]).toContain("2 edit")
     expect(summaries[0]).toContain("2 read")
     expect(summaries[0]).toContain("1 thought")

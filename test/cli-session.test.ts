@@ -1213,7 +1213,9 @@ describe("cli: --verify (self-heal)", () => {
     } finally {
       p2.close()
     }
-  })
+    // v7.42: dua spawn CLI + verify di bawah beban suite penuh >5s — timeout
+    // eksplisit (asersi status/status tak diubah).
+  }, 30_000)
 
   // ── STEP 6 / PF-05: identitas presentasi harus kanonik setelah --resume.
   test("PF-05: identitas plan event kanonik setelah --resume", async () => {

@@ -25,6 +25,7 @@ import {
 import { appendWrapped, shaveWrapped } from "../render/composer-wrap.ts"
 import { formatError } from "../render/errors.ts"
 import { listRow } from "../render/list.ts"
+import { ASSISTANT_LEFT_MARGIN } from "../render/markdown-layout.ts"
 import { sanitizeAnsi, sanitizeAnsiLine, stripSgr } from "../render/sanitize.ts"
 import { c, glyphs, scrimMode, scrimSgr } from "../render/theme.ts"
 import { chunkByWidth, displayWidth, escapeLength, truncateToWidth } from "../render/width.ts"
@@ -113,7 +114,9 @@ const MAX_DROPDOWN_ROWS = 8
 const MIN_ROWS = 10
 const MIN_COLS = 20
 
-const promptFirst = (): string => `minicode ${glyphs.arrow} `
+// v7.42: prompt mengikuti margin kiri yang sama dengan teks model (kecuali
+// footer) → satu tepi yang rapi, tidak mepet ke jendela.
+const promptFirst = (): string => `${" ".repeat(ASSISTANT_LEFT_MARGIN)}minicode ${glyphs.arrow} `
 const promptCont = (): string => `  ${glyphs.dot} `
 const TIMER_TEXT = "00.00.00"
 const DOT_INTERVAL_MS = 200

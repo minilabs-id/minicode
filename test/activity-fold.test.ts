@@ -1,7 +1,9 @@
 // Renderer flat (full mono): lipatan aktivitas merangkum SATU baris kategori
-// per turn (`+ N command · N read`) yang jadi separator, dengan detail penuh
+// per turn (`N command · N read`) yang jadi separator, dengan detail penuh
 // tetap tersimpan untuk `/expand`. `minimizeActivity` menahan tool sukses agar
 // tak menggandakan baris live; tool gagal tetap tampil individual.
+// v7.42: `+` ASCII di depan ringkasan dihapus — yang diuji tetap angka+label
+// (count & kategori), bukan penandanya; kontrak tanpa duplikasi tetap dijaga.
 import { describe, expect, test } from "bun:test"
 import type {
   UiPresentationActivity,
@@ -65,7 +67,7 @@ describe("activity fold (minimizeActivity)", () => {
     // terlihat sebelum turn tutup. Tool gagal tetap individual.
     const during = transcript.view(40, 10, 0).join("\n")
     expect(during).toContain("bash")
-    expect(during).toContain("+ 1 command")
+    expect(during).toContain("1 command")
     expect(during).toContain("1 read")
     expect(during).toContain("read_file")
 
@@ -73,9 +75,9 @@ describe("activity fold (minimizeActivity)", () => {
     const view = transcript.view(40, 10, 0).join("\n")
     // Ringkasan permanen tepat SATU baris — baris live sudah hilang bersama
     // activityFold yang dikosongkan `flushActivityFold` (tanpa duplikasi).
-    expect(view.match(/\+ 1 command/g)?.length).toBe(1)
+    expect(view.match(/\b1 command\b/g)?.length).toBe(1)
     // Ringkasan kategori, bukan daftar "2 tools" / "N ok" lama.
-    expect(view).toContain("+ 1 command")
+    expect(view).toContain("1 command")
     expect(view).toContain("1 read")
     expect(view).not.toContain("2 tools")
     expect(view).not.toContain("ok ·")

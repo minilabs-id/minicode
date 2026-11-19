@@ -463,7 +463,8 @@ describe("Transcript UI audit regressions (Fase 3.2-3.4)", () => {
       const rows = t.view(40, 4, 0)
       // v7.29: prompt kini history — gema `minicode > …` (ASCII) tampil di
       // transkrip dengan tepat SATU jeda sebelum dan sesudahnya.
-      expect(rows).toEqual(["jawaban", "", "minicode > pertanyaan dua", ""])
+      // v7.42: echo user mengikuti margin kiri seragam (3 kolom).
+      expect(rows).toEqual(["jawaban", "", "   minicode > pertanyaan dua", ""])
       // Kill-switch ASCII tetap berlaku: panah '›' tak boleh muncul.
       expect(rows.some((l) => l.includes("›"))).toBe(false)
     } finally {
@@ -491,13 +492,15 @@ describe("Transcript UI audit regressions (Fase 3.2-3.4)", () => {
     // v7.29: prompt kini history — baris gema `minicode › hello world` benar-benar
     // ada di viewport (dulu disembunyikan demi card), tapi chrome tetap dikecualikan
     // dari sumber seleksi seperti sebelum kartu diperkenalkan.
+    // v7.42: margin +3 → teks `minicode › hello world` mulai di kolom 3,
+    // sumber (hello) mulai di kolom 11+3=14.
     const prompt = rows.find((r) => r.text.includes("minicode › hello world"))!
-    expect(prompt.displayStart).toBe(11)
-    const start = t.pointAt(prompt, 11)!
-    const end = t.pointAt(prompt, 16)!
+    expect(prompt.displayStart).toBe(14)
+    const start = t.pointAt(prompt, 14)!
+    const end = t.pointAt(prompt, 19)!
     expect(t.selectionText(start, end)).toBe("hello")
-    expect(t.columnAtOffset(prompt, start.offset)).toBe(11)
-    expect(t.columnAtOffset(prompt, end.offset)).toBe(16)
+    expect(t.columnAtOffset(prompt, start.offset)).toBe(14)
+    expect(t.columnAtOffset(prompt, end.offset)).toBe(19)
   })
 
   test("mouse selection pada baris markdown inline selaras dengan kolom tampilan", () => {

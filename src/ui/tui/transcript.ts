@@ -20,6 +20,7 @@ import { renderActivityPanel } from "../render/activity-panel.ts"
 import { paintLedger, runMarker, statusWord } from "../render/ledger.ts"
 import { parseFence, renderInline } from "../render/markdown.ts"
 import {
+  ASSISTANT_LEFT_MARGIN,
   computeAssistantLineLayout,
   effectiveAssistantMargin,
   formatAssistantSpacing,
@@ -721,13 +722,22 @@ export class Transcript {
       this.append("", { kind: "system" })
     }
     const arrow = glyphs.arrow
+    // v7.42: echo user sejajar dengan prompt & jawaban (margin kiri seragam).
+    const lead = " ".repeat(ASSISTANT_LEFT_MARGIN)
+    const prefix = `${lead}minicode ${arrow} `
     this.appendWithSource(
-      `${c.accent("minicode")} ${c.muted(arrow)} ${first ?? ""}`,
+      `${lead}${c.accent("minicode")} ${c.muted(arrow)} ${first ?? ""}`,
       { kind: "user" },
       first ?? "",
-      `minicode ${arrow} `,
+      prefix,
     )
-    for (const r of rest) this.appendWithSource(`  ${r}`, { kind: "user" }, r, "  ")
+    for (const r of rest)
+      this.appendWithSource(
+        `${lead}${" ".repeat(arrow.length + 1)}${r}`,
+        { kind: "user" },
+        r,
+        `${lead}  `,
+      )
     // Ritme flat: SATU baris kosong setelah prompt sebelum jawaban model.
     // Bersama jeda sebelum prompt di atas, tiap blok (turn) dipisah rapi.
     this.append("", { kind: "system" })
@@ -1819,7 +1829,8 @@ export class Transcript {
     // dicetak saat bukan sukses: baris sukses berwarna hijau sudah menyatakan
     // hasilnya, dan "selesai" di setiap baris membuat daftar tool jadi derau.
     const statusSuffix = status === "completed" ? "" : ` ${glyphs.dot} ${statusWord(status)}`
-    const line = `  ${glyphs.arrow} ${name}${targetText}${statusSuffix}${retry}${child}${verificationMark}${provenanceMark}${message}`
+    // v7.42: margin ledger mengikuti tepi prompt/jawaban (kecuali footer).
+    const line = `${" ".repeat(ASSISTANT_LEFT_MARGIN)}${glyphs.arrow} ${name}${targetText}${statusSuffix}${retry}${child}${verificationMark}${provenanceMark}${message}`
     // Lipat aktivitas (opencode-like): saat minimizeActivity ATAU panel
     // aktivitas aktif, baris ledger per-tool TIDAK boleh menghilang diam-diam
     // — ditahan lalu dirangkum saat turn selesai (panel: per keluarga tool;
@@ -1868,7 +1879,7 @@ export class Transcript {
         : ""
     const markerText = marker ? `${marker} ` : ""
     const statusSuffix = status === "completed" ? "" : ` ${glyphs.dot} ${statusWord(status)}`
-    const line = `    ↳ ${markerText}${name}${targetText}${statusSuffix}${message}`
+    const line = `${" ".repeat(ASSISTANT_LEFT_MARGIN + 2)}↳ ${markerText}${name}${targetText}${statusSuffix}${message}`
     this.append(paintLedger(status, line), {
       kind: "activity",
       ...(event.seq !== undefined ? { seq: event.seq } : {}),
@@ -2079,12 +2090,14 @@ export class Transcript {
       other: 0,
     }
     for (const entry of fold) counts[compactToolCategory(entry.name)]++
+    // v7.42: angka lebih terang (c.info) dari label kategori (c.gray, abu
+    // lebih gelap) — hierarki visual tanpa `+` di depan (permintaan user).
+    // Di mono kedua token jadi polos; gray pakai `dim` agar tetap lebih redup.
     const parts = COMPACT_CATEGORY_ORDER.filter((cat) => counts[cat] > 0).map(
-      (cat) => `${counts[cat]} ${t(`ts.toolCategory.${cat}`)}`,
+      (cat) => `${c.info(String(counts[cat]))} ${c.gray(t(`ts.toolCategory.${cat}`))}`,
     )
     if (parts.length === 0) return ""
-    // `+` ASCII aman di mono; warna lewat token c.* ikut mati saat NO_COLOR.
-    return `  ${c.accentAlt("+")} ${c.muted(parts.join(` ${glyphs.dot} `))}`
+    return `${" ".repeat(ASSISTANT_LEFT_MARGIN)}${parts.join(` ${c.faint(glyphs.dot)} `)}`
   }
 
   /**
@@ -2116,7 +2129,7 @@ export class Transcript {
           "…",
         )
         // `appr.tool` sudah mengandung titik dua ("Tool:") — jangan ditambah.
-        lines.push(`  ${c.muted(t("appr.tool"))} ${c.info(list)}`)
+        lines.push(`${" ".repeat(ASSISTANT_LEFT_MARGIN)}${c.muted(t("appr.tool"))} ${c.info(list)}`)
       }
     }
     return lines.map((text) => ({
@@ -2179,7 +2192,9 @@ export class Transcript {
       const elapsedText = showElapsed ? ` (${formatElapsed(elapsed)})` : ""
       const retry = activity.supersedes ? ` ${t("ts.retry")}` : ""
       const markerText = marker ? `${marker} ` : ""
-      const prefix = child ? "    ↳ " : `  ${glyphs.arrow} `
+      const prefix = child
+        ? `${" ".repeat(ASSISTANT_LEFT_MARGIN + 2)}↳ `
+        : `${" ".repeat(ASSISTANT_LEFT_MARGIN)}${glyphs.arrow} `
       return c.info(
         `${prefix}${markerText}${name}${target} … ${t("ts.statusRunning")}${elapsedText}${retry}`,
       )
