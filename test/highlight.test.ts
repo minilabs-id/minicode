@@ -1,15 +1,14 @@
 // Cabang highlight yang sebelumnya tak tersentuh: Python, shell, JSON, diff, dan
-// `formatCodeBlock` (80,43% lines). Semua uji memakai invarian yang sama:
-// **highlight tidak boleh mengubah teks**, hanya menambah SGR. Itu satu-satunya
-// jaminan yang berarti — warna spesifik bergantung tema dan level warna terminal,
-// jadi menguncinya akan membuat test rapuh tanpa menambah kepercayaan.
+// `formatCodeBlock` (80,43% lines). Invarian utama tetap: **highlight tidak boleh
+// mengubah teks**. Itu satu-satunya jaminan yang berarti — warna spesifik
+// bergantung tema dan level warna terminal, jadi menguncinya dulu membuat test
+// rapuh tanpa menambah kepercayaan.
 //
-// COLORTERM dipaksa `truecolor`: tanpa itu hasil bergantung apakah stdout runner
-// tersambung ke TTY, dan pada level mono seluruh pewarnaan jadi identity sehingga
-// test lolos tanpa benar-benar menjalankan cabang pewarnaan.
-//
-// Sejak warna digate `stdout.isTTY` (output ke pipe/redirect harus polos),
-// suite ini men-stub stdout sebagai TTY — yang diuji adalah palet, bukan gate.
+// v7.29: FORCE_MONO dihapus — warna nyala by default di TTY. Sebagian test
+// di bawah sengaja mengunci jalur MONO (lewat MINICODE_COLOR=0, lihat
+// `withMono`); selebihnya memakai stripAnsi agar hijau di kedua mode warna.
+// COLORTERM/TTY tetap di-stub supaya hasil tidak bergantung pada runner (mis.
+// stdout tersambung ke pipe), bukan untuk memaksa warna.
 import { afterAll, beforeEach, describe, expect, test } from "bun:test"
 import { resetLocaleState, setSessionLocale } from "../src/ui/i18n/locale.ts"
 import { formatCodeBlock, highlightCode } from "../src/ui/render/highlight.ts"
@@ -17,10 +16,14 @@ import { stripAnsi } from "../src/ui/render/theme.ts"
 
 const origColorterm = process.env.COLORTERM
 const origNoColor = process.env.NO_COLOR
+const origMinicodeColor = process.env.MINICODE_COLOR
 
 beforeEach(() => {
   process.env.COLORTERM = "truecolor"
   delete process.env.NO_COLOR
+  // Env bersih = warna aktif (color-by-default). Test mono menyalakan flag
+  // sendiri dan memulihkannya di `withMono`.
+  delete process.env.MINICODE_COLOR
   Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
   // Marker "... (N more lines)" dwibahasa — kunci en seperti warna.
   setSessionLocale("en")
@@ -32,8 +35,25 @@ afterAll(() => {
   else process.env.COLORTERM = origColorterm
   if (origNoColor == null) delete process.env.NO_COLOR
   else process.env.NO_COLOR = origNoColor
+  if (origMinicodeColor == null) delete process.env.MINICODE_COLOR
+  else process.env.MINICODE_COLOR = origMinicodeColor
   resetLocaleState()
 })
+
+/**
+ * Jalankan `fn` dalam mode monokrom eksplisit (v7.29: MINICODE_COLOR=0) lalu
+ * pulihkan env. Dipakai test yang mengunci "tak ada SGR", bukan menghapusnya.
+ */
+function withMono<T>(fn: () => T): T {
+  const saved = process.env.MINICODE_COLOR
+  process.env.MINICODE_COLOR = "0"
+  try {
+    return fn()
+  } finally {
+    if (saved == null) delete process.env.MINICODE_COLOR
+    else process.env.MINICODE_COLOR = saved
+  }
+}
 
 const ESC = String.fromCharCode(27)
 /** Apakah keluaran benar-benar diwarnai (bukan hanya diteruskan apa adanya)? */
@@ -58,8 +78,22 @@ describe("highlight: TypeScript", () => {
     expect(stripAnsi(highlightCode(code, "typescript"))).toBe(code)
   })
 
-  test("mewarnai sesuatu (cabang pewarnaan benar-benar jalan)", () => {
-    expect(isColored(highlightCode(code, "typescript"))).toBe(true)
+  test("mode mono: tidak ada SGR, teks TypeScript utuh", () => {
+    // v7.29: warna nyala by default, jadi MINICODE_COLOR=0 dipaksa lewat
+    // withMono. Yang dijaga: tak ada ESC warna yang menyusup ke transkrip.
+    withMono(() => {
+      const out = highlightCode(code, "typescript")
+      expect(isColored(out)).toBe(false)
+      expect(out).toBe(code)
+    })
+  })
+
+  test("v7.29: mode warna memancarkan SGR dan stripAnsi tetap utuh", () => {
+    // Pasangan dari test mono: env bersih (beforeEach) → warna aktif by default.
+    // Mengunci bahwa highlighter benar-benar mewarnai, bukan sekadar lolos strip.
+    const out = highlightCode(code, "typescript")
+    expect(isColored(out)).toBe(true)
+    expect(stripAnsi(out)).toBe(code)
   })
 
   test("komentar `//` mewarnai bagian kanan tanpa mengubah teks", () => {
@@ -109,8 +143,14 @@ describe("highlight: Python", () => {
     expect(highlightCode(code, "py")).toBe(highlightCode(code, "python"))
   })
 
-  test("mewarnai keyword, angka, string, dan nama kelas", () => {
-    expect(isColored(highlightCode(code, "python"))).toBe(true)
+  test("mode mono: keyword/angka/string/kelas tak dibungkus SGR", () => {
+    // v7.29: paksa MINICODE_COLOR=0 — warna kini aktif by default di TTY.
+    // Yang dijaga: isi tetap terbaca utuh tanpa sekuens warna.
+    withMono(() => {
+      const out = highlightCode(code, "python")
+      expect(out).toBe(code)
+      expect(isColored(out)).toBe(false)
+    })
   })
 
   test("komentar `#` di awal baris tidak menghapus isi", () => {
@@ -151,8 +191,14 @@ describe("highlight: shell", () => {
     }
   })
 
-  test("mewarnai variabel `$VAR` dan keyword", () => {
-    expect(isColored(highlightCode('echo "$HOME"', "sh"))).toBe(true)
+  test("mode mono: variabel `$VAR` dan keyword tetap polos", () => {
+    // v7.29: paksa MINICODE_COLOR=0 supaya jalur mono tetap teruji.
+    withMono(() => {
+      const line = 'echo "$HOME"'
+      const out = highlightCode(line, "sh")
+      expect(out).toBe(line)
+      expect(isColored(out)).toBe(false)
+    })
   })
 
   test("flag panjang tidak hilang", () => {
@@ -160,22 +206,27 @@ describe("highlight: shell", () => {
     expect(stripAnsi(highlightCode(line, "sh"))).toBe(line)
   })
 
-  test("flag shell (-x/--long) diwarnai kuning, bukan polos", () => {
-    // Audit TUI P2-4: cabang yellow untuk token "-" mati (tokenizer tak pernah
-    // menghasilkan token berawalan "-"). Kode lama: output == input persis.
-    const line = "curl --silent -L https://example.com"
-    const out = highlightCode(line, "sh")
-    expect(stripAnsi(out)).toBe(line)
-    expect(out).not.toBe(line) // ada SGR kuning pada flag
-    expect(out).toContain("--silent")
-    expect(out).toContain("-L")
+  test("flag shell (-x/--long) utuh tanpa pewarnaan mono", () => {
+    // v7.29: warna aktif by default, jadi paksa MINICODE_COLOR=0. Yang dijaga:
+    // flag tetap tampil utuh dan tak ada ESC warna di jalur mono.
+    withMono(() => {
+      const line = "curl --silent -L https://example.com"
+      const out = highlightCode(line, "sh")
+      expect(out).toBe(line)
+      expect(isColored(out)).toBe(false)
+      expect(out).toContain("--silent")
+      expect(out).toContain("-L")
+    })
   })
 
-  test("komentar shell diwarnai tanpa mengubah teks", () => {
-    const line = "rm -rf build # bersihkan"
-    const out = highlightCode(line, "zsh")
-    expect(stripAnsi(out)).toBe(line)
-    expect(isColored(out)).toBe(true)
+  test("komentar shell utuh tanpa SGR di mode mono", () => {
+    // v7.29: paksa MINICODE_COLOR=0 supaya jalur mono tetap teruji.
+    withMono(() => {
+      const line = "rm -rf build # bersihkan"
+      const out = highlightCode(line, "zsh")
+      expect(out).toBe(line)
+      expect(isColored(out)).toBe(false)
+    })
   })
 })
 
@@ -232,10 +283,16 @@ describe("highlight: diff", () => {
     expect(highlightCode("--- a/x.ts", "diff")).toBe("--- a/x.ts")
   })
 
-  test("baris tambah/hapus/hunk diwarnai", () => {
-    expect(isColored(highlightCode("+tambah", "diff"))).toBe(true)
-    expect(isColored(highlightCode("-hapus", "diff"))).toBe(true)
-    expect(isColored(highlightCode("@@ -1 +1 @@", "diff"))).toBe(true)
+  test("mode mono: baris tambah/hapus/hunk polos tapi utuh", () => {
+    // v7.29: paksa MINICODE_COLOR=0. Penanda `+`/`-`/`@@` tetap terbaca sebagai
+    // teks — itu yang dipakai user, bukan warna; tak ada SGR mengganggu parser.
+    withMono(() => {
+      for (const line of ["+tambah", "-hapus", "@@ -1 +1 @@"]) {
+        const out = highlightCode(line, "diff")
+        expect(out).toBe(line)
+        expect(isColored(out)).toBe(false)
+      }
+    })
   })
 
   test("baris konteks diteruskan apa adanya", () => {

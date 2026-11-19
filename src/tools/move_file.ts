@@ -10,23 +10,29 @@ import { contextUnrestricted, requireToolCwd } from "./context.ts"
 
 export const moveFileTool: Tool = {
   name: "move_file",
+  // v7.38 (wire contract): `from`/`to` DISATUKAN ke `path`/`destination` agar
+  // satu konvensi path dengan seluruh tool lain. Perilaku persis identik —
+  // hanya nama field wire yang berubah; pembaca argumen ikut diselaraskan.
   description:
-    "Move/rename a file within workspace (atomic rename). Supports moving to new directory (auto-creates parents).",
+    "FILE EDIT: Move/rename a file within the workspace (atomic rename; auto-creates parent dirs).",
   parameters: {
     type: "object",
     properties: {
-      from: { type: "string", description: "source path relative to cwd" },
-      to: { type: "string", description: "destination path relative to cwd" },
+      path: { type: "string", description: "source path relative to the workspace root" },
+      destination: {
+        type: "string",
+        description: "destination path relative to the workspace root",
+      },
     },
-    required: ["from", "to"],
+    required: ["path", "destination"],
     additionalProperties: false,
   },
-  async execute({ from, to }, ctx) {
+  async execute({ path, destination }, ctx) {
     ctx.signal.throwIfAborted()
     const root = requireToolCwd(ctx)
     const relaxed = contextUnrestricted(ctx)
-    const f = from as string
-    const t = to as string
+    const f = path as string
+    const t = destination as string
     // Verifikasi kedua ujung via pemilik tunggal (logis + target nyata) —
     // detail di safe-open.ts. Beda dengan tool satu-berkas hanya karena
     // move punya dua ujung; substring pesan ("outside workspace",

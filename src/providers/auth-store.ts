@@ -48,17 +48,19 @@ const authLocks = new Map<string, Promise<void>>()
 async function withAuthLock<T>(path: string, fn: () => Promise<T>): Promise<T> {
   const prev = authLocks.get(path) ?? Promise.resolve()
   let release!: () => void
-  const next = new Promise<void>((res) => (release = res))
-  authLocks.set(
-    path,
-    prev.then(() => next),
-  )
+  const gate = new Promise<void>((res) => (release = res))
+  // Yang DISIMPAN harus rantai yang SAMA dengan yang dibandingkan di finally.
+  // Dulu map menyimpan `prev.then(() => next)` tapi finally membandingkan
+  // `next` — tak pernah sama, jadi entri tak pernah dihapus dan rantai lock
+  // tumbuh terus tiap save/remove (pola perbaikan sama dengan withConfigLock).
+  const tail = prev.then(() => gate)
+  authLocks.set(path, tail)
   await prev
   try {
     return await fn()
   } finally {
     release()
-    if (authLocks.get(path) === next) authLocks.delete(path)
+    if (authLocks.get(path) === tail) authLocks.delete(path)
   }
 }
 

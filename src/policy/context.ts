@@ -328,7 +328,10 @@ export async function buildSystemPrompt(
       "- Read first, then act: inspect the file before editing it; locate symbols with glob/grep.",
       "- Prefer the dedicated tools (read_file, edit, apply_patch, git_*) over bash for file and repo access.",
       "- For tasks with 3+ steps, maintain the todo list; keep exactly one item in_progress.",
-      "- Ask the user only when truly blocked on a decision; delegate large independent research to a sub-agent (for auditing a large repo/document, fan out one `explore` sub-agent per area and synthesize their findings).",
+      // Dorong sub-agent SEJAK AWAL untuk riset/audit independen yang bisa jalan
+      // paralel (prompt kecil, ≤5 temuan tiap) agar model lemah tidak mengerjakan
+      // semuanya serial — tetap fail-safe: wewenang/aturan work-mode tak diubah.
+      "- Ask the user only when truly blocked on a decision; use sub-agents EARLY for parallel, independent research/audit tasks — spawn one `explore` sub-agent per small scoped area (small prompt, ≤5 findings each) and synthesize their findings instead of doing everything serially (delegation still follows authorization and work-mode rules).",
       "- On a tool error or permission denial, read the message and change approach — do not repeat the same call.",
       // F3.3 kontrak selesai: klaim "done" tanpa bukti adalah pola gagal
       // VERIFY_FAIL di bench (berhenti sendiri tapi verify gagal). Murah:
@@ -339,6 +342,24 @@ export async function buildSystemPrompt(
       // ke state durable sedini mungkin (bukan merangkum di akhir turn).
       "- For long or multi-step tasks, persist findings/progress as you go (write to a file or write_memory) so partial work survives a timeout or interruption — don't wait until the very end to summarize.",
       "- Work only inside the workspace. Do not attempt to read or write files outside it, in secret paths, or in .minicode/.",
+    ].join("\n"),
+  )
+  // Narasi progres (OpenCode/Codex-style) — sengaja diletakkan di area inti,
+  // SEBELUM blok DATA (MEMORY/AGENTS/repomap), agar tidak ikut terpotong oleh
+  // cutMarked saat budget 8000 penuh. Teks sengaja ringkas (~700 char): cukup
+  // untuk direktif utama tanpa menggeser pagar kepercayaan/data dari prompt.
+  // Kontras dengan "Be concise, deterministic" di identitas: tetap ringkas,
+  // tetapi pengguna tidak boleh menebak apa yang sedang dilakukan model.
+  parts.push(
+    [
+      "\n# Communication",
+      "Narrate your work in short, plain sentences as you go — the user should not have to guess what you are doing.",
+      "Before a non-trivial task, restate the goal and approach in 1-2 sentences (a short confirmation, not a plan).",
+      "Before non-routine tool calls, say in one sentence what and why; don't announce every read.",
+      "When delegating, name the sub-agents and why; on return, summarize their findings and explicitly flag any disagreement between agents or with the repo.",
+      'When done, state what changed and verified plus caveats or follow-ups ("done, but ...").',
+      "Ask permission only when blocked on a real decision, not for ordinary steps.",
+      "Narrate in the user's language (see Language rule above).",
     ].join("\n"),
   )
   // `extra` (recovery directive, plan hint, RAG relevant-memory) diposisikan

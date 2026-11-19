@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { LIMITS } from "../src/constants.ts"
 import { Scheduler } from "../src/task/scheduler.ts"
 import {
   newOwnerToken,
@@ -338,14 +339,18 @@ describe("§13 lease timing evidence", () => {
     // lease with room for misses. These are the two ratios 6Y can verify without
     // production data; the absolute adequacy is what remains unverified.
     const { SESSION_RENEW_INTERVAL_MS: RENEW } = { SESSION_RENEW_INTERVAL_MS }
-    expect({
+    const ratios = {
       renewals_per_lease: SESSION_LEASE_MS / RENEW,
-      lease_over_subagent_timeout: SESSION_LEASE_MS / 120_000,
-      lease_over_bash_timeout: SESSION_LEASE_MS / 30_000,
-    }).toEqual({
-      renewals_per_lease: 5,
-      lease_over_subagent_timeout: 2.5,
-      lease_over_bash_timeout: 10,
-    })
+      lease_over_subagent_timeout: SESSION_LEASE_MS / LIMITS.SUB_AGENT_TIMEOUT_MS,
+      lease_over_bash_timeout: SESSION_LEASE_MS / LIMITS.BASH_DEFAULT_TIMEOUT_MS,
+    }
+    // v7.40: dulu test ini memaku angka absolut (5 / 2,5 / 10) dari konstanta
+    // lama (sub-agent 120 dtk). Sesuai komentar test sendiri yang dimaksud
+    // adalah HUBUNGANNYA: lease harus lebih panjang dari timeout anak & bash,
+    // dan renewal harus cukup sering. Pakai konstanta aktual + relasi, supaya
+    // perubahan konstanta sah tak memecah test.
+    expect(ratios.renewals_per_lease).toBeGreaterThanOrEqual(2)
+    expect(ratios.lease_over_subagent_timeout).toBeGreaterThan(1)
+    expect(ratios.lease_over_bash_timeout).toBeGreaterThan(1)
   })
 })

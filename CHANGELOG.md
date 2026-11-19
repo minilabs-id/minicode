@@ -22,7 +22,7 @@
 
 ### Changed — Keterbacaan TUI
 
-- **Ledger tool `› nama target`** tanpa kata status untuk hasil sukses (baris hijau sudah menyatakannya), ringkasan turn hanya mencetak counter yang bukan nol, penanda bahasa blok kode memakai bar yang sama dengan isi blok, kolom label ringkasan sesi dihitung dari locale aktif, zero-state boot menampilkan logo kecil + satu hint redup, serta perapian teks idle/hint (`src/ui/tui/{transcript,app}.ts`, `src/ui/render/{markdown,session-summary}.ts`, `src/ui/i18n/{id,en}.ts`).
+- **Ledger tool `› nama target`** tanpa kata status untuk hasil sukses (baris hijau sudah menyatakannya), ringkasan turn hanya mencetak counter yang bukan nol, penanda bahasa blok kode memakai bar yang sama dengan isi blok, kolom label ringkasan sesi dihitung dari locale aktif, zero-state boot KOSONG tanpa logo/hint (baris kosong + composer + footer; perilaku v7.29+ yang menggantikan klaim lama "logo kecil + hint redup" pada entri ini), serta normalisasi jeda teks (`src/ui/tui/{transcript,app}.ts`, `src/ui/render/{markdown,session-summary}.ts`, `src/ui/i18n/{id,en}.ts`).
 
 ## [0.30.2] - 2026-11-17
 
@@ -516,7 +516,7 @@ pelengkapan Fase 7 prompt caching, dan konsolidasi dokumentasi.
 
 ### Mode Architecture Migration — WorkMode / PermissionMode / Tool Access Policy
 
-Pemisahan tiga tanggung jawab yang sebelumnya tercampur pada union `PermissionMode` enam nilai. Audit + laporan migrasi: `docs/audit/MODE_ARCHITECTURE_RECONCILIATION_AUDIT_2026-11-05.md` dan `docs/audit/MODE_ARCHITECTURE_MIGRATION_REPORT_2026-11-05.md`.
+Pemisahan tiga tanggung jawab yang sebelumnya tercampur pada union `PermissionMode` enam nilai. Audit + laporan migrasi: `docs/audit/MODE_ARCHITECTURE_RECONCILIATION_AUDIT_2026-11-05.md` dan `docs/audit/MODE_ARCHITECTURE_MIGRATION_REPORT_2026-11-05.md` (**tidak tersedia di checkout ini** — direktori `docs/audit/` tidak ikut disalin; rujukan historis dipertahankan).
 
 - **WorkMode** (`DISCUSS` / `PLAN` / `BUILD`): *bagaimana* agent bekerja. `BUILD` adalah nama produk untuk identitas internal `EXECUTE` (alias input + display; persistensi tetap `EXECUTE`). Ceiling kini dibaca langsung dari registry kontrak tool (`ceilingAllows`), bukan lagi dari handler `readonly`/`plan`.
 - **PermissionMode** (`AUTO` / `ASK`): *apakah* butuh izin manusia. `AUTO` = otonomi penuh — capability yang authorized (termasuk `git_commit`, `delegate_task`, `mcp_*`) berjalan tanpa henti persetujuan rutin; `ask_user` ditolak deterministik. `ASK` = pengawasan manusia.
@@ -534,7 +534,7 @@ Pemisahan tiga tanggung jawab yang sebelumnya tercampur pada union `PermissionMo
 
 ### WorkMode, observability, reliability & repository consolidation (P0–P2 + P2.3)
 
-Integrasi tahap **P0–P2** dan penutupan **P2.3**, lalu **Final Integration & Repository Consolidation**. Detail stage-scoped per subfase ada di `docs/audit/` (P0_FOUNDATION…, P1_…, P2_OPERATIONAL_…, P2_3_OPERATIONAL_…, FINAL_INTEGRATION_…).
+Integrasi tahap **P0–P2** dan penutupan **P2.3**, lalu **Final Integration & Repository Consolidation**. Detail stage-scoped per subfase ada di `docs/audit/` (P0_FOUNDATION…, P1_…, P2_OPERATIONAL_…, P2_3_OPERATIONAL_…, FINAL_INTEGRATION_…) — direktori `docs/audit/` **tidak tersedia di checkout ini**; rujukan historis dipertahankan.
 
 - **P0 — Kontrak WorkMode** (`DISCUSS`/`PLAN`/`EXECUTE`, lapis intent terpisah dari PermissionMode): registry/dispatch selaras agar tool yang terlihat = yang dapat dieksekusi; network read dilarang di `DISCUSS` dan butuh approval di `PLAN`; hooks/verify digerbangi WorkMode; persistensi & resume WorkMode; parity `daemon`/`ACP`/`exec`.
 - **P1 — Correctness & operator UX**: validasi `supersedes_id` + tombstone dua-arah seluruh chunk memori (tanpa resurrection via reconcile); machine/task observability dengan identitas child-session/run; ACE/verification/denial visibility di TUI; context occupancy ≠ session spend; approval binding dua lapis + `always` hanya bila dapat dipersist; proyeksi error context-window dan peringatan flag setelah prompt.
@@ -1206,7 +1206,7 @@ Integrasi tahap **P0–P2** dan penutupan **P2.3**, lalu **Final Integration & R
 ### Test & Gate
 - `1168 pass 0 fail`, `gate:coverage` 82.79%/85.22%, `gate:pack` 22/22, `gate:bash` 0 bypass, `extreme-bash-fuzz` 0/2582, `extreme-mcp` 67/67. `extreme-shadow-git` skala 2000 file masih timeout 300s di Windows (unit `shadow-git.test.ts` 22 pass — hambatan I/O Windows, bukan regresi).
 
-## [Unreleased] — Audit UI/UX (V6) + uji live multi-provider (V7) + bug hunter UI (V8)
+## Audit UI/UX (V6/V7/V8) — 2026-09-01 (arsip historis, sebelum v0.8.0)
 
 ### V8 — bug hunter UI/UX: 31 temuan dari tiga ronde
 

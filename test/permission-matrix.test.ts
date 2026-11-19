@@ -1,4 +1,4 @@
-// Matriks Permission × Tool (38 tool × 6 mode).
+// Matriks Permission × Tool (41 tool × 6 mode).
 // Ekspektasi di-derive dari src/policy/permission.ts (bukan dokumentasi):
 // bila handler berubah, test ini yang harus ikut berubah secara sadar.
 // Hermetic: root tmp per test, tanpa eksekusi tool (hanya decision check).
@@ -8,6 +8,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createPermissionHandler, type PermissionMode } from "../src/policy/permission.ts"
+import { NETWORK_READ_TOOL_NAMES } from "../src/policy/tool-contract.ts"
 import { isMcpToolName } from "../src/presentation/label.ts"
 import { allTools } from "../src/tools/index.ts"
 
@@ -33,7 +34,16 @@ const READONLY = new Set([
   "lsp_workspace_symbols",
   "read_image",
 ])
-const FILE_WRITE = new Set(["write_file", "edit", "apply_patch", "move_file", "delete_file"])
+const FILE_WRITE = new Set([
+  "write_file",
+  "edit",
+  "apply_patch",
+  "move_file",
+  "delete_file",
+  "git_restore",
+  "git_checkout",
+  "lsp_rename",
+])
 const INTERNAL_WRITE = new Set([
   "write_memory",
   "forget_memory",
@@ -50,6 +60,9 @@ const GATED = new Set([
   "git_commit",
   "git_push",
   "ask_user",
+  "git_restore",
+  "git_checkout",
+  "lsp_rename",
 ])
 const NO_PROMPT = new Set(["todo_write", "submit_result", "bash_output", "bash_kill"])
 
@@ -61,7 +74,7 @@ const ARGS: Record<string, Record<string, unknown>> = {
   apply_patch: { path: "probe.txt", patches: [{ search: "a", replace: "b" }] },
   glob: { pattern: "*.ts" },
   grep: { pattern: "x" },
-  move_file: { from: "a.txt", to: "b.txt" },
+  move_file: { path: "a.txt", destination: "b.txt" },
   delete_file: { path: "probe.txt" },
   read_image: { path: "i.png" },
   bash: { cmd: "echo hi" },
@@ -72,12 +85,15 @@ const ARGS: Record<string, Record<string, unknown>> = {
   git_log: {},
   git_commit: { message: "m" },
   git_push: {},
-  lsp_diagnostics: { file: "a.ts" },
-  lsp_definition: { file: "a.ts" },
-  lsp_references: { file: "a.ts" },
-  lsp_hover: { file: "a.ts" },
-  lsp_symbols: { file: "a.ts" },
+  git_restore: { path: "probe.txt" },
+  git_checkout: { path: "probe.txt" },
+  lsp_diagnostics: { path: "a.ts" },
+  lsp_definition: { path: "a.ts" },
+  lsp_references: { path: "a.ts" },
+  lsp_hover: { path: "a.ts" },
+  lsp_symbols: { path: "a.ts" },
   lsp_workspace_symbols: { query: "x" },
+  lsp_rename: { path: "a.ts", symbol: "x", newName: "y" },
   mcp_list: {},
   mcp_call: { server: "s", tool: "t" },
   mcp_read: { server: "s", uri: "u" },
@@ -97,9 +113,9 @@ const ARGS: Record<string, Record<string, unknown>> = {
 
 const NAMES = Object.keys(ARGS).sort()
 
-test("registry allTools tepat 38 nama yang dicakup matriks", () => {
+test("registry allTools tepat 41 nama yang dicakup matriks", () => {
   expect(allTools.map((t) => t.name).sort()).toEqual(NAMES)
-  expect(NAMES).toHaveLength(38)
+  expect(NAMES).toHaveLength(41)
 })
 
 type Ask = (call: { name: string; args?: unknown }) => Promise<"allow" | "deny" | "always">
@@ -128,12 +144,16 @@ const TTY = !!process.stdin.isTTY
 // Ekspektasi per mode untuk argumen benign (kasus tepi di adversarial test).
 function expected(mode: PermissionMode, ask: boolean, name: string): "allow" | "deny" {
   if (mode === "allow-all") return "allow"
-  if (mode === "readonly") return READONLY.has(name) ? "allow" : "deny"
+  // [audit deep-mode] plan/readonly kini menggantung network read lewat
+  // promptAskOr. Matriks ini headless (tanpa ask) ⇒ fail-closed deny.
+  if (mode === "readonly")
+    return !NETWORK_READ_TOOL_NAMES.has(name) && READONLY.has(name) ? "allow" : "deny"
   if (mode === "plan")
-    return READONLY.has(name) ||
-      name === "todo_write" ||
-      name === "delegate_task" ||
-      name === "submit_result"
+    return !NETWORK_READ_TOOL_NAMES.has(name) &&
+      (READONLY.has(name) ||
+        name === "todo_write" ||
+        name === "delegate_task" ||
+        name === "submit_result")
       ? "allow"
       : "deny"
   if (mode === "allowlist") {
@@ -165,7 +185,7 @@ function expected(mode: PermissionMode, ask: boolean, name: string): "allow" | "
 const MODES: PermissionMode[] = ["auto", "ask", "readonly", "plan", "allowlist", "allow-all"]
 
 for (const mode of MODES) {
-  test(`matriks ${mode} × 37 tool (headless, tanpa ask fn)`, async () => {
+  test(`matriks ${mode} × 41 tool (headless, tanpa ask fn)`, async () => {
     const savedSandbox = process.env.MINICODE_SANDBOX
     const savedAllow = process.env.MINICODE_BASH_ALLOWLIST
     delete process.env.MINICODE_SANDBOX
@@ -248,13 +268,13 @@ test("matriks jail: operasi keluar root ditolak di semua mode", async () => {
       )
       // Baca ke luar root: mode baca (auto/readonly/plan/ask) akan allow.
       expect(await decideArgs(mode, root, "read_file", { path: outsideFile })).toBe("deny")
-      // move_file punya DUA ujung (from+to): keduanya harus dijail.
-      expect(await decideArgs(mode, root, "move_file", { from: outsideFile, to: "b.txt" })).toBe(
-        "deny",
-      )
-      expect(await decideArgs(mode, root, "move_file", { from: "a.txt", to: outsideFile })).toBe(
-        "deny",
-      )
+      // move_file punya DUA ujung (path+destination): keduanya harus dijail.
+      expect(
+        await decideArgs(mode, root, "move_file", { path: outsideFile, destination: "b.txt" }),
+      ).toBe("deny")
+      expect(
+        await decideArgs(mode, root, "move_file", { path: "a.txt", destination: outsideFile }),
+      ).toBe("deny")
     }
   } finally {
     rmSync(root, { recursive: true, force: true })
@@ -302,8 +322,8 @@ test("matriks jail: tulis state .minicode/ ditolak di mode permisif", async () =
       // Menggeser state keluar workspace = menyebar bukti; tetap deny.
       expect(
         await decideArgs(mode, root, "move_file", {
-          from: ".minicode/sessions.db",
-          to: "docs/s.db",
+          path: ".minicode/sessions.db",
+          destination: "docs/s.db",
         }),
       ).toBe("deny")
     }

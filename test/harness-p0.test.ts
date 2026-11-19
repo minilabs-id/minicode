@@ -28,10 +28,10 @@ describe("harness P0.2: jail move_file/delete_file di permission", () => {
     dir = await mkdtemp(join(tmpdir(), "minicode-harness-"))
     const h = createPermissionHandler({ mode: "allow-all", root: dir })
     expect(
-      await h.check(call("move_file", { from: "a.txt", to: "../evil.txt" }), {} as never),
+      await h.check(call("move_file", { path: "a.txt", destination: "../evil.txt" }), {} as never),
     ).toBe("deny")
     expect(
-      await h.check(call("move_file", { from: "../evil.txt", to: "a.txt" }), {} as never),
+      await h.check(call("move_file", { path: "../evil.txt", destination: "a.txt" }), {} as never),
     ).toBe("deny")
     expect(await h.check(call("delete_file", { path: "../evil.txt" }), {} as never)).toBe("deny")
   })
@@ -39,18 +39,18 @@ describe("harness P0.2: jail move_file/delete_file di permission", () => {
   test("allow-all tetap deny move/delete ke file sensitif", async () => {
     dir = await mkdtemp(join(tmpdir(), "minicode-harness-"))
     const h = createPermissionHandler({ mode: "allow-all", root: dir })
-    expect(await h.check(call("move_file", { from: "a.txt", to: ".env" }), {} as never)).toBe(
-      "deny",
-    )
+    expect(
+      await h.check(call("move_file", { path: "a.txt", destination: ".env" }), {} as never),
+    ).toBe("deny")
     expect(await h.check(call("delete_file", { path: ".env" }), {} as never)).toBe("deny")
   })
 
   test("move_file sah di dalam workspace tetap allow", async () => {
     dir = await mkdtemp(join(tmpdir(), "minicode-harness-"))
     const h = createPermissionHandler({ mode: "allow-all", root: dir })
-    expect(await h.check(call("move_file", { from: "a.txt", to: "sub/b.txt" }), {} as never)).toBe(
-      "allow",
-    )
+    expect(
+      await h.check(call("move_file", { path: "a.txt", destination: "sub/b.txt" }), {} as never),
+    ).toBe("allow")
     expect(await h.check(call("delete_file", { path: "a.txt" }), {} as never)).toBe("allow")
   })
 })

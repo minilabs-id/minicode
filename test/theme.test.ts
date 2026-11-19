@@ -7,10 +7,14 @@ import { c, ESC, stripAnsi } from "../src/ui/render/theme.ts"
 
 const origColorterm = process.env.COLORTERM
 const origNoColor = process.env.NO_COLOR
+const origMinicodeColor = process.env.MINICODE_COLOR
 
 beforeEach(() => {
   process.env.COLORTERM = "truecolor"
   delete process.env.NO_COLOR
+  // v7.29: warna nyala by default di TTY. Hapus flag mono supaya test warna
+  // benar-benar menguji jalur berwarna, bukan sisa env dari test sebelumnya.
+  delete process.env.MINICODE_COLOR
   // Warna digate stdout.isTTY — stub TTY agar yang diuji palet, bukan gate.
   Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
 })
@@ -21,6 +25,8 @@ afterAll(() => {
   else process.env.COLORTERM = origColorterm
   if (origNoColor == null) delete process.env.NO_COLOR
   else process.env.NO_COLOR = origNoColor
+  if (origMinicodeColor == null) delete process.env.MINICODE_COLOR
+  else process.env.MINICODE_COLOR = origMinicodeColor
 })
 
 const COLOR_SLOTS = [
@@ -44,10 +50,31 @@ const COLOR_SLOTS = [
   "brightCyan",
 ] as const
 
-test("palet tunggal: semua slot warna mengeluarkan SGR saat truecolor", () => {
+test("palet tunggal: semua slot warna identitas saat MINICODE_COLOR=0", () => {
+  // v7.29: FORCE_MONO dihapus — warna nyala by default di TTY. Mode monokrom
+  // kini opt-out eksplisit lewat MINICODE_COLOR=0; paksa di sini untuk tetap
+  // menguji jalur aksesibilitas (bukan menghapus assertions warnanya).
+  process.env.MINICODE_COLOR = "0"
+  try {
+    for (const slot of COLOR_SLOTS) {
+      expect(c[slot]("X"), slot).toBe("X")
+      expect(c[slot]("X"), slot).not.toContain(ESC)
+    }
+  } finally {
+    delete process.env.MINICODE_COLOR
+  }
+})
+
+test("v7.29: semua slot warna memancarkan SGR saat TTY + truecolor", () => {
+  // Pasangan dari test mono di atas: sebelum v7.29 test ini satu-satunya jalur
+  // warna. Kini dijalankan dengan env bersih (beforeEach menghapus flag mono),
+  // jadi mengunci bahwa color-by-default benar-benar aktif.
   for (const slot of COLOR_SLOTS) {
     expect(c[slot]("X"), slot).toContain(ESC)
+    expect(stripAnsi(c[slot]("X")), slot).toBe("X")
   }
+  // Representasi truecolor spesifik: jangan sampai jatuh ke 16/256 warna.
+  expect(c.success("X")).toBe(`\x1b[38;2;137;209;133mX\x1b[39m`)
 })
 
 test("warna mati saat stdout bukan TTY walau COLORTERM=truecolor (Unix pipe)", () => {

@@ -36,6 +36,11 @@ export interface FooterStatus {
    * memetakan frame → glyph berwarna.
    */
   sparkFrame?: number
+  /**
+   * v7.29: interval kedip spark (ms) mengikuti kecepatan model — makin cepat
+   * stream teks masuk, makin kecil. 0/undefined = pakai default (200ms).
+   */
+  streamIntervalMs?: number
   /** Jumlah job bash background hidup (dihitung di cli — batas lapisan).
    * >= 1 = badge `◷ N` berputar; 0/undefined = tanpa badge. */
   backgroundJobs?: number
@@ -174,6 +179,7 @@ function footerCacheKey(s: FooterStatus, cols: number): string {
     s.context ?? "",
     s.metrics ?? "",
     s.sparkFrame ?? 0,
+    s.streamIntervalMs ?? 0,
     s.backgroundJobs ?? 0,
     s.backgroundFrame ?? 0,
     s.activity ?? "",

@@ -58,7 +58,7 @@ istilah teknis English — tabel ini mengunci maknanya.
 | **Minicode** | Layer agencode di atas MiniCore: tools, agents, policy, providers, memory, sessions, CLI |
 | **Tool** | Kemampuan yang dipilih model dalam loop ReAct; tool MCP dapat ditambahkan dinamis sebagai `serverId.toolName` |
 | **Tool scope** | `full` atau subset read-only `explore` — flag `--tool-scope` |
-| **WorkMode** | Cara agent bekerja: `DISCUSS`, `PLAN`, atau `BUILD` (alias produk untuk identitas internal `EXECUTE`) |
+| **WorkMode** | Cara agent bekerja: `DISCUSS` atau `BUILD` (alias produk untuk identitas internal `EXECUTE`). Nilai `PLAN` adalah legacy dan dinormalkan ke `DISCUSS` |
 | **PermissionMode** | Pilihan pengawasan: `AUTO` menjalankan capability yang diotorisasi; `ASK` meminta persetujuan untuk aksi yang digate |
 | **Tool Access Policy** | Batas capability yang tersedia, seperti read-only, allowlist, atau profil akses warisan `--allow-all` |
 | **Gate** | Tool wajib persetujuan manusia saat TTY; non-TTY selalu tolak (mis. `git_commit`, MCP, `delegate_task`) |

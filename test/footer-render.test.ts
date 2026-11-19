@@ -25,6 +25,22 @@ afterEach(() => {
   tty = undefined
 })
 
+/**
+ * v7.29: warna nyala by default di TTY. Test yang mengunci "tak ada SGR"
+ * memaksa MINICODE_COLOR=0 lewat helper ini lalu memulihkannya — jalur mono
+ * tetap diuji, bukan dihapus.
+ */
+function withMono<T>(fn: () => T): T {
+  const saved = process.env.MINICODE_COLOR
+  process.env.MINICODE_COLOR = "0"
+  try {
+    return fn()
+  } finally {
+    if (saved == null) delete process.env.MINICODE_COLOR
+    else process.env.MINICODE_COLOR = saved
+  }
+}
+
 describe("footer render", () => {
   test("shortModel membuang prefix provider", () => {
     expect(shortModel("acme::deepseek-v4-flash")).toBe("deepseek-v4-flash")
@@ -111,30 +127,35 @@ describe("footer render", () => {
     }
   })
 
-  test("timer di sebelah sparkle, separator bullet hilang, dan level warna naik", () => {
-    tty = installFakeTty({ columns: 90 })
-    const render = (
-      timer: string,
-      timerActive: boolean,
-      timerHighlight?: "seconds" | "minutes" | "hours",
-    ) =>
-      renderFooter(
-        { mode: "auto", model: "m1", cwd: "cwd", timer, timerActive, timerHighlight },
-        90,
-      )[0]!
-    const idle = render("00.00.00", false)
-    const seconds = render("00.00.42", true, "seconds")
-    const minutes = render("00.01.02", true, "minutes")
-    const hours = render("01.00.00", true, "hours")
-    expect(stripAnsi(idle)).toMatch(/✦ {2}00\.00\.00 {2}Discuss +m1 +cwd/)
-    expect(stripAnsi(seconds)).toMatch(/✦ {2}00\.00\.42 {2}Discuss +m1 +cwd/)
-    expect(stripAnsi(minutes)).toMatch(/✦ {2}00\.01\.02 {2}Discuss +m1 +cwd/)
-    expect(stripAnsi(hours)).toMatch(/✦ {2}01\.00\.00 {2}Discuss +m1 +cwd/)
-    for (const line of [idle, seconds, minutes, hours]) expect(stripAnsi(line)).not.toContain("•")
-    expect(idle).toContain("\x1b[90m00.00.00")
-    expect(seconds).toContain("\x1b[37m42\x1b[39m")
-    expect(minutes).toContain("\x1b[37m01\x1b[39m")
-    expect(hours).toContain("\x1b[37m01\x1b[39m")
+  test("timer di sebelah sparkle, separator bullet hilang, tanpa level warna (monokrom)", () => {
+    // v7.29: warna nyala by default — paksa MINICODE_COLOR=0 untuk mengunci
+    // bahwa di mode mono timer tak berubah level warna idle → busy.
+    withMono(() => {
+      tty = installFakeTty({ columns: 90 })
+      const render = (
+        timer: string,
+        timerActive: boolean,
+        timerHighlight?: "seconds" | "minutes" | "hours",
+      ) =>
+        renderFooter(
+          { mode: "auto", model: "m1", cwd: "cwd", timer, timerActive, timerHighlight },
+          90,
+        )[0]!
+      const idle = render("00.00.00", false)
+      const seconds = render("00.00.42", true, "seconds")
+      const minutes = render("00.01.02", true, "minutes")
+      const hours = render("01.00.00", true, "hours")
+      expect(stripAnsi(idle)).toMatch(/✦ {2}00\.00\.00 {2}Discuss +m1 +cwd/)
+      expect(stripAnsi(seconds)).toMatch(/✦ {2}00\.00\.42 {2}Discuss +m1 +cwd/)
+      expect(stripAnsi(minutes)).toMatch(/✦ {2}00\.01\.02 {2}Discuss +m1 +cwd/)
+      expect(stripAnsi(hours)).toMatch(/✦ {2}01\.00\.00 {2}Discuss +m1 +cwd/)
+      for (const line of [idle, seconds, minutes, hours]) {
+        expect(stripAnsi(line)).not.toContain("•")
+        // Mode mono: timer tetap di samping spark, tak ada SGR sama sekali.
+        expect(line).not.toContain("\x1b[")
+        expect(line).toBe(stripAnsi(line))
+      }
+    })
   })
 
   test("Work Mode stabil di kiri; Permission Mode tidak menggeser model", () => {
@@ -182,6 +203,15 @@ describe("footer render", () => {
     expect(c.success("Build")).not.toBe(c.info("Auto"))
   })
 
+  test("v7.29: footer memancarkan SGR saat warna aktif (tanpa MINICODE_COLOR)", () => {
+    // Pasangan dari test mono: env warna aktif by default di fake TTY.
+    tty = installFakeTty({ columns: 90 })
+    const line = renderFooter({ mode: "auto", model: "m1", cwd: "cwd" }, 90)[0]!
+    expect(line).toContain("\x1b[")
+    expect(stripAnsi(line)).toContain("Discuss")
+    expect(stripAnsi(line)).toContain("Auto")
+  })
+
   test("badge bash: titik monokrom (kuning aktif, abu nonaktif, merah unrestricted)", () => {
     tty = installFakeTty({ columns: 80 })
     expect(stripAnsi(paintBashStrict(true))).toBe("●")
@@ -223,15 +253,23 @@ describe("footer render", () => {
     expect(plain).toContain("Ask")
   })
 
-  test("spark: redup saat idle (frame 0), putih/abu saat busy (frame naik)", () => {
-    tty = installFakeTty({ columns: 80 })
-    const idle = renderFooter({ mode: "auto", model: "m1", cwd: "cwd" }, 80)[0]!
-    const busy1 = renderFooter({ mode: "auto", model: "m1", cwd: "cwd", sparkFrame: 1 }, 80)[0]!
-    const busy2 = renderFooter({ mode: "auto", model: "m1", cwd: "cwd", sparkFrame: 2 }, 80)[0]!
-    expect(stripAnsi(idle)).toContain("✦")
-    expect(stripAnsi(busy1)).toContain("✦")
-    expect(stripAnsi(busy2)).toContain("✦")
-    expect(busy1).not.toBe(busy2)
+  test("spark: glyph statis monokrom, tanpa animasi warna antar frame", () => {
+    // v7.29: di mode warna spark berdenyut (faint → gray → white), jadi test
+    // "tanpa animasi warna" ini dijalankan dengan MINICODE_COLOR=0.
+    withMono(() => {
+      tty = installFakeTty({ columns: 80 })
+      const idle = renderFooter({ mode: "auto", model: "m1", cwd: "cwd" }, 80)[0]!
+      const busy1 = renderFooter({ mode: "auto", model: "m1", cwd: "cwd", sparkFrame: 1 }, 80)[0]!
+      const busy2 = renderFooter({ mode: "auto", model: "m1", cwd: "cwd", sparkFrame: 2 }, 80)[0]!
+      for (const line of [idle, busy1, busy2]) {
+        expect(stripAnsi(line)).toContain("✦")
+        // Mode mono: tak ada SGR yang berubah antar frame.
+        expect(line).not.toContain("\x1b[")
+      }
+      // Tanpa kanal warna, frame idle/busy identik — animasi memang dihapus.
+      expect(busy1).toBe(busy2)
+      expect(idle).toBe(busy1)
+    })
   })
 
   test("injeksi ANSI dari nama model/cwd/context dinetralkan", () => {
@@ -334,20 +372,34 @@ describe("footer render", () => {
     expect(displayWidth(plain)).toBeLessThanOrEqual(69)
   })
 
-  test("cache footer: env tema berubah dirender ulang, array hasil tetap baru", () => {
-    tty = installFakeTty({ columns: 80 })
-    const args = { mode: "auto", model: "m1", cwd: "cwd" } as const
-    const colored = renderFooter(args, 80)[0]!
-    expect(colored).toContain("\x1b[")
-    // Mutasi hasil panggilan tidak boleh meracuni cache.
-    const mutable = renderFooter(args, 80)
-    mutable[0] = "rusak"
-    expect(renderFooter(args, 80)[0]).toBe(colored)
-    // NO_COLOR mengubah kapabilitas: cache lama (berwarna) tak boleh dipakai.
-    process.env.NO_COLOR = "1"
-    const plain = renderFooter(args, 80)[0]!
-    expect(plain).not.toContain("\x1b[")
-    delete process.env.NO_COLOR
-    expect(renderFooter(args, 80)[0]).toBe(colored)
+  test("cache footer: hasil array tetap baru (env tema tak mengubah output monokrom)", () => {
+    // v7.29: warna nyala by default — paksa MINICODE_COLOR=0 supaya env tema
+    // (COLORTERM/NO_COLOR) tak bisa mengubah isi footer di jalur mono.
+    withMono(() => {
+      tty = installFakeTty({ columns: 80 })
+      const args = { mode: "auto", model: "m1", cwd: "cwd" } as const
+      const plain = renderFooter(args, 80)[0]!
+      expect(plain).not.toContain("\x1b[")
+      // Mutasi hasil panggilan tidak boleh meracuni cache.
+      const mutable = renderFooter(args, 80)
+      mutable[0] = "rusak"
+      expect(renderFooter(args, 80)[0]).toBe(plain)
+      // MINICODE_COLOR=0 mengunci level 0: kunci cache dan isi footer tetap.
+      const savedColor = process.env.COLORTERM
+      const savedNoColor = process.env.NO_COLOR
+      process.env.COLORTERM = "truecolor"
+      process.env.NO_COLOR = "1"
+      try {
+        const afterEnv = renderFooter(args, 80)[0]!
+        expect(afterEnv).toBe(plain)
+        expect(afterEnv).not.toContain("\x1b[")
+      } finally {
+        if (savedNoColor === undefined) delete process.env.NO_COLOR
+        else process.env.NO_COLOR = savedNoColor
+        if (savedColor === undefined) delete process.env.COLORTERM
+        else process.env.COLORTERM = savedColor
+      }
+      expect(renderFooter(args, 80)[0]).toBe(plain)
+    })
   })
 })

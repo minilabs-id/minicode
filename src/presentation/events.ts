@@ -139,6 +139,12 @@ export interface ChildSessionLink {
    * membawanya (tetap sah, hanya tanpa identitas run anak).
    */
   runId?: string
+  /**
+   * Label manusiawi sub-agent (`explore-1`, `plan-2`, atau nama dari caller).
+   * Additive: jalur lama tanpa label tetap memakai marker code-derived.
+   * Dipakai UI untuk menggantikan `run_<8>`/`sub_<8>` yang tak bermakna.
+   */
+  label?: string
 }
 
 /**
@@ -229,6 +235,24 @@ export interface ToolProgressEvent extends Base {
   type: "tool.progress"
   toolCallId: string
   message: string
+}
+
+/**
+ * Langkah agen baru saja dimulai (dari `step:started` kernel).
+ *
+ * DURABLE supaya `state.seq` naik dan cache snapshot UI ter-invalidasi —
+ * tanpa itu baris progres di composer bisa stale saat turn berjalan. Ini
+ * observasi progres, BUKAN aktivitas: sengaja tak membuat baris ledger/tool.
+ *
+ * `step` = indeks mentah kernel (0-based). `total` opsional: kernel tidak
+ * mengirimnya, jadi UI wajib jujur bila absen (tampilkan "step N" saja).
+ * `label` = ringkasan netral (bukan terjemahan) untuk fallback konsumer.
+ */
+export interface StepStartedEvent extends Base {
+  type: "step.started"
+  step: number
+  total?: number
+  label?: string
 }
 export interface ToolCompletedEvent extends Base {
   type: "tool.completed"
@@ -482,6 +506,25 @@ export interface VerificationObservedEvent extends Base {
 }
 
 /**
+ * Judul diri sub-agent yang datang belakangan (self-title, panggilan LLM
+ * paralel di `delegate_task`). BUKAN tool event: memakai `tool.*` membuat
+ * transkrip mengira terminal tool sudah tampil (`presentedTerminals`) dan
+ * event non-tool dikeluarkan dari replay. Event ini HANYA menimpa `label`
+ * pada activity yang SUDAH ada — tak pernah membuat baris baru.
+ *
+ * `toolCallId` = `parentToolCallId` taut delegate (lihat adapter), `sessionId`
+ * = session anak pemilik judul. Durable supaya `state.seq` naik dan cache
+ * snapshot UI ter-invalidasi saat label berubah.
+ */
+export interface ActivityLabelEvent extends Base {
+  type: "activity.label"
+  toolCallId: string
+  label: string
+  /** Taut ke delegate_task pemanggil (dibawa adapter untuk korelasi UI). */
+  parentLink?: ChildSessionLink
+}
+
+/**
  * F-CTRL-1/F-CTRL-2: keputusan consequence terstruktur (ACE) — BUKAN string
  * stderr. Diterjemahkan dari `ConsequenceDecision` di policy ke literal display
  * yang stabil. `newEvidenceSinceLastAttempt` membawa alasan "VERIFYING / Tamper
@@ -554,6 +597,7 @@ export type DomainEvent =
   | ReasoningCompletedEvent
   | ToolStartedEvent
   | ToolProgressEvent
+  | StepStartedEvent
   | ToolCompletedEvent
   | ToolFailedEvent
   | ToolDeniedEvent
@@ -569,6 +613,7 @@ export type DomainEvent =
   | DiagnosticRaisedEvent
   | CheckpointCreatedEvent
   | VerificationObservedEvent
+  | ActivityLabelEvent
   | ConsequenceDecidedEvent
   | ContextWindowEvent
   | ContextCutoffEvent
@@ -591,6 +636,9 @@ export const DURABILITY: Record<DomainEventType, { durable: boolean; replayable:
   "reasoning.completed": { durable: true, replayable: true },
   "tool.started": { durable: true, replayable: true },
   "tool.progress": { durable: false, replayable: false },
+  // Durable: progres langkah wajib menaikkan state.seq supaya cache snapshot UI
+  // ter-invalidasi saat step baru dimulai (baris progres live di composer).
+  "step.started": { durable: true, replayable: true },
   "tool.completed": { durable: true, replayable: true },
   "tool.failed": { durable: true, replayable: true },
   "tool.denied": { durable: true, replayable: true },
@@ -606,6 +654,9 @@ export const DURABILITY: Record<DomainEventType, { durable: boolean; replayable:
   "diagnostic.raised": { durable: true, replayable: true },
   "checkpoint.created": { durable: true, replayable: true },
   "verification.observed": { durable: true, replayable: true },
+  // Durable: perubahan label wajib menaikkan state.seq supaya cache snapshot
+  // UI (ber-key objek state + seq) ter-invalidasi dan baris ledger di-repaint.
+  "activity.label": { durable: true, replayable: true },
   "consequence.decided": { durable: true, replayable: true },
   "context.window": { durable: false, replayable: false },
   "context.cutoff": { durable: true, replayable: true },

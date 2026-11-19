@@ -12,8 +12,16 @@
 // assertion "ada parentLink" otomatis gagal. Hermetic: fake bus lokal.
 
 import { expect, test } from "bun:test"
+import { toPresentationEvent } from "../cli/bootstrap/presentation-bridge.ts"
 import { assertExecutionShape, createPresentationAdapter } from "../src/presentation/adapter.ts"
-import type { DomainEvent, EventBusLike, ToolStartedEvent } from "../src/presentation/events.ts"
+import type {
+  ActivityLabelEvent,
+  DomainEvent,
+  EventBusLike,
+  ToolStartedEvent,
+} from "../src/presentation/events.ts"
+import { createInitialState } from "../src/presentation/model.ts"
+import { createReducerDiagnostics, reduce } from "../src/presentation/reducer.ts"
 import type { UiExecution, UiStep } from "../src/ui/contract.ts"
 
 function fakeBus(): EventBusLike & {
@@ -312,4 +320,66 @@ test("dua anak berbeda pada SATU induk pending bertaut ke induk yang sama", () =
   expect(l1?.parentLink?.parentToolCallId).toBe("dt_1")
   expect(l2?.parentLink?.parentToolCallId).toBe("dt_1")
   a.dispose()
+})
+
+// ── Judul diri (self-title): adapter → DomainEvent → reducer → bridge ──
+
+test("minicode:child-label → activity.label menimpa label activity anak (tanpa baris baru)", () => {
+  const bus = fakeBus()
+  const a = createPresentationAdapter(bus, { sessionId: "parent-1" })
+  const events = collect(a)
+  bus.emit("execution:started", startedPayload("dt_1", "delegate_task", { prompt: "x" }))
+  bus.emit("execution:started", {
+    execution: {
+      call: { id: "k_read", name: "read_file", args: { path: "config.ts" } },
+      result: {},
+    },
+    forwardedChild: "sub_aa11",
+    childLabel: "explore-1",
+  })
+  bus.emit("provider:extension", {
+    kind: "minicode:child-label",
+    data: { forwardedChild: "sub_aa11", childLabel: "audit·allowlist" },
+  })
+
+  const label = events.find((e): e is ActivityLabelEvent => e.type === "activity.label")
+  expect(label).toBeTruthy()
+  expect(label!.toolCallId).toBe("dt_1")
+  expect(label!.label).toBe("audit·allowlist")
+  expect(label!.sessionId).toBe("sub_aa11")
+
+  let state = createInitialState("parent-1")
+  const diag = createReducerDiagnostics()
+  for (const e of events) state = reduce(state, e, diag)
+  const child = [...state.activities.values()].find((x) => x.toolCallId === "k_read")
+  expect(child?.label).toBe("audit·allowlist")
+  expect(child?.parentToolCallId).toBe("dt_1")
+  // Durable: seq ikut naik supaya cache snapshot UI ter-invalidasi.
+  expect(state.seq).toBeGreaterThanOrEqual(label!.eventSeq)
+  expect(diag.unknownEvent).toBe(0)
+
+  const ui = toPresentationEvent(label!)
+  expect(ui?.type).toBe("activity.label")
+  expect(ui?.label).toBe("audit·allowlist")
+  expect(ui?.toolCallId).toBe("dt_1")
+  a.dispose()
+})
+
+test("activity.label tanpa activity yang cocok = lateEvent, bukan activity phantom", () => {
+  let state = createInitialState("parent-1")
+  const diag = createReducerDiagnostics()
+  const base = {
+    eventSeq: 7,
+    ts: 1000,
+    sessionId: "sub_none",
+    turnId: 1,
+    v: 1,
+  }
+  state = reduce(
+    state,
+    { ...base, type: "activity.label", toolCallId: "dt_none", label: "late title" },
+    diag,
+  )
+  expect(state.activities.size).toBe(0)
+  expect(diag.lateEvent).toBe(1)
 })

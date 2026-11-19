@@ -5,6 +5,7 @@ import { promptAsk, promptAskText } from "../src/ui/approval/prompt.ts"
 import { glyphs, stripAnsi } from "../src/ui/render/theme.ts"
 import { displayWidth } from "../src/ui/render/width.ts"
 import { popupBoxWidth } from "../src/ui/screens/dialog.ts"
+import { IDLE_CANCEL_MS, IDLE_WARN_MS } from "../src/ui/screens/form.ts"
 import { getApprovalSink, setApprovalSink } from "../src/ui/tui/transcript.ts"
 import { installFakeTty, KEY } from "./helpers/tui-harness.ts"
 
@@ -404,6 +405,76 @@ describe("ask_user modal: hint & echo", () => {
     } finally {
       if (prev === undefined) delete process.env.MINICODE_ASCII
       else process.env.MINICODE_ASCII = prev
+    }
+  })
+})
+
+describe("M1: idle guard approval di-reset tiap keypress", () => {
+  test("tombol tak dikenal (tak mengubah pilihan) tetap mereset timer idle", async () => {
+    // Idle timer form = 80 dtk + 10 dtk (waktu nyata terlalu lama untuk test).
+    // Hanya timer dengan delay itu yang kita tangkap; timer lain (flush Esc)
+    // tetap memakai setTimeout asli.
+    type Captured = {
+      id: ReturnType<typeof setTimeout>
+      fn: () => void
+      delay: number
+      cleared: boolean
+    }
+    const targets = new Set([IDLE_WARN_MS, IDLE_CANCEL_MS])
+    const realSet = globalThis.setTimeout
+    const realClear = globalThis.clearTimeout
+    let caps: Captured[] = []
+    let seq = 1
+    globalThis.setTimeout = ((fn: (...a: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+      if (ms != null && targets.has(ms)) {
+        const id = seq++ as unknown as ReturnType<typeof setTimeout>
+        caps.push({ id, fn: () => fn(...args), delay: ms, cleared: false })
+        return id
+      }
+      return realSet(fn as never, ms, ...(args as []))
+    }) as typeof setTimeout
+    globalThis.clearTimeout = ((id: ReturnType<typeof setTimeout>) => {
+      const hit = caps.find((x) => x.id === id)
+      if (hit) {
+        hit.cleared = true
+        return
+      }
+      realClear(id)
+    }) as typeof clearTimeout
+    const active = (delay: number) => caps.filter((x) => !x.cleared && x.delay === delay).length
+    const fire = (delay: number) => {
+      const t = caps.find((x) => !x.cleared && x.delay === delay)
+      if (!t) throw new Error(`tidak ada timer idle aktif ${delay}`)
+      t.cleared = true
+      t.fn()
+    }
+
+    tty = installFakeTty({ columns: 80, rows: 24 })
+    setApprovalSink({
+      pushBlock: () => {},
+      repaint: () => {},
+      suspend: () => {},
+      resume: () => {},
+    })
+    let p!: Promise<string | null>
+    try {
+      p = promptAsk({ name: "bash", args: {} })
+      await tty.ready()
+      // Waktu berjalan 80 dtk → warning, masuk fase batal 10 dtk.
+      fire(IDLE_WARN_MS)
+      expect(active(IDLE_CANCEL_MS)).toBe(1)
+      // `q` bukan quick key dan tak mengubah seleksi: changed = false.
+      // Kode lama tak memanggil idle.reset() di sini → timer batal tetap aktif.
+      await tty.send("q")
+      expect(active(IDLE_CANCEL_MS)).toBe(0)
+      expect(active(IDLE_WARN_MS)).toBe(1)
+      // Selesaikan modal normal supaya tak menggantung lintas test.
+      await tty.send("y")
+      expect(await p).toBe("allow")
+    } finally {
+      globalThis.setTimeout = realSet
+      globalThis.clearTimeout = realClear
+      caps = []
     }
   })
 })

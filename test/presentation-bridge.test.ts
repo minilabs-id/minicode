@@ -70,6 +70,13 @@ const fixtures: Record<DomainEventType, DomainEvent> = {
     toolCallId: "c1",
     message: "50%",
   },
+  "step.started": {
+    ...base(99),
+    type: "step.started",
+    step: 1,
+    total: 4,
+    label: "step 2/4",
+  },
   "tool.completed": {
     ...base(12),
     type: "tool.completed",
@@ -218,6 +225,13 @@ const fixtures: Record<DomainEventType, DomainEvent> = {
     parentId: "t0",
     dependsOn: ["t0"],
     revision: 2,
+  },
+  // v7.26: self-title sub-agent mengganti label activity secara live.
+  "activity.label": {
+    ...base(31),
+    type: "activity.label",
+    toolCallId: "dt_1",
+    label: "audit·allowlist",
   },
 }
 

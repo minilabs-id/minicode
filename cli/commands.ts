@@ -60,6 +60,13 @@ export interface CommandContext {
    * mengisinya untuk melepas terminal alt-screen + raw mode dan menutup sesi induk.
    * Tanpa injeksi tetap jalan (no-op). */
   onBeforeSpawn?: () => void | Promise<void>
+  /**
+   * v7.32: jalankan shell INTERAKTIF (PTY/stdio-inherit) lewat handoff aman:
+   * composition root melepas alt-screen + raw mode, spawn shell yang benar-benar
+   * interaktif di layar utama, lalu mengembalikan TUI saat shell selesai.
+   * Absen (non-TTY / one-shot) = fail-closed, command ditolak.
+   */
+  withShell?: (cmd: string) => Promise<void>
   /** Kontrak control-plane (Phase 6): angka konteks SAAT INI dari sumber
    * kebenaran kernel (estimateSessionContext) — bukan usage kumulatif.
    * Dibedakan dari Input/Output/Total (provider usage) di /status. */
@@ -153,6 +160,7 @@ export const BUILTIN_COMMANDS: BuiltinCommand[] = [
   { name: "status", descKey: "help.desc.status" },
   { name: "sessions", args: "[id|history|branches]", descKey: "help.desc.sessions" },
   { name: "init", descKey: "help.desc.init" },
+  { name: "shell", descKey: "help.desc.shell" },
   { name: "exit", descKey: "help.desc.exit" },
 ]
 
@@ -178,7 +186,7 @@ export const DRIVER_HELP_COMMANDS: BuiltinCommand[] = [
 export const HELP_GROUPS: readonly { key: MsgKey; names: readonly string[] }[] = [
   {
     key: "help.gGeneral",
-    names: ["help", "status", "sessions", "clear", "copy", "init", "exit"],
+    names: ["help", "status", "sessions", "clear", "copy", "init", "shell", "exit"],
   },
   { key: "help.gModel", names: ["model", "context", "provider"] },
   { key: "help.gMode", names: ["mode", "undo", "redo", "lang"] },
@@ -203,8 +211,6 @@ const KEYBOARD_HELP: [string, MsgKey][] = [
   ["ctrl+j", "help.k.newline"],
   ["ctrl+w", "help.k.delWord"],
   ["ctrl+u", "help.k.clearLine"],
-  ["ctrl+o", "help.k.compact"],
-  ["ctrl+t", "help.k.thinking"],
   ["esc", "help.k.esc"],
   ["ctrl+c", "help.k.ctrlC"],
   ["ctrl+d", "help.k.ctrlD"],
@@ -695,6 +701,22 @@ export async function handleBuiltinCommand(
         }
       }
       console.log(`\n${t("help.keysLine")}\n`)
+      return { handled: true }
+    }
+
+    case "shell": {
+      // v7.32: handoff ke shell asli yang interaktif (PTY/stdio-inherit).
+      // Komposisi root yang menyuntik `withShell`; tanpa itu (non-TTY/one-shot)
+      // kita tolak fail-closed, bukan mencoba spawn buta.
+      if (!ctx.withShell) {
+        printCommandLines([t("shell.unavailable")])
+        return { handled: true }
+      }
+      try {
+        await ctx.withShell(args)
+      } catch (error) {
+        printCommandLines([t("shell.failed", { msg: formatError(error) })])
+      }
       return { handled: true }
     }
 

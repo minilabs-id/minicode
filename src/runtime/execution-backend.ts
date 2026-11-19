@@ -28,7 +28,7 @@ import { type ChildProcess, spawn, spawnSync } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { resolveTrustedExecutable } from "../lib/trusted-exec.ts"
 import { sanitizeSpawnEnv } from "../policy/scrub.ts"
-import { dockerAvailable, runInDocker } from "../sandbox/docker.ts"
+import { type DockerRunOptions, dockerAvailable, runInDocker } from "../sandbox/docker.ts"
 import { osSandboxAvailable, osSandboxTypeName, runInOsSandbox } from "../sandbox/os.ts"
 
 /** Backend fisik yang dikenal M5. Remote = deferred (bukan P1). */
@@ -242,6 +242,38 @@ export const DEFAULT_BACKEND_WAIT_MS = 5_000
  */
 function allocateBackendHandleId(): string {
   return `be_${randomUUID().slice(0, 8)}`
+}
+
+/**
+ * [AUDIT] Kumpulkan opsi `runInDocker` dari request backend. Diekspor supaya
+ * forwarding `AbortSignal` bisa diuji langsung tanpa Docker terpasang (shim
+ * start() menunggu penuh, jadi satu-satunya jalur cancel mid-flight adalah
+ * signal yang diteruskan ke runner). Jangan jatuhkan `req.signal` — bwrap/
+ * seatbelt sudah meneruskannya; docker dulu ketinggalan.
+ */
+export function dockerRunOptionsFromRequest(req: BackendExecRequest): DockerRunOptions {
+  return {
+    ...(req.signal ? { signal: req.signal } : {}),
+    ...(req.timeoutMs !== undefined ? { timeoutMs: req.timeoutMs } : {}),
+    ...(req.env ? { env: req.env } : {}),
+  }
+}
+
+/**
+ * [AUDIT] Terjemahkan hasil runner run-to-completion menjadi observasi fisik.
+ * Exit code bukan nol = GAGAL (`status: "failed"`), bukan sekadar "exited" yang
+ * nanti dibaca sebagai completed — kalau tidak, result-envelope tools kehilangan
+ * penanda isError (parity dengan jalur bash/code_run). Host backend sengaja
+ * tidak diubah; helper ini khusus shim sandbox.
+ */
+export function shimCompletionToObservation(
+  code: number | null,
+  output: string,
+): BackendObservation {
+  if (code !== null && code !== 0) {
+    return { status: "failed", exitCode: code, error: output }
+  }
+  return { status: "exited", exitCode: code }
 }
 
 // ── Mekanik kill bersama (cermin bash.ts:96-124 + F-23; didokumentasikan,
@@ -530,7 +562,7 @@ function createRunToCompletionShim(
     observe(handle: BackendHandle): BackendObservation {
       const rec = handle.kind === kind ? records.get(handle.id) : undefined
       if (!rec) return { status: "unknown", error: "no such handle (disposed or foreign)" }
-      return { status: "exited", exitCode: rec.code }
+      return shimCompletionToObservation(rec.code, rec.output)
     },
     cancel(handle: BackendHandle, _reason: string): BackendCancelResult {
       const rec = handle.kind === kind ? records.get(handle.id) : undefined
@@ -582,11 +614,7 @@ export function createDockerBackend(): ExecutionBackend {
     "docker",
     () => dockerAvailable(),
     "docker unavailable (no silent host fallback)",
-    (req) =>
-      runInDocker(req.cmd, req.cwd ?? process.cwd(), {
-        ...(req.timeoutMs !== undefined ? { timeoutMs: req.timeoutMs } : {}),
-        ...(req.env ? { env: req.env } : {}),
-      }),
+    (req) => runInDocker(req.cmd, req.cwd ?? process.cwd(), dockerRunOptionsFromRequest(req)),
   )
 }
 

@@ -413,7 +413,8 @@ export function renderMarkdownTable(
       rows: table.rows,
       aligns: table.aligns,
     },
-    { width, styleHeader: true, formatCell, box: true, fairMinimums: true },
+    // Renderer flat: tabel markdown tanpa kotak/garis, cuma kolom rata.
+    { width, styleHeader: true, formatCell, box: false, fairMinimums: true },
   )
 }
 

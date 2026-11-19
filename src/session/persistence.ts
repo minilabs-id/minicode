@@ -242,6 +242,10 @@ function isValidTaskVerification(value: unknown): boolean {
   )
 }
 
+export function isValidEventShapeForTest(value: Record<string, unknown>): boolean {
+  return isValidEventShape(value)
+}
+
 function isValidEventShape(value: Record<string, unknown>): boolean {
   const isStr = (k: string): boolean => typeof value[k] === "string"
   const isNum = (k: string): boolean => typeof value[k] === "number"
@@ -271,13 +275,29 @@ function isValidEventShape(value: Record<string, unknown>): boolean {
         typeof argsSummary === "object"
       )
     }
+    // v7.31: `||` dulu membuat tool.completed dengan hanya `paths` lolos decode,
+    // lalu reducer membaca `event.toolCallId` undefined ⇒ seluruh state sesi
+    // terhapus. Tool events WAJIB punya toolCallId; hanya file.changed yang
+    // boleh divalidasi lewat `paths`.
     case "tool.progress":
     case "tool.completed":
     case "tool.failed":
     case "tool.denied":
     case "tool.cancelled":
+      return isStr("toolCallId")
     case "file.changed":
-      return isStr("toolCallId") || isArr("paths")
+      return isArr("paths")
+    // v7.27: `step.started` durable untuk invalidasi cache snapshot UI. Tanpa
+    // validator ini, decodePresentationEvent menolaknya saat replay (default false)
+    // sehingga prefix progres hilang walau barisnya tersimpan.
+    case "step.started":
+      return (
+        Number.isSafeInteger(value.step) &&
+        (value.step as number) >= 0 &&
+        (value.total === undefined ||
+          (Number.isSafeInteger(value.total) && (value.total as number) > 0)) &&
+        (value.label === undefined || isStr("label"))
+      )
     case "turn.completed":
       return !!value.summary
     case "turn.failed":
@@ -292,6 +312,11 @@ function isValidEventShape(value: Record<string, unknown>): boolean {
     case "model.completed":
     case "reasoning.completed":
       return isStr("text")
+    // v7.31: self-title sub-agent (activity.label) adalah durable — tanpa
+    // validator ini decodePresentationEvent menolaknya saat replay dan judul
+    // manusiawi kembali ke `explore-N` setelah restart.
+    case "activity.label":
+      return isStr("toolCallId") && isStr("label") && isValidParentLink(value.parentLink)
     case "approval.requested":
       return isStr("approvalId")
     case "approval.settled":
@@ -3298,6 +3323,9 @@ async function deleteSessionCompletely(id: string, cwd?: string): Promise<void> 
       id: string
     }[]
     for (const kid of kids) {
+      // v7.31: provenance ringkasan ikut dihapus — session id yang dibuat ulang
+      // tak boleh mewarisi canonical_first_text lama (ringkasan → pesan user).
+      db.prepare("DELETE FROM history_summaries WHERE session_id = ?").run(kid.id)
       db.prepare("DELETE FROM history_projections WHERE session_id = ?").run(kid.id)
       db.prepare("DELETE FROM runs WHERE session_id = ?").run(kid.id)
       db.prepare("DELETE FROM threads WHERE session_id = ?").run(kid.id)
@@ -3319,6 +3347,8 @@ async function deleteSessionCompletely(id: string, cwd?: string): Promise<void> 
     // P2.6: Run sesi ini ikut mati — recreate id yang sama tak boleh
     // mewarisi residu RUNNING/UNKNOWN dari incarnasi sebelumnya.
     db.prepare("DELETE FROM runs WHERE session_id = ?").run(id)
+    // v7.31: hapus provenance ringkasan bersama proyeksinya (lihat atas).
+    db.prepare("DELETE FROM history_summaries WHERE session_id = ?").run(id)
     db.prepare("DELETE FROM history_projections WHERE session_id = ?").run(id)
   })
   try {

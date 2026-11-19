@@ -25,7 +25,6 @@ import {
 import { appendWrapped, shaveWrapped } from "../render/composer-wrap.ts"
 import { formatError } from "../render/errors.ts"
 import { listRow } from "../render/list.ts"
-import { LOGO_WIDTH, renderLogoRows } from "../render/logo.ts"
 import { sanitizeAnsi, sanitizeAnsiLine, stripSgr } from "../render/sanitize.ts"
 import { c, glyphs, scrimMode, scrimSgr } from "../render/theme.ts"
 import { chunkByWidth, displayWidth, escapeLength, truncateToWidth } from "../render/width.ts"
@@ -72,7 +71,11 @@ export interface TuiHost {
   cycleWorkMode(dir: 1 | -1): void
   /** Toggle PermissionMode AUTO↔ASK (Shift+Tab). */
   togglePermissionMode(): void
-  /** Toggle compact / reasoning (Ctrl+O / Ctrl+T). */
+  /**
+   * Dipertahankan hanya untuk kompatibilitas komposisi/fixture lama. Binding
+   * Ctrl+O/Ctrl+T sudah dihapus: renderer flat tak mengonsumsi flag-flag ini,
+   * jadi memanggilnya hanya menghasilkan kwitansi palsu.
+   */
   toggleCompact(): void
   toggleReasoning(): void
 }
@@ -114,6 +117,8 @@ const promptFirst = (): string => `minicode ${glyphs.arrow} `
 const promptCont = (): string => `  ${glyphs.dot} `
 const TIMER_TEXT = "00.00.00"
 const DOT_INTERVAL_MS = 200
+/** v7.29: peta laju stream teks → interval kedip spark (sama seperti turn-status). */
+const SPARK_INTERVALS = [120, 150, 220, 320] as const
 /** Badge job background berputar lebih pelan dari dots (tidak berkedip). */
 const WAITING_INTERVAL_MS = 400
 const DOT_PHASES = ["...", "..", ".", ".."] as const
@@ -299,15 +304,27 @@ export class TuiApp {
   private draft = ""
   private editing = true
   private busy = false
-  private thinkingActive = false
+  /** v7.29: laju stream teks → interval kedip spark. */
+  private streamDeltas: number[] = []
+  private lastStreamTextAt = 0
+  private streamIntervalMs = 0
   private turnStartedAt = 0
   private activityTimer: ReturnType<typeof setTimeout> | undefined
   // Clock badge job background: TERPISAH dari activityTimer karena job hidup
   // justru saat turn IDLE (activityTimer hanya jalan saat busy).
   private waitingTimer: ReturnType<typeof setTimeout> | undefined
   private waitingStartedAt = 0
-  /** Timestamp abort terakhir (ms) — deteksi double-tap Esc = quit. */
+  /** Timestamp abort terakhir (ms) — dipakai BERSAMA `awaitingSecondEsc` untuk
+   * jendela double-tap Esc = quit. Timestamp saja tak cukup: ia basi setelah
+   * draft baru diketik (temuan audit VERIFIED). */
   private lastAbortAt = 0
+  /**
+   * Khusus jendela "Esc lagi = quit" setelah abort. Beda dari `lastIdleEscapeAt`
+   * (gesture /undo saat idle) dan diprogram ulang tiap abort. Draft baru / submit
+   * / lewatnya 1,5 dtk mematikan flag ini supaya Esc berikutnya tak menyalahartikan
+   * "hapus draft" sebagai quit.
+   */
+  private awaitingSecondEsc = false
   private lastIdleEscapeAt = 0
   /** Hint "tekan lagi untuk keluar" tampil sekali setelah abort pertama. */
   private abortHintOn = false
@@ -382,8 +399,6 @@ export class TuiApp {
   private preferredCol: number | null = null
   /** Ukuran transkrip saat mulai scroll ke atas (basis hitung baris baru). */
   private scrollBase = 0
-  /** Panjang visual terakhir (kunci posisi baca agar stream tak merampasnya). */
-  private lastWrapped = 0
   /** Auto-scroll saat drag seleksi menempel di tepi viewport (feature). */
   private autoScrollTimer: ReturnType<typeof setInterval> | undefined
   /** +1 = tepi ATAS (gulir ke konten lama); -1 = tepi BAWAH (ke konten baru). */
@@ -557,26 +572,46 @@ export class TuiApp {
         } catch {}
       }
       sub("turn:started", () => {
-        this.thinkingActive = false
         this.turnStartedAt = Date.now()
+        this.streamDeltas = []
+        this.lastStreamTextAt = 0
+        this.streamIntervalMs = 0
+        // Turn BARU harus mulai bersih: hint "Esc lagi = quit" dari abort di
+        // turn sebelumnya tak boleh bocor ke turn yang tak berhubungan (audit).
+        this.abortHintOn = false
         this.startActivityClock()
       })
-      sub("provider:extension", (event: { kind?: string }) => {
-        if (event?.kind === "reasoning") this.thinkingActive = true
-      })
+      // v7.29: reasoning tidak lagi punya baris status khusus; transkrip
+      // tetap menerima event reasoning lewat subscription Transcript sendiri.
       sub("provider:text", () => {
-        this.thinkingActive = false
+        // v7.29: ukur jeda antar chunk teks (jendela 6 sampel) untuk mengatur
+        // kecepatan kedip spark — model cepat = kelip cepat, lambat = lambat.
+        const now = Date.now()
+        if (this.lastStreamTextAt > 0) {
+          const d = now - this.lastStreamTextAt
+          if (d > 5 && d < 2000) {
+            this.streamDeltas.push(d)
+            if (this.streamDeltas.length > 6) this.streamDeltas.shift()
+            const avg = this.streamDeltas.reduce((a, b) => a + b, 0) / this.streamDeltas.length
+            this.streamIntervalMs =
+              avg < 120
+                ? SPARK_INTERVALS[0]
+                : avg < 250
+                  ? SPARK_INTERVALS[1]
+                  : avg < 500
+                    ? SPARK_INTERVALS[2]
+                    : SPARK_INTERVALS[3]
+          }
+        }
+        this.lastStreamTextAt = now
       })
-      sub("execution:started", () => {
-        this.thinkingActive = false
-      })
-      sub("execution:completed", () => {
-        this.thinkingActive = false
-      })
-      sub("turn:completed", () => {
-        this.thinkingActive = false
-      })
+      sub("execution:started", () => {})
+      sub("execution:completed", () => {})
+      sub("turn:completed", () => {})
       sub("context:compacted")
+      // v7.28: anchor atas membuat 0 = kepala. Resume history harus mulai
+      // dari ekor (terbaru), sama seperti setelah ketikan/submit.
+      this.followTail()
       this.scrollBase = this.transcript.total()
       this.setMouseMode(mouseSelectionEnabled() ? "drag" : "off")
       if (this.initialDraft) {
@@ -691,14 +726,23 @@ export class TuiApp {
       this.host.abort()
     } catch {}
     const now = Date.now()
-    const doubleTap = now - this.lastAbortAt < 1500
+    // Flag eksplisit, bukan `lastAbortAt` saja: timestamp dari abort lama bisa
+    // masih dalam jendela 1,5 dtk saat user sudah mengetik draft baru (audit).
+    const doubleTap = this.awaitingSecondEsc && now - this.lastAbortAt < 1500
     if (!doubleTap) {
       this.abortHintOn = true
       this.startActivityClock()
     }
     this.lastAbortAt = now
+    this.awaitingSecondEsc = true
     if (doubleTap) this.quit()
     else this.paintCurrent()
+  }
+
+  /** Matikan jendela "Esc lagi = quit" setelah abort (audit VERIFIED). */
+  private disarmAbortQuit(): void {
+    this.awaitingSecondEsc = false
+    this.lastAbortAt = 0
   }
 
   private handleKeys(keys: { key: PromptKey }[]): boolean {
@@ -747,7 +791,8 @@ export class TuiApp {
         this.applyEngine({ type: key.type === "wheelup" ? "up" : "down" })
         return
       }
-      this.scrollBy(key.type === "wheelup" ? 0.5 : -0.5)
+      // v7.28 anchor atas: wheelup = ke atas/lama (scrollBack mengecil).
+      this.scrollBy(key.type === "wheelup" ? -0.5 : 0.5)
       return
     }
     // Scroll SELALU tersedia (menu buka/tutup, busy/idle, layar menciut) —
@@ -760,10 +805,11 @@ export class TuiApp {
     if (key.type === "pageup" || key.type === "pagedown") {
       const mod = key.modifier ?? 0
       if (mod === 2) {
-        this.scrollBy(key.type === "pageup" ? 0.5 : -0.5)
+        // v7.28: PgUp = naik (negatif), PgDn = turun (positif).
+        this.scrollBy(key.type === "pageup" ? -0.5 : 0.5)
         return
       }
-      this.scrollBy(key.type === "pageup" ? 1 : -1)
+      this.scrollBy(key.type === "pageup" ? -1 : 1)
       return
     }
     // Home/End LOMPAT transkrip HANYA saat prompt kosong & tanpa dropdown
@@ -798,6 +844,18 @@ export class TuiApp {
       return
     }
     if (key.type === "esc") {
+      // Cek jendela abort DULUAN, sebelum cabang busy/idle. Turn yang dibatalkan
+      // bisa selesai lebih cepat dari jari user: tanpa ini Esc kedua jatuh ke
+      // cabang idle dan (dalam kondisi gesture tertentu) memicu /undo, bukan quit.
+      // Jendela diprogram oleh FLAG eksplisit, bukan timestamp saja: timestamp
+      // basi setelah draft baru diketik (audit VERIFIED). Lewat 1,5 dtk = mati.
+      if (this.awaitingSecondEsc && Date.now() - this.lastAbortAt >= 1500) {
+        this.disarmAbortQuit()
+      }
+      if (this.awaitingSecondEsc && Date.now() - this.lastAbortAt < 1500) {
+        this.quit()
+        return
+      }
       if (this.isBusy()) {
         this.lastIdleEscapeAt = 0
         this.requestAbort()
@@ -840,7 +898,7 @@ export class TuiApp {
     // permintaan pemilik repo): tombol penyusun teks tetap jalan supaya koreksi
     // bisa diketik selagi model bekerja, dan Enter mengantri sebagai informasi
     // tambahan (`host.enqueue`). Yang tetap ditahan saat busy: Escape (abort),
-    // scroll/selection (di atas), Tab/Shift+Tab/Ctrl+O/Ctrl+T/Ctrl+R, karena
+    // scroll/selection (di atas), Tab/Shift+Tab/Ctrl+R, karena
     // semuanya memutasi mode atau membuka overlay yang tak boleh balapan dengan
     // turn. Ctrl+D baris-kosong tetap abort + quit (I14, jalan keluar saat abort
     // macet).
@@ -883,16 +941,9 @@ export class TuiApp {
       this.paintCurrent()
       return
     }
-    if (key.type === "ctrl-o") {
-      this.host.toggleCompact()
-      this.paintCurrent()
-      return
-    }
-    if (key.type === "ctrl-t") {
-      this.host.toggleReasoning()
-      this.paintCurrent()
-      return
-    }
+    // Ctrl+O / Ctrl+T sengaja TIDAK di-bind lagi. Dulu keduanya memutasi flag
+    // UI dan mencetak kwitansi, padahal renderer flat mengabaikan flag itu —
+    // kontrol mati yang menyesatkan. Biarkan jatuh ke engine (action "none").
     if (key.type === "ctrl-r") {
       this.historySearch()
       return
@@ -927,6 +978,9 @@ export class TuiApp {
     const { state, action } = applyKey(this.state, key, hints)
     const lineUnchanged = state.line === this.state.line
     this.state = state
+    // Baris berubah = user mengedit draft. Jendela "Esc lagi = quit" dari abort
+    // sebelumnya harus mati: Esc berikutnya bermakna hapus draft, bukan quit.
+    if (!lineUnchanged) this.disarmAbortQuit()
     if (action === "submit") {
       void this.doSubmit(state.line)
     } else if (action === "cancel") {
@@ -1011,6 +1065,7 @@ export class TuiApp {
       this.preferredCol = null
       this.histIdx = -1
       this.editing = true
+      this.disarmAbortQuit()
       if (line) {
         this.rememberHistory(line)
         this.host.enqueue?.(line)
@@ -1025,6 +1080,7 @@ export class TuiApp {
     this.editing = false
     this.followTail()
     this.abortHintOn = false
+    this.disarmAbortQuit()
     if (!line) {
       // Enter pada baris kosong tetap idle: prompt harus langsung kembali
       // (I13), bukan menghilang sampai ketikan berikutnya.
@@ -1036,9 +1092,11 @@ export class TuiApp {
     // Built-in commands and shortcuts belong to the composer history, not the
     // conversation transcript. The command result remains independently
     // visible when it carries useful user-facing information.
-    if (!line.startsWith("/")) this.transcript.pushUser(rawLine)
+    if (!line.startsWith("/")) {
+      // v7.29: prompt masuk transkrip sebagai history biasa (tanpa card).
+      this.transcript.pushUser(rawLine)
+    }
     this.busy = true
-    this.thinkingActive = false
     this.turnStartedAt = Date.now()
     this.lastAbortAt = 0
     this.startActivityClock()
@@ -1206,18 +1264,26 @@ export class TuiApp {
     if (!screen) return
     const cols = screen.cols
     const rows = screen.rows
-    const buildDimmed = (c: number, r: number): readonly string[] => {
-      const snap = this.host.getStatus()
-      const layout = this.buildLayout(r, c, snap)
-      if (c === cols && r === rows) this.lastLayout = layout
-      return layout.frame.map((ln) => TuiApp.applyBackdropDim(ln))
-    }
-    const dimmed = buildDimmed(cols, rows)
-    screen.paint([...dimmed])
+    // Bekukan FRAME redup sekali saat suspend. Callback backdrop saat resize
+    // DULU memanggil buildLayout lagi → memutasi scrollBack / lastWrapped /
+    // selection / clock di belakang modal (audit VERIFIED). Kini callback hanya
+    // memakai snapshot beku ini; `resume()` tetap repaint penuh dari state hidup.
+    const snap = this.host.getStatus()
+    const layout = this.buildLayout(rows, cols, snap)
+    this.lastLayout = layout
+    const frozen = layout.frame.map((ln) => TuiApp.applyBackdropDim(ln))
+    screen.paint([...frozen])
     this.frames++
     this.clearBackdrop()
     this.releaseBackdrop = registerScreenBackdrop(
-      (c, r) => (c === cols && r === rows ? dimmed : buildDimmed(c, r)),
+      (_c, r) => {
+        // screen.paintRegion sudah memotong tiap baris ke lebar baru; di sini
+        // cukup menyajikan `r` baris dari snapshot (lebih panjang = di-crop,
+        // lebih pendek = baris kosong redup). Tak ada efek samping layout.
+        const out: string[] = []
+        for (let i = 0; i < r; i++) out.push(frozen[i] ?? "")
+        return out
+      },
       cols,
       rows,
     )
@@ -1277,6 +1343,8 @@ export class TuiApp {
   private setLine(line: string): void {
     // Bangun ulang state lewat engine (aturan menu/sel ikut terjaga). Baris
     // berubah = kembali ke ekor (paritas ketikan — viewport tidak diam).
+    // Recall/history juga mengubah draft → matikan jendela quit pasca-abort.
+    this.disarmAbortQuit()
     this.followTail()
     const { state } = applyKey(
       createState(),
@@ -1298,14 +1366,20 @@ export class TuiApp {
 
   private scrollBy(pages: number): void {
     const rows = process.stdout.rows || 24
-    const page = Math.max(1, this.viewportHeight(rows, process.stdout.columns || 80) - 1)
-    // scrollBack dihitung dalam BARIS agar presisi di terminal pendek. Basis
-    // hitung "baris baru" dicatat saat mulai meninggalkan ekor. total()
-    // (monotonik) dipakai agar evict cap 5000 tak merusak hitungan.
-    // pages pecahan (±0.5) = setengah halaman (temuan audit TUI-002).
-    if (this.scrollBack === 0 && pages > 0) this.scrollBase = this.transcript.total()
-    this.scrollBack = Math.max(0, Math.round(this.scrollBack + pages * page))
-    if (this.scrollBack === 0) {
+    const cols = process.stdout.columns || 80
+    const viewH = this.viewportHeight(rows, cols)
+    const wrapped = this.transcript.wrappedLength(cols)
+    // v7.35: page WAJIB sama dengan viewH (bukan viewH - 1). scrollRows/jumpEdge/
+    // followTail memakai `wrapped - viewH`; bila PgDn memakai viewH - 1, satu
+    // langkah kurang dari satu viewport penuh sehingga ekor butuh langkah
+    // tambahan yang tak mengubah tampilan (no-op). Samakan batasnya di sini.
+    const page = viewH
+    // v7.28 anchor atas: scrollBack = 0 berarti KEPALA, nilai besar = ekor.
+    // PgDn (+pages) maju ke bawah, PgUp (-pages) mundur ke atas.
+    const max = Math.max(0, wrapped - viewH)
+    if (this.scrollBack === max && pages < 0) this.scrollBase = this.transcript.total()
+    this.scrollBack = Math.max(0, Math.min(max, Math.round(this.scrollBack + pages * page)))
+    if (this.scrollBack === max) {
       this.scrollBase = this.transcript.total()
     }
     this.paintCurrent()
@@ -1313,19 +1387,21 @@ export class TuiApp {
 
   /**
    * Scroll per BARIS (bukan per halaman) — dipakai auto-scroll seleksi agar
-   * gulirnya halus & presisi. `n` = baris terbungkus (+ = ke atas/lama,
-   * - = ke bawah/baru); di-clamp ke [0, wrapped - viewH]. Menjaga basis
-   * `scrollBase` sama seperti `scrollBy`.
+   * gulirnya halus & presisi. `n` = baris terbungkus (+ = ke bawah/baru,
+   * - = ke atas/lama); di-clamp ke [0, wrapped - viewH]. Menjaga basis
+   * `scrollBase` sama seperti `scrollBy`. Arah ini selaras dengan scrollBy:
+   * scrollBack 0 = kepala, nilai besar = ekor (v7.28 anchor atas).
    */
   private scrollRows(n: number): void {
     const cols = process.stdout.columns || 80
     const rows = process.stdout.rows || 24
-    const viewH = Math.max(1, this.viewportHeight(rows, cols) - 1)
+    const viewH = this.viewportHeight(rows, cols)
     const wrapped = this.transcript.wrappedLength(cols)
     const maxBack = Math.max(0, wrapped - viewH)
-    if (this.scrollBack === 0 && n > 0) this.scrollBase = this.transcript.total()
+    // v7.28: n > 0 = gulir ke bawah (lebih baru), n < 0 = ke atas.
+    if (this.scrollBack === maxBack && n < 0) this.scrollBase = this.transcript.total()
     this.scrollBack = Math.max(0, Math.min(this.scrollBack + n, maxBack))
-    if (this.scrollBack === 0) {
+    if (this.scrollBack === maxBack) {
       this.scrollBase = this.transcript.total()
     }
     this.paintCurrent()
@@ -1342,21 +1418,24 @@ export class TuiApp {
     const rows = process.stdout.rows || 24
     const cols = process.stdout.columns || 80
     const curWrapped = this.transcript.wrappedLength(cols)
-    this.lastWrapped = curWrapped
+    const viewH = this.viewportHeight(rows, cols)
+    const maxBack = Math.max(0, curWrapped - viewH)
+    // v7.28: Home = kepala (0), End = ekor (maks).
     if (top) {
-      const viewH = Math.max(1, this.viewportHeight(rows, cols) - 1)
-      if (this.scrollBack === 0) this.scrollBase = this.transcript.total()
-      this.scrollBack = Math.max(0, curWrapped - viewH)
-    } else {
       this.scrollBack = 0
+    } else {
+      if (this.scrollBack === maxBack) this.scrollBase = this.transcript.total()
+      this.scrollBack = maxBack
       this.scrollBase = this.transcript.total()
     }
     this.paintCurrent()
   }
 
-  /** Kembali ke ekor: dipakai tiap ketikan/submit baru (I18). */
+  /** Kembali ke ekor (bawah): dipakai tiap ketikan/submit baru (I18). */
   private followTail(): void {
-    this.scrollBack = 0
+    const cols = process.stdout.columns || 80
+    const viewH = this.viewportHeight(process.stdout.rows || 24, cols)
+    this.scrollBack = Math.max(0, this.transcript.wrappedLength(cols) - viewH)
     this.scrollBase = this.transcript.total()
   }
 
@@ -1365,7 +1444,6 @@ export class TuiApp {
   clearView(): void {
     this.transcript.clear()
     this.followTail()
-    this.lastWrapped = 0
     this.paintCurrent()
   }
 
@@ -1431,26 +1509,12 @@ export class TuiApp {
     }
   }
 
-  private activityStatus(snap: TuiStatusSnapshot): string {
-    const activity = snap.pinnedActivity
-    if (!activity) return ""
-    const name = sanitizeAnsiLine(String(activity.name ?? ""))
-    const target = activity.target ? ` ${sanitizeAnsiLine(String(activity.target))}` : ""
-    return sanitizeAnsiLine(`${name}${target}`)
-  }
-
-  private activityRow(content: string, cols: number): string {
-    const width = Math.max(1, Math.floor(cols) - 1)
-    return truncateToWidth(sanitizeAnsiLine(content), width, "")
-  }
-
   /**
-   * Composer hidup bila sedang mengedit teks — termasuk saat busy dengan draft
-   * yang sudah diketik. Saat busy TANPA draft, slot composer tetap dipakai baris
-   * status aktivitas (dots/timer), jadi layar tidak menambah baris.
+   * v7.29: composer SELALU hidup (prompt siap diketik), termasuk saat busy.
+   * Tidak ada lagi baris status aktivitas yang menggantikan prompt.
    */
-  private composerLive(busy: boolean): boolean {
-    return this.editing && (!busy || this.state.line.length > 0)
+  private composerLive(_busy: boolean): boolean {
+    return this.editing
   }
 
   private composerRows(
@@ -1459,12 +1523,12 @@ export class TuiApp {
     busy: boolean,
     now: number,
   ): string[] {
-    if (busy && !this.composerLive(busy)) {
-      const start = this.turnStartedAt || now
-      const status = this.activityStatus(snap)
-      const content = this.thinkingActive ? thinkingDots(now, start) : status
-      return [this.activityRow(content, cols)]
-    }
+    // v7.29: kolom chat BERSIH — tidak ada status/progres di composer, baik
+    // idle maupun busy. Status kerja tampil di footer indicatorLine, bukan di
+    // sini. Composer selalu menampil prompt/draft saja, siap diketik.
+    void snap
+    void busy
+    void now
     // Idle: prompt tetap tampil. Dulu baris kosong menggantikannya sehingga
     // setelah Esc/Enter-kosong layar terlihat mati (I13: prompt tampil saat
     // boot/idle) — audit 2026-11-12, MEDIUM-4.
@@ -2006,8 +2070,10 @@ export class TuiApp {
       // Tautkan fokus ke baris selectable terdekat dari tepi viewport SEBELUM
       // menggulir (pindai masuk bila baris tepi persis border/pemisah kosong).
       const rows = layout.transcriptRows
-      const step = this.autoScrollDir === 1 ? 1 : -1
-      const start = this.autoScrollDir === 1 ? 0 : rows.length - 1
+      // v7.31: dir -1 = tepi ATAS → pindai dari index 0 masuk ke bawah;
+      // dir +1 = tepi BAWAH → pindai dari ekor masuk ke atas.
+      const step = this.autoScrollDir === -1 ? 1 : -1
+      const start = this.autoScrollDir === -1 ? 0 : rows.length - 1
       for (let i = start; i >= 0 && i < rows.length; i += step) {
         const edgeRow = rows[i]!
         if (!edgeRow.selectable) continue
@@ -2017,7 +2083,7 @@ export class TuiApp {
           break
         }
       }
-      // +1 baris/ke atas (konten lama), -1/ke bawah (konten baru).
+      // v7.31: scrollRows(-1) = ke atas/konten lama, +1 = ke bawah/baru.
       this.scrollRows(this.autoScrollDir)
     }, 60)
     try {
@@ -2044,8 +2110,11 @@ export class TuiApp {
       return
     }
     const rowIndex = key.y - 1 - layout.transcriptTop
-    if (rowIndex <= 0) this.startAutoScroll(1, key.x)
-    else if (rowIndex >= n - 1) this.startAutoScroll(-1, key.x)
+    // v7.31: anchor atas → tepi ATAS = gulir ke lama (scrollBack mengecil,
+    // dir -1), tepi BAWAH = ke baru (dir +1). Sebelumnya terbalik sehingga
+    // seleksi drag tak bisa diperpanjang melewati viewport.
+    if (rowIndex <= 0) this.startAutoScroll(-1, key.x)
+    else if (rowIndex >= n - 1) this.startAutoScroll(1, key.x)
     else this.stopAutoScroll()
   }
 
@@ -2062,8 +2131,9 @@ export class TuiApp {
       return
     }
     if (text.length > MAX_SELECTION_CHARS || utf8ByteLength(text) > MAX_SELECTION_BYTES) {
-      this.transcript.pushInfo([c.warning(t("tui.selectionTooLarge"))])
-      this.paintCurrent()
+      // v7.30: kwitansi salin BUKAN percakapan — tampil di footer (toast),
+      // jangan jadi baris permanen di transkrip.
+      this.showToast(t("tui.selectionTooLarge"))
       return
     }
     let copied = false
@@ -2071,7 +2141,7 @@ export class TuiApp {
       copied = this.host.copySelection(text)
     } catch {}
     const msg = t(copied ? "tui.selectionCopied" : "tui.selectionCopyFailed")
-    this.transcript.pushInfo([c.muted(msg)])
+    // v7.30: hasil salin adalah kwitansi UI, bukan giliran bicara — footer saja.
     this.showToast(msg)
   }
 
@@ -2084,14 +2154,26 @@ export class TuiApp {
       if (!this.turnStartedAt) this.turnStartedAt = now
       this.startActivityClock()
     } else {
-      this.thinkingActive = false
       this.turnStartedAt = 0
     }
     // Badge hidup saat busy DAN idle; clock-nya terpisah dari activity.
     const backgroundJobs = snap.footer.backgroundJobs ?? 0
     if (backgroundJobs >= 1) this.startWaitingClock()
     else this.stopWaitingClock()
-    const newCount = this.scrollBack > 0 ? this.transcript.total() - this.scrollBase : 0
+    // v7.28: indikator "baris baru" muncul saat user TIDAK berada di ekor
+    // (anchor atas → ekor = maks, bukan 0).
+    const maxBackForIndicator = Math.max(
+      0,
+      this.transcript.wrappedLength(width) -
+        Math.max(
+          1,
+          height -
+            2 -
+            Math.min(MAX_INPUT_ROWS, Math.max(1, this.composerRows(width, snap, busy, now).length)),
+        ),
+    )
+    const awayFromTail = this.scrollBack < maxBackForIndicator
+    const newCount = awayFromTail ? this.transcript.total() - this.scrollBase : 0
     // Baris indikator WAJIB dipotong ke lebar frame seperti baris lain: teks
     // locale id lebih panjang dari terminal sempit (51 kolom untuk abort hint),
     // dan baris lebih lebar dari `cols` membungkus sendiri → frame jadi
@@ -2105,14 +2187,17 @@ export class TuiApp {
     //       transkrip, seluruh isi layar bergeser di antara frame — gejala
     //       "teks naik-turun";
     //   (b) tidak memakan satu baris transkrip permanen demi pesan sementara.
-    const indicatorLine =
-      busy && this.abortHintOn
+    // v7.30: toast (kwitansi perintah) lebih baru daripada hint abort —
+    // kalau hint menang, pesan toast tak pernah terlihat (pesan dijamin tampil).
+    // Urutan baru: toast > hint abort > indikator "baris baru". Tinggi frame
+    // tetap satu baris, jadi geometri/composer tidak berubah.
+    const indicatorLine = this.statusToast
+      ? c.accent(truncateToWidth(this.statusToast, width))
+      : busy && this.abortHintOn
         ? c.warning(truncateToWidth(t("app.abortHint"), width))
         : newCount > 0
           ? c.muted(truncateToWidth(t("app.newBelow", { n: newCount }), width))
-          : this.statusToast
-            ? c.accent(truncateToWidth(this.statusToast, width))
-            : ""
+          : ""
 
     const allMenu = this.menuRows(height, width, busy)
     const allComposer = this.composerRows(width, snap, busy, now)
@@ -2123,20 +2208,16 @@ export class TuiApp {
       menu = menu.slice(0, Math.max(0, contentBudget - 1))
       composerH = Math.max(1, contentBudget - menu.length)
     }
-    const viewH = Math.max(1, height - 2 - composerH - menu.length)
-    let viewport = this.transcript.viewport(width, viewH, this.scrollBack)
-    const curWrapped = viewport.totalRows
-    if (this.scrollBack > 0 && this.lastWrapped > 0) {
-      const nextScrollBack = Math.max(
-        0,
-        Math.min(this.scrollBack + (curWrapped - this.lastWrapped), Math.max(0, curWrapped - 1)),
-      )
-      if (nextScrollBack !== this.scrollBack) {
-        this.scrollBack = nextScrollBack
-        viewport = this.transcript.viewport(width, viewH, this.scrollBack)
-      }
-    }
-    this.lastWrapped = curWrapped
+    // v7.29: card prompt DIHAPUS — prompt kini menjadi history biasa di
+    // transkrip (lihat `projectRows`). Biarkan cardRows kosong; semua turunan
+    // `cardH` di bawah (viewH, cursorRow, composerTop) otomatis collapse ke 0,
+    // sehingga tinggi frame & pemetaan mouse tetap konsisten.
+    const cardRows: string[] = []
+    const cardH = 0
+    const viewH = Math.max(1, height - 2 - composerH - menu.length - cardH)
+    // v7.28: dengan anchor atas, baris baru ditambahkan DI BAWAH sehingga
+    // tidak menggeser baris yang sedang terlihat — tidak perlu koreksi drift.
+    const viewport = this.transcript.viewport(width, viewH, this.scrollBack)
     if (
       this.selection &&
       (!this.transcript.hasSource(this.selection.anchor.id) ||
@@ -2146,6 +2227,8 @@ export class TuiApp {
     ) {
       this.selection = null
     }
+    // Transcript sudah menyembunyikan gema user terakhir (card) dan
+    // menormalkan jeda — viewport tinggal dipakai apa adanya.
     const bodyRows = viewport.rows
     let body = bodyRows.map((row) => row.text)
     if (this.selection) {
@@ -2180,23 +2263,10 @@ export class TuiApp {
         return row.text
       })
     }
-    // Zero-state boot: logo kecil minicode di pojok kiri atas + SATU baris hint
-    // redup. Identitas (model/cwd) tetap tidak diulang di sini karena footer
-    // sudah memuatnya — layar kosong tanpa petunjuk lebih membingungkan
-    // daripada sekadar tidak "penuh". Hint hilang begitu user mengetik atau
-    // sudah ada isi transkrip.
-    if (this.transcript.total() === 0 && !busy && menu.length === 0 && !this.state.line) {
-      const logoRows = renderLogoRows()
-      if (viewH >= logoRows.length && width >= LOGO_WIDTH + 2) {
-        for (let wi = 0; wi < logoRows.length; wi++) {
-          body[wi] = `  ${c.accent(logoRows[wi]!)}`
-        }
-        // Satu baris jeda di bawah logo, lalu hint — hanya bila tingginya cukup
-        // (terminal pendek tetap menampilkan logo saja tanpa memotong frame).
-        const hintRow = logoRows.length + 1
-        if (hintRow < viewH) body[hintRow] = `  ${c.muted(t("app.idleHint"))}`
-      }
-    }
+    // Renderer flat: zero-state sengaja KOSONG. Logo, hint, dan identitas tidak
+    // diulang di transkrip — footer sudah memuat model/cwd, dan layar kosong
+    // lebih jujur daripada dekorasi. Komposer tetap menjadi satu-satunya
+    // petunjuk bahwa aplikasi siap menerima input.
 
     const pf = promptFirst()
     let shownComposer: string[]
@@ -2208,14 +2278,15 @@ export class TuiApp {
       const winStart = Math.max(0, Math.min(allComposer.length - composerH, cursor.visIdx))
       composerOffset = winStart
       shownComposer = allComposer.slice(winStart, winStart + composerH)
-      cursorRow = viewH + menu.length + (cursor.visIdx - winStart) + 1
+      cursorRow = viewH + cardH + menu.length + (cursor.visIdx - winStart) + 1
       cursorCol = cursor.col
     } else {
       shownComposer = allComposer.slice(0, composerH)
-      cursorRow = viewH + menu.length + 1
-      // Kursor parkir tepat setelah prompt saat idle (bukan kolom 1) supaya
-      // caret terlihat di tempat user akan mengetik.
-      if (!busy) cursorCol = displayWidth(pf) + 1
+      cursorRow = viewH + cardH + menu.length + 1
+      // v7.30: SELALU parkir caret tepat setelah prompt, termasuk saat busy
+      // dengan editing=false (cabang ini). Dulu `if (!busy)` membuat cursorCol
+      // tetap 1 saat submit → caret tampil SEBELUM prompt (`| minicode ›`).
+      cursorCol = displayWidth(pf) + 1
     }
     if (this.composerLive(busy) && composerOffset === 0 && shownComposer[0]?.startsWith(pf)) {
       shownComposer = [
@@ -2225,8 +2296,9 @@ export class TuiApp {
     }
 
     const started = this.turnStartedAt || now
+    const sparkInterval = this.streamIntervalMs > 0 ? this.streamIntervalMs : DOT_INTERVAL_MS
     const sparkFrame =
-      busy && !motionReduced() ? Math.max(1, Math.floor((now - started) / DOT_INTERVAL_MS) + 1) : 0
+      busy && !motionReduced() ? Math.max(1, Math.floor((now - started) / sparkInterval) + 1) : 0
     const elapsed = now - started
     const timer = busy ? formatTimer(elapsed) : TIMER_TEXT
     const footer =
@@ -2234,6 +2306,7 @@ export class TuiApp {
         {
           ...snap.footer,
           sparkFrame,
+          streamIntervalMs: this.streamIntervalMs,
           timer,
           timerActive: busy,
           timerHighlight: timerHighlight(elapsed),
@@ -2248,6 +2321,7 @@ export class TuiApp {
       )[0] ?? ""
     const frame = [
       ...body,
+      ...cardRows,
       ...menu,
       ...shownComposer,
       "",
@@ -2267,7 +2341,7 @@ export class TuiApp {
       cols: Math.max(10, width),
       transcriptRows: bodyRows,
       transcriptTop: topPad - crop,
-      composerTop: topPad - crop + body.length + menu.length,
+      composerTop: topPad - crop + body.length + cardH + menu.length,
       composerLines: allComposer,
       composerOffset,
     }

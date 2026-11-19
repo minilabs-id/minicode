@@ -1,4 +1,6 @@
 import type { UiBus, UiEvent, UiEventType } from "../contract.ts"
+import { sanitizeAnsiLine, stripSgr } from "../render/sanitize.ts"
+import { truncateToWidth } from "../render/width.ts"
 
 // Diagnosis event bus per turn: MINICODE_DEBUG_BUS=1 mencetak satu baris
 // ringkas per event bus ke stderr (`[bus] ...`). Dipakai membedakan dua
@@ -14,6 +16,23 @@ import type { UiBus, UiEvent, UiEventType } from "../contract.ts"
 // terlihat; dilepas di close().
 
 const MAX_LINE = 300
+
+/**
+ * Nama tool / `kind` berasal dari model atau MCP (tak-terpercaya). Sanitasi +
+ * stripSgr membuang SEMUA sekuens ESC — termasuk CSI `ESC[2J`, OSC, dan BEL —
+ * sebelum ditulis ke stderr; SGR juga dibuang karena log diagnostik tak perlu
+ * warna, jadi tak ada byte ESC yang bisa menyuntik kontrol terminal. Sisa C0
+ * (tab/dll.) ikut dibuang agar satu baris tak menggeser geometri. Kap memakai
+ * lebar KOLOM (CJK/emoji = 2), bukan panjang UTF-16 mentah — `slice` lama bisa
+ * membelah surrogate pair dan melampaui MAX_LINE kolom.
+ */
+function safeDebugLine(s: string): string {
+  const noEsc = stripSgr(sanitizeAnsiLine(s))
+  const noCtl = Array.from(noEsc)
+    .filter((c) => c.charCodeAt(0) >= 0x20 && c.charCodeAt(0) !== 0x7f)
+    .join("")
+  return truncateToWidth(noCtl, MAX_LINE)
+}
 
 function summarize(type: string, e: unknown): string {
   try {
@@ -69,7 +88,7 @@ export function attachBusDebug(bus: UiBus): () => void {
   const offs = TYPES.map((t) =>
     bus.on(t, (e: UiEvent) => {
       try {
-        process.stderr.write(`[bus] ${summarize(t, e).slice(0, MAX_LINE)}\n`)
+        process.stderr.write(`[bus] ${safeDebugLine(summarize(t, e))}\n`)
       } catch {}
     }),
   )

@@ -3,7 +3,7 @@
 // painter aktif dikomit sebagai baris permanen — tidak hilang tertimpa tick.
 // Plus invariant mutual exclusion turn-painter vs wizard-spinner.
 
-import { afterEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { attachTurnStatus, type TurnStatusHandle } from "../src/ui/assistant/turn-status.ts"
 import { askLine } from "../src/ui/input/input.ts"
 import { stripAnsi } from "../src/ui/render/theme.ts"
@@ -17,10 +17,19 @@ const ESC = String.fromCharCode(27)
 const CONTROL_RE = new RegExp(`[${String.fromCharCode(0x0d)}${ESC}]`)
 
 let tty: FakeTty | undefined
+const origMinicodeColor = process.env.MINICODE_COLOR
+
+beforeEach(() => {
+  // v7.29: warna nyala by default di TTY. Test "tak ada SGR" menyalakan flag
+  // sendiri; pastikan env tiap test mulai bersih.
+  delete process.env.MINICODE_COLOR
+})
 
 afterEach(() => {
   tty?.restore()
   tty = undefined
+  if (origMinicodeColor == null) delete process.env.MINICODE_COLOR
+  else process.env.MINICODE_COLOR = origMinicodeColor
 })
 
 function startTurnPainter(): { bus: ReturnType<typeof createFakeBus>; status: TurnStatusHandle } {
@@ -61,18 +70,35 @@ describe("transient arbitration", () => {
   }, 4000)
 
   test("spinner saat turn-painter aktif: warning overlap, tanpa crash", async () => {
-    const { status } = startTurnPainter()
-    await sleep(60)
-    tty!.clear()
-    const s = createSpinner("mendeteksi")
-    expect(isTransientPainting()).toBe(true)
-    expect(tty!.allErr()).toContain("[transient-paint] spinner starts while turn active")
-    s.success("selesai")
-    await sleep(250)
-    // Tidak ada sisa frame animasi setelah stop (tidak ada \r baru).
-    const tail = tty!.allErr().split("\n").slice(-4).join("\n")
-    expect(tail).not.toContain("\r·")
-    status.detach()
+    // v7.29: warna nyala by default — paksa MINICODE_COLOR=0 supaya assertion
+    // "tak ada SGR warna" tetap menguji jalur mono.
+    process.env.MINICODE_COLOR = "0"
+    try {
+      const { status } = startTurnPainter()
+      await sleep(60)
+      tty!.clear()
+      const s = createSpinner("mendeteksi")
+      expect(isTransientPainting()).toBe(true)
+      expect(tty!.allErr()).toContain("[transient-paint] spinner starts while turn active")
+      s.success("selesai")
+      await sleep(250)
+      // Mode mono: frame spinner adalah `·` polos, jadi `\r·` juga muncul di frame
+      // AWAL — bukan bukti sisa animasi. Yang dijaga: setelah status akhir
+      // "ok selesai" tak ada frame spinner "mendeteksi" baru; yang boleh terus
+      // menulis hanya turn-painter (`·· bash npm test`).
+      const all = tty!.allErr()
+      const afterFinal = all.split("ok selesai").pop() ?? ""
+      expect(afterFinal).not.toContain("mendeteksi")
+      expect(afterFinal).not.toMatch(/\r· /)
+      // Spinner menyembunyikan kursor saat start dan mengembalikannya saat stop.
+      expect(all).toContain("\x1b[?25l")
+      expect(all).toContain("\x1b[?25h")
+      // Mono: tak ada SGR warna di frame maupun status akhir.
+      expect(all).not.toMatch(new RegExp(`${ESC}\\[[0-9;]*m`))
+      status.detach()
+    } finally {
+      delete process.env.MINICODE_COLOR
+    }
   }, 4000)
 
   test("layar interaktif: painter stderr berhenti selama picker hidup", async () => {

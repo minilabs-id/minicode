@@ -471,7 +471,13 @@ describe("E. the policy is per-execution and never inherited", () => {
     // human typing a URL that is a read. For an unattended executor it is an
     // outbound request nobody asked for, whose response becomes model input.
     // 6S denies them; the divergence is deliberate and must stay deliberate.
-    const interactive = interactiveHandler({ mode: "readonly" })
+    // v7.25: readonly kini meng-gate network read via ask. Suntik broker allow
+    // supaya perbandingan tetap menguji Autonomous (lebih ketat), bukan modalitas.
+    const interactive = interactiveHandler({
+      mode: "readonly",
+      ask: async () => "allow",
+      allowNonTtyAsk: true,
+    })
     expect(await interactive.check(call("web_fetch"))).toBe("allow")
     const h = createAutonomousPermissionHandler(new AutonomousPolicyLedger())
     expect(await h.check(call("web_fetch"))).toBe("deny")

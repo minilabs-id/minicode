@@ -306,15 +306,15 @@ describe("TUI table transcript", () => {
     )
     expect(wideTable.length).toBe(2)
     expect(narrowTable.length).toBe(2)
-    // Wrap (bukan truncate): konten panjang dilanjutkan ke baris berikutnya
-    // dalam sel — info tidak dipotong hilang (tak ada ellipsis "…").
-    expect(narrow.some((line) => line.includes("value-long"))).toBe(true)
-    const firstColText = narrow
-      .filter((line) => /[|│]/.test(line))
-      .map((line) => line.split(/[|│]/)[1]?.replace(/\s+/g, "") ?? "")
-      .join("")
-    expect(firstColText).toContain("value-long-long-long")
-    expect(narrow.some((line) => line.includes("…"))).toBe(false)
+    // Tabel kini flat (box:false): tak ada karakter `|`/`│`, kolom dipisah
+    // spasi dan garis pemisah `─`. Jadi geometri diukur dari lebar kolom, bukan
+    // dari bubble pipe. Sel panjang dipotong dengan ellipsis, bukan dibungkus.
+    const narrowData = narrowTable.find((line) => line.includes("value-long"))!
+    expect(narrowData).toContain("value-long")
+    expect(narrowData).toContain("…")
+    // Render ulang mengikuti lebar paint: versi lebar memuat nilai penuh.
+    expect(wide.some((line) => line.includes("value-long-long-long"))).toBe(true)
+    expect(narrow.some((line) => line.includes("value-long-long-long"))).toBe(false)
     for (const line of narrow.filter(Boolean)) expect(displayWidth(line)).toBeLessThanOrEqual(30)
     expect(transcript.view(80, 8, 0).map(stripAnsi)).toEqual(wide)
   })

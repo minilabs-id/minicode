@@ -11,7 +11,7 @@
  * Writes docs/audit/PHASE-6Y-MUTATION-SUMMARY.json.
  */
 import { spawnSync } from "node:child_process"
-import { existsSync, readFileSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 
 const REPO = join(import.meta.dir, "..")
@@ -162,7 +162,8 @@ const MUTATIONS: Mut[] = [
     id: "M14",
     target: "the lease is shorter than a legitimate execution window",
     file: "src/task/session-authority.ts",
-    anchor: "export const SESSION_LEASE_MS = 300_000",
+    // v7.26: lease diturunkan dari SUB_AGENT_TIMEOUT_MS, bukan literal.
+    anchor: "export const SESSION_LEASE_MS = Math.ceil(LIMITS.SUB_AGENT_TIMEOUT_MS * 2.5)",
     replacement: "export const SESSION_LEASE_MS = 1_000",
     tests: [...LEASE, ...PROCS],
   },
@@ -467,10 +468,20 @@ const summary = {
   campaign_failure: campaignFailure,
   rows,
 }
-if (!existsSync(join(REPO, "docs/audit"))) throw new Error("docs/audit missing")
+// Checkout ini tidak menyalin docs/audit; buat dir output agar kampanye tidak
+// mati SESUDAH sumber dimutasi/dikembalikan (dulu throw di sini = summary tak
+// pernah ditulis dan exit 0 menyamar sebagai sukses).
+mkdirSync(join(REPO, "docs/audit"), { recursive: true })
 writeFileSync(SUMMARY, `${JSON.stringify(summary, null, 2)}\n`, "utf8")
 console.log(
   `\n  planned=${summary.totals.planned} executed=${summary.totals.executed} killed=${summary.totals.killed} survived=${summary.totals.survived} unexecuted=${summary.totals.unexecuted}`,
 )
 console.log(`  campaign_failure: ${campaignFailure ?? "none"}`)
 console.log(`  summary: ${SUMMARY.replace(`${REPO}\\`, "")}`)
+
+// ADR-24: kampanye WAJIB exit non-zero bila ada survivor, mutant tak
+// ter-execute, atau campaign_failure — kalau tidak, gate lolos vacuously
+// (semua log hijau tapi tak ada properti yang benar-benar dibuktikan).
+if (summary.totals.survived > 0 || summary.totals.unexecuted > 0 || campaignFailure !== null) {
+  process.exit(1)
+}

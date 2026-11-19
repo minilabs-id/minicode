@@ -48,6 +48,9 @@ function hasTruecolorEnv(): boolean {
 }
 /** 0=mono, 1=16-color, 2=256-color, 3=truecolor */
 function colorLevel(): number {
+  // v7.29: warna aktif di TTY; MONOKROM adalah opt-out (MINICODE_COLOR=0 /
+  // NO_COLOR). Pipe/redirect/TERM=dumb TETAP level 0 untuk determinisme.
+  if (colorDisabledByFlag()) return 0
   if (noColorEnv()) return 0
   // Determinisme Unix: output ke pipe/redirect/file tidak boleh memuat ANSI,
   // apa pun TERM/COLORTERM di env (env sesi interaktif sering bocor ke proses
@@ -92,7 +95,17 @@ export function scrimSgr(mode: ScrimMode): string {
  * terminal berwarna (atau sebaliknya) setelah env berubah.
  */
 export function themeCapabilityKey(): string {
-  return `${colorLevel()}:${hasTruecolorEnv() ? 1 : 0}:${supportsUtf8() ? 1 : 0}`
+  return `${colorLevel()}:${hasTruecolorEnv() ? 1 : 0}:${supportsUtf8() ? 1 : 0}:${colorDisabledByFlag() ? 0 : 1}`
+}
+
+/**
+ * v7.29: warna menyala by default di TTY. `MINICODE_COLOR=0` mematikan semua
+ * SGR warna (mode monokrom eksplisit), berguna untuk test & terminal polos.
+ * Dievaluasi LAZY supaya perubahan env di runtime/test tetap berpengaruh.
+ */
+function colorDisabledByFlag(): boolean {
+  const v = process.env.MINICODE_COLOR
+  return v === "0" || v === "false" || v === "off" || v === "no"
 }
 
 type Paint = (s: string) => string

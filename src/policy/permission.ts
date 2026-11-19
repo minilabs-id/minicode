@@ -25,10 +25,19 @@ import {
   isTrashRestore,
 } from "./jail.ts"
 import { scrubSecrets } from "./scrub.ts"
-// [Fase 2 / TOOL-01] Diimpor dari registry kontrak tool (satu sumber).
+// [Fase 2 / TOOL-01, v7.33 / audit F2] Diimpor dari registry kontrak tool.
+// Semua klasifikasi (read/gated/jail/internal/no-prompt/plan) kini SATU sumber
+// di tool-contract.ts — permission.ts hanya mengonsumsi derivasinya.
 import {
+  CWD_JAIL_TOOL_NAMES,
   contractForTool,
+  FILE_JAIL_TOOL_NAMES,
+  FILE_WRITE_TOOL_NAMES,
   GATED_TOOLS,
+  INTERNAL_WRITE_TOOL_NAMES,
+  LSP_FILE_JAIL_TOOL_NAMES,
+  NETWORK_READ_TOOL_NAMES,
+  NO_PROMPT_TOOL_NAMES,
   PLAN_EXTRA_TOOL_NAMES,
   READONLY_TOOL_NAMES,
 } from "./tool-contract.ts"
@@ -102,6 +111,22 @@ export function canPersistAlways(args: unknown): boolean {
   }
 }
 
+/**
+ * [AGENT-CONTROL-4] Persetujuan "Always" TIDAK boleh dipakai ulang untuk
+ * `delegate_task`: grant `delegate_task:${argsJson}` akan menyetujui setiap
+ * delegasi identik berikutnya tanpa izin baru, padahal docs/AGENTS.md:8
+ * menetapkan satu approval ASK hanya mencakup SATU delegasi. Satu klik "Always"
+ * bisa menggandakan efek samping anak yang sudah committed. `canPersistAlways`
+ * sengaja tetap murni soal ukuran args (kontrak K-1 lama dipakai test), jadi
+ * pembatasan ini diletakkan di helper terpisah dan dipakai di gerbang view.
+ * Catatan: view memang tak menawarkan "Always" untuk delegasi, tetapi broker
+ * yang di-inject bisa saja mengembalikan "always" — karena itu `saveAlways`
+ * DAN jalur matchAllowlist kini ikut memblokir delegate_task (fail-closed).
+ */
+export function canAlwaysForCall(call: ToolCall): boolean {
+  return call.name !== "delegate_task" && canPersistAlways(call.args)
+}
+
 // [Fase 2 / TOOL-01] Satu sumber kebenaran: `READONLY_TOOLS` kini diturunkan
 // dari registry kontrak tool (`allowedInReadonly`) — bukan lagi daftar manual
 // yang bisa menyimpang dari `tool-contract.ts`. Menambah/mengganti tool read
@@ -109,25 +134,24 @@ export function canPersistAlways(args: unknown): boolean {
 // untuk lupa. Membership (termasuk in/out `web_fetch`/`web_search`) dipegang
 // test no-drift di p15-phase2-contracts-approval-recovery.test.ts.
 const READONLY_TOOLS: ReadonlySet<string> = READONLY_TOOL_NAMES
+// [v7.33 / audit F2] Dulu tiga set ini berupa literal manual yang menduplikasi
+// klasifikasi di tool-contract.ts dan bisa menyimpang (tool baru = fail-open).
+// Sekarang DITURUNKAN dari flag kontrak. Test no-drift memastikan himpunan
+// hasil identik dengan literal lama — ini refactor, bukan perubahan kebijakan.
+//
 // Tool yang menulis state internal minicode (bukan file workspace) — aman
 // di semua mode kecuali readonly/plan. `bash_kill` menghentikan proses yang
 // dimulai agent sendiri, jadi tidak menambah permukaan serangan.
-const INTERNAL_WRITE_TOOLS = new Set([
-  "write_memory",
-  "forget_memory",
-  "todo_write",
-  "submit_result",
-  "bash_output",
-  "bash_kill",
-])
+const INTERNAL_WRITE_TOOLS: ReadonlySet<string> = INTERNAL_WRITE_TOOL_NAMES
 
-const FILE_WRITE_TOOLS = new Set(["write_file", "edit", "apply_patch", "move_file", "delete_file"])
+// Tool tulis workspace (path-serialized) yang dijail path-nya & auto-allowed.
+const FILE_WRITE_TOOLS: ReadonlySet<string> = FILE_WRITE_TOOL_NAMES
 
 // Subset INTERNAL_WRITE_TOOLS yang juga tidak perlu prompt di mode `ask`.
 // `write_memory`/`forget_memory` TIDAK termasuk: itu menulis MEMORY.md yang
 // persisten lintas sesi, jadi user berhak menyetujuinya. `submit_result`
 // termasuk: ia hanya menyerahkan jawaban akhir, tanpa efek samping.
-const NO_PROMPT_TOOLS = new Set(["todo_write", "submit_result", "bash_output", "bash_kill"])
+const NO_PROMPT_TOOLS: ReadonlySet<string> = NO_PROMPT_TOOL_NAMES
 
 // Tool yang memperbesar serangan / menembus dunia luar: tidak auto-allowed.
 //
@@ -664,8 +688,13 @@ function buildDiffPreview(name: string, args: unknown): string | undefined {
       }
       case "delete_file":
         return str(a.path) ? out(`- ${str(a.path)}`) : undefined
-      case "move_file":
-        return str(a.from) || str(a.to) ? out(`${str(a.from)} → ${str(a.to)}`) : undefined
+      case "move_file": {
+        // v7.38: wire `path`/`destination`. Fallback lama dipertahankan hanya
+        // untuk preview (bukan jalur keputusan) agar args historis tetap terbaca.
+        const from = str(a.path ?? a.from)
+        const to = str(a.destination ?? a.to)
+        return from || to ? out(`${from} → ${to}`) : undefined
+      }
       case "git_commit": {
         const m = line(str(a.message), 160)
         return m ? out(`commit ${m}`) : undefined
@@ -722,8 +751,22 @@ export function createPermissionHandler(
      * terkonfigurasi). Dipakai `auto` untuk membedakan MCP terotorisasi dari
      * MCP tak-dikenal/tak-terkonfigurasi: hanya nama bertitik yang ADA di set
      * ini yang boleh auto-allow. Absen = fail-closed (semua MCP bertitik deny).
+     *
+     * Kompatibilitas: jalur baru (composition root) memakai `hasAuthorizedTool`
+     * (predikat LIVE). Opsi statis ini dipertahankan untuk pemanggil lama/test.
+     * Bila keduanya ada, `hasAuthorizedTool` yang menang.
      */
     authorizedTools?: ReadonlySet<string> | null
+    /**
+     * [v7.33 / audit F1] Predikat otorisasi LIVE. Snapshot `authorizedTools`
+     * sekali di awal sesi bikin MCP tool yang muncul saat DISCUSS→EXECUTE tetap
+     * deny ("not configured/authorized") walau sudah terlihat di wire. Predikat
+     * ini dibaca per-call dari array tool LIVE milik tool-layer (dimutasi
+     * in-place oleh setWorkMode/setPermissionMode), sehingga `visible ===
+     * callable` di kedua arah transisi. Absen = fail-closed (kecuali fallback
+     * ke `authorizedTools` statis di bawah).
+     */
+    hasAuthorizedTool?: (name: string) => boolean
     /**
      * [mode-architecture] Pembatas bash TERPISAH dari sumbu persetujuan.
      * Bila true, mode `auto` juga membatasi `bash` ke allow-list
@@ -738,7 +781,11 @@ export function createPermissionHandler(
      * Precedence: env `MINICODE_BASH_ALLOWLIST` > config > default bawaan.
      */
     bashAllowlist?: readonly string[]
-    /** Izinkan callback `ask` non-TTY (mis. `ApprovalBroker` daemon) untuk tool gated. */
+    /**
+     * Izinkan callback `ask` non-TTY (mis. `ApprovalBroker` daemon) HANYA untuk
+     * tool non-gated. [AGENT-CONTROL-2] Tool gated (delegate_task, git_commit,
+     * MCP) tetap menuntut TTY——broker tak boleh membuka delegasi headless.
+     */
     allowNonTtyAsk?: boolean
   } = {},
 ): PermissionHandler {
@@ -750,6 +797,7 @@ export function createPermissionHandler(
   const askUser = opts.ask
   const allowLocal = opts.allowLocalConfig === true
   const authorizedTools = opts.authorizedTools
+  const hasAuthorizedTool = opts.hasAuthorizedTool
   let allowlistCache: string[] | null = null
   // Persetujuan "always" sesi ini — in-memory, bukan dari disk. Tanpa ini,
   // jawaban always yang baru disimpan ke berkas lokal tak terlihat saat local
@@ -795,6 +843,23 @@ export function createPermissionHandler(
     return GATED_TOOLS.has(name) || isMcpToolName(name)
   }
 
+  // [NETWORK-READ-GATE] `web_fetch`/`web_search` termasuk READONLY_TOOL_NAMES,
+  // tetapi baca jaringan adalah permukaan prompt-injection: responsnya menjadi
+  // input model. Di DISCUSS, WorkMode wrapper yang memegang gerbang (memanggil
+  // __promptGated) dan menandai base dengan enforceJail=true — base TIDAK boleh
+  // prompt kedua kali. Di EXECUTE wrapper = identitas, jadi handler
+  // readonly/plan inilah satu-satunya gerbang: headless/tanpa ask ⇒ deny
+  // (fail-closed, sesuai kontrak NETWORK_READ_TOOL_NAMES di tool-contract.ts).
+  async function gateNetworkRead(
+    call: ToolCall,
+    signal: AbortSignal | undefined,
+    enforceJail: boolean,
+  ): Promise<"allow" | "deny" | null> {
+    if (!NETWORK_READ_TOOL_NAMES.has(call.name)) return null
+    if (enforceJail) return null
+    return promptAskOr(call, () => deny(call, "network read requires approval"), signal)
+  }
+
   // Alasan deny per-call untuk seam kernel describeDenial (audit #14):
   // check() TETAP mengembalikan "deny" polos (kontrak Decision + semua
   // assertion tak berubah); alasannya dibaca kernel tepat setelah deny via
@@ -825,10 +890,28 @@ export function createPermissionHandler(
       return undefined
     }
   }
-  function bashDenyReason(cmd: string): string | null {
+  // Guard dan shell WAJIB me-resolve operand relatif dari direktori yang SAMA.
+  // bash.ts spawn dengan cwd = sessionRoot + args.cwd, sedangkan dulu guard
+  // menerima sessionRoot saja — akibatnya `sub/link -> /outside/secret` lolos
+  // (guard cek root/link/secret, shell baca root/sub/link/secret) dan `cat ../x`
+  // dari sub salah ditolak. args.cwd sudah dijail di check() sebelum handler
+  // dipanggil, jadi di sini aman dipakai sebagai basis resolusi. Fail-closed:
+  // resolusi gagal → kembalikan root (basis lama), bukan mengizinkan.
+  function bashEffectiveCwd(args: unknown): string {
+    const rel = (args as { cwd?: unknown } | null)?.cwd
+    if (typeof rel === "string" && rel) {
+      try {
+        return resolve(root, rel)
+      } catch {
+        return root
+      }
+    }
+    return root
+  }
+  function bashDenyReason(cmd: string, effectiveCwd: string): string | null {
     if (!cmd.trim()) return "empty command"
     try {
-      const v = inspectBashCommand(cmd, root)
+      const v = inspectBashCommand(cmd, effectiveCwd, root)
       return v.denied ? (v.reason ?? "blocked command") : null
     } catch {
       // Fail-closed: guard yang melempar exception bukan bukti perintah aman.
@@ -853,6 +936,10 @@ export function createPermissionHandler(
   let approvalCounter = 0
 
   function saveAlways(call: ToolCall): Promise<void> {
+    // [AGENT-CONTROL-4] Satu ASK = satu delegasi. Broker yang di-inject bisa
+    // mengembalikan "always" walau view tak menawarkannya; menyimpannya akan
+    // membuat delegasi identik berikutnya lolos tanpa izin baru. Jadi no-op.
+    if (call.name === "delegate_task") return Promise.resolve()
     // Simpan kunci PENUH (tanpa slice) agar simetris dengan matchAllowlist.
     // Arg raksasa (>2KB JSON, mis. write_file 1MB) tidak disimpan sama sekali
     // (fail-closed, minta persetujuan tiap kali) — kalau tidak allowlist.json
@@ -880,6 +967,7 @@ export function createPermissionHandler(
       call: ToolCall,
       args: Record<string, unknown> | null,
       signal?: AbortSignal,
+      enforceJail?: boolean,
     ) => Promise<"allow" | "deny">
   > = {
     "allow-all": async () => "allow",
@@ -887,21 +975,27 @@ export function createPermissionHandler(
     // jadi entry ini tak pernah ter-capai saat runtime — ada demi kelengkapan
     // Record<PermissionMode, …> (TS exhaustiveness).
     unrestricted: async () => "allow",
-    readonly: async (call) =>
-      READONLY_TOOLS.has(call.name) ? "allow" : deny(call, "read-only mode"),
+    readonly: async (call, _args, signal, enforceJail) => {
+      const gated = await gateNetworkRead(call, signal, enforceJail === true)
+      if (gated !== null) return gated
+      return READONLY_TOOLS.has(call.name) ? "allow" : deny(call, "read-only mode")
+    },
     // Plan = readonly + tiga perkecualian aman (PLAN_EXTRA_TOOL_NAMES):
     // todo_write (artefak rencana .minicode/plans, bukan file workspace),
     // delegate_task (penelahan rencana, bukan eksekusi — dipaksa explore/
     // read-only di task.ts bila parent plan/readonly, permission hanya membuka
     // gerbangnya), dan submit_result (singleton memori-proses untuk exec --json).
-    plan: async (call) =>
-      READONLY_TOOLS.has(call.name) || PLAN_EXTRA_TOOL_NAMES.has(call.name)
+    plan: async (call, _args, signal, enforceJail) => {
+      const gated = await gateNetworkRead(call, signal, enforceJail === true)
+      if (gated !== null) return gated
+      return READONLY_TOOLS.has(call.name) || PLAN_EXTRA_TOOL_NAMES.has(call.name)
         ? "allow"
-        : deny(call, "plan mode"),
+        : deny(call, "plan mode")
+    },
     allowlist: async (call, args) => {
       if (call.name === "bash") {
         const cmd = (args?.cmd as string) ?? ""
-        const br = bashDenyReason(cmd)
+        const br = bashDenyReason(cmd, bashEffectiveCwd(args))
         if (br) return deny(call, `bash-guard: ${br}`)
         const decision = decideBashCommand(cmd, bashAllowlist, root)
         if (decision.ok) return "allow"
@@ -927,7 +1021,9 @@ export function createPermissionHandler(
       // konfirmasi untuk ini hanya melelahkan tanpa menambah keamanan.
       if (NO_PROMPT_TOOLS.has(call.name)) return "allow"
       const list = await getAllowlist()
-      if (matchAllowlist(call, list)) return "allow"
+      // [AGENT-CONTROL-4] Grant "always" untuk delegate_task TIDAK boleh
+      // dipakai ulang — meski broker menyuntik jawaban always (lihat saveAlways).
+      if (call.name !== "delegate_task" && matchAllowlist(call, list)) return "allow"
       if (call.name === "code_run" && codeRunMissingSandbox()) {
         // Tolak sebelum prompt [y/n] agar operator tidak diminta menyetujui
         // tool yang langsung gagal karena MINICODE_SANDBOX belum aktif.
@@ -935,7 +1031,7 @@ export function createPermissionHandler(
       }
       if (call.name === "bash") {
         const cmd = (args?.cmd as string) ?? ""
-        const br = bashDenyReason(cmd)
+        const br = bashDenyReason(cmd, bashEffectiveCwd(args))
         if (br) return deny(call, `bash-guard: ${br}`)
       } else if (isGated(call.name)) {
         return await promptAskOr(call, () => deny(call, "gated approval unavailable"), signal)
@@ -971,7 +1067,13 @@ export function createPermissionHandler(
       // terkonfigurasi). Tak dikenal/tak terkonfigurasi = deny, bukan prompt
       // (AUTO tak boleh bertanya sebagai jalan pintas hard-restriction).
       if (isMcpToolName(call.name)) {
-        if (authorizedTools?.has(call.name)) return "allow"
+        // v7.33: utamakan predikat LIVE (berasal dari array tool yang dimutasi
+        // tool-layer saat Shift+Tab). Fallback ke set statis untuk kompatibilitas
+        // pemanggil lama; keduanya absen = fail-closed deny.
+        const authorized = hasAuthorizedTool
+          ? hasAuthorizedTool(call.name)
+          : (authorizedTools?.has(call.name) ?? false)
+        if (authorized) return "allow"
         return deny(call, "MCP tool not configured/authorized")
       }
       // Capability gated (git_commit, delegate_task, mcp_call/read/prompt):
@@ -986,7 +1088,7 @@ export function createPermissionHandler(
       }
       if (call.name === "bash") {
         const cmd = (args?.cmd as string) ?? ""
-        const br = bashDenyReason(cmd)
+        const br = bashDenyReason(cmd, bashEffectiveCwd(args))
         if (br) return deny(call, `bash-guard: ${br}`)
         // restrictBash: bash hanya boleh pola allow-list (fallback no-sandbox).
         // Pakai daftar DEVELOPER (lebih luas) — sesi trusted di mesin sendiri,
@@ -1024,44 +1126,37 @@ export function createPermissionHandler(
         (_deps as { enforceJail?: boolean } | null | undefined)?.enforceJail === true
       if (state.mode === "unrestricted" && !enforceJail) return "allow"
 
-      // universal file-path jail — harus sebelum allow-all (defense-in-depth)
-      // realpath-based: symlink keluar workspace tetap tertangkap walau --allow-all
-      if (
-        call.name === "write_file" ||
-        call.name === "edit" ||
-        call.name === "apply_patch" ||
-        call.name === "read_file" ||
-        call.name === "read_image" ||
-        call.name === "delete_file"
-      ) {
-        const p = (earlyArgs?.path as string) ?? ""
-        if (!p) return "deny"
-        if (isRealPathOutsideRoot(p, root)) return deny(call, "jail: outside workspace")
-        if (isSensitive(p)) return deny(call, "jail: sensitive file")
+      // v7.33 / audit F2 — jail groups DITURUNKAN dari TOOL_CONTRACTS, bukan
+      // enumerasi nama manual. Tool tulis baru lewat `ws(...)` otomatis masuk
+      // `FILE_JAIL_TOOL_NAMES` sehingga TIDAK fail-open (path-nya tetap dijail).
+      // Idealnya jail sebelum allow-all (defense-in-depth), realpath-based:
+      // symlink keluar workspace tetap tertangkap walau --allow-all.
+      if (FILE_JAIL_TOOL_NAMES.has(call.name)) {
+        // v7.38: `move_file` punya dua ujung (path+destination); tool lain satu `path`.
+        // Fallback `from`/`to` hanya kompatibilitas args historis (fail-closed tetap
+        // berlaku: dua ujung harus ada dan di dalam root).
+        const targets =
+          call.name === "move_file"
+            ? [
+                (earlyArgs?.path as string) ?? (earlyArgs?.from as string) ?? "",
+                (earlyArgs?.destination as string) ?? (earlyArgs?.to as string) ?? "",
+              ]
+            : [(earlyArgs?.path as string) ?? ""]
+        if (call.name === "move_file" && (!targets[0] || !targets[1])) return "deny"
+        for (const p of targets) {
+          if (!p) return "deny"
+          if (isRealPathOutsideRoot(p, root)) return deny(call, "jail: outside workspace")
+          if (isSensitive(p)) return deny(call, "jail: sensitive file")
+        }
       }
-      // move_file punya dua ujung (from+to): keduanya dijail. `to` yang belum
-      // ada jatuh ke cek logis di isRealPathOutsideRoot (fallback ENOENT).
-      if (call.name === "move_file") {
-        const f = (earlyArgs?.from as string) ?? ""
-        const t = (earlyArgs?.to as string) ?? ""
-        if (!f || !t) return "deny"
-        if (isRealPathOutsideRoot(f, root) || isRealPathOutsideRoot(t, root))
-          return deny(call, "jail: outside workspace")
-        if (isSensitive(f) || isSensitive(t)) return deny(call, "jail: sensitive file")
-      }
-      if (call.name.startsWith("lsp_")) {
-        const f = (earlyArgs?.file as string) ?? ""
+      if (LSP_FILE_JAIL_TOOL_NAMES.has(call.name)) {
+        // v7.38: semua tool LSP (termasuk lsp_rename) memakai `path`.
+        const f = (earlyArgs?.path as string) ?? (earlyArgs?.file as string) ?? ""
         if (f && isRealPathOutsideRoot(f, root)) return deny(call, "jail: outside workspace")
         if (f && isSensitive(f)) return deny(call, "jail: sensitive file")
       }
       const cwdArg = (earlyArgs?.cwd as string) ?? ""
-      if (
-        cwdArg &&
-        (call.name === "bash" ||
-          call.name === "glob" ||
-          call.name === "grep" ||
-          call.name.startsWith("git_"))
-      ) {
+      if (cwdArg && CWD_JAIL_TOOL_NAMES.has(call.name)) {
         if (isCwdOutsideRoot(cwdArg, root) || isRealPathOutsideRoot(cwdArg, root))
           return deny(call, "jail: cwd outside workspace")
       }
@@ -1092,16 +1187,15 @@ export function createPermissionHandler(
       // memakai best-effort realpath agar symlink INTERNAL SAH (mis. tautan
       // repositori ke berkas biasa di luar `.minicode/`) tetap bisa ditulis,
       // sesuai kontrak "targetnya yang dicek" di safe-open.ts.
-      if (
-        call.name === "write_file" ||
-        call.name === "edit" ||
-        call.name === "apply_patch" ||
-        call.name === "delete_file" ||
-        call.name === "move_file"
-      ) {
+      // v7.33: daftar tool tulis file kini dari kontrak (satu sumber dengan
+      // auto-allow & jail path di atas), bukan enumerasi nama manual.
+      if (FILE_WRITE_TOOL_NAMES.has(call.name)) {
         const rawTargets =
           call.name === "move_file"
-            ? ([(earlyArgs?.from as string) ?? "", (earlyArgs?.to as string) ?? ""] as const)
+            ? ([
+                (earlyArgs?.path as string) ?? (earlyArgs?.from as string) ?? "",
+                (earlyArgs?.destination as string) ?? (earlyArgs?.to as string) ?? "",
+              ] as const)
             : ([(earlyArgs?.path as string) ?? ""] as const)
         // Carve-out sah (string mentah): restore `.minicode/.trash/` →
         // workspace — satu-satunya gerak sah yang menyentuh state. Cek string
@@ -1138,14 +1232,14 @@ export function createPermissionHandler(
           const cmd = (earlyArgs?.cmd as string) ?? ""
           // allow-all + cmd kosong = allow (perilaku lama dipertahankan).
           if (cmd.trim()) {
-            const br = bashDenyReason(cmd)
+            const br = bashDenyReason(cmd, bashEffectiveCwd(earlyArgs))
             if (br) return deny(call, `bash-guard: ${br}`)
           }
         }
         return "allow"
       }
 
-      return handlers[state.mode](call, earlyArgs, signal)
+      return handlers[state.mode](call, earlyArgs, signal, enforceJail)
     },
     // Kontrol mode saat runtime (Shift+Tab di TUI). Sebelumnya kedua method ini
     // hanya ada di type-cast tanpa implementasi, sehingga pemanggilnya no-op /
@@ -1220,7 +1314,15 @@ export function createPermissionHandler(
     ask: PermissionAsk | undefined,
     requireTTY: boolean,
   ): Promise<GatedAnswer> {
-    const ttyReady = allowNonTtyAsk || Boolean(process.stdin.isTTY)
+    // [AGENT-CONTROL-2] Carve-out daemon (allowNonTtyAsk) HANYA untuk tool
+    // non-gated (mis. web_fetch yang memang lewat ApprovalBroker). Tool gated
+    // — terutama delegate_task — tetap butuh terminal: broker yang di-inject
+    // tak boleh mengubah non-TTY jalur persetujuan (docs/AGENTS.md:8 dan
+    // docs/exec.md: delegasi non-TTY ditolak fail-closed). Tanpa pagar ini,
+    // askUser dari daemon bisa menyetujui delegasi tanpa operator hadir dan
+    // menggandakan efek samping anak.
+    const brokerReady = allowNonTtyAsk && !isGated(call.name)
+    const ttyReady = brokerReady || Boolean(process.stdin.isTTY)
     const headless = signal?.aborted === true || !ask || (requireTTY && !ttyReady)
     const approvalId = `ap_${++approvalCounter}`
     const callInfo = { id: call.id, name: call.name, args: call.args }
@@ -1267,7 +1369,9 @@ export function createPermissionHandler(
                 args: call.args,
                 riskTier,
                 diffPreview,
-                canAlways: canPersistAlways(call.args),
+                // [AGENT-CONTROL-4] `delegate_task` tak pernah menawarkan
+                // "Always" — tiap delegasi butuh persetujuan tersendiri.
+                canAlways: canAlwaysForCall(call),
               }),
               signal,
             )
@@ -1374,7 +1478,9 @@ export function createPermissionHandler(
       return noTty()
     }
     const list = await getAllowlist()
-    if (matchAllowlist(call, list)) return "allow"
+    // [AGENT-CONTROL-4] Sama dengan handler `ask`: allowlist tak boleh
+    // men-short-circuit delegasi, atau "always" sekali klik berlaku selamanya.
+    if (call.name !== "delegate_task" && matchAllowlist(call, list)) return "allow"
     const ans = await gatedPrompt(call, signal, askUser, true)
     if (ans === "headless") return noTty()
     if (ans === "aborted") return "deny"

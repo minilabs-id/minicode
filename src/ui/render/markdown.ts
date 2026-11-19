@@ -7,7 +7,7 @@ import { effectiveAssistantMargin, formatAssistantSpacing, parseFence } from "./
 import { type MarkdownTable, parseMarkdownBlocks } from "./markdown-table.ts"
 import { sanitizeAnsi } from "./sanitize.ts"
 import { renderMarkdownTable } from "./table-grid.ts"
-import { c, glyphs } from "./theme.ts"
+import { c } from "./theme.ts"
 
 export { type FenceMatch, parseFence } from "./markdown-layout.ts"
 export { renderMarkdownTable, renderMarkdownTableLines } from "./table-grid.ts"
@@ -85,7 +85,7 @@ export function decorateMarkdown(text: string): string {
         fenceLen = fence.len
         fenceLang = fence.lang
         // Bar yang sama dengan isi blok: `· ts` terbaca seperti poin daftar.
-        if (fenceLang) out.push(`${margin}${c.dim(`${glyphs.vLine} ${fenceLang}`)}`)
+        // Renderer flat: tanpa header bahasa — blok kode cukup indentasi.
       } else {
         if (fence.char === fenceChar && fence.len >= fenceLen) {
           inFence = false
@@ -94,8 +94,7 @@ export function decorateMarkdown(text: string): string {
           fenceLang = ""
         } else {
           // fence di dalam fence dengan char/len berbeda → anggap konten
-          const bar = fenceLang ? c.dim(glyphs.vLine) : glyphs.vLine
-          out.push(`${margin}${bar} ${fenceLang ? highlightCode(line, fenceLang) : line}`)
+          out.push(`${margin}  ${fenceLang ? highlightCode(line, fenceLang) : line}`)
           continue
         }
       }
@@ -113,8 +112,7 @@ export function decorateMarkdown(text: string): string {
         out.push("")
         continue
       }
-      const bar = fenceLang ? c.dim(glyphs.vLine) : glyphs.vLine
-      out.push(`${margin}${bar} ${fenceLang ? highlightCode(line, fenceLang) : line}`)
+      out.push(`${margin}  ${fenceLang ? highlightCode(line, fenceLang) : line}`)
       continue
     }
 
@@ -123,10 +121,11 @@ export function decorateMarkdown(text: string): string {
       continue
     }
 
-    // Headings (# .. ######) -> bold dengan margin area teks.
+    // v7.29: heading memakai accent+bold (OpenCode: heading plain, tetapi di
+    // renderer flat kita butuh penanda visual; tetap tanpa box/garis).
     if (/^#{1,6}\s/.test(line)) {
       if (out.length > 0 && out[out.length - 1] !== "") out.push("")
-      out.push(`${margin}${c.bold(line)}`)
+      out.push(`${margin}${c.accentBold(line)}`)
       continue
     }
 

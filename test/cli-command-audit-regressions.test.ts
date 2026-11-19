@@ -1,6 +1,8 @@
 // Proteksi regresi untuk perbaikan Audit Command & Deduplikasi (CMD-01..CMD-10).
 // Mencakup helper telemetry (`readTraceRows`), builtin command (`/init`, `/sessions`),
-// dan perilaku end-to-end TUI (`/view compact`, `/view thinking`, `/view fold`, `/view expand`, `/sessions history`, `/init`).
+// dan perilaku end-to-end TUI (`/view thinking`, `/view expand`, `/sessions history`, `/init`).
+// `/view compact|fold|minimize` sengaja dihapus: renderer flat tak membaca
+// flag-flag itu, sehingga kwitsinya dulu palsu (menyesatkan operator).
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
@@ -194,8 +196,11 @@ describe("handleBuiltinCommand: /init & /sessions", () => {
 })
 
 describe("TUI slash commands (CMD-02..CMD-09)", () => {
-  test.each(["compact", "thinking", "expand", "minimize", "fold"] as const)(
-    "/view picker dispatches %s without leaking input",
+  // VIEW_ACTIONS kini HANYA ["thinking","expand"]. compact/fold/minimize
+  // dihapus total (flag-nya tak dibaca renderer flat), jadi picker wajib
+  // berisi dua item — bukan lima seperti sebelum rewrite.
+  test.each(["thinking", "expand"] as const)(
+    "/view picker hanya menawarkan 2 aksi valid dan mendispatch %s tanpa membocorkan input",
     async (action) => {
       const session = makeFakeTuiSession(makeTmp("minicode-view-picker-"))
       tty = installFakeTty({ columns: 100, rows: 24 })
@@ -205,42 +210,40 @@ describe("TUI slash commands (CMD-02..CMD-09)", () => {
         await tty.waitForOutput((o) => o.includes("00.00.00"))
         await tty.send("/view")
         await tty.send(KEY.enter)
-        const frame = await tty.waitForScreen((f) => f.some((l) => l.includes("compact —")))
-        for (const name of ["compact", "thinking", "expand", "minimize", "fold"]) {
-          expect(frame.join("\n")).toContain(`${name} —`)
+        const frame = await tty.waitForScreen((f) => f.some((l) => l.includes("thinking —")))
+        const screen = frame.join("\n")
+        for (const name of ["thinking", "expand"]) {
+          expect(screen).toContain(`${name} —`)
+        }
+        // Kontrol mati TIDAK boleh muncul lagi di picker (dulu 5 item).
+        for (const name of ["compact", "minimize", "fold"]) {
+          expect(screen).not.toContain(`${name} —`)
         }
         expect(tty.promptListeners()).toBe(1)
-        const index = ["compact", "thinking", "expand", "minimize", "fold"].indexOf(action)
+        const index = ["thinking", "expand"].indexOf(action)
         for (let i = 0; i < index; i++) await tty.send(KEY.down)
         await tty.send(KEY.enter)
         const receipt =
-          action === "compact"
-            ? t("tui.compactLine", { v: t("state.expanded") })
-            : action === "thinking"
-              ? t("tui.thinkingSet", { v: t("state.expanded") })
-              : action === "expand"
-                ? t("tui.expandEmpty")
-                : action === "minimize"
-                  ? t("tui.sectionsMin")
-                  : t("tui.activityFold", { v: t("state.folded") })
-        await tty.waitForScreen((f) => f.some((l) => l.includes(receipt)))
+          action === "thinking"
+            ? t("tui.thinkingSet", { v: t("state.expanded") })
+            : t("tui.expandEmpty")
+        // v7.30: kwitansi /view tinggal di footer (toast), bukan baris transkrip.
+        await tty.waitForScreen((f) => (f[f.length - 1] ?? "").includes(receipt))
         expect(tty.promptListeners()).toBe(1)
-        if (action === "minimize") {
-          expect(session.uiState!.sectionMinimized("tool")).toBe(true)
-          expect(session.uiState!.sectionMinimized("answer")).toBe(true)
-        }
       } finally {
         await closeTuiClean(tty, runP)
       }
     },
   )
 
-  test("retired names are unknown in TUI completion and dispatch", async () => {
+  test("perintah lepas dari /view tetap unknown; compact/fold/minimize benar-benar dihapus", async () => {
     tty = installFakeTty({ columns: 100, rows: 24 })
     const runP = runTui(makeFakeTuiSession(makeTmp("minicode-retired-")))
     try {
       await tty.ready()
       await tty.waitForOutput((o) => o.includes("00.00.00"))
+      // compact/fold/minimize sudah dihapus total. thinking/expand juga unknown
+      // sebagai perintah lepas — keduanya HANYA valid sebagai sub-`/view`.
       for (const name of [
         "work-mode",
         "sync",
@@ -254,9 +257,10 @@ describe("TUI slash commands (CMD-02..CMD-09)", () => {
       ]) {
         await tty.send(`/${name}`)
         await tty.send(KEY.enter)
-        // Pesan i18n berkapital ("Unknown command"), jadi bandingkan tanpa case.
+        // v7.30: unknown-command = toast di footer. Pesan i18n berkapital
+        // ("Unknown command"), jadi bandingkan tanpa case.
         await tty.waitForScreen((f) =>
-          f.some((l) => l.toLowerCase().includes(`unknown command: /${name}`)),
+          (f[f.length - 1] ?? "").toLowerCase().includes(`unknown command: /${name}`),
         )
       }
     } finally {
@@ -330,35 +334,54 @@ describe("TUI slash commands (CMD-02..CMD-09)", () => {
     }
   }, 15_000)
 
-  test("/view compact, /view thinking, dan /view fold menerima on/off case-insensitive serta menolak argumen asing", async () => {
+  test("/view thinking menerima on/off case-insensitive; compact/fold/minimize ditolak", async () => {
     const dir = makeTmp("minicode-tui-toggles-")
+    const session = makeFakeTuiSession(dir)
     tty = installFakeTty({ columns: 90, rows: 24 })
-    let runP: Promise<void> | null = runTui(makeFakeTuiSession(dir))
+    let runP: Promise<void> | null = runTui(session)
     try {
       await tty.ready()
       await tty.waitForOutput((o) => o.includes("00.00.00"))
+      // Rekam state sesudah default TUI diterapkan — kontrol mati tak boleh
+      // mengubahnya (dulu /view minimize memaksa keduanya minimized).
+      const toolBefore = session.uiState!.sectionMinimized("tool")
+      const answerBefore = session.uiState!.sectionMinimized("answer")
 
-      await tty.send("/view compact ON")
+      // thinking masih hidup: toggle benar-benar mengubah state yang dirender.
+      await tty.send("/view thinking ON")
       await tty.send(KEY.enter)
+      // v7.30: kwitansi-kwitansi ini di footer (toast), bukan baris transkrip.
       await tty.waitForScreen((f) =>
-        f.some((l) => l.includes(t("tui.compactLine", { v: t("state.compact") }))),
+        (f[f.length - 1] ?? "").includes(t("tui.thinkingSet", { v: t("state.expanded") })),
       )
 
-      await tty.send("/view compact salah")
+      await tty.send("/view thinking salah")
       await tty.send(KEY.enter)
       await tty.waitForScreen((f) =>
-        f.some((l) => l.includes(t("tui.toggleUse", { cmd: "compact" }))),
+        (f[f.length - 1] ?? "").includes(t("tui.toggleUse", { cmd: "thinking" })),
       )
 
       await tty.send("/view thinking OFF")
       await tty.send(KEY.enter)
       await tty.waitForScreen((f) =>
-        f.some((l) => l.includes(t("tui.thinkingSet", { v: t("state.minimized") }))),
+        (f[f.length - 1] ?? "").includes(t("tui.thinkingSet", { v: t("state.minimized") })),
       )
 
-      await tty.send("/view fold bogus")
-      await tty.send(KEY.enter)
-      await tty.waitForScreen((f) => f.some((l) => l.includes(t("tui.toggleUse", { cmd: "fold" }))))
+      // compact/fold/minimize sengaja ditolak: renderer flat tak membaca
+      // flag-flag itu, jadi kwitansi lamanya palsu. Harus jatuh ke usage.
+      for (const cmd of ["compact", "fold", "minimize"]) {
+        await tty.send(`/view ${cmd} ON`)
+        await tty.send(KEY.enter)
+        await tty.waitForScreen((f) => (f[f.length - 1] ?? "").includes(t("tui.viewUse")))
+      }
+      expect(tty.screen()[tty.screen().length - 1]).toContain(t("tui.viewUse"))
+      // Kwitansi kontrol mati TIDAK boleh muncul lagi.
+      const screen = tty.screen().join("\n")
+      expect(screen).not.toContain(t("tui.compactLine", { v: t("state.compact") }))
+      expect(screen).not.toContain(t("tui.activityFold", { v: t("state.folded") }))
+      expect(screen).not.toContain(t("tui.sectionsMin"))
+      expect(session.uiState!.sectionMinimized("tool")).toBe(toolBefore)
+      expect(session.uiState!.sectionMinimized("answer")).toBe(answerBefore)
 
       await tty.send("/exit")
       await tty.send(KEY.enter)
@@ -379,12 +402,13 @@ describe("TUI slash commands (CMD-02..CMD-09)", () => {
 
       await tty.send("/view expand")
       await tty.send(KEY.enter)
-      await tty.waitForScreen((f) => f.some((l) => l.includes(t("tui.expandEmpty"))))
+      // v7.30: hasil /view expand = toast di footer, bukan baris transkrip.
+      await tty.waitForScreen((f) => (f[f.length - 1] ?? "").includes(t("tui.expandEmpty")))
 
       await tty.send("/view expand tidak-ada-id")
       await tty.send(KEY.enter)
       await tty.waitForScreen((f) =>
-        f.some((l) => l.includes(t("tui.expandNotFound", { id: "tidak-ada-id" }))),
+        (f[f.length - 1] ?? "").includes(t("tui.expandNotFound", { id: "tidak-ada-id" })),
       )
 
       await tty.send("/exit")
@@ -444,7 +468,8 @@ describe("TUI slash commands (CMD-02..CMD-09)", () => {
 
       await tty.send("/mode BUILD")
       await tty.send(KEY.enter)
-      await tty.waitForScreen((f) => f.some((l) => l.includes("work mode: BUILD")))
+      // v7.30: kwitansi "work mode: BUILD" dihapus — footer yang menampilkan Build.
+      await tty.waitForScreen((f) => (f[f.length - 1] ?? "").includes("Build"))
 
       await tty.send("/init")
       await tty.send(KEY.enter)

@@ -9,8 +9,11 @@ import { contextUnrestricted, requireToolCwd } from "./context.ts"
 
 export const writeFileTool: Tool = {
   name: "write_file",
+  // v7.33: kalimat keputusan identik dengan edit.ts & patch.ts (wire
+  // contract). Catatan jail/cap dipertahankan — hanya aturan pilih-tool yang
+  // disatukan supaya model tak melihat tiga nasihat yang saling bertentangan.
   description:
-    "Create or overwrite a file with text content (atomic write, creates parent directories). Max 5M chars (~20MB). Cannot write outside the workspace, to secret paths (.env, .ssh, node_modules) or to .minicode/ state — write your own notes in the workspace instead. Prefer edit for small changes to an existing file.",
+    "FILE EDIT: Create or overwrite a file with full text content (atomic, creates parent dirs, max 5M chars). 1 change → edit; ≥2 changes in one file → apply_patch; full rewrite/new file → write_file. Every search block must match exactly once — add surrounding lines if ambiguous. Cannot write outside the workspace, to secrets (.env, .ssh, node_modules) or to .minicode/ state.",
   parameters: {
     type: "object",
     properties: {

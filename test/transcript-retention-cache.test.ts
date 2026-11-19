@@ -17,7 +17,11 @@ test("retention preserves projections of unchanged rows and recomputes on resize
     // Each append projects its new row and the changed eviction marker.
     expect(project.mock.calls.length).toBeLessThanOrEqual(40)
     expect(transcript.size()).toBe(TRANSCRIPT_CAP + 1)
-    expect(transcript.view(80, 1, 0)[0]).toContain("new-19")
+    // v7.28: anchor ATAS — scrollBack=0 = kepala (marker evict). Baris terbaru
+    // kini ada di ekor, jadi inspect lewat scrollBack besar (dulu cukup 0 saat
+    // anchor di bawah). Cache/retention tetap dijaga: <=40 proyeksi untuk 20
+    // append artinya baris lama tak diproyeksikan ulang.
+    expect(transcript.view(80, 1, 5000)[0]).toContain("new-19")
     project.mockClear()
     transcript.view(40, 20, 0)
     expect(project.mock.calls.length).toBeGreaterThanOrEqual(TRANSCRIPT_CAP)

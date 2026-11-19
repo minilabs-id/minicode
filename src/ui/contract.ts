@@ -145,6 +145,8 @@ export interface UiPresentationActivity {
   /** F-AGENT-1: identitas sub-agent (session anak + run kanonik). */
   childSessionId?: string
   runId?: string
+  /** Label manusiawi sub-agent; lebih prioritas daripada marker run_<8>/sub_<8>. */
+  label?: string
   supersedes?: string
   expandRef?: { toolCallId: string; idx: number }
   verification?: UiVerificationDisplay
@@ -310,6 +312,7 @@ export interface UiPresentationEvent {
     | "reasoning.completed"
     | "tool.started"
     | "tool.progress"
+    | "step.started"
     | "tool.completed"
     | "tool.failed"
     | "tool.denied"
@@ -325,6 +328,7 @@ export interface UiPresentationEvent {
     | "diagnostic.raised"
     | "checkpoint.created"
     | "verification.observed"
+    | "activity.label"
     | "consequence.decided"
     | "context.window"
     | "context.cutoff"
@@ -332,11 +336,20 @@ export interface UiPresentationEvent {
   seq?: number
   turnId?: number
   stepId?: number
+  /** step.started: indeks langkah mentah kernel (0-based). */
+  step?: number
+  /** step.started: total langkah bila tersedia; absen = jangan tampilkan pecahan. */
+  total?: number
   /** P1.6: session pemilik event (anak untuk event forward), bukan selalu induk. */
   sessionId?: string
   /** P1.6: identitas sub-agent yang membedakan session vs run vs taut pemanggil. */
   childSessionId?: string
   runId?: string
+  /**
+   * Label manusiawi sub-agent dari `parentLink.label`. Additive; bridge/reducer
+   * perlu menyalinnya ke sini sebelum snapshot activity bisa memakainya.
+   */
+  label?: string
   toolCallId?: string
   approvalId?: string
   name?: string

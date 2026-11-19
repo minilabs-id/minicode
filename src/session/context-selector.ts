@@ -253,15 +253,22 @@ function sumTokens(messages: readonly Message[], est: TokenEstimator): number {
 }
 
 /**
- * Batas cakupan parsial yang aman: mulai `rawBaseSeq`, geser NAIK sampai batas
- * aman (tidak memisahkan pasangan assistant(toolCalls)/tool-result). Batas sah
- * ada di [1, head] — P3.2 `deriveContextFrontier` menolak baseSeq > head
- * ("view is never inverted"), jadi cakupan PENUH P2.8 (base_seq == head+1)
- * DICAP ke head (ringkasan [0,head) + ekor [head]; tetap valid & lengkap).
- * Deterministis; tanpa heuristik.
+ * Batas cakupan parsial yang aman: terima `rawBaseSeq` HANYA bila batas itu
+ * tidak memisahkan pasangan assistant(toolCalls)/tool-result. Batas sah ada di
+ * [1, head] — P3.2 `deriveContextFrontier` menolak baseSeq > head ("view is
+ * never inverted"), jadi cakupan PENUH P2.8 (base_seq == head+1) DICAP ke head
+ * (ringkasan [0,head) + ekor [head]; tetap valid & lengkap).
  *
- * Mengembalikan baseSeq final; 0 = cakupan penuh (mundur aman-terlebar bila
- * tak ada batas aman). rawBaseSeq <= 0 juga 0.
+ * KENAPA batas TIDAK digeser, melainkan ditolak: `summaryText` dibuat HANYA
+ * dari [0, rawBaseSeq). Menggeser batas NAIK ke b > rawBaseSeq membuat baris
+ * [rawBaseSeq, b) tak masuk ekor (`coverageOf` filter `r.seq >= b`) DAN tak
+ * tercakup ringkasan → fakta hilang senyap (mis. tool-result berisi bukti).
+ * Menggeser TURUN mengubah cakupan yang diklaim `coveredSeq`/frontier.
+ * Paling aman: mundur ke histori kanonik penuh (0), sama seperti P2.8
+ * `assembleContext` saat batas tak aman. Deterministis; tanpa heuristik.
+ *
+ * Mengembalikan baseSeq final; 0 = cakupan penuh (fallback aman-terlebar).
+ * rawBaseSeq <= 0 juga 0.
  */
 export function safeBaseSeq(rows: readonly SelectableRow[], rawBaseSeq: number): number {
   if (rawBaseSeq <= 0) return 0
@@ -269,12 +276,10 @@ export function safeBaseSeq(rows: readonly SelectableRow[], rawBaseSeq: number):
   const head = rows[rows.length - 1]!.seq
   // Cap ke head: base_seq == head+1 (cakupan penuh P2.8) tetap representable
   // sebagai ringkasan [0,head) + ekor [head].
-  let boundary = Math.min(rawBaseSeq, head)
-  while (boundary >= 1 && boundary <= head) {
-    if (boundaryIsSafe(rows as { seq: number; message: unknown }[], boundary)) return boundary
-    boundary++
-  }
-  return 0
+  const boundary = Math.min(rawBaseSeq, head)
+  // Tolak, jangan geser: geser maju = baris [rawBaseSeq, b) hilang dari view.
+  if (!boundaryIsSafe(rows as { seq: number; message: unknown }[], boundary)) return 0
+  return boundary
 }
 
 /** Bangun frontier + materialisasi atas cakupan [baseSeq, head]. */

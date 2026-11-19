@@ -102,10 +102,10 @@ const completed = (name: string, args: unknown, id = "c1", isError = false) => (
   execution: { call: { name, args, id }, result: { content: "ok", isError } },
 })
 
-// ── 1. Closed-set classifier vs registry 37 tool ──
+// ── 1. Closed-set classifier vs registry tool ──
 
-test("journal: seluruh 38 tool terklasifikasi; unknown fail-loud di test", () => {
-  expect(allTools.map((t) => t.name).sort()).toHaveLength(38)
+test("journal: seluruh 41 tool terklasifikasi; unknown fail-loud di test", () => {
+  expect(allTools.map((t) => t.name).sort()).toHaveLength(41)
   for (const t of allTools) {
     const c = classifyTool(t.name)
     if (c === "unknown") throw new Error(`tool belum diklasifikasikan: ${t.name}`)
@@ -130,7 +130,7 @@ test("journal: unknown fail-closed → terjurnal sebagai mutasi (F-14)", () => {
   expect(isMutationTool("write_file")).toBe(true)
 })
 
-test("journal: daftar MUTATION persis 13 + dotted", () => {
+test("journal: daftar MUTATION persis 16 + dotted", () => {
   const names = allTools
     .map((t) => t.name)
     .filter((n) => isMutationTool(n))
@@ -146,6 +146,9 @@ test("journal: daftar MUTATION persis 13 + dotted", () => {
       "forget_memory",
       "git_commit",
       "git_push",
+      "git_restore",
+      "git_checkout",
+      "lsp_rename",
       "mcp_call",
       "move_file",
       "write_file",
@@ -168,6 +171,9 @@ test("journal: paths relatif-dalam-root saja", () => {
     expect(verifyPaths("write_file", { path: "a/b.txt" }, dir)).toEqual(["a/b.txt"])
     expect(verifyPaths("write_file", { path: "/etc/passwd" }, dir)).toEqual([])
     expect(verifyPaths("write_file", { path: "../luar.txt" }, dir)).toEqual([])
+    // CATATAN: verifyPaths masih membaca alias lama `from`/`to` karena
+    // src/session/** di luar ownership agen ini; helper itu perlu follow-up
+    // oleh pemilik session agar menerima `path`/`destination` (wire v7.38).
     expect(verifyPaths("move_file", { from: "a", to: "sub/b" }, dir)).toEqual(["a", "sub/b"])
     expect(verifyPaths("move_file", { from: "a", to: "/luar" }, dir)).toEqual(["a"])
     expect(verifyPaths("git_commit", { message: "m", paths: ["a", "/x"] }, dir)).toEqual(["a"])

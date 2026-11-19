@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test"
+import { mkdtempSync } from "node:fs"
 import { mkdir, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { createPermissionHandler } from "../src/policy/permission.ts"
 import { editTool } from "../src/tools/edit.ts"
 import { globTool } from "../src/tools/glob.ts"
@@ -16,11 +19,29 @@ test("write_file + read_file + edit", async () => {
   await writeFileTool.execute({ path: p, content: "hello world" }, ctx)
   // read_file kini memberi nomor baris (`1: `) supaya model bisa merujuk baris.
   const r = (await readFileTool.execute({ path: p }, ctx)) as string
-  expect(r).toBe("1: hello world")
+  // v7.33: relax pin exact-string — yang diuji ialah nomor baris, bukan spasi.
+  expect(r).toMatch(/^1:\s*hello world$/)
   await editTool.execute({ path: p, oldString: "world", newString: "minicode" }, ctx)
   const r2 = (await readFileTool.execute({ path: p }, ctx)) as string
-  expect(r2).toBe("1: hello minicode")
+  expect(r2).toMatch(/^1:\s*hello minicode$/)
   await rm(tmp, { recursive: true, force: true })
+})
+
+test("read_file: path relatif di-resolve terhadap ToolContext.cwd, bukan process.cwd()", async () => {
+  // v7.33: semua test file-tool dulu memakai cwd = process.cwd(), jadi bila
+  // tool salah memakai process.cwd() pun tak terdeteksi. Temp dir di luar cwd
+  // proses dengan berkas bernama sama membuktikan resolusi memakai ctx.cwd.
+  const external = mkdtempSync(join(tmpdir(), "minicode-tools-cwd-"))
+  try {
+    await mkdir(join(external, ".minicode"), { recursive: true })
+    await writeFile(join(external, "known.txt"), "from-temp-cwd")
+    expect(external).not.toBe(process.cwd())
+    const ctx: any = { signal: new AbortController().signal, cwd: external }
+    const r = (await readFileTool.execute({ path: "known.txt" }, ctx)) as string
+    expect(r).toMatch(/^1:\s*from-temp-cwd$/)
+  } finally {
+    await rm(external, { recursive: true, force: true })
+  }
 })
 
 test("edit fails on multiple matches", async () => {

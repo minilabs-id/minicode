@@ -17,6 +17,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { deleteSession } from "../src/session/persistence.ts"
+import { SESSION_LEASE_MS } from "../src/task/session-authority.ts"
 import { resetSessionOwnershipForTests } from "../src/task/session-ownership.ts"
 import { resetTaskStoreHandles, TaskStore } from "../src/task/store.ts"
 import { type FakeProvider, startFakeProvider } from "./helpers/fake-provider.ts"
@@ -28,7 +29,8 @@ isolateHomeForTests()
 
 const REPO = import.meta.dir.replace(/[\\/]test$/, "").replace(/\\/g, "/")
 
-const LEASE = 300_000
+// v7.40: dari sumber kanonik, bukan hardcode 300_000 (lease naik ke 750_000).
+const LEASE = SESSION_LEASE_MS
 
 /**
  * The child. argv:
@@ -451,7 +453,8 @@ describe("6AB S19 P4/P5 - deletion and restart", () => {
     expect(restarted.report.ok).toBe(false)
     expect(restarted.exitCode).toBe(4)
     expect(restarted.report.error).toContain("lease")
-    expect(LEASE).toBe(300_000)
+    // v7.40: verifikasi konstanta aktual, bukan angka lama 300_000.
+    expect(LEASE).toBe(SESSION_LEASE_MS)
   }, 120_000)
 })
 

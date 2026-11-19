@@ -22,7 +22,14 @@ import {
 import { sanitizeSpawnEnv, scrubSecrets } from "../policy/scrub.ts"
 import { contextUnrestricted, requireToolCwd } from "./context.ts"
 
-function runGit(
+// Seam untuk menguji lifecycle abort tanpa bergantung pada biner git/kill OS
+// (pola yang sama dengan setDockerSpawnForTest di sandbox/docker.ts).
+let gitSpawnForTest: typeof spawn | null = null
+export function setGitSpawnForTest(spawner: typeof spawn | null): void {
+  gitSpawnForTest = spawner
+}
+
+export function runGit(
   args: string[],
   cwd: string | undefined,
   signal: AbortSignal,
@@ -30,59 +37,92 @@ function runGit(
   relaxed = false,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
+    // M2: satu sinyal gabungan (induk + timeout) dipakai spawn DAN close handler.
+    // AbortSignal.any meneruskan reason dari sinyal yang lebih dulu gugur, jadi
+    // timeout maupun pembatalan user sama-sama terdeteksi di bawah.
+    const effective = AbortSignal.any([signal, AbortSignal.timeout(LIMITS.GIT_TIMEOUT_MS)])
     // Audit #10 P0: SEMUA pemanggilan git lewat sini membawa netralisasi
     // repo-controlled execution (hooks/fsmonitor/pager via GIT_SAFE_BASE).
     // Executable di-resolve absolut dari PATH terpercaya karena Windows
     // mencari CWD lebih dulu: `git.bat` di repo akan dieksekusi tanpa ini.
-    const p = spawn(resolveTrustedExecutable("git"), [...GIT_SAFE_BASE, ...args], {
-      cwd,
-      // Repo hooks (pre-commit/commit-msg/...) berjalan sebagai child dengan
-      // Secara default kredensial (API_KEY/TOKEN/...) di-strip agar hook nakal tak
-      // bisa memanen secret dari env. Auth tetap via credential helper / agen
-      // SSH (SSH_AUTH_SOCK bukan pola secret) — lihat policy/scrub.ts.
-      // Unrestricted: kredensial git SEMPIT (GH_TOKEN/GITHUB_TOKEN/SSH_AUTH_SOCK)
-      // dilewatkan untuk `git push`/remote.
-      env: sanitizeSpawnEnv(process.env, envPatch, relaxed),
-      // Timeout dari LIMITS, bukan hardcode: `git_commit` menjalankan beberapa
-      // operasi berurutan (rev-parse → add → commit → log), dan di mesin yang
-      // sibuk (mis. CI menjalankan test dengan coverage) spawn git bisa jauh
-      // lebih lambat dari batas 8s yang dulu dipakai — kegagalannya muncul
-      // sebagai flake, bukan bug nyata.
-      signal: AbortSignal.any([signal, AbortSignal.timeout(LIMITS.GIT_TIMEOUT_MS)]),
-    })
+    const p = (gitSpawnForTest ?? spawn)(
+      resolveTrustedExecutable("git"),
+      [...GIT_SAFE_BASE, ...args],
+      {
+        cwd,
+        // Repo hooks (pre-commit/commit-msg/...) berjalan sebagai child dengan
+        // Secara default kredensial (API_KEY/TOKEN/...) di-strip agar hook nakal tak
+        // bisa memanen secret dari env. Auth tetap via credential helper / agen
+        // SSH (SSH_AUTH_SOCK bukan pola secret) — lihat policy/scrub.ts.
+        // Unrestricted: kredensial git SEMPIT (GH_TOKEN/GITHUB_TOKEN/SSH_AUTH_SOCK)
+        // dilewatkan untuk `git push`/remote.
+        env: sanitizeSpawnEnv(process.env, envPatch, relaxed),
+        // Timeout dari LIMITS, bukan hardcode: `git_commit` menjalankan beberapa
+        // operasi berurutan (rev-parse → add → commit → log), dan di mesin yang
+        // sibuk (mis. CI menjalankan test dengan coverage) spawn git bisa jauh
+        // lebih lambat dari batas 8s yang dulu dipakai — kegagalannya muncul
+        // sebagai flake, bukan bug nyata.
+        // M2: simpan handle combined signal. Dulu inline di sini, sehingga close
+        // handler hanya bisa memeriksa `signal` induk — timeout mengakhiri child
+        // dengan code null lalu di-resolve sebagai `exit null` (palsu-sukses).
+        signal: effective,
+      },
+    )
     // F-15: cap SAAT streaming (bukan slice di akhir): `git diff`/`git log`
     // di repo raksasa bisa ratusan MB — buffer tak terbatas = OOM sebelum
     // truncate kernel sempat jalan. Satu-satunya tool tanpa cap sebelumnya.
+    // Audit deep: anggaran dipakai BERSAMA stdout+stderr (sama seperti
+    // bash.ts CappedBuffer). Dulu tiap stream punya cap penuh sehingga
+    // gabungannya bisa ~2× GIT_OUTPUT_MAX_CHARS — klaim cap jadi bohong.
     const cap = LIMITS.GIT_OUTPUT_MAX_CHARS
     let out = "",
       err = "",
       truncated = false
-    const push = (cur: string, d: Buffer): string => {
-      if (cur.length >= cap) {
+    const push = (target: "out" | "err", d: Buffer): void => {
+      const used = out.length + err.length
+      if (used >= cap) {
         truncated = true
-        return cur
+        return
       }
-      const room = cap - cur.length
+      const room = cap - used
       const s = d.toString()
       if (s.length > room) truncated = true
-      return cur + s.slice(0, Math.max(0, room))
+      const piece = s.slice(0, Math.max(0, room))
+      if (target === "out") out += piece
+      else err += piece
     }
     const onAbort = () => p.kill("SIGTERM")
-    p.stdout.on("data", (d) => (out = push(out, d)))
-    p.stderr.on("data", (d) => (err = push(err, d)))
+    p.stdout.on("data", (d) => push("out", d))
+    p.stderr.on("data", (d) => push("err", d))
     p.on("error", (e) => {
-      signal.removeEventListener("abort", onAbort)
+      effective.removeEventListener("abort", onAbort)
       reject(e)
     })
     p.on("close", (code) => {
-      signal.removeEventListener("abort", onAbort)
+      effective.removeEventListener("abort", onAbort)
+      // Abort/timeout keduanya menutup child dengan code null. Sebelumnya
+      // keduanya di-resolve sebagai `exit null\n…` seolah hasil normal, sehingga
+      // pemanggil tak pernah tahu pembatalan terjadi. Periksa sinyal GABUNGAN:
+      // bila induk dibatalkan ATAU timeout tercapai, lempar reason-nya supaya
+      // kernel menandai isError/abort (bukan "exit null"). M2: dulu yang dicek
+      // hanya `signal` induk → timeout tak terdeteksi dan dianggap sukses.
+      if (effective.aborted) {
+        reject(effective.reason)
+        return
+      }
       const text = scrubSecrets((out + (err ? `\n${err}` : "")).trim())
       const marked = truncated ? `${text}\n… [git output truncated]` : text
-      if (code !== 0 && !marked) reject(new Error(`git ${args.join(" ")} exit ${code}`))
-      else resolve(marked || `(exit ${code})`)
+      // Audit: dulu `code !== 0 && !marked` — bila git gagal TAPI sempat
+      // menulis stdout/stderr, hasilnya di-resolve sebagai SUKSES. Sekarang
+      // mirror bash tool: exit code bukan nol selalu ditandai `exit N\n` di
+      // awal hasil (sinyal isError/kegagalan untuk model + jurnal), dengan
+      // output tetap dibawa. Teks "nothing to commit" di gitCommitTool tetap
+      // terdeteksi karena pencocokannya substring, bukan prefix.
+      if (code !== 0) resolve(`exit ${code}\n${marked}`)
+      else resolve(marked || "(exit 0)")
     })
-    if (signal.aborted) onAbort()
-    else signal.addEventListener("abort", onAbort, { once: true })
+    if (effective.aborted) onAbort()
+    else effective.addEventListener("abort", onAbort, { once: true })
   })
 }
 
@@ -124,8 +164,10 @@ async function isGitRepo(cwd: string, signal: AbortSignal): Promise<boolean> {
 
 export const gitStatusTool: Tool = {
   name: "git_status",
+  // v7.33 (wire contract): tag family. "hardened" dipertahankan karena test
+  // repo-git-trust memverifikasi klaim ini, demikian pula preferensi git tool.
   description:
-    "git status --porcelain + diff --stat + log --oneline -10 (hardened: ignores repository hooks, filters and diff drivers — prefer over raw `git` in bash)",
+    "GIT READ: git status --porcelain + diff --stat + log --oneline -10 (hardened: ignores repository hooks, filters and diff drivers — prefer over raw `git` in bash)",
   parameters: {
     type: "object",
     properties: { cwd: { type: "string" } },
@@ -161,8 +203,9 @@ export const gitStatusTool: Tool = {
 
 export const gitDiffTool: Tool = {
   name: "git_diff",
+  // v7.33 (wire contract): tag family; "hardened" dipertahankan (test pin).
   description:
-    "git diff (unstaged) or git diff --staged (hardened: ignores repository hooks, filters and diff drivers — prefer over raw `git diff` in bash)",
+    "GIT READ: git diff (unstaged) or git diff --staged (hardened: ignores repository hooks, filters and diff drivers — prefer over raw `git diff` in bash)",
   parameters: {
     type: "object",
     properties: {
@@ -191,7 +234,8 @@ export const gitDiffTool: Tool = {
 
 export const gitLogTool: Tool = {
   name: "git_log",
-  description: "git log --oneline -n (hardened: ignores repository hooks and pager)",
+  // v7.33 (wire contract): tag family.
+  description: "GIT READ: git log --oneline -n (hardened: ignores repository hooks and pager)",
   parameters: {
     type: "object",
     properties: {
@@ -251,8 +295,10 @@ function assertPaths(
 
 export const gitCommitTool: Tool = {
   name: "git_commit",
+  // v7.33 (wire contract): `GIT WRITE:` (bukan GIT READ) agar model tak
+  // mengira commit adalah operasi baca. Batasan authority dipertahankan.
   description:
-    "Create a git commit. Stage specific paths (paths) or all tracked changes (all:true). Does not support push/amend/reset — that is beyond the agent's authority. Never runs repository hooks and refuses configured custom filters before staging; use manual Git only after reviewing trusted filters.",
+    "GIT WRITE: Create a git commit. Stage specific paths or all tracked changes (all:true). No push/amend/reset — beyond the agent's authority. Repository hooks never run; custom filters are refused before staging (review them, then commit manually if trusted).",
   parameters: {
     type: "object",
     properties: {
@@ -341,6 +387,11 @@ export const gitCommitTool: Tool = {
         // runGit mengembalikan "(exit 0)" saat stdout+stderr kosong (lihat baris 82).
         const isCleanGitOut = (s: string): boolean => !s || /^\(exit \d+\)$/.test(s)
         if (/nothing to commit|no changes added/i.test(out)) {
+          // Jalur retry "already committed" menjalankan beberapa git berurutan.
+          // Cek di sini (dan setelah blok try/catch di bawah) supaya abort di
+          // tengah retry tidak ditelan lalu dilaporkan sebagai "nothing to
+          // commit" — runGit kini melempar saat signal induk gugur.
+          ctx.signal.throwIfAborted()
           try {
             if (files.length > 0) {
               // Hanya klaim "already committed" bila file target bersih sekarang,
@@ -412,6 +463,10 @@ export const gitCommitTool: Tool = {
               }
             }
           } catch {}
+          // runGit bisa melempar karena abort DAN kelemparan itu tertelan catch
+          // di atas — sebelum mengembalikan hasil retry, pastikan sesi masih
+          // hidup supaya pembatalan tak berubah jadi "nothing to commit".
+          ctx.signal.throwIfAborted()
           let untrackedHint = ""
           if (files.length === 0 && all === true) {
             const untracked = (
@@ -480,8 +535,9 @@ export const gitCommitTool: Tool = {
 
 export const gitPushTool: Tool = {
   name: "git_push",
+  // v7.33 (wire contract): tag GIT WRITE (operasi mengubah remote).
   description:
-    "Push a local branch to a remote (git push; hardened: repo hooks/filters neutralized). Gated like git_commit. In unrestricted mode git credentials (GH_TOKEN/GITHUB_TOKEN/SSH agent) are passed through.",
+    "GIT WRITE: Push a local branch to a remote (hardened: repo hooks/filters neutralized; gated like git_commit). In unrestricted mode git credentials (GH_TOKEN/GITHUB_TOKEN/SSH agent) pass through.",
   parameters: {
     type: "object",
     properties: {
@@ -524,5 +580,116 @@ export const gitPushTool: Tool = {
     if (setUpstream === true) args.push("--set-upstream")
     const out = await runGit(args, resolvedCwd, ctx.signal, undefined, relaxed)
     return out.trim() || "(push finished)"
+  },
+}
+
+/**
+ * v7.38: `git_restore`/`git_checkout` sengaja SEMPIT — satu path, tanpa
+ * branch switching, tanpa `--force`, tanpa hapus ref. Commit/push sudah
+ * di-gate karena mengubah riwayat bersama; restore juga merusak kerja user
+ * (menimpa perubahan belum tersimpan), jadi dapat perlakuan gate yang sama.
+ * Argumen dibangun sebagai ARRAY (bukan string shell) dan lewat `runGit`
+ * yang menetralkan hook/filter repo — persis pola `git_commit`/`git_push`.
+ */
+
+/**
+ * Audit deep: `git restore`/`git checkout` menulis worktree dan menjalankan
+ * SMUDGE filter repo — beda dari status/diff yang hanya kena CLEAN filter.
+ * Netralisasi (`filter.<d>.smudge=cat`) mengubah konten hasil restore, jadi
+ * bukan jalan yang benar. Seperti `git_commit`, kami TOLAK bila ada driver
+ * filter terkonfigurasi: menjalankan perintah dari .git/config = RCE.
+ * Fail-closed: discoverFilterDrivers melempar saat config tak bisa dibaca.
+ */
+async function refuseRepoFilters(cwd: string): Promise<void> {
+  const drivers = await discoverFilterDrivers(cwd)
+  if (drivers.length > 0) {
+    const names = drivers.map((d) => `filter.${d.name}`).join(", ")
+    throw new Error(
+      `git restore/checkout blocked before running: repository Git filters are configured (${names}). ` +
+        "Review .gitattributes and Git config, then restore manually if the filters are trusted.",
+    )
+  }
+}
+
+export const gitRestoreTool: Tool = {
+  name: "git_restore",
+  // v7.38 (wire contract): tag GIT WRITE agar model tak mengira ini operasi baca.
+  description:
+    "GIT WRITE: Restore ONE file path from the index or a ref (git restore). Narrow: no branch/ref deletion, no force. `--staged` unstages (index ← HEAD); `ref` sets --source. Repository hooks/filters are neutralized; gated like git_commit.",
+  parameters: {
+    type: "object",
+    properties: {
+      path: { type: "string", description: "single file path relative to the workspace root" },
+      ref: { type: "string", description: "restore source ref (e.g. HEAD~1); default = index" },
+      staged: {
+        type: "boolean",
+        description: "true = restore the index entry from HEAD (unstage)",
+      },
+      cwd: { type: "string" },
+    },
+    required: ["path"],
+    additionalProperties: false,
+  },
+  async execute({ path, ref, staged, cwd }, ctx) {
+    ctx.signal.throwIfAborted()
+    const c = cwd as string | undefined
+    const sessionRoot = requireToolCwd(ctx)
+    const relaxed = contextUnrestricted(ctx)
+    assertCwd(c, sessionRoot, relaxed)
+    const resolvedCwd = c ? resolve(sessionRoot, c) : sessionRoot
+    // Fail-closed: path luar root / sensitif / owned-state ditolak sebelum git jalan.
+    const [target] = assertPaths([path], c, sessionRoot, relaxed)
+    if (!target) throw new Error("path is required")
+
+    // Nilai `--source=` tetap satu argumen argv, tapi tolak awalan '-' dan NUL
+    // supaya ref tak bisa menyisipkan opsi git lain (pola `refArg` di git_push).
+    const source = typeof ref === "string" ? ref.trim() : ""
+    if (source.startsWith("-") || source.includes("\0"))
+      throw new Error("ref must not start with '-' or contain NUL")
+
+    if (!(await isGitRepo(resolvedCwd, ctx.signal))) return "not a git repository"
+    // Audit deep: tolak sebelum smudge filter repo sempat dieksekusi.
+    await refuseRepoFilters(resolvedCwd)
+
+    // `--` memisahkan opsi dari path: nama berkas '-f' tak jadi flag git.
+    const args: string[] = ["restore"]
+    if (staged === true) args.push("--staged")
+    if (source) args.push(`--source=${source}`)
+    args.push("--", target)
+    const out = await runGit(args, resolvedCwd, ctx.signal)
+    return out.trim() || `restored ${target}${source ? ` from ${source}` : ""}`
+  },
+}
+
+export const gitCheckoutTool: Tool = {
+  name: "git_checkout",
+  // v7.38 (wire contract): tag GIT WRITE; ruang lingkup dipadatkan di deskripsi.
+  description:
+    "GIT WRITE: Restore ONE file path from the index via `git checkout -- <path>`. Narrow path-restore ONLY — no branch switching, no ref, no --force. Repository hooks/filters are neutralized; gated like git_commit.",
+  parameters: {
+    type: "object",
+    properties: {
+      path: { type: "string", description: "single file path relative to the workspace root" },
+      cwd: { type: "string" },
+    },
+    required: ["path"],
+    additionalProperties: false,
+  },
+  async execute({ path, cwd }, ctx) {
+    ctx.signal.throwIfAborted()
+    const c = cwd as string | undefined
+    const sessionRoot = requireToolCwd(ctx)
+    const relaxed = contextUnrestricted(ctx)
+    assertCwd(c, sessionRoot, relaxed)
+    const resolvedCwd = c ? resolve(sessionRoot, c) : sessionRoot
+    const [target] = assertPaths([path], c, sessionRoot, relaxed)
+    if (!target) throw new Error("path is required")
+    if (!(await isGitRepo(resolvedCwd, ctx.signal))) return "not a git repository"
+    // Audit deep: tolak sebelum smudge filter repo sempat dieksekusi.
+    await refuseRepoFilters(resolvedCwd)
+    // Sengaja TIDAK ada bentuk `git checkout <branch>`: switch branch mengubah
+    // seluruh working tree dan bisa menimpa kerja user di luar satu path.
+    const out = await runGit(["checkout", "--", target], resolvedCwd, ctx.signal)
+    return out.trim() || `restored ${target} from index`
   },
 }

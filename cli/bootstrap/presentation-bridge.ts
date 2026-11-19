@@ -96,6 +96,17 @@ function mapPresentationEvent(event: DomainEvent): UiPresentationEvent | null {
         status: "running",
         message: event.message,
       }
+    case "step.started":
+      // Progres langkah: UiPresentationEvent membawa angka mentah; label
+      // terjemahan dihitung transcript (i18n), bukan di sini (lintas lapisan).
+      return {
+        type: event.type,
+        seq: event.eventSeq,
+        turnId: event.turnId,
+        step: event.step,
+        ...(event.total !== undefined ? { total: event.total } : {}),
+        ...(event.label ? { label: event.label } : {}),
+      }
     case "tool.completed":
       return {
         type: event.type,
@@ -210,6 +221,16 @@ function mapPresentationEvent(event: DomainEvent): UiPresentationEvent | null {
           observedAt: event.observedAt,
         },
         ...(event.parentLink ? { parentToolCallId: event.parentLink.parentToolCallId } : {}),
+      }
+    case "activity.label":
+      // Judul diri anak hanya mengubah label activity; renderer wajib no-op
+      // (lihat transcript.presentationEvent) agar tak ada baris baru.
+      return {
+        type: event.type,
+        seq: event.eventSeq,
+        turnId: event.turnId,
+        toolCallId: event.toolCallId,
+        label: event.label,
       }
     case "context.compacted":
       return {
@@ -335,12 +356,16 @@ function mapPresentationEvent(event: DomainEvent): UiPresentationEvent | null {
 export function toPresentationEvent(event: DomainEvent): UiPresentationEvent | null {
   const mapped = mapPresentationEvent(event)
   if (!mapped) return null
-  const link = (event as { parentLink?: { childSessionId?: string; runId?: string } }).parentLink
+  const link = (
+    event as { parentLink?: { childSessionId?: string; runId?: string; label?: string } }
+  ).parentLink
   return {
     ...mapped,
     sessionId: event.sessionId,
     ...(link?.childSessionId ? { childSessionId: link.childSessionId } : {}),
     ...(link?.runId ? { runId: link.runId } : {}),
+    // Continuasi label sub-agent ke UiPresentationEvent → Activity → runMarker.
+    ...(link?.label ? { label: link.label } : {}),
   }
 }
 

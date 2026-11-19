@@ -34,7 +34,7 @@ describe("unrestricted mode: full access, no guard", () => {
     const h = createPermissionHandler({ mode: "unrestricted", root: dir })
     expect(await h.check(call("write_file", { path: "../outside.txt" }), {} as never)).toBe("allow")
     expect(
-      await h.check(call("move_file", { from: "a.txt", to: "../evil.txt" }), {} as never),
+      await h.check(call("move_file", { path: "a.txt", destination: "../evil.txt" }), {} as never),
     ).toBe("allow")
   })
 

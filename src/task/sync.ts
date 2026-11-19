@@ -36,8 +36,8 @@
 
 import type { CanonicalAssignment, CanonicalAssignmentTable } from "./assignment.ts"
 import { type DeclaredTask, planTaskIdentities, todoStatusToTask } from "./identity.ts"
-import { isTaskId, isTerminalTaskStatus, type Task, TaskError } from "./model.ts"
-import { TaskStore, type VerificationGateOutcome } from "./store.ts"
+import { isTaskId, isTerminalTaskStatus, type Task, TaskError, type TaskStatus } from "./model.ts"
+import { type PatchOptions, TaskStore, type VerificationGateOutcome } from "./store.ts"
 
 /** One declared item, already mapped out of the legacy `TodoItem` shape.
  *  `content` is mapped to `title` by the caller - the store requires `title`,
@@ -163,6 +163,22 @@ export function synchronizeCanonicalTasks(opts: {
   }))
   const plan = planTaskIdentities(asDeclared)
 
+  // [P1-4b] Ambil snapshot revisi SEBELUM kunci tulis diambil. Ini bukan
+  // pembacaan di dalam transaksi: jeda antara snapshot dan `withTransaction`
+  // adalah jendela yang dipakai penulis lain (mis. Scheduler yang claim task)
+  // untuk memajukan revisi. Dengan `expectedRevision` dari snapshot lama,
+  // `patchTask` menolak CAS alih-alih diam-diam menimpa eksekusi live.
+  const revisions = new Map<string, number>()
+  for (const t of store.listTasks(sessionId)) revisions.set(t.id, t.revision)
+  const revOpts = (id: string): PatchOptions => {
+    const expectedRevision = revisions.get(id)
+    return expectedRevision === undefined ? {} : { expectedRevision }
+  }
+
+  // [P1-4a] IMMEDIATE, bukan DEFERRED: transaksi ini membaca lalu menulis lintas
+  // koneksi, jadi lock tulis harus diambil di awal agar upgrade kunci SQLite
+  // tidak deadlock saat penulis lain menunggu. Tidak ada perubahan status/order
+  // selain timing lock.
   return store.withTransaction((tx) => {
     // Resolve-before-mutate, second leg: every claimed id must already exist.
     // An unknown id is a hard failure - never a silent "treat as new".
@@ -170,6 +186,30 @@ export function synchronizeCanonicalTasks(opts: {
       if (!tx.getTask(sessionId, id)) {
         throw new TaskError("TASK_NOT_FOUND", `declared unknown task ${id}`)
       }
+    }
+
+    // [P1-4b] Pagar authority: model todo_write TIDAK boleh mengubah task yang
+    // sedang diklaim Scheduler menjadi status apa pun yang melepaskan ownership.
+    // [AUDIT] Dulu pagar hanya menolak target PENDING. Itu lubang: patchTask
+    // (store.ts) mengosongkan `execution_owner` SETIAP KALI status keluar dari
+    // IN_PROGRESS/VERIFYING, dan TASK_EDGES mengizinkan IN_PROGRESS→COMPLETED/
+    // CANCELLED/BLOCKED. Jadi todo_write yang menyatakan task live "selesai"/
+    // "batal"/"blocked" lewat pagar lama dan meng-yatim-kan eksekusi yang masih
+    // jalan. Oleh karena itu tolak SEMUA target yang melepaskan ownership,
+    // bukan hanya PENDING.
+    const refuseSchedulerRequeue = (id: string, target: TaskStatus): void => {
+      // IN_PROGRESS/VERIFYING ada di RECONCILABLE_STATUSES: tidak melepaskan
+      // ownership (itu cursor plan agent di atas klaim live, bukan akhir eksekusi).
+      // Setiap status lain melepaskan ownership → wajib ditolak saat owner scheduler.
+      if (target === "IN_PROGRESS" || target === "VERIFYING") return
+      const current = tx.getTask(sessionId, id)
+      if (!current || (current.status !== "IN_PROGRESS" && current.status !== "VERIFYING")) return
+      if (tx.getExecutionOwnership(sessionId, id)?.executionOwner !== "scheduler") return
+      throw new TaskError(
+        "TASK_AUTHORITY_VIOLATION",
+        `${id} is claimed by the scheduler (${current.status}); a model todo_write cannot move a live execution to ${target} (that would release execution ownership and orphan the run). ` +
+          `Let the scheduler finish or reconcile it first, then call todo_read and re-send.`,
+      )
     }
 
     const seen = new Set<string>()
@@ -186,45 +226,70 @@ export function synchronizeCanonicalTasks(opts: {
         const id = entry.taskId as string
         seen.add(id)
         assignment.push({ taskId: id, kind: "existing" })
+        // [P1-4b] tolak requeue eksekusi live SEBELUM patch apa pun.
+        refuseSchedulerRequeue(id, entry.status)
+        // [P1-4b] CAS memakai revisi snapshot; patch di bawah gagal bila ada
+        // penulis lain yang memajukan revisi di jendela sebelum lock diambil.
+        const opts = revOpts(id)
         if (holdVerifying) {
           changed.push(
-            tx.patchTask(sessionId, id, {
-              title: entry.title,
-              status: "VERIFYING",
-              order: entry.order,
-              blockedReason: null,
-            }),
+            tx.patchTask(
+              sessionId,
+              id,
+              {
+                title: entry.title,
+                status: "VERIFYING",
+                order: entry.order,
+                blockedReason: null,
+              },
+              opts,
+            ),
           )
         } else if (entry.status === "COMPLETED" && verificationOutcome?.ok === true) {
           const cur = tx.getTask(sessionId, id)!
           if (cur.status !== "COMPLETED") {
-            tx.patchTask(sessionId, id, {
-              title: entry.title,
-              status: "VERIFYING",
-              order: entry.order,
-              blockedReason: null,
-            })
+            tx.patchTask(
+              sessionId,
+              id,
+              {
+                title: entry.title,
+                status: "VERIFYING",
+                order: entry.order,
+                blockedReason: null,
+              },
+              opts,
+            )
             changed.push(tx.completeTaskVerification(sessionId, id, verificationOutcome))
           } else {
             changed.push(
-              tx.patchTask(sessionId, id, {
-                title: entry.title,
-                status: entry.status,
-                order: entry.order,
-                blockedReason: entry.blockedReason,
-              }),
+              tx.patchTask(
+                sessionId,
+                id,
+                {
+                  title: entry.title,
+                  status: entry.status,
+                  order: entry.order,
+                  blockedReason: entry.blockedReason,
+                },
+                opts,
+              ),
             )
           }
         } else {
           changed.push(
-            tx.patchTask(sessionId, id, {
-              title: entry.title,
-              status: entry.status,
-              // `order` is the declared position. It is display/execution order,
-              // never identity.
-              order: entry.order,
-              blockedReason: entry.blockedReason,
-            }),
+            tx.patchTask(
+              sessionId,
+              id,
+              {
+                title: entry.title,
+                status: entry.status,
+                // `order` is the declared position. It is display/execution order,
+                // never identity.
+                order: entry.order,
+                blockedReason: entry.blockedReason,
+              },
+              opts,
+            ),
           )
         }
       } else {
@@ -270,7 +335,7 @@ export function synchronizeCanonicalTasks(opts: {
       })
 
     return { applied: true, changed, created, retained, assignment }
-  })
+  }, true)
 }
 
 /** Resolve canonical identity for a plan projection.

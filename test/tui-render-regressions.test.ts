@@ -24,6 +24,8 @@ interface Harness {
   acts: Record<string, unknown>[]
   emit: (event: Record<string, unknown>) => void
   rows: () => string[]
+  /** v7.28: baca baris dari EKOR (scrollBack besar), bukan kepala. */
+  tailRows: () => string[]
 }
 
 function harness(opts: { reasoning?: boolean } = {}): Harness {
@@ -51,7 +53,17 @@ function harness(opts: { reasoning?: boolean } = {}): Harness {
     ).viewport(100, 80, 0)
     return view.rows.map((row) => stripSgr(row.text).trimEnd()).filter((line) => line.length > 0)
   }
-  return { tr, ui, events: tasks, acts, emit, rows }
+  // v7.28 anchor atas: `rows()` melihat KEPALA (scrollBack=0). Untuk kasus
+  // eviction, baris yang diuji ada di EKOR — baca dengan scrollBack besar.
+  const tailRows = () => {
+    const view = (
+      tr as unknown as {
+        viewport: (w: number, h: number, back: number) => { rows: { text: string }[] }
+      }
+    ).viewport(100, 80, TRANSCRIPT_CAP)
+    return view.rows.map((row) => stripSgr(row.text).trimEnd()).filter((line) => line.length > 0)
+  }
+  return { tr, ui, events: tasks, acts, emit, rows, tailRows }
 }
 
 const reasoning = (h: Harness, text: string) =>
@@ -119,7 +131,8 @@ describe("thinking: satu baris per turn, bukan per segmen", () => {
     // Turn masih berjalan — segmen berikutnya WAJIB tetap terlihat.
     reasoning(h, "segmen-kedua")
     h.emit({ type: "tool.started", toolCallId: "t1", name: "bash" })
-    expect(h.rows().some((line) => line.includes("thinking"))).toBe(true)
+    // Segmen terbaru ada di ekor setelah banjir eviction (v7.28).
+    expect(h.tailRows().some((line) => line.includes("thinking"))).toBe(true)
   })
 
   test("detail penuh tetap bisa diambil lewat /expand", () => {
@@ -135,7 +148,7 @@ describe("thinking: satu baris per turn, bukan per segmen", () => {
 })
 
 describe("tool gagal: satu baris, alasan tidak hilang", () => {
-  test("tool gagal: alasan tercetak sekali, hitungan gagal tetap di grup", () => {
+  test("tool gagal: alasan tercetak sekali di baris flat (tanpa panel grup)", () => {
     const h = harness()
     h.emit({ type: "turn.started" })
     for (let i = 0; i < 3; i++)
@@ -164,15 +177,17 @@ describe("tool gagal: satu baris, alasan tidak hilang", () => {
     })
     h.emit({ type: "turn.completed", summary: {} })
     const rows = h.rows()
-    // Alasan tampil SEKALI di baris individual; baris grup hanya membawa
-    // hitungan, jadi tidak ada teks alasan yang terduplikasi.
+    // Renderer flat (ledger) tak punya panel grup: satu baris tool gagal membawa
+    // nama, status, dan alasan. Yang dijaga: alasan tampil tepat SEKALI dan tak
+    // hilang (regresi lama: barisnya ditelan saat hitungan dipindah ke grup).
     expect(rows.filter((line) => line.includes("pola tidak ditemukan")).length).toBe(1)
     const failedRow = rows.find((line) => line.includes("pola tidak ditemukan"))!
     expect(failedRow).toContain("grep")
-    // Baris grup tetap melaporkan keberhasilan yang dilipat.
-    const group = rows.find((line) => line.includes("execute"))
-    expect(group).toBeDefined()
-    expect(group).toContain("3 ok")
+    expect(failedRow).toContain("failed")
+    expect(failedRow).toContain("pola tidak ditemukan")
+    // Tak ada lagi baris grup "execute · 3 ok" — tiap tool dicatat apa adanya.
+    expect(rows.some((line) => line.includes("execute"))).toBe(false)
+    expect(rows.some((line) => line.includes("3 ok"))).toBe(false)
   })
 
   test("tool ditolak juga tampil (alasan penolakan tidak ditelan)", () => {

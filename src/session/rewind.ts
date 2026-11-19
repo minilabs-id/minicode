@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto"
-import { type FileHandle, mkdir, open, readFile, rm } from "node:fs/promises"
+import { type FileHandle, mkdir, open, readFile, rm, stat } from "node:fs/promises"
+import { hostname, uptime } from "node:os"
 import { join, resolve } from "node:path"
 import { atomicWriteText } from "../lib/atomic-write.ts"
 import { sanitizeSessionPart } from "../lib/session-id.ts"
@@ -126,29 +127,123 @@ export function listUserTurns(sessionId: string, cwd?: string): UserTurn[] {
   return result
 }
 
+/**
+ * Batas usia lock rewind sebelum dianggap basi. Bisa diubah operator lewat env
+ * (milidetik); default 10 menit. Garda ini menutup kasus crash + PID reuse:
+ * `process.kill(pid, 0)` bisa selalu sukses pada PID yang didaur ulang, sehingga
+ * lock lama tanpa batas usia memblokir rewind selamanya.
+ */
+const REWIND_LOCK_MAX_AGE_MS = (() => {
+  const raw = Number(process.env.MINICODE_REWIND_LOCK_MAX_AGE_MS)
+  return Number.isFinite(raw) && raw > 0 ? raw : 10 * 60 * 1000
+})()
+
+interface RewindLockContent {
+  pid: number
+  bootId: string
+  createdAt: number
+}
+
+/** Penanda boot yang stabil selama satu sesi boot mesin. */
+function rewindBootMarker(): string {
+  const fromEnv = process.env.MINICODE_BOOT_ID?.trim()
+  if (fromEnv) return fromEnv
+  // `Date.now() - uptime()` konstan dalam satu boot (keduanya naik bersama).
+  // Bulatkan ke menit agar jitter sub-detik tak mengubah penanda antar-proses.
+  const bootStart = Math.round((Date.now() - uptime() * 1000) / 60_000) * 60_000
+  return `${hostname()}:${bootStart}`
+}
+
+/**
+ * Terima format baru ({pid,bootId,createdAt}) dan format lama (PID numerik).
+ * Format lama tak punya createdAt/bootId — staleness-nya memakai mtime berkas.
+ */
+function parseRewindLock(raw: string): Partial<RewindLockContent> | null {
+  const trimmed = raw.trim()
+  if (trimmed === "") return null
+  if (trimmed.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(trimmed) as Partial<RewindLockContent>
+      if (
+        typeof parsed.pid === "number" &&
+        Number.isSafeInteger(parsed.pid) &&
+        parsed.pid >= 1 &&
+        typeof parsed.bootId === "string" &&
+        typeof parsed.createdAt === "number" &&
+        Number.isFinite(parsed.createdAt)
+      )
+        return parsed
+    } catch {}
+    return null
+  }
+  const pid = Number(trimmed)
+  return Number.isSafeInteger(pid) && pid >= 1 ? { pid } : null
+}
+
+/** Klaim lock basi (boot beda / terlalu tua / PID mati); lock hidup dilempar. */
+async function reclaimRewindLock(path: string): Promise<FileHandle> {
+  let raw: string
+  let mtimeMs: number
+  try {
+    raw = await readFile(path, "utf8")
+    mtimeMs = (await stat(path)).mtimeMs
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      // Berkas hilang di antara EEXIST dan baca — langsung coba acquire lagi.
+      return await open(path, "wx", 0o600)
+    }
+    throw error
+  }
+  const lock = parseRewindLock(raw)
+  if (!lock) throw new Error("invalid rewind lock; recovery required")
+  const now = Date.now()
+  // Format lama tak punya createdAt — jangan menyumbang staleness (mtime saja
+  // yang dipakai). Sentinel Infinity justru membuat semua lock lama selalu basi.
+  const staleByContent =
+    lock.createdAt !== undefined && now - lock.createdAt > REWIND_LOCK_MAX_AGE_MS
+  const bootStale = lock.bootId !== undefined && lock.bootId !== rewindBootMarker()
+  const staleByAge = now - mtimeMs > REWIND_LOCK_MAX_AGE_MS || staleByContent
+  if (!bootStale && !staleByAge) {
+    // Masih segar: pertahankan pemeriksaan PID liveness yang sudah ada.
+    try {
+      process.kill(lock.pid!, 0)
+      throw new Error("another rewind operation is active")
+    } catch (failure) {
+      if ((failure as NodeJS.ErrnoException).code !== "ESRCH") throw failure
+    }
+  }
+  await rm(path)
+  return await open(path, "wx", 0o600)
+}
+
 async function withOperation<T>(cwd: string, action: () => Promise<T>): Promise<T> {
   const dir = directory(cwd)
   if (isRealPathOutsideRoot(dir, cwd)) throw new Error("rewind state is outside the workspace")
   await mkdir(dir, { recursive: true })
   const path = join(dir, "operation.lock")
+  const acquire = async (): Promise<FileHandle> => {
+    try {
+      return await open(path, "wx", 0o600)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return await reclaimRewindLock(path)
+      throw error
+    }
+  }
   let handle: FileHandle
   try {
-    handle = await open(path, "wx", 0o600)
+    handle = await acquire()
   } catch (error) {
+    // TOCTOU: proses lain menghapus/buat lock tepat setelah pengecekan EEXIST.
+    // Satu retry menutup jendela ini tanpa memutar loop tak terbatas.
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
-    const pid = Number(await readFile(path, "utf8"))
-    if (!Number.isSafeInteger(pid) || pid < 1)
-      throw new Error("invalid rewind lock; recovery required")
-    try {
-      process.kill(pid, 0)
-      throw new Error("another rewind operation is active")
-    } catch (failure) {
-      if ((failure as NodeJS.ErrnoException).code !== "ESRCH") throw failure
-    }
-    await rm(path)
-    handle = await open(path, "wx", 0o600)
+    handle = await acquire()
   }
-  await handle.writeFile(String(process.pid))
+  const content: RewindLockContent = {
+    pid: process.pid,
+    bootId: rewindBootMarker(),
+    createdAt: Date.now(),
+  }
+  await handle.writeFile(JSON.stringify(content))
   try {
     return await action()
   } finally {

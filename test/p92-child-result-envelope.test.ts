@@ -282,7 +282,9 @@ test("B3 max-step terstruktur → max_steps_exceeded, tanpa flag timeout/abort",
       },
     })
     expect(r.thrown).toBeNull()
-    expect(r.out).toBe("[sub-agent explore error] turn max steps exceeded")
+    // v7.30: step limit kini disebut eksplisit dengan hitungan (details tak ada
+    // pada error buatan test ini → fallback `?/5` yang jujur).
+    expect(r.out).toContain("[sub-agent explore error] step limit reached")
     const term = await delegateTerminal("p92-b3", dir)
     expect(term.state).toBe("committed")
     const env = envelopeOf(term)
@@ -290,12 +292,12 @@ test("B3 max-step terstruktur → max_steps_exceeded, tanpa flag timeout/abort",
     expect(term.outcome?.timeout).toBeUndefined()
     expect(term.outcome?.aborted).toBeUndefined()
     const childId = r.spec!.journal!.sessionId
-    // P9.3.1: max_steps = turn berakhir oleh aturannya sendiri → tetap
-    // COMPLETED (bukan INTERRUPTED); batas ini revisitable terpisah.
+    // v7.30: max_steps_exceeded kini diperlakukan sebagai pemotongan turn —
+    // Run INTERRUPTED/UNKNOWN (bukan COMPLETED), selaras timeout/abort.
     const runs = listSessionRuns(childId, dir)
     expect(runs).toHaveLength(1)
-    expect(runs[0]!.status).toBe("COMPLETED")
-    expect(runs[0]!.recovery_status).toBe("NONE")
+    expect(runs[0]!.status).toBe("INTERRUPTED")
+    expect(runs[0]!.recovery_status).toBe("UNKNOWN")
   } finally {
     restore()
   }
@@ -790,11 +792,12 @@ test("U2 buildChildResultEnvelope: batas, flag, null jujur", () => {
   ).toBeNull()
 })
 
-test("U3 childStatusOutcomeFlags: hanya timeout/aborted", () => {
+test("U3 childStatusOutcomeFlags: timeout/aborted/max_steps_exceeded", () => {
   expect(childStatusOutcomeFlags("timeout")).toEqual({ timeout: true })
   expect(childStatusOutcomeFlags("aborted")).toEqual({ aborted: true })
+  // v7.30: max_steps_exceeded adalah pemotongan turn — Run tak boleh COMPLETED.
+  expect(childStatusOutcomeFlags("max_steps_exceeded")).toEqual({ maxStepsExceeded: true })
   expect(childStatusOutcomeFlags("returned")).toEqual({})
   expect(childStatusOutcomeFlags("error")).toEqual({})
-  expect(childStatusOutcomeFlags("max_steps_exceeded")).toEqual({})
   expect(childStatusOutcomeFlags("failed_to_start")).toEqual({})
 })

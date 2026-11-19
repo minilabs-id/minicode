@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite"
+import { chmodSync } from "node:fs"
 import { LIMITS } from "../../constants.ts"
 import { resolveDbPath, resolveLocalDbPath, withSqliteBusyRetrySync } from "../../lib/db-path.ts"
 
@@ -7,6 +8,23 @@ export const dbPath = (cwd?: string, local = false): string =>
 
 const initializedSessionPaths = new Set<string>()
 const migratedSessionPaths = new Set<string>()
+
+/**
+ * v7.40 (audit): samakan dengan memory/vector.ts — chmod 0600 pada DB + sidecar
+ * WAL/SHM dijalankan di `finally` SETIAP open, bukan hanya saat pertama kali
+ * `initializedSessionPaths` diisi. SQLite bisa membuat ulang `-wal`/`-shm`
+ * kapan saja (checkpoint/restart); bila chmod cuma sekali, sidecar baru itu
+ * tetap 0644 dan percakapan terbaca user lokal lain. Murah & aman diulang.
+ */
+function chmodSessionDbSync(p: string): void {
+  try {
+    for (const f of [p, `${p}-wal`, `${p}-shm`]) {
+      try {
+        chmodSync(f, 0o600)
+      } catch {}
+    }
+  } catch {}
+}
 
 function daemonApprovalsMigrated(db: Database): boolean {
   try {
@@ -107,10 +125,9 @@ export function openSessionHandle(cwd?: string, local = false): Database {
       if (walOk === null) {
         process.stderr.write(`[warn] persistence: wal setup deferred, retry next open: ${p}\n`)
       }
-      try {
-        const { chmodSync } = require("node:fs") as typeof import("node:fs")
-        chmodSync(p, 0o600)
-      } catch {}
+      // v7.39: PRAGMA journal_mode=WAL menaruh isi sesi di `-wal`/`-shm` juga.
+      // chmod kini dipindah ke `finally` di bawah agar berjalan di SETIAP open
+      // (juga setelah DDL pertama), tidak hanya saat path pertama kali di-init.
     }
     const needsDdl = !migratedSessionPaths.has(p) || !daemonApprovalsMigrated(db)
     if (needsDdl) {
@@ -320,6 +337,11 @@ export function openSessionHandle(cwd?: string, local = false): Database {
       db.close()
     } catch {}
     throw err
+  } finally {
+    // v7.40 (audit): jalankan chmod di SETIAP open, setelah DDL/migrasi selesai
+    // (sidecar WAL/SHM sudah dibuat SQLite). Menjaga permission 0600 walau SQLite
+    // membuat ulang sidecar setelah open pertama — sama seperti memory/vector.ts.
+    chmodSessionDbSync(p)
   }
 }
 

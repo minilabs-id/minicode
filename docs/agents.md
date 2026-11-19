@@ -3,9 +3,11 @@
 
 ## Konsep
 
-Sub-agent = instans agent dengan **context terpisah** dari parent: memory, signal, dan budget sendiri. Pool concurrency 3 — maksimum 3 sub-agent hidup sekaligus — dan abort-aware (mewarisi AbortSignal parent; parent batal → anak berhenti).
+Sub-agent = instans agent dengan **context terpisah** dari parent: memory, signal, dan budget sendiri. Pool concurrency 3 — maksimum 3 sub-agent hidup sekaligus — dan abort-aware (mewarisi AbortSignal parent; parent batal → anak berhenti). Ukuran pool dapat diubah lewat `MINICODE_SUB_AGENT_POOL_SIZE` (1..16) bila fan-out lebih besar memang diperlukan.
 
-`delegate_task` meminta persetujuan di **ASK** (TTY); non-TTY menolak. Di **AUTO**, delegasi berjalan tanpa prompt jika capability telah diotorisasi. Anak mewarisi WorkMode parent; `DISCUSS` membatasi tool anak ke subset eksplorasi baca-saja. **Satu approval di ASK hanya mencakup satu delegasi.**
+**Anggaran & tampilan child.** `delegate_task` menerima `timeoutMs` opsional per delegasi (finite, >0, dibatasi batas timer internal); defaultnya `MINICODE_SUB_AGENT_TIMEOUT_MS` = 300.000 ms (5 menit), naik dari 120.000 ms agar analisis mendalam tidak terpotong. Saat timeout, child berstatus `timeout`, ACE verdict FAIL/BLOCKED, dan teks yang sudah mengalir dikembalikan sebagai **bagian hasil** (fail-soft, tanpa rollback efek berkas). Beri `name` agar child tampil dengan nama manusiawi (`explore-1`, `plan-2`, … bila tidak diisi) di transkrip alih-alih kode `run_<8>`/`sub_<8>`; nama dari model tetap disanitasi sebelum ditampilkan. Untuk fan-out banyak, pecah scope per agen (satu direktori, ≤5 temuan) dan set `maxSteps` kecil — ini lebih efektif daripada menaikkan timeout saja.
+
+`delegate_task` meminta persetujuan di **ASK** (TTY); non-TTY menolak, termasuk bila broker persetujuan daemon di-inject — pengecualian `allowNonTtyAsk` hanya untuk tool non-gated. Di **AUTO**, delegasi berjalan tanpa prompt jika capability telah diotorisasi. Anak mewarisi WorkMode parent; `DISCUSS` membatasi tool anak ke subset eksplorasi baca-saja. **Satu approval di ASK hanya mencakup satu delegasi:** opsi "Always" tidak tersedia untuk `delegate_task`, jadi delegasi identik berikutnya tetap butuh izin baru.
 
 ## Mode anak: `explore` / `plan`
 
@@ -20,9 +22,15 @@ Restriksi anak yang **selalu** berlaku: `delegate_task`, `git_commit`, memory/to
 
 Sub-agent menjalankan task tanpa Anda di depan layar. Karena itu kemampuan commit dan tool dinamis MCP tidak diteruskan; mode `explore` dan WorkMode ketat hanya memberi tool eksplorasi (tool MCP built-in pun tersaring). Mode `plan` di bawah `BUILD` tetap dapat mengubah file, menjalankan tool dasar, dan memakai tool MCP built-in bila diotorisasi, sehingga hasilnya harus ditinjau parent.
 
+## Laporan inkremental & evaluasi parent
+
+Sejak v7.35, child **mengirim temuan selagi bekerja**, bukan hanya satu string di akhir. Instruksi bawaan meminta baris `[FINDING] <severity> | <file:line> | <ringkasan>`; baris pertama dikirim lebih awal sebelum baca mendalam. Tiap temuan langsung tampil di transkrip induk sebagai entri `[EVALUATE]` (`finding.detected`) dan ikut tersimpan walau child timeout — jadi 600 dtk kerja tak hilang hanya karena kalimat pembuka. Induk **wajib mengevaluasi** temuan itu (hipotesis, bukan kesimpulan) sebelum memakainya; descripton `delegate_task` menyatakan hal ini eksplisit.
+
+**Audit self-repo yang reproducible.** Sebelum mendelegasikan audit, pin `git rev-parse HEAD` dan `git diff --stat` di prompt/laporan. Tanpa itu temuan bisa jadi stale saat working tree berubah karena sesi/proses lain — persis yang terjadi pada sesi `ef40d265`, di mana perubahan paralel memicu `EVALUATOR_TAMPER_ATTEMPT` pada audit baca-saja. Guard kini hanya menyalahkan sesi yang benar-benar memakai tool mutasi (`write_file`, `edit`, `bash`, `code_run`, …); namun mencatat checkpoint tetap kebiasaan yang baik.
+
 ## Recovery
 
-Turn parent gagal **setelah** anak `committed`: jurnal menandai delegasi; saat resume model diberi warning `[recovery]` agar tidak mendelegasi ulang buta (efek anak sudah terjadi — yang benar adalah verifikasi hasilnya). Lihat [Keamanan](security.md) untuk jurnal recovery lengkap.
+Turn parent gagal **setelah** anak `committed`: jurnal menandai delegasi; warning `[recovery]` (status anak + ringkasan tervalidasi) dipancarkan baik pada kegagalan one-shot maupun pada kegagalan turn interaktif/TUI sebelum turn berikutnya dimulai, agar tidak mendelegasi ulang buta (efek anak sudah terjadi — yang benar adalah verifikasi hasilnya). Lihat [Keamanan](security.md) untuk jurnal recovery lengkap.
 
 ## Lanjut
 

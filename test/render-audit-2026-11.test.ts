@@ -93,13 +93,18 @@ describe("wordWrap: indentasi dipertahankan", () => {
 
 // ── HIGH-4: SGR opak saat highlight ────────────────────────────────────────
 describe("highlight: SGR tidak dipecah tokenizer", () => {
-  function withTruecolor<T>(fn: () => T): T {
+  function withTruecolor<T>(fn: () => T, mono = false): T {
     const savedTty = process.stdout.isTTY
     const savedColor = process.env.COLORTERM
     const savedNoColor = process.env.NO_COLOR
+    const savedMinicodeColor = process.env.MINICODE_COLOR
     Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
     process.env.COLORTERM = "truecolor"
     delete process.env.NO_COLOR
+    // v7.29: warna nyala by default di TTY — flag mono dihapus kecuali test
+    // memang mengunci jalur monokrom (argumen `mono = true`).
+    delete process.env.MINICODE_COLOR
+    if (mono) process.env.MINICODE_COLOR = "0"
     try {
       return fn()
     } finally {
@@ -108,6 +113,8 @@ describe("highlight: SGR tidak dipecah tokenizer", () => {
       else process.env.COLORTERM = savedColor
       if (savedNoColor === undefined) delete process.env.NO_COLOR
       else process.env.NO_COLOR = savedNoColor
+      if (savedMinicodeColor === undefined) delete process.env.MINICODE_COLOR
+      else process.env.MINICODE_COLOR = savedMinicodeColor
     }
   }
 
@@ -125,10 +132,25 @@ describe("highlight: SGR tidak dipecah tokenizer", () => {
     })
   })
 
-  test("kode sah tetap di-highlight (bukan semua dibiarkan)", () => {
+  test("kode sah utuh tanpa SGR bocor (highlight monokrom)", () => {
+    // v7.29: warna nyala by default, jadi jalur mono dipaksa lewat flag.
     withTruecolor(() => {
       const out = highlightCode("const x = 1", "ts")
-      expect(out).not.toBe("const x = 1")
+      // MINICODE_COLOR=0: highlight tak memancarkan SGR, teks persis input.
+      // Yang dijaga: tidak ada SGR mentah yang dipecah tokenizer (2 test di atas).
+      expect(out).toBe("const x = 1")
+      // ESC dibangun dari charCode agar tak memicu lint control-character.
+      expect(out).not.toContain(String.fromCharCode(27))
+      expect(stripAnsi(out)).toBe("const x = 1")
+    }, true)
+  })
+
+  test("v7.29: highlight warna tetap mengembalikan teks utuh setelah strip", () => {
+    withTruecolor(() => {
+      const out = highlightCode("const x = 1", "ts")
+      // Pasangan dari test mono: color-by-default aktif, SGR dipancarkan,
+      // tetapi kontrak stripAnsi → teks asli tetap berlaku.
+      expect(out).toContain(String.fromCharCode(27))
       expect(stripAnsi(out)).toBe("const x = 1")
     })
   })

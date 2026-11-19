@@ -10,10 +10,19 @@ import { Transcript } from "../src/ui/tui/transcript.ts"
 import { createFakeBus, installFakeTty, KEY } from "./helpers/tui-harness.ts"
 
 let tty: ReturnType<typeof installFakeTty> | null = null
+// v7.29 membalik default warna (nyala di TTY). Test scrim below ditulis pada
+// era v7.22 yang memaksa mono, jadi ia harus menyetel MINICODE_COLOR=0 secara
+// eksplisit dan mengembalikannya setelah test — jangan mengandalkan default.
+let savedColor: string | undefined
 afterEach(() => {
   tty?.restore()
   tty = null
   resetAltScreenDepth()
+  if (savedColor !== undefined) {
+    if (savedColor === "") delete process.env.MINICODE_COLOR
+    else process.env.MINICODE_COLOR = savedColor
+    savedColor = undefined
+  }
 })
 
 function setup(
@@ -42,12 +51,17 @@ function setup(
 }
 
 describe("popup komposit", () => {
-  test("/model-style: transkrip terlihat di belakang kotak popup", async () => {
+  test("/model-style: transkrip terlihat di belakang kotak popup tanpa scrim monokrom", async () => {
+    savedColor = process.env.MINICODE_COLOR ?? ""
+    process.env.MINICODE_COLOR = "0"
     const { transcript, app } = setup()
     const runP = app.run()
     await tty!.ready()
     await tty!.waitForOutput((o) => o.includes("00.00.00"))
-    transcript.pushUser("halo dunia")
+    // Renderer flat menyembunyikan gema user terakhir dari viewport (digantikan
+    // card prompt). pushInfo tetap dirender sebagai baris transkrip, jadi dipakai
+    // untuk membuktikan latar masih terlihat di balik popup.
+    transcript.pushInfo(["halo dunia"])
     await tty!.send("x")
     await tty!.waitForOutput((o) => o.includes("halo dunia"))
     // Buka popup seperti controller: suspend App, view melukis region.
@@ -56,6 +70,9 @@ describe("popup komposit", () => {
     const suspendOutput = tty!.all().slice(beforeSuspend)
     expect(suspendOutput).toContain("\x1b[?1002l")
     expect(suspendOutput).toContain("\x1b[?1000h")
+    // Mono paksa: scrimMode() = "none" — tak ada SGR redup/backdrop sama sekali.
+    expect(suspendOutput).not.toContain("\x1b[2m")
+    expect(suspendOutput).not.toContain("\x1b[48;5;")
     const dimmedFrame = tty!.screen()
     expect(dimmedFrame[dimmedFrame.length - 2]).toBe("")
     expect(dimmedFrame[dimmedFrame.length - 1]).toContain("Auto")
@@ -79,9 +96,10 @@ describe("popup komposit", () => {
     // Sudut kotak: MELENGKUNG secara default (I20 v7.14), lancip hanya dengan
     // MINICODE_BOX=square, ASCII dengan MINICODE_ASCII=1/MINICODE_BOX=ascii.
     expect(frame).toContain(supportsUtf8() ? "╭" : "+")
-    // Popup TIDAK me-clear layar (transkrip di belakang selamat).
-    const afterSuspend = tty!.all().split("\x1b[2m").pop() ?? ""
-    expect(afterSuspend).not.toContain("\x1b[2J")
+    // Popup TIDAK me-clear layar (transkrip di belakang selamat), dan backdrop
+    // tak pernah meredup: pada mono tak ada `\x1b[2m` / SGR latar sama sekali.
+    expect(suspendOutput).not.toContain("\x1b[2J")
+    expect(suspendOutput).not.toContain("\x1b[2m")
     // Batal → resume → transkrip utuh, kotak hilang.
     await tty!.send(KEY.esc, 90)
     await p
@@ -89,7 +107,9 @@ describe("popup komposit", () => {
     expect(picked).toBe("")
     const beforeResume = tty!.all().length
     app.resume()
-    expect(tty!.all().slice(beforeResume)).toContain("\x1b[?1002h")
+    const resumeOutput = tty!.all().slice(beforeResume)
+    expect(resumeOutput).toContain("\x1b[?1002h")
+    expect(resumeOutput).not.toContain("\x1b[2m")
     await tty!.send(KEY.backspace)
     const after = tty!.screen().join("\n")
     expect(after).toContain("halo dunia")

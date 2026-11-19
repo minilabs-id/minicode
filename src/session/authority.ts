@@ -31,6 +31,27 @@ export class SessionBusyError extends Error {
   }
 }
 
+/**
+ * v7.40 (audit): takeoverSessionEpoch mengembalikan `epoch-moved-unexpected`
+ * bila writer_epoch berubah dari sumber yang BUKAN hasil takeover kita (tak ada
+ * baris session_takeovers untuk priorEpoch itu). Mengadopsi epoch rival itu
+ * membuat dua penulis memakai expectedEpoch yang SAMA — pagar CAS jadi palsu.
+ * Galat khas ini dipakai agar pemanggil bisa membedakan dari SQLITE_BUSY dll.
+ */
+export class UnexpectedEpochMoveError extends Error {
+  readonly code = "REFUSED_UNEXPECTED_EPOCH_MOVE"
+  readonly sessionId: string
+  readonly observedEpoch: number
+  constructor(sessionId: string, observedEpoch: number) {
+    super(
+      `[session] sid=${sessionId} writer epoch moved unexpectedly to ${observedEpoch} during takeover — refusing to adopt a rival's epoch (lease released, fail-closed)`,
+    )
+    this.name = "UnexpectedEpochMoveError"
+    this.sessionId = sessionId
+    this.observedEpoch = observedEpoch
+  }
+}
+
 export interface WriterAdmission {
   readonly token: string
   readonly epoch: number
@@ -62,6 +83,69 @@ function holderSummary(
     }
   } catch {
     return { active: false, pid: null, expiresAt: null }
+  }
+}
+
+// Seam sempit untuk blok pasca-akuisisi (baca epoch + takeover). Diekspor
+// supaya jalur "takeover melempar → lease dilepas" bisa diuji dengan dep
+// injeksi; produksi memakai fungsi persistence/TaskStore yang nyata.
+export interface LeaseTakeoverDeps {
+  readEpoch: typeof readWriterEpoch
+  takeover: typeof takeoverSessionEpoch
+  release: typeof releaseSessionWriter
+}
+
+const defaultLeaseTakeoverDeps: LeaseTakeoverDeps = {
+  readEpoch: readWriterEpoch,
+  takeover: takeoverSessionEpoch,
+  release: releaseSessionWriter,
+}
+
+/**
+ * Pasca-akuisisi lease: baca epoch, lalu bump hanya bila pemilik lease lama
+ * berbeda token. v7.39 (P1-3): bila baca/takeover melempar (SQLITE_BUSY/IO),
+ * lease yang BARU saja kita pegang harus dilepas best-effort — kalau dibiarkan,
+ * token mati mengunci semua penulis selama ~750 dtk. Galat aslinya tetap
+ * dilempar (fail-closed); release gagal tak boleh menimpani galat takeover.
+ * Jalur fresh/re-acquire (tanpa takeover) tetap hanya membaca epoch.
+ */
+export function takeoverEpochUnderLease(
+  input: {
+    sessionId: string
+    token: string
+    cwd?: string
+    bootId: string
+    reason?: string
+    preOwnerToken: string | undefined
+  },
+  deps: LeaseTakeoverDeps = defaultLeaseTakeoverDeps,
+): { epoch: number; tookOver: boolean } {
+  const { sessionId, token, cwd, bootId, preOwnerToken } = input
+  try {
+    let epoch = deps.readEpoch(sessionId, cwd)
+    let tookOver = false
+    if (preOwnerToken && preOwnerToken !== token) {
+      const bump = deps.takeover(sessionId, epoch, input.reason ?? "lease-takeover", bootId, cwd)
+      // v7.40 (audit): `epoch-moved-unexpected` = epoch berubah dari sumber yang
+      // tak kita ketahui, bukan hasil takeover kita. Dulu `epoch = bump.epoch`
+      // mengadopsi epoch rival sehingga DUA penulis memakai expectedEpoch sama.
+      // Fail-closed: lepas lease lewat `catch` di bawah lalu lempar galat khas —
+      // jangan pernah pakai epoch milik pihak lain sebagai generasi kita.
+      if (bump.outcome === "epoch-moved-unexpected") {
+        throw new UnexpectedEpochMoveError(sessionId, bump.epoch)
+      }
+      epoch = bump.epoch
+      tookOver = bump.outcome === "advanced"
+    }
+    return { epoch, tookOver }
+  } catch (error) {
+    // Best-effort: lepas lease agar sesi tak terkunci oleh token yang gagal.
+    try {
+      deps.release(sessionId, token, cwd)
+    } catch {
+      // Jangan timpani galat takeover dengan galat release.
+    }
+    throw error
   }
 }
 
@@ -117,19 +201,14 @@ export function acquireSessionWriter(opts: {
   // Kita pemegang lease. Takeover (bump epoch) HANYA bila baris lease
   // sebelumnya milik token LAIN (aktif/expired) — akuisisi fresh atau
   // re-acquire token sendiri tak menyentuh epoch (§16).
-  let epoch = readWriterEpoch(sessionId, cwd)
-  let tookOver = false
-  if (pre && pre.ownerToken !== token) {
-    const bump = takeoverSessionEpoch(
-      sessionId,
-      epoch,
-      opts.reason ?? "lease-takeover",
-      bootId,
-      cwd,
-    )
-    epoch = bump.epoch
-    tookOver = bump.outcome === "advanced"
-  }
+  const { epoch, tookOver } = takeoverEpochUnderLease({
+    sessionId,
+    token,
+    cwd,
+    bootId,
+    reason: opts.reason,
+    preOwnerToken: pre?.ownerToken,
+  })
   return { ok: true, admission: { token, epoch, fresh: !pre, tookOver } }
 }
 

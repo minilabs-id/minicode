@@ -29,6 +29,7 @@
 // constructed with everything it needs (DI), so isolation cannot depend on
 // module-level configuration that another call could mutate.
 
+import { LIMITS } from "../constants.ts"
 import type { ProductionExecutionRunner } from "../runtime/production-execution.ts"
 import type { OperationalStateSnapshot } from "../session/runtime-header.ts"
 import { buildRuntimeStateHeader } from "../session/runtime-header.ts"
@@ -343,7 +344,11 @@ export class AutonomousExecutionContext {
       // silently change what an unattended executor may do.
       permissionMode: "readonly",
       maxSteps: this.config.maxSteps ?? 8,
-      timeoutMs: this.config.timeoutMs ?? 120_000,
+      // [DESIGN DECISION] default mengikuti timeout sub-agent yang sudah dinaikkan
+      // (env-overridable). Angka 120_000 lama terlalu ketat untuk turn otonom di
+      // repo besar; memakai konstanta yang sama dengan delegate_task mencegah
+      // dua jalur sub-agent punya batas berbeda tanpa alasan.
+      timeoutMs: this.config.timeoutMs ?? LIMITS.SUB_AGENT_TIMEOUT_MS,
       systemExtra: this.systemExtra(),
       sessionId: this.childSessionId,
       parentSessionId: this.parentSessionId,

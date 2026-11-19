@@ -344,30 +344,50 @@ test("M. when the JSON write fails, TaskStore is never touched", async () => {
   expect(store.getTask(S, "t1")?.revision).toBe(1)
 })
 
-// N. a TaskStore failure suppresses plan publication
-test("N. a TaskStore failure surfaces as a tool error, so no plan can publish", async () => {
+// N. a TaskStore failure keeps JSON and TaskStore consistent, with a WORKING repair path
+// [P0-1] dulu test ini mem-pin "documented divergence": JSON menyimpan id phantom
+// t42 sementara TaskStore rollback. Setelah perbaikan, tampilan JSON di-derive
+// ulang dari TaskStore sehingga todo_read tak berbohong, dan pesan error menyebut
+// id asli + jalur perbaikan yang benar-benar bisa dipakai.
+test("N. a TaskStore failure restores the JSON view and names real taskIds", async () => {
   const dir = await ownedDir()
   todoSession.id = S
   todoSession.cwd = dir
   seed(dir)
-  // an unknown id makes the sync fail AFTER the JSON write
-  let threw = false
+  // an unknown id makes the sync fail AFTER the first JSON write
+  let err: { code?: string; message?: string } | undefined
   try {
     await todoWriteTool.execute(
       { todos: [{ taskId: "t42", content: "ghost", status: "pending" }] },
       mkctx(dir),
     )
-  } catch {
-    threw = true
+  } catch (e) {
+    err = e as { code?: string; message?: string }
   }
-  expect(threw).toBe(true)
-  // the JSON write did happen (documented divergence), TaskStore did not change
+  expect(err).toBeDefined()
+  expect(err?.code).toBe("TASK_NOT_FOUND")
+  expect(err?.message).toContain("todo_read")
+  expect(err?.message).toContain("t1, t2, t3")
+  // TaskStore did not change, and neither did the canonical view: no phantom id.
   const store = new TaskStore(dir)
   expect(store.listTasks(S)).toHaveLength(3)
   expect(store.getTask(S, "t42")).toBeNull()
-  const [jsonRow] = await loadTodos(S, dir)
-  expect(jsonRow?.taskId).toBe("t42")
-  expect(jsonRow?.content).toBe("ghost")
+  const jsonRows = await loadTodos(S, dir)
+  expect(jsonRows.map((t) => t.taskId)).toEqual(["t1", "t2", "t3"])
+  expect(jsonRows.some((t) => t.taskId === "t42")).toBe(false)
+  // The repair path advertised in the message actually works: re-send with the
+  // ids the error named instead of the phantom one.
+  const out = (await todoWriteTool.execute(
+    {
+      todos: [
+        { taskId: "t1", content: "A", status: "pending" },
+        { taskId: "t2", content: "B", status: "pending" },
+        { taskId: "t3", content: "C", status: "pending" },
+      ],
+    },
+    mkctx(dir),
+  )) as string
+  expect(out).toContain("todos 0/3")
 })
 
 // S. the canonical path never uses positional identity

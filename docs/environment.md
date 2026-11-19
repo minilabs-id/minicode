@@ -22,6 +22,10 @@ Variabel yang paling menentukan perilaku (sisanya referensi di bawah):
 | `MINICODE_SESSION_TTL_DAYS` | TTL sesi (default 30; `0` = selamanya) |
 | `MINICODE_REWIND_DRAFT` | Internal handoff `/undo`: `1` → TUI memuat prompt target dari record rewind ke composer cabang |
 | `MINICODE_REWIND_NOTICE` | Internal handoff `/undo`/`/redo`: notice base64 yang ditampilkan sekali di transkrip sesi anak |
+| `MINICODE_SUB_AGENT_TIMEOUT_MS` | Timeout default per turn sub-agent (ms, finite >0; default 300000 / 5 menit). Bisa ditimpa per delegasi lewat argumen `timeoutMs` pada `delegate_task` |
+| `MINICODE_SUB_AGENT_POOL_SIZE` | Jumlah slot eksekusi sub-agent paralel (1..16, default 3). Naikkan bila sering menjalankan fan-out 5+ agen sekaligus |
+| `MINICODE_REWIND_LOCK_MAX_AGE_MS` | Batas usia lock `operation.lock` rewind sebelum dianggap stale (default 600000 ms / 10 menit). Operator bisa memperpanjang bila rewind sering terputus di mesin lambat |
+| `MINICODE_BOOT_ID` | Penanda boot mesin untuk validasi lock rewind lintas restart. Bila tidak diset, diturunkan dari `hostname` + `Date.now() - os.uptime()`; set eksplisit untuk determinisme saat clock NTP bergeser |
 | `MINICODE_HOME` | Override home untuk DB lokal/global (sessions + vector); default `~` |
 | `MINICODE_TOKENIZERS` | `0`/`off` → nonaktifkan unduh tokenizer presisi on-demand dari HuggingFace (fallback estimator densitas). Default: aktif untuk model open (deepseek/qwen/mistral/gemma/phi); vocab di-cache di `~/.minicode/tokenizers/`, tak diunduh ulang |
 | `MINICODE_TELEMETRY` | `0`/`false`/`off` → matikan penulisan traces.jsonl |
@@ -100,6 +104,7 @@ Variabel yang paling menentukan perilaku (sisanya referensi di bawah):
 | `MINICODE_AUTORESUME_BG` | `0` → nonaktifkan auto-resume turn TUI saat job background selesai (default aktif; sekali per job, hanya bila tidak ada turn berjalan) |
 | `MINICODE_TURN_AUTO_RESUME` | `0` → nonaktifkan resume otomatis turn setelah kegagalan provider **transien** (`server`/`network`; default aktif). Retry provider dan resume turn berbagi **satu anggaran pemulihan** (`src/policy/recovery-budget.ts`): total 45 dtk dan kuota 6 percobaan untuk satu panggilan logis, dengan full jitter dan `Retry-After` sebagai floor. Berbagi satu anggaran mencegah *retry amplification* (angka terpisah per lapisan membuat biaya berkali: ≈82 dtk untuk provider mati). Kegagalan terminal tidak dipulihkan: `rate_limit` (429 permanen/spend-cap tidak pulih), `auth`, `invalid_request`, `context_length_exceeded`, `budget_exceeded`, `max_steps_exceeded`, dan abort user |
 | `MINICORE_THINKING` | `off` → kirim `enable_thinking:false` ke OpenAI-compat (DeepSeek). Alias lama `MINICODE_THINKING` masih dihormati |
+| `MINICODE_COLOR` | `0` → paksa monokrom (identik `NO_COLOR`); selain itu/absen → warna nyala by default di TTY (v7.29+). `TERM=dumb` / non-TTY tetap monokrom untuk determinisme |
 | `NO_COLOR` | Set apa pun selain `0` → matikan seluruh warna |
 
 ## API key fallback

@@ -17,7 +17,11 @@ export interface ResponsesConfig {
   reasoningEffort?: string
 }
 
-// Minimal Responses API adapter — /v1/responses, previous_response_id chaining, store:false
+// Minimal Responses API adapter — /v1/responses, previous_response_id chaining.
+// v7.40 (audit): selalu store:true sejak v7.31 karena response.id dipakai untuk
+// chaining — klaim lama "store:false saat replay manual" sudah basi. Catatan:
+// `input` mengirim riwayat penuh DAN `prev` ikut dikirim → konteks terduplikasi
+// di server (optimasi/privasi, butuh ADR — sengaja tak diubah di putaran ini).
 // Untuk P11 P1.1: providerHint "responses" → wire ini, bukan chat/completions.
 // Implementasi streaming SSE mirip openai-compat, tapi endpoint berbeda.
 //
@@ -123,7 +127,11 @@ export function createResponsesProvider(config: ResponsesConfig): ModelProvider 
           ? { max_output_tokens: request.maxTokens }
           : {}),
         stream: true,
-        store: false,
+        // v7.31: SELALU store:true. Kita menyimpan `response.id` untuk chaining
+        // (lihat `response.completed` handler). Bila store:false pada turn pertama,
+        // id itu tak tersimpan di server namun tetap dipakai sebagai
+        // previous_response_id di turn berikutnya → endpoint ketat menolak 400.
+        store: true,
         ...(sendEffort ? { reasoning: { effort: sendEffort } } : {}),
         // Rantai konteks antar turn; tanpa ini server memperlakukan tiap
         // request sebagai sesi baru (biaya konteks + hilang ingatan server).

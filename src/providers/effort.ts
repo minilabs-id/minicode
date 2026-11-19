@@ -113,12 +113,26 @@ export function withStrippedRetry(
         yield* fallback.stream(request, signal)
         return
       }
+      // Cermin pagar router (hasYieldedContent): sekali konten substantif
+      // keluar dari primary, error tengah stream TAK boleh difallback ke
+      // fallback dari awal — itu menggandakan teks yang sudah dilihat user.
+      let hasYieldedContent = false
       try {
-        yield* primary.stream(request, signal)
+        for await (const ev of primary.stream(request, signal)) {
+          if (
+            ev.type === "text" ||
+            ev.type === "tool_call" ||
+            (ev.type === "extension" && ev.kind === "reasoning")
+          ) {
+            hasYieldedContent = true
+          }
+          yield ev
+        }
         return
       } catch (e) {
         if (signal.aborted) throw e
         if (e instanceof ProviderError && trigger.has(e.category)) {
+          if (hasYieldedContent) throw e
           if (e.category === "invalid_request") strippedModels.add(key)
           try {
             opts.onStrip?.({ model: key || "model", category: e.category })

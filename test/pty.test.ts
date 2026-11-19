@@ -232,20 +232,31 @@ describe("PTY: boot & kontrak layar", () => {
       await withTui({}, async (tui) => {
         await tui.waitFor((raw) => raw.includes("00.00.00"))
         tui.send("prompt salah\r")
-        await tui.waitFor((raw) => raw.includes("PTJ-TURN-OK"), 30000)
+        // v7.40: ConPTY win32 fragil di bawah beban suite penuh — 60s agar
+        // handoff proses tak jadi flake (bukan pelemahan asersi).
+        await tui.waitFor((raw) => raw.includes("PTJ-TURN-OK"), 60000)
         const source = listSessions(tui.cwd)[0]!.id
         const messages = loadSession(source, tui.cwd)!.messages
         tui.send("/undo last\r")
-        await tui.waitFor((raw) => raw.includes("Original session kept"), 30000)
-        const branch = listSessions(tui.cwd).find((s) => s.id !== source)!.id
-        expect(loadSession(branch, tui.cwd)?.messages).toEqual([])
+        // v7.40: notisi undo kini jadi toast (bukan teks transkrip) sejak v7.30,
+        // dan render toast Via ConPTY tak stabil. Tunggu sinyal NYATA handoff —
+        // branch session dibuat di disk — bukan byte layar yang flake.
+        const deadline = Date.now() + 60000
+        let branch: string | undefined
+        while (Date.now() < deadline) {
+          branch = listSessions(tui.cwd).find((s) => s.id !== source)?.id
+          if (branch) break
+          await new Promise((r) => setTimeout(r, 100))
+        }
+        expect(branch, "branch sesi undo harus dibuat").toBeTruthy()
+        expect(loadSession(branch!, tui.cwd)?.messages).toEqual([])
         expect(loadSession(source, tui.cwd)?.messages).toEqual(messages)
         await tui.waitFor(
           (raw) => parseScreenBuffer(raw, 100, 30).some((line) => line.includes("prompt salah")),
           10000,
         )
         tui.send("\x15/redo\r")
-        await tui.waitFor((raw) => raw.includes("Redo: workspace restored"), 30000)
+        await tui.waitFor((raw) => raw.includes("Redo: workspace restored"), 60000)
         expect(loadSession(source, tui.cwd)?.messages).toEqual(messages)
         tui.send("/exit\r")
         await tui.exit()

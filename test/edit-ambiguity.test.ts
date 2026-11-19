@@ -2,7 +2,7 @@
 // (Agent B track, 2026-10-22).
 //
 // Kontrak tool: "oldString must appear exactly once in the file". Jalur
-// flexibleMatch menegakkan itu dengan柔性: cocok pertama + cari cocok kedua.
+// flexibleMatch menegakkan itu dengan cara lentur: cocok pertama + cari cocok kedua.
 // Jalur hashline (cepat) DULU hanya mencari duplikat SUBSTRING PERSIS, jadi
 // needle yang unik-persis tapi ambigu-fuzzy lolos dan blok PERTAMA diedit
 // diam-diam.
@@ -92,7 +92,7 @@ describe("edit — keunikan target (hashline vs flexibleMatch)", () => {
   })
 
   test("kedua jalur menjawab pertanyaan yang sama: tolak ⟺ matcher menemukan ≥2 target", async () => {
-    // Kunci kontrak: keputusan edit工具 = keputusan matcher yang sama
+    // Kunci kontrak: keputusan edit tool = keputusan matcher yang sama
     // (flexibleMatch). Untuk tiap kasus, hitung sendiri "berapa target"
     // memakai flexibleMatch, lalu bandingkan dengan hasil tool.
     const cases: [string, string][] = [

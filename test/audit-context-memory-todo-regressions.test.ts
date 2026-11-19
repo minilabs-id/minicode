@@ -452,6 +452,8 @@ describe("Fase 3 regressions: memory store security, RAG scope, & concurrency", 
     delete process.env.DEEPSEEK_API_KEY
   })
 
+  // v7.40: operasi embedding/tokenizer bisa retry saat network absen — 5s
+  // default Bun terlalu ketat untuk test I/O ini (timeout flake di beban penuh).
   test("deleteMemoryByQuery rejects blank queries, getMemoryStats stays read-only, and reconcileMemoryStores isolates global/provisional", async () => {
     const { home, ws } = await makeTempEnv("mem-sec")
     await mkdir(join(home, ".minicode"), { recursive: true })
@@ -473,7 +475,7 @@ describe("Fase 3 regressions: memory store security, RAG scope, & concurrency", 
     expect(memFile).toContain("Validated local fact")
     expect(memFile).not.toContain("Candidate provisional fact")
     expect(memFile).not.toContain("Secret global fact")
-  })
+  }, 30_000)
 
   test("appendMemory rejects hardlink MEMORY.md, withMemLock serializes cleanly, and writeMemoryTool rejects provisional + supersedes_id", async () => {
     const { ws } = await makeTempEnv("mem-lock")

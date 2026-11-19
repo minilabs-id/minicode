@@ -19,6 +19,7 @@ import { rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { LIMITS } from "../src/constants.ts"
+import { resolveSubAgentTimeout, SUB_AGENT_TIMEOUT_MIN_MS } from "../src/policy/subagent-timeout.ts"
 import { createGrant } from "../src/runtime/capability.ts"
 import { admitChild } from "../src/runtime/child-execution.ts"
 import { createRootCorrelation } from "../src/runtime/execution-id.ts"
@@ -397,12 +398,19 @@ test("B2 delegate cap eksplisit TIDAK diklamp mode (≠ M7), clamp hard-cap 50",
   }
 })
 
-test("B3 delegate timeout ceiling tetap SUB_AGENT_TIMEOUT_MS", async () => {
+test("B3 delegate timeout mengikuti policy adaptif & tetap terkurung timer", async () => {
+  // v7.34: dulu tes ini memaku timeout ke SUB_AGENT_TIMEOUT_MS (300s) tetap.
+  // Policy adaptif (kerja uncommitted sebelumnya) kini menurunkan pagu prompt
+  // pendek jadi 180s — jadi asersi lama adalah drift, bukan kontrak.
+  // Kita tetap uji KONTRAK aslinya: nilai yang dikirim ke sesi anak sama
+  // persisnya dengan policy, dan tidak pernah keluar dari batas timer JS.
   const restore = providerEnv()
   try {
     todoSession.id = "p91-b3"
     const spec = await delegate(tmpRoot(), { prompt: "x" })
-    expect(spec.timeoutMs).toBe(LIMITS.SUB_AGENT_TIMEOUT_MS)
+    expect(spec.timeoutMs).toBe(resolveSubAgentTimeout({ promptLength: "x".length }))
+    expect(spec.timeoutMs).toBeGreaterThanOrEqual(SUB_AGENT_TIMEOUT_MIN_MS)
+    expect(spec.timeoutMs).toBeLessThanOrEqual(LIMITS.MAX_TIMER_DELAY_MS)
   } finally {
     restore()
   }
@@ -439,7 +447,8 @@ test("B6 autonomous: readonly tetap, default 8, ceiling 120_000, tanpa artefak M
   const src = await read("src/task/autonomous-context.ts")
   expect(src.includes('permissionMode: "readonly"')).toBe(true)
   expect(src.includes("maxSteps: this.config.maxSteps ?? 8")).toBe(true)
-  expect(src.includes("timeoutMs: this.config.timeoutMs ?? 120_000")).toBe(true)
+  // v7.26: default mengikuti LIMITS.SUB_AGENT_TIMEOUT_MS (300_000, env-overridable).
+  expect(src.includes("timeoutMs: this.config.timeoutMs ?? LIMITS.SUB_AGENT_TIMEOUT_MS")).toBe(true)
   // Tak mengarang mode M7, grant, atau korelasi M1 — sebagai kode (komentar
   // yang menyebut nama-nama ini untuk menjelaskan larangan tak dihitung).
   const code = stripCode(src)

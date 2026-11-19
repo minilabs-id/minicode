@@ -24,24 +24,36 @@ export function sanitizeSessionId(id: string): string {
 // saat turn paralel (mis. Pool(3) sub-agent).
 const checkpointLocks = new Map<string, Promise<void>>()
 
+/**
+ * Test-only: jumlah entri lock yang masih tersisa. Kebocoran map tidak bisa
+ * dibuktikan lewat perilaku tanpa mengintrospeksi struktur internal, jadi
+ * regresi audit #1 memakai accessor sempit ini.
+ */
+export function checkpointLockCountForTest(): number {
+  return checkpointLocks.size
+}
+
 async function withCheckpointLock<T>(path: string, fn: () => Promise<T>): Promise<T> {
   const prev = checkpointLocks.get(path) ?? Promise.resolve()
   let release!: () => void
-  const next = new Promise<void>((res) => (release = res))
-  checkpointLocks.set(
-    path,
-    prev.then(() => next),
-  )
+  const gate = new Promise<void>((res) => (release = res))
+  // Yang DISIMPAN harus rantai yang sama dengan yang dibandingkan di finally.
+  // Dulu map menyimpan `prev.then(() => next)` sementara finally membandingkan
+  // `next` — tak pernah sama, sehingga entri map tidak pernah dihapus dan
+  // rantai promise tumbuh terus di daemon berumur panjang.
+  const tail = prev.then(() => gate)
+  checkpointLocks.set(path, tail)
   await prev
   try {
     return await fn()
   } finally {
     release()
-    if (checkpointLocks.get(path) === next) checkpointLocks.delete(path)
+    if (checkpointLocks.get(path) === tail) checkpointLocks.delete(path)
   }
 }
 
-const MAX_CHECKPOINTS = 20
+// v7.31: pakai konstanta terpusat supaya tak drift dengan LIMITS.
+const MAX_CHECKPOINTS = LIMITS.CHECKPOINT_MAX_COUNT
 
 export interface FileSnapshot {
   path: string // relative path

@@ -81,7 +81,10 @@ function ev(over: Record<string, unknown>): DomainEvent {
 }
 
 const T0 = 1_700_000_000_000
-const LEASE = 300_000
+// v7.39: LEASE diturunkan dari sumber kanonik (750_000 ms sejak SUB_AGENT_TIMEOUT
+// naik). Hardcode 300_000 membuat skenario "lease kedaluwarsa" memakai waktu yang
+// masih dianggap hidup → 2 test gagal di branch refusal sebelum helper diuji.
+const LEASE = SESSION_LEASE_MS
 
 test("P2.2: epoch awal 0, save biasa tak memajukan, restart mempertahankannya", async () => {
   const cwd = ws()

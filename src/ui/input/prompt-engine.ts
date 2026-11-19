@@ -408,10 +408,24 @@ export interface DecoderState {
   pending: number[]
   /** Overlong sequences retain only their termination rule, never their payload. */
   discard?: "csi" | "sgr"
+  /**
+   * ESC tunggal yang mengendap di `pending` dari chunk SEBELUMNYA (belum sempat
+   * di-flush timer). Tanpa flag eksplisit ini, Alt+Enter yang terbelah
+   * ([0x1b] lalu [0x0d]) salah dibaca sebagai esc+enter — guard lama
+   * `i >= pendingCount` mengira ESC dari chunk lama bukan pasangan Alt+Enter.
+   */
+  pendingLoneEsc?: boolean
+  /**
+   * Payload bracketed paste MELEWATI batas `MAX_PASTE_BYTES` sebelum terminator
+   * ESC[201~ tiba. Sisa byte harus tetap dibaca sebagai teks literal: kalau
+   * didekode normal, CR di tail jadi Enter (submit) dan 0x03 jadi Ctrl-C
+   * (cancel) — audit VERIFIED. Flag ini bertahan lintas chunk sampai terminator.
+   */
+  pasteOverflow?: boolean
 }
 
 export function createDecoderState(): DecoderState {
-  return { pending: [] }
+  return { pending: [], pendingLoneEsc: false, pasteOverflow: false }
 }
 
 // Bound incomplete control sequences independently of bracketed paste payloads.
@@ -437,6 +451,118 @@ function utf8CharLen(b: number): number {
 
 function decodeUtf8(bytes: number[]): string {
   return new TextDecoder().decode(Uint8Array.from(bytes))
+}
+
+/**
+ * Batas code point Utf-8 terakhir yang UTUH dalam [start, end). Saat payload
+ * paste dipaksa keluar karena melewati batas ukuran, memotong di tengah emoji
+ * membuat TextDecoder memancarkan U+FFFD. Mundur ke batas aman dan serahkan
+ * sisa byte ke chunk berikutnya.
+ */
+function lastUtf8Boundary(bytes: number[], start: number, end: number): number {
+  let i = start
+  while (i < end) {
+    const n = utf8CharLen(bytes[i]!)
+    if (i + n > end) break
+    // Awalnya `valid = n === 1` lalu loop `valid && k < n`: untuk code point
+    // multibyte valid selalu FALSE sejak awal, loop tak pernah jalan, dan
+    // fungsi berhenti di byte LEAD-nya — termasuk ketika sekuensnya LENGKAP.
+    // Itu membuat chunk lanjutan paste emoji terdekode jadi U+FFFD. Mulai dari
+    // true lalu periksa continuation byte satu per satu (audit L3).
+    let valid = true
+    for (let k = 1; k < n; k++) {
+      if ((bytes[i + k]! & 0xc0) !== 0x80) {
+        valid = false
+        break
+      }
+    }
+    if (!valid) break
+    i += n
+  }
+  return i
+}
+
+/**
+ * Apakah [start, end) adalah AWALAN code point Utf-8 yang belum lengkap —
+ * BUKAN byte cacat? Dipakai jalur overflow paste: bila chunk berakhir di tengah
+ * emoji, byte itu WAJIB ditahan di `pending` untuk disambung chunk berikutnya.
+ * Mendekodenya sekarang memancarkan U+FFFD dan menghilangkan karakter asli
+ * (emoji 4-byte yang hanya 2 byte pertamanya masuk chunk). Byte invalid tetap
+ * dipancarkan U+FFFD + maju satu byte agar loop tidak mandek.
+ */
+function isIncompleteUtf8Prefix(bytes: number[], start: number, end: number): boolean {
+  const b = bytes[start]!
+  const n = utf8CharLen(b)
+  if (n <= 1) return false // continuation yatim / ASCII: bukan awalan multibyte
+  // Lead byte harus sah: 0xC0/0xC1 (overlong) dan 0xF5..0xFF bukan awal valid.
+  if (n === 2 && (b < 0xc2 || b > 0xdf)) return false
+  if (n === 3 && (b < 0xe0 || b > 0xef)) return false
+  if (n === 4 && (b < 0xf0 || b > 0xf4)) return false
+  const avail = end - (start + 1)
+  if (avail >= n - 1) return false // sekuens sudah lengkap, bukan awalan
+  for (let k = 1; k <= avail; k++) {
+    const c = bytes[start + k]!
+    if ((c & 0xc0) !== 0x80) return false
+    // Batas byte kedua menjaga overlong/surrogate: walau chunk berikutnya
+    // melengkapi continuation-nya, awalan ini tak akan jadi code point valid.
+    if (k === 1) {
+      if (b === 0xe0 && c < 0xa0) return false
+      if (b === 0xed && c >= 0xa0) return false
+      if (b === 0xf0 && c < 0x90) return false
+      if (b === 0xf4 && c >= 0x90) return false
+    }
+  }
+  return true
+}
+
+/** Cari byte dalam rentang [from, to) — jangan menjangkau event berikutnya. */
+function indexOfByte(bytes: number[], needle: number, from: number, to: number): number {
+  for (let k = from; k < to; k++) if (bytes[k] === needle) return k
+  return -1
+}
+
+/** Cari char dalam rentang [from, to) (varian string untuk `decodeKey`). */
+function indexOfChar(s: string, needle: string, from: number, to: number): number {
+  const at = s.indexOf(needle, from)
+  return at >= 0 && at < to ? at : -1
+}
+
+/** Byte terminator ESC[201~ (dipakai untuk deteksi penuh maupun paruh). */
+const PASTE_END_BYTES = [0x1b, 0x5b, 0x32, 0x30, 0x31, 0x7e]
+
+/** Indeks awal terminator ESC[201~ di `buf` mulai `from`, atau -1 bila belum tiba. */
+function findPasteEnd(buf: number[], from: number): number {
+  for (let j = from; j + 5 < buf.length; j++) {
+    let match = true
+    for (let k = 0; k < PASTE_END_BYTES.length; k++) {
+      if (buf[j + k] !== PASTE_END_BYTES[k]) {
+        match = false
+        break
+      }
+    }
+    if (match) return j
+  }
+  return -1
+}
+
+/**
+ * Indeks awal AWALAN terminator ESC[201~ yang menggantung di ekor `buf`.
+ * Potongan seperti `ESC[` harus ditahan di pending, bukan dibuang sebagai
+ * teks literal — kalau tidak, terminator yang terbelah jadi karakter nyasar.
+ */
+function trailingPasteEndPrefix(buf: number[]): number {
+  const max = Math.min(PASTE_END_BYTES.length - 1, buf.length)
+  for (let k = max; k >= 1; k--) {
+    let match = true
+    for (let t = 0; t < k; t++) {
+      if (buf[buf.length - k + t] !== PASTE_END_BYTES[t]) {
+        match = false
+        break
+      }
+    }
+    if (match) return buf.length - k
+  }
+  return buf.length
 }
 
 /** Pemetaan byte ASCII/control → key; null bila printable biasa. */
@@ -486,11 +612,56 @@ function asciiKey(b: number): DecodedKey | null {
  */
 export function decodeKeysStream(chunk: Uint8Array, state: DecoderState): DecodedKey[] {
   const pendingCount = state.pending.length
+  // Rekonstruksi flag lintas-chunk dari pending yang memang bertahan antar
+  // pemanggilan. ESC tunggal dari chunk sebelumnya + CR di chunk ini = Alt+Enter.
+  const loneEscPending = pendingCount === 1 && state.pending[0] === 0x1b
+  state.pendingLoneEsc = loneEscPending
   const buf = state.pending.concat([...chunk])
   const out: DecodedKey[] = []
   let i = 0
   while (i < buf.length) {
     const b = buf[i]!
+    if (state.pasteOverflow) {
+      // Mode overflow paste: semua byte sebelum ESC[201~ = char LITERAL.
+      // Jangan biarkan CR/0x03/C1 didekode jadi enter/cancel/escape (audit).
+      const term = findPasteEnd(buf, i)
+      if (term === -1) {
+        // Tahan awalan terminator yang terpotong di ujung chunk.
+        const hold = trailingPasteEndPrefix(buf)
+        if (hold === i) break
+        const end = lastUtf8Boundary(buf, i, hold)
+        if (end > i) {
+          out.push({ key: { type: "char", ch: decodeUtf8(buf.slice(i, end)) }, width: 0 })
+          i = end
+        } else if (isIncompleteUtf8Prefix(buf, i, hold)) {
+          // Chunk berakhir di tengah code point: tahan ekornya di `pending`.
+          // Kalau dipancarkan U+FFFD di sini, emoji yang terbelah batas
+          // MAX_PASTE_BYTES hilang permanen (regresi audit L3).
+          break
+        } else {
+          // Byte tak valid di awal: pancarkan U+FFFD satu byt dan maju supaya
+          // loop tak mandek; sisa disambung chunk berikutnya.
+          out.push({ key: { type: "char", ch: "\ufffd" }, width: 0 })
+          i++
+        }
+        continue
+      }
+      const end = lastUtf8Boundary(buf, i, term)
+      if (end > i) {
+        out.push({ key: { type: "char", ch: decodeUtf8(buf.slice(i, end)) }, width: 0 })
+        i = end
+        continue
+      }
+      if (i < term && isIncompleteUtf8Prefix(buf, i, term)) {
+        // Code point terbelah tepat sebelum terminator: jangan dibuang bersama
+        // terminator — tahan dulu, lengkapi dengan chunk berikutnya.
+        break
+      }
+      // end === i → tepat di terminator: konsumsi dan keluar dari mode overflow.
+      i = term + 6
+      state.pasteOverflow = false
+      continue
+    }
     if (state.discard) {
       if (b < 0x20 || b >= 0x7f) {
         // Recover at an independent byte without consuming it (including ESC).
@@ -519,26 +690,23 @@ export function decodeKeysStream(chunk: Uint8Array, state: DecoderState): Decode
         buf[i + 4] === 0x30 &&
         buf[i + 5] === 0x7e
       ) {
-        let term = -1
-        for (let j = i + 6; j + 5 < buf.length; j++) {
-          if (
-            buf[j] === 0x1b &&
-            buf[j + 1] === 0x5b &&
-            buf[j + 2] === 0x32 &&
-            buf[j + 3] === 0x30 &&
-            buf[j + 4] === 0x31 &&
-            buf[j + 5] === 0x7e
-          ) {
-            term = j
-            break
-          }
-        }
+        const term = findPasteEnd(buf, i + 6)
         if (term === -1) {
           // Batas defensif bila terminal crash sebelum mengirim penutup ESC[201~:
           // jangan tahan buffer tanpa batas sampai membekukan seluruh input.
           if (buf.length - (i + 6) > MAX_PASTE_BYTES) {
-            out.push({ key: { type: "char", ch: decodeUtf8(buf.slice(i + 6)) }, width: 0 })
-            i = buf.length
+            // Jangan decode sampai ujung chunk: byte terakhir bisa berada di
+            // tengah code point multibyte. Mundur ke batas Utf-8 terakhir;
+            // sisanya tetap di pending dan disambung chunk berikutnya.
+            const start = i + 6
+            const end = lastUtf8Boundary(buf, start, buf.length)
+            if (end > start) {
+              out.push({ key: { type: "char", ch: decodeUtf8(buf.slice(start, end)) }, width: 0 })
+            }
+            // Tandai mode overflow supaya sisa payload (termasuk CR/Ctrl-C)
+            // tetap dibaca literal sampai terminator tiba (audit VERIFIED).
+            state.pasteOverflow = true
+            i = end
             continue
           }
           break // penutup belum tiba — tahan
@@ -582,13 +750,12 @@ export function decodeKeysStream(chunk: Uint8Array, state: DecoderState): Decode
           continue
         }
         if (j >= buf.length) break
-        const first = buf.indexOf(0x3b, i + 3)
-        const second = first >= 0 ? buf.indexOf(0x3b, first + 1) : -1
+        // Batasi pencarian ke [i+3, j): semicolon di EVENT SGR berikutnya
+        // tak boleh merusak parsing event ini (audit VERIFIED).
+        const first = indexOfByte(buf, 0x3b, i + 3, j)
+        const second = first >= 0 ? indexOfByte(buf, 0x3b, first + 1, j) : -1
         const valid =
-          first > i + 3 &&
-          second > first + 1 &&
-          second < j &&
-          !buf.slice(second + 1, j).includes(0x3b)
+          first > i + 3 && second > first + 1 && !buf.slice(second + 1, j).includes(0x3b)
         const button = valid ? parseDecimalBytes(buf, i + 3, first) : null
         const x = valid ? parseDecimalBytes(buf, first + 1, second) : null
         const y = valid ? parseDecimalBytes(buf, second + 1, j) : null
@@ -632,14 +799,24 @@ export function decodeKeysStream(chunk: Uint8Array, state: DecoderState): Decode
         continue
       }
       // Alt+Enter: ESC + CR (`\x1b\r`) → sisip newline, bukan batal/Esc.
-      // Hanya cocokkan bila tiba dalam chunk yang SAMA (`i >= pendingCount`),
-      // bukan `Esc` yang masih menunggu timer 50ms lalu diikuti `Enter` cepat.
-      if (n1 === 0x0d && i >= pendingCount) {
+      // `loneEscPending` menangkap ESC yang tertahan di ujung chunk SEBELUMNYA:
+      // guard lama `i >= pendingCount` menolak kasus itu dan menghasilkan
+      // esc+enter (abort + submit) saat Alt+Enter terbelah antar chunk.
+      if (n1 === 0x0d && (i >= pendingCount || loneEscPending)) {
         out.push({ key: { type: "ctrl-j" }, width: 2 })
         i += 2
         continue
       }
-      // ESC + byte lain: ESC tunggal (lengkap, tidak menunggu apa pun).
+      // Alt+<printable> (termasuk byte awal Utf-8) BUKAN Esc. Kode lama
+      // memancarkan `esc` untuk setiap ESC+byte non-CSI, jadi Alt+b mengabort
+      // turn yang sedang berjalan. Buang ESC-nya saja; byte berikutnya tetap
+      // didekode normal. Lone-ESC (flush timer) dan ESC+CR di atas tak tersentuh.
+      if (n1 >= 0x20) {
+        out.push({ key: { type: "ignore" }, width: 1 })
+        i += 1
+        continue
+      }
+      // ESC + byte kontrol tak dikenal: pertahankan perilaku esc lama.
       out.push({ key: { type: "esc" }, width: 0 })
       i += 1
       continue
@@ -684,6 +861,7 @@ export function hasPendingLoneEsc(state: DecoderState): boolean {
 export function flushLoneEsc(state: DecoderState): DecodedKey[] {
   if (!hasPendingLoneEsc(state)) return []
   state.pending = []
+  state.pendingLoneEsc = false
   return [{ key: { type: "esc" }, width: 0 }]
 }
 
@@ -820,10 +998,11 @@ export function decodeKey(s: string, i: number): DecodedKey | null {
     if (s[i + 1] === "[" && s[i + 2] === "<") {
       let j = i + 3
       while (j < s.length && s[j] !== "M" && s[j] !== "m") j++
-      const first = s.indexOf(";", i + 3)
-      const second = first >= 0 ? s.indexOf(";", first + 1) : -1
-      const valid =
-        first > i + 3 && second > first + 1 && second < j && !s.slice(second + 1, j).includes(";")
+      // Sama seperti jalur stream: hanya scan sampai `j` agar event SGR
+      // berikutnya tak menyisipkan semicolon ke event ini.
+      const first = indexOfChar(s, ";", i + 3, j)
+      const second = first >= 0 ? indexOfChar(s, ";", first + 1, j) : -1
+      const valid = first > i + 3 && second > first + 1 && !s.slice(second + 1, j).includes(";")
       const button = valid ? Number.parseInt(s.slice(i + 3, first), 10) : Number.NaN
       const x = valid ? Number.parseInt(s.slice(first + 1, second), 10) : Number.NaN
       const y = valid ? Number.parseInt(s.slice(second + 1, j), 10) : Number.NaN

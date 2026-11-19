@@ -109,8 +109,9 @@ async function readErrorSnippet(res: Response, maxChars = 4096): Promise<string>
 
 export const webFetchTool: Tool = {
   name: "web_fetch",
+  // v7.33 (wire contract): tag WEB; batas private-host tetap disebut singkat.
   description:
-    "Fetch a public HTTP/HTTPS URL (GET, 10s timeout, max 50k chars). Use for browsing public web pages. Blocks private IPs and private redirect targets.",
+    "WEB: Fetch a public HTTP/HTTPS URL (GET, 10s timeout, 50k char cap) with readable-HTML extraction. Private IPs and private redirect targets are blocked.",
   parameters: {
     type: "object",
     properties: {

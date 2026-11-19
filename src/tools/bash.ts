@@ -31,12 +31,16 @@ class CappedBuffer {
 
   append(target: "out" | "err", chunk: Buffer | string): string {
     const s = typeof chunk === "string" ? chunk : chunk.toString()
-    const cur = target === "out" ? this.out : this.err
-    if (cur.length >= this.cap) {
+    // v7.32 (L9): anggaran dipakai BERSAMA stdout+stderr. Dulu tiap stream
+    // punya cap penuh 20k sehingga gabungannya bisa ~40k, melanggar klaim
+    // "max 20k chars" di deskripsi tool. Sekarang yang tersisa dihitung dari
+    // total out+err, jadi total keluaran benar-benar ≤ cap.
+    const used = this.out.length + this.err.length
+    if (used >= this.cap) {
       this.truncated = true
       return ""
     }
-    const room = this.cap - cur.length
+    const room = this.cap - used
     if (s.length > room) this.truncated = true
     const piece = s.slice(0, Math.max(0, room))
     if (target === "out") this.out += piece
@@ -82,6 +86,8 @@ interface BackgroundJob {
   chunks: string[]
   exitCode: number | null
   done: boolean
+  /** v7.31: timer eskalasi kill dari bash_kill — dibersihkan saat job close. */
+  killTimer?: ReturnType<typeof setTimeout>
   /**
    * F-03 (P5 §C2): sid kanonik pemilik job — diikat saat start dari instans
    * tool yang sudah di-composition (createBashJobTools), BUKAN dari argumen
@@ -241,6 +247,11 @@ function startBackground(
   proc.on("close", (code) => {
     job.exitCode = code
     job.done = true
+    // v7.31: matikan timer eskalasi bash_kill bila job selesai lebih dulu.
+    if (job.killTimer !== undefined) {
+      clearTimeout(job.killTimer)
+      job.killTimer = undefined
+    }
     emitOnce(code)
   })
   jobs.set(id, job)
@@ -253,12 +264,19 @@ function startBackground(
 function makeBashTool(ownerSid: string | null): Tool {
   return {
     name: "bash",
+    // v7.33 (wire contract): deskripsi dipangkas ~45%. Timeout/cap di dalam
+    // deskripsi panjang duplikat dengan schema (timeoutMs, LIMITS) dan hasil
+    // tool; yang HARUS tetap ada adalah aturan "jangan retry buta" (penting
+    // untuk command ber-efek samping) dan petunjuk Windows (dipindah ke `cmd`).
     description:
-      "Run a shell command (default timeout 30s, max output 20k chars, exit code prefixed). Set background:true for long-running processes (dev server, watcher), then collect output via bash_output and stop with bash_kill. Prefer git_status/git_diff/git_log tools over raw `git` commands: raw git executes repository-configured hooks, filters and diff drivers. Destructive, network-exfiltrating, env-dumping, and inline-interpreter commands are blocked. If the shell allowlist denies a command: do NOT retry blindly — file reads/writes belong to read_file/write_file/edit, and a full shell needs the operator to rerun with --allow-all or --sandbox docker. On Windows the shell is cmd.exe (use dir, echo %VAR%, type).",
+      "SHELL: Run a shell command (30s timeout, 20k output cap, exit prefixed). background:true for long jobs — collect via bash_output, stop via bash_kill. Prefer git_status/git_diff/git_log and read_file/edit over raw shell. On allowlist denial do NOT retry blindly; use the dedicated tool or ask the operator to rerun with --allow-all/--sandbox docker.",
     parameters: {
       type: "object",
       properties: {
-        cmd: { type: "string", description: "command to run (shell: cmd.exe on Windows)" },
+        cmd: {
+          type: "string",
+          description: "command to run (Windows: cmd.exe syntax — dir, echo %VAR%, type)",
+        },
         cwd: {
           type: "string",
           description: "working directory relative to the workspace (default: workspace root)",
@@ -321,6 +339,9 @@ function makeBashTool(ownerSid: string | null): Tool {
             timeoutMs: timeout,
             env: sanitizeSpawnEnv(process.env, undefined, relaxed) as Record<string, string>,
             signal: ctx.signal,
+            // Teruskan flag unrestricted: runInDocker menyanitasi ulang env,
+            // tanpa ini kredensial git yang lolos di sini bakal dihapus lagi.
+            allowGitCredentials: relaxed,
           })
           ctx.signal.throwIfAborted()
           const text = scrubSecrets(res.output)
@@ -348,6 +369,9 @@ function makeBashTool(ownerSid: string | null): Tool {
             signal: ctx.signal,
             timeoutMs: timeout,
             env: sanitizeSpawnEnv(process.env, undefined, relaxed) as Record<string, string>,
+            // v7.31: env sudah di-sanitize dengan `relaxed` di atas — tanpa
+            // flag ini OS sandbox menghapus kredensial git lagi saat unrestricted.
+            allowGitCredentials: relaxed,
           })
           const text = scrubSecrets(res.output)
           if (res.code !== 0)
@@ -399,8 +423,34 @@ function makeBashTool(ownerSid: string | null): Tool {
         }
         p.stdout.on("data", (d: Buffer) => emitChunk(buf.append("out", d)))
         p.stderr.on("data", (d: Buffer) => emitChunk(buf.append("err", d)))
-        p.on("error", reject)
+        // v7.32 (L2): SATU jalur cleanup dipanggil dari error DAN close.
+        // Dulu `p.on("error", reject)` hanya settle promise; bila `close`
+        // tak pernah menyusul (mis. spawn ENOENT / kill gagal), timer 30 dtk
+        // dan abort listener tetap hidup menahan referensi proses mati.
+        // Idempoten (cleanedUp) agar aman bila error diikuti close.
+        let killTimer: ReturnType<typeof setTimeout> | undefined
+        let t: ReturnType<typeof setTimeout> | undefined
+        const onAbort = () => {
+          if (t) clearTimeout(t)
+          if (killTimer) clearTimeout(killTimer)
+          // Kill the group before close can release executor quarantine.
+          killTree(p)
+        }
+        let cleanedUp = false
+        const cleanup = () => {
+          if (cleanedUp) return
+          cleanedUp = true
+          ctx.signal.removeEventListener("abort", onAbort)
+          if (t) clearTimeout(t)
+          if (killTimer) clearTimeout(killTimer)
+        }
+
+        p.on("error", (e) => {
+          cleanup()
+          reject(e)
+        })
         p.on("close", (code) => {
+          cleanup()
           const text = buf.text()
           if (ctx.signal.aborted) {
             reject(ctx.signal.reason)
@@ -429,8 +479,7 @@ function makeBashTool(ownerSid: string | null): Tool {
           if (code !== 0) resolveOut(`exit ${code}\n${text}`)
           else resolveOut(text)
         })
-        let killTimer: ReturnType<typeof setTimeout> | undefined
-        const t = setTimeout(() => {
+        t = setTimeout(() => {
           timedOut = true
           // Windows: SIGTERM hanya membunuh cmd.exe wrapper — cucu (node -e)
           // bisa belum lahir (spawn lambat) atau yatim sambil menahan pipe.
@@ -444,19 +493,8 @@ function makeBashTool(ownerSid: string | null): Tool {
             killTree(p)
           }, 2000)
         }, timeout)
-        const onAbort = () => {
-          clearTimeout(t)
-          if (killTimer) clearTimeout(killTimer)
-          // Kill the group before close can release executor quarantine.
-          killTree(p)
-        }
         ctx.signal.addEventListener("abort", onAbort, { once: true })
         if (ctx.signal.aborted) onAbort()
-        p.on("close", () => {
-          ctx.signal.removeEventListener("abort", onAbort)
-          clearTimeout(t)
-          if (killTimer) clearTimeout(killTimer)
-        })
       })
     },
   }
@@ -465,8 +503,9 @@ function makeBashTool(ownerSid: string | null): Tool {
 function makeBashOutputTool(ownerSid: string | null): Tool {
   return {
     name: "bash_output",
+    // v7.33 (wire contract): tag SHELL.
     description:
-      "Get NEW output from a background job (since the last read). Includes the exit status once it has finished.",
+      "SHELL: Get NEW output from a background job (since the last read); includes exit status once finished.",
     parameters: {
       type: "object",
       properties: {
@@ -498,7 +537,8 @@ function makeBashOutputTool(ownerSid: string | null): Tool {
 function makeBashKillTool(ownerSid: string | null): Tool {
   return {
     name: "bash_kill",
-    description: "Stop a background job (SIGTERM then SIGKILL).",
+    // v7.33 (wire contract): tag SHELL.
+    description: "SHELL: Stop a background job (SIGTERM then SIGKILL).",
     parameters: {
       type: "object",
       properties: { id: { type: "string", description: "job id" } },
@@ -524,11 +564,21 @@ function makeBashKillTool(ownerSid: string | null): Tool {
           job.proc.kill("SIGTERM")
         } catch {}
       }
-      setTimeout(() => {
+      // v7.31: simpan handle & bersihkan saat job selesai — timer 1 dtk yang
+      // dibiarkan hidup menahan shutdown dan menyentuh pid mati.
+      // v7.32 (L3): batalkan timer eskalasi SEBELUM menggantinya. Tanpa ini,
+      // bash_kill kedua menganakkan timer baru sementara timer pertama tetap
+      // hidup (orphan) → dua taskkill ke pid yang sama setelah job selesai.
+      if (job.killTimer !== undefined) clearTimeout(job.killTimer)
+      const escalation = setTimeout(() => {
         try {
           if (!job.done) killTree(job.proc)
         } catch {}
       }, 1000)
+      try {
+        ;(escalation as unknown as { unref?: () => void }).unref?.()
+      } catch {}
+      job.killTimer = escalation
       return `[${job.id}] stopped`
     },
   }

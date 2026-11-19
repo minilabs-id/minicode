@@ -415,7 +415,7 @@ test("[ARCHITECTURE-GUARD] P2.9: Sub-Agent kanonik, berpagar, dan terisolasi", (
   expect(dSrc).toContain("DELETE FROM runs WHERE session_id = ?")
 })
 
-test("[ARCHITECTURE-GUARD] P2.9: tak ada vendor改动 & writer child di persistence owner", () => {
+test("[ARCHITECTURE-GUARD] P2.9: tak ada perubahan vendor & writer child di persistence owner", () => {
   const vendorHits = tracked(/^vendor\/.*\.ts$/).filter((f) => f.includes("minicore"))
   expect(vendorHits.length).toBeGreaterThan(0)
   // Penulis sessions/threads/runs tetap SATU owner (persistence.ts).

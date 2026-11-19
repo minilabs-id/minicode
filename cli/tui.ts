@@ -64,7 +64,10 @@ import type { CliSession } from "./setup.ts"
 // Dua sumbu mode berbagi popup, bukan otoritas.
 const PERMISSION_MODES = ["auto", "ask"] as const
 const WORK_MODE_CYCLE = ["DISCUSS", "EXECUTE"] as const
-const VIEW_ACTIONS = ["compact", "thinking", "expand", "minimize", "fold"] as const
+// Aksi view yang benar-benar punya efek di renderer flat. compact/minimize/fold
+// dihapus: mengubah flag-flag itu tak mengubah satu sel pun di layar (hanya
+// menghasilkan kwitansi palsu), jadi jangan ditawarkan lagi di picker /view.
+const VIEW_ACTIONS = ["thinking", "expand"] as const
 const DRIVER_COMMANDS = ["/view", "/mode", "/lang", "/clear", "/copy", "/undo", "/redo"]
 
 function fmtCtx(n: number): string | undefined {
@@ -195,6 +198,11 @@ export async function runTui(ctx: CliSession): Promise<void> {
   if (ctx.uiState && process.env.MINICODE_ACTIVITY_PANEL !== "0") ui.setActivityPanel(true)
 
   let mode: string = permissions?.getMode() ?? permissionMode ?? "auto"
+  // Satu sumber kebenaran mode permission: kontrol runtime bila tersedia, baru
+  // snapshot boot. /status dan footer WAJIB lewat helper yang sama — sebelumnya
+  // /status memakai live control sementara footer memakai `mode` basi, sehingga
+  // label keduanya bisa berbeda setelah Shift+Tab.
+  const livePermissionMode = (): string => permissions?.getMode() ?? mode
   // Mode permission sebelum /unrestric diaktifkan — dipakai untuk memulihkan
   // saat operator menonaktifkannya kembali (toggle, per-sesi).
   let modeBeforeUnrestricted: string | null = null
@@ -209,6 +217,11 @@ export async function runTui(ctx: CliSession): Promise<void> {
     ui.setMinimizeActivity(true)
   let warned80 = false
   let abort: AbortController | null = null
+  // Abort membatalkan NIAT: sampai user benar-benar mengirim prompt BARU,
+  // jalur antrean (steering fallback) harus menolak baris. Tanpa ini, Enter
+  // yang masuk di celah antara unwind abort dan submit berikutnya mengisi
+  // `queuedPrompts` lagi lalu dijalankan `runTurn` sebagai turn hantu (M2).
+  let abortRequested = false
   // Antrean FALLBACK untuk informasi tambahan: hanya dipakai bila kernel
   // menolak steering (turn sudah selesai lebih dulu — race antara submit dan
   // akhir turn). Pesannya lalu dikirim sebagai turn penuh berikutnya supaya
@@ -372,7 +385,7 @@ export async function runTui(ctx: CliSession): Promise<void> {
       return displayWorkMode(workModeControl?.getWorkMode() ?? "DISCUSS")
     },
     get permissionMode() {
-      return (permissions?.getMode() ?? mode).toUpperCase()
+      return livePermissionMode().toUpperCase()
     },
     get providerHint() {
       const cur = modelRef.current
@@ -388,6 +401,37 @@ export async function runTui(ctx: CliSession): Promise<void> {
     onBeforeSpawn: async () => {
       app.releaseTerminal()
       await close().catch(() => {})
+    },
+    // v7.32: shell interaktif via handoff aman (sudah teruji untuk /sessions).
+    // Keluar alt-screen + cooked mode → shell asli menguasai terminal (vim,
+    // htop, warna, resize semua jalan) → re-acquire TUI saat shell selesai.
+    withShell: async (cmd: string) => {
+      const { spawn } = await import("node:child_process")
+      const { waitChildExit } = await import("./auto-update.ts")
+      const shell =
+        process.platform === "win32"
+          ? (process.env.COMSPEC ?? "cmd.exe")
+          : (process.env.SHELL ?? "/bin/sh")
+      const shellArgs =
+        process.platform === "win32"
+          ? ["/K", ...(cmd.trim() ? [cmd.trim()] : [])]
+          : ["-c", cmd.trim() || 'exec "$SHELL"']
+      app.releaseTerminal()
+      let code: number | null = null
+      try {
+        const child = spawn(shell, shellArgs, {
+          stdio: "inherit",
+          cwd: cwd ?? process.cwd(),
+          env: process.env,
+        })
+        code = await waitChildExit(child)
+      } finally {
+        process.stdin.resume()
+        // reacquireTerminal() sudah memasang listener + repaint; resume() di sini
+        // akan menaikkan suspend counter secara tidak seimbang — jangan dipanggil.
+        if (!app.reacquireTerminal()) app.requestQuit()
+      }
+      if (code !== 0 && code != null) throw new Error(`shell exited with code ${code}`)
     },
     getContextTokens: () => session.contextTokens,
     budgetState: () => {
@@ -666,9 +710,26 @@ export async function runTui(ctx: CliSession): Promise<void> {
     }
     const ctrl = new AbortController()
     abort = ctrl
+    // Turn BARU (termasuk auto-resume job background) memulai niat baru:
+    // hapus jejak abort lama di SINI, bukan di submit(). Menaruhnya di submit
+    // membuat turn yang dipicu onBackgroundJobFinished mewarisi
+    // abortRequested=true dan menolak seluruh steering. Guard antrean tetap
+    // bekerja di celah abort→turn-baru karena flag belum dihapus sampai titik ini.
+    abortRequested = false
     try {
       await runPromptWithVerify(finalPrompt, ctrl.signal)
-      if (ctrl.signal.aborted) transcript.pushInfo([c.muted(t("tui.stopped"))])
+      // v7.30: kwitansi abort/antrean/budget = status UI, bukan giliran bicara.
+      if (ctrl.signal.aborted) app.showToast(t("tui.stopped"))
+    } catch (error) {
+      // v7.31: abort user melempar `AgentError(aborted)` dari decideTurnResume.
+      // Tanpa penanganan di sini, rejection sampai ke doSubmit.catch yang
+      // menulis error permanen ke transkrip — dan toast "stopped" di atas tak
+      // pernah tercapai. Abort = status UI, bukan giliran bicara.
+      if (ctrl.signal.aborted || (error as { kind?: string })?.kind === "aborted") {
+        app.showToast(t("tui.stopped"))
+      } else {
+        throw error
+      }
     } finally {
       abort = null
       // Abort membatalkan NIAT user: pesan yang sempat diantrikan tak boleh
@@ -676,7 +737,7 @@ export async function runTui(ctx: CliSession): Promise<void> {
       // (bukan hilang diam-diam).
       if (ctrl.signal.aborted && queuedPrompts.length > 0) {
         const dropped = queuedPrompts.splice(0, queuedPrompts.length).length
-        transcript.pushInfo([c.muted(t("tui.queueDropped", { n: String(dropped) }))])
+        app.showToast(t("tui.queueDropped", { n: String(dropped) }))
       }
     }
     const u = usage.get(modelRef.current)
@@ -693,9 +754,7 @@ export async function runTui(ctx: CliSession): Promise<void> {
       !warned80
     ) {
       warned80 = true
-      transcript.pushInfo([
-        c.warning(t("tui.budget80", { spent: formatUsd(sess.cost), budget: formatUsd(budget) })),
-      ])
+      app.showToast(t("tui.budget80", { spent: formatUsd(sess.cost), budget: formatUsd(budget) }))
     }
   }
 
@@ -748,26 +807,29 @@ export async function runTui(ctx: CliSession): Promise<void> {
       .map((turn) => turn.trim())
       .filter(Boolean)
     const txt = turns.join("\n\n").trim()
+    // v7.30: semua kwitansi /copy adalah urusan UI, bukan percakapan —
+    // tampil di footer (toast) supaya histori transkrip tetap murni dialog.
     if (!txt) {
-      transcript.pushInfo([c.muted(t("tui.copyNone"))])
+      app.showToast(t("tui.copyNone"))
       return
     }
     // Guard byte SEBELUM base64: 10 turn panjang bisa melewati batas OSC 52;
     // memberi pesan spesifik lebih baik daripada gagal "butuh TTY" yang keliru.
     const bytes = clipboardByteLength(txt)
     if (bytes > MAX_CLIPBOARD_BYTES) {
-      transcript.pushInfo([
-        c.warning(t("tui.copyTooLarge", { n: bytes, max: MAX_CLIPBOARD_BYTES })),
-      ])
+      app.showToast(t("tui.copyTooLarge", { n: bytes, max: MAX_CLIPBOARD_BYTES }))
       return
     }
     if (writeClipboardOsc52(txt)) {
       const key = turns.length > 1 ? "tui.copyOkMany" : "tui.copyOk"
-      transcript.pushInfo([c.muted(t(key, { n: txt.length, turns: turns.length }))])
-    } else transcript.pushInfo([c.muted(t("tui.copyNeedTty"))])
+      app.showToast(t(key, { n: txt.length, turns: turns.length }))
+    } else app.showToast(t("tui.copyNeedTty"))
   }
 
   async function submit(line: string): Promise<{ quit?: boolean } | undefined> {
+    // Flag abort sengaja TIDAK dihapus di sini: satu-satunya titik clear ada di
+    // runTurnOnce saat AbortController turn baru dibuat. Kalau tidak, auto-resume
+    // job background (yang tak lewat submit) akan mewarisi niat abort lama.
     if (!line.startsWith("/")) {
       await runTurn(line)
       return
@@ -799,22 +861,21 @@ export async function runTui(ctx: CliSession): Promise<void> {
       const nextWork = parseWorkModeValue(args)
       if (nextWork) {
         if (!workModeControl) {
-          transcript.pushInfo([c.muted(t("tui.workModeUnavailable"))])
+          app.showToast(t("tui.workModeUnavailable"))
           return
         }
         workModeControl.setWorkMode(nextWork)
-        transcript.pushInfo([c.muted(t("tui.workModeLine", { m: displayWorkMode(nextWork) }))])
+        // v7.30: kwitansi "work mode: X" / "mode: X" DIBUANG — footer sudah
+        // menampilkan kedua sumbu secara live. Toast malah menimpa footer
+        // dan mengulang informasi yang sudah terlihat (histori tetap dialog).
       } else if ((PERMISSION_MODES as readonly string[]).includes(args.toLowerCase())) {
         if (!permissions) {
-          transcript.pushInfo([c.muted(t("tui.permissionUnavailable"))])
+          app.showToast(t("tui.permissionUnavailable"))
           return
         }
         setPermissionAxis(args.toLowerCase() as (typeof PERMISSION_MODES)[number])
-        transcript.pushInfo([c.muted(t("tui.modeLine", { m: mode }))])
       } else {
-        transcript.pushInfo([
-          c.muted(t("tui.unknownMode", { a: args, modes: "DISCUSS, BUILD, AUTO, ASK" })),
-        ])
+        app.showToast(t("tui.unknownMode", { a: args, modes: "DISCUSS, BUILD, AUTO, ASK" }))
         return
       }
       app.repaint()
@@ -826,7 +887,8 @@ export async function runTui(ctx: CliSession): Promise<void> {
     if (name === "unrestric" || name === "unrestrict") {
       const parsed = parseToggleArg(args)
       if (parsed === "invalid") {
-        transcript.pushInfo([c.muted(t("tui.unrestrictedUsage"))])
+        // v7.30: kwitansi toggle = status UI, bukan percakapan (footer/toast).
+        app.showToast(t("tui.unrestrictedUsage"))
         return
       }
       const next = parsed === undefined ? mode !== "unrestricted" : parsed
@@ -840,11 +902,11 @@ export async function runTui(ctx: CliSession): Promise<void> {
         // WorkMode EXECUTE (BUILD) agar ceiling DISCUSS tak menahan tulis.
         workModeControl?.setWorkMode("EXECUTE")
         app.repaint()
-        transcript.pushInfo([c.warning(`${c.red(glyphs.unlock)} ${t("tui.unrestrictedOn")}`)])
+        app.showToast(`${glyphs.unlock} ${t("tui.unrestrictedOn")}`)
         return
       }
       if (mode !== "unrestricted") {
-        transcript.pushInfo([c.muted(`${glyphs.lock} ${t("tui.unrestrictedOff", { m: mode })}`)])
+        app.showToast(`${glyphs.lock} ${t("tui.unrestrictedOff", { m: mode })}`)
         return
       }
       mode = modeBeforeUnrestricted ?? "auto"
@@ -855,18 +917,19 @@ export async function runTui(ctx: CliSession): Promise<void> {
       modeBeforeUnrestricted = null
       workModeBeforeUnrestricted = null
       app.repaint()
-      transcript.pushInfo([c.muted(`${glyphs.lock} ${t("tui.unrestrictedOff", { m: mode })}`)])
+      app.showToast(`${glyphs.lock} ${t("tui.unrestrictedOff", { m: mode })}`)
       return
     }
     if (name === "lang") {
       const { currentLocale, setSessionLocale } = await import("../src/ui/i18n/locale.ts")
       if (!args) {
-        transcript.pushInfo([c.muted(t("tui.langLine", { v: `${currentLocale()} (en|id)` }))])
+        // v7.30: readout/pesan /lang = kwitansi UI — footer (toast), bukan transkrip.
+        app.showToast(t("tui.langLine", { v: `${currentLocale()} (en|id)` }))
         return
       }
       const next = args.trim().toLowerCase()
       if (next !== "en" && next !== "id") {
-        transcript.pushInfo([c.muted(t("tui.langUnknown", { a: args }))])
+        app.showToast(t("tui.langUnknown", { a: args }))
         return
       }
       setSessionLocale(next)
@@ -875,7 +938,7 @@ export async function runTui(ctx: CliSession): Promise<void> {
         const { saveLang } = await import("../src/config.ts")
         await saveLang(next)
       } catch {}
-      transcript.pushInfo([c.muted(t("tui.langLine", { v: next }))])
+      // v7.30: hapus duplikasi transkrip — toast di footer sudah menyampaikan hasilnya.
       app.showToast(t("tui.langLine", { v: next }))
       return
     }
@@ -909,40 +972,33 @@ export async function runTui(ctx: CliSession): Promise<void> {
       viewAction = parts.shift()!.toLowerCase()
       args = parts.join(" ")
       if (!(VIEW_ACTIONS as readonly string[]).includes(viewAction)) {
-        transcript.pushInfo([c.muted(t("tui.viewUse"))])
+        // v7.30: kwitansi /view = status UI, bukan giliran bicara (toast di footer).
+        app.showToast(t("tui.viewUse"))
         return
       }
     }
-    if (viewAction === "compact" || viewAction === "thinking" || viewAction === "fold") {
+    if (viewAction === "thinking") {
+      // compact/fold (dan minimize di bawah) sudah dihapus dari VIEW_ACTIONS:
+      // flag-nya tak dibaca renderer flat, jadi hanya menyisakan kwitansi palsu.
       const parsed = parseToggleArg(args)
       if (parsed === "invalid") {
-        transcript.pushInfo([c.muted(t("tui.toggleUse", { cmd: viewAction }))])
+        app.showToast(t("tui.toggleUse", { cmd: viewAction }))
         return
       }
-      const toggleLine =
-        viewAction === "compact"
-          ? t("tui.compactLine", {
-              v: t(ui.setCompactMode(parsed) ? "state.compact" : "state.expanded"),
-            })
-          : viewAction === "thinking"
-            ? t("tui.thinkingSet", {
-                v: t(ui.setReasoningVisible(parsed) ? "state.expanded" : "state.minimized"),
-              })
-            : t("tui.activityFold", {
-                v: t(ui.setActivityPanel(parsed) ? "state.expanded" : "state.folded"),
-              })
-      transcript.pushInfo([c.muted(toggleLine)])
+      app.showToast(
+        t("tui.thinkingSet", {
+          v: t(ui.setReasoningVisible(parsed) ? "state.expanded" : "state.minimized"),
+        }),
+      )
       return
     }
     if (viewAction === "expand") {
       const sections = args ? ctx.expandContent(args) : ctx.expandAllContent()
       const views = args ? [] : ui.collapsedSectionsSnapshot()
       if (!sections.length && !views.length) {
-        transcript.pushInfo([
-          c.muted(
-            args ? t("tui.expandNotFound", { id: sanitizeAnsiLine(args) }) : t("tui.expandEmpty"),
-          ),
-        ])
+        app.showToast(
+          args ? t("tui.expandNotFound", { id: sanitizeAnsiLine(args) }) : t("tui.expandEmpty"),
+        )
         return
       }
       const lines: string[] = []
@@ -964,21 +1020,6 @@ export async function runTui(ctx: CliSession): Promise<void> {
       await showCommandOutput(t("out.titleExpand"), lines)
       return
     }
-    if (viewAction === "minimize") {
-      const parsed = parseToggleArg(args)
-      if (parsed === "invalid") {
-        transcript.pushInfo([c.muted(t("tui.minUse"))])
-        return
-      }
-      const next =
-        parsed === undefined
-          ? !(ui.sectionMinimized("tool") && ui.sectionMinimized("answer"))
-          : parsed
-      ui.setSectionMinimized("tool", next)
-      ui.setSectionMinimized("answer", next)
-      transcript.pushInfo([c.muted(t(next ? "tui.sectionsMin" : "tui.sectionsExp"))])
-      return
-    }
     if (name === "undo" || name === "redo") {
       // Daftar turn adalah readout panjang → jendela command, sama seperti
       // /history. Receipt undo/redo yang pendek tetap di transkrip.
@@ -988,7 +1029,7 @@ export async function runTui(ctx: CliSession): Promise<void> {
     if (name === "copy") {
       const count = parseCopyCount(args)
       if (count === null) {
-        transcript.pushInfo([c.muted(t("tui.copyInvalid", { n: args, max: MAX_COPY_TURNS }))])
+        app.showToast(t("tui.copyInvalid", { n: args, max: MAX_COPY_TURNS }))
         return
       }
       await copyLastTurn(count)
@@ -1078,14 +1119,13 @@ export async function runTui(ctx: CliSession): Promise<void> {
         "resume",
         ...allLoadedSkills.map((s) => s.name),
       ])
-      transcript.pushInfo([
-        c.muted(
-          t("tui.unknownCmd", {
-            name,
-            tail: hint ? t("tui.didYou", { hint }) : t("tui.tryHelp"),
-          }),
-        ),
-      ])
+      // v7.30: perintah tak dikenal adalah umpan balik UI, bukan pesan percakapan.
+      app.showToast(
+        t("tui.unknownCmd", {
+          name,
+          tail: hint ? t("tui.didYou", { hint }) : t("tui.tryHelp"),
+        }),
+      )
       return
     }
     transcript.pushUser(line)
@@ -1096,16 +1136,18 @@ export async function runTui(ctx: CliSession): Promise<void> {
     bus: session.events as unknown as TuiHost["bus"],
     getStatus: () => {
       const busy = abort != null
+      const liveMode = livePermissionMode()
       const status = {
         footer: {
           // Normalisasi: sumbu persetujuan hanya AUTO/ASK. Profil warisan
           // (allow-all/allowlist) tak lagi bocor sebagai label mode. "unrestricted"
           // adalah mode full-akses eksplisit (/unrestric) — tampil apa adanya.
-          mode: mode === "ask" ? "ask" : mode === "unrestricted" ? "unrestricted" : "auto",
+          // Baca kontrol live (bukan snapshot `mode`) — lihat livePermissionMode.
+          mode: liveMode === "ask" ? "ask" : liveMode === "unrestricted" ? "unrestricted" : "auto",
           // Gembok (allow-list) terang HANYA saat allow-list benar-benar menahan
           // bash: restrictBash + mode AUTO. Di ASK bash diawasi prompt (bukan
           // allow-list), dan di allow-all bash bebas — keduanya gembok redup.
-          strictBash: (permissions?.getRestrictBash?.() ?? false) && mode === "auto",
+          strictBash: (permissions?.getRestrictBash?.() ?? false) && liveMode === "auto",
           // P12 S2.2 Slice 5 - WorkMode LIVE (bukan snapshot boot): footer
           // mencerminkan mode aktif saat frame digambar.
           workMode: workModeControl?.getWorkMode() ?? "DISCUSS",
@@ -1142,24 +1184,31 @@ export async function runTui(ctx: CliSession): Promise<void> {
     enqueue: (raw) => {
       const line = raw.trim()
       if (!line) return false
+      if (abortRequested) {
+        // Jangan diam: user perlu tahu barisnya tak jadi turn hantu.
+        // v7.30: kwitansi antrean = status UI (toast), bukan baris percakapan.
+        app.showToast(t("tui.queueAborted"))
+        return false
+      }
       if (line.startsWith("/")) {
         const name = line.split(/\s+/)[0] ?? line
-        transcript.pushInfo([c.muted(t("tui.busyCmd", { cmd: name }))])
+        app.showToast(t("tui.busyCmd", { cmd: name }))
         return false
       }
       transcript.pushUser(line)
       // `?.` menjaga fixture/komposisi lama yang belum punya seam ini (fail-safe:
       // jatuh ke antrean, bukan crash di tengah turn).
       if (ctx.session.steer?.(line)) {
-        transcript.pushInfo([c.muted(t("tui.steered"))])
+        app.showToast(t("tui.steered"))
         return true
       }
       queuedPrompts.push(line)
-      transcript.pushInfo([c.muted(t("tui.queued", { n: String(queuedPrompts.length) }))])
+      app.showToast(t("tui.queued", { n: String(queuedPrompts.length) }))
       return true
     },
     copySelection: (text) => writeClipboardOsc52(text),
     abort: () => {
+      abortRequested = true
       abort?.abort()
     },
     cycleWorkMode: (dir) => {
@@ -1168,18 +1217,11 @@ export async function runTui(ctx: CliSession): Promise<void> {
     togglePermissionMode: () => {
       togglePermissionMode()
     },
-    toggleCompact: () => {
-      const compact = ui.setCompactMode()
-      transcript.pushInfo([
-        c.muted(t("tui.compactLine", { v: t(compact ? "state.compact" : "state.expanded") })),
-      ])
-    },
-    toggleReasoning: () => {
-      const vis = ui.setReasoningVisible()
-      transcript.pushInfo([
-        c.muted(t("tui.thinkingSet", { v: t(vis ? "state.expanded" : "state.minimized") })),
-      ])
-    },
+    // Tidak ada lagi binding Ctrl+O/Ctrl+T. Metode ini sengaja NO-OP: renderer
+    // flat tak mengonsumsi flag compact/reasoning, jadi mengubahnya sambil
+    // mencetak kwitansi hanya menyesatkan user (temuan H1).
+    toggleCompact: () => {},
+    toggleReasoning: () => {},
   }
 
   const loadRewindDraft = process.env.MINICODE_REWIND_DRAFT === "1"
@@ -1195,7 +1237,8 @@ export async function runTui(ctx: CliSession): Promise<void> {
     } catch {}
   }
   const app = new TuiApp(transcript, host, { initialDraft })
-  if (rewindNotice) transcript.pushInfo([c.muted(sanitizeAnsiLine(rewindNotice))])
+  // v7.30: notisi rewind = status sesi sesaat, bukan riwayat percakapan.
+  if (rewindNotice) app.showToast(sanitizeAnsiLine(rewindNotice))
   // Approval sebagai warga TUI: blok pertanyaan + keputusan tercatat di
   // transkrip dan terlihat sebelum menjawab (tanpa sink = tulis langsung).
   const { setApprovalSink } = await import("../src/ui/tui/transcript.ts")

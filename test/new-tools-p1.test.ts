@@ -51,7 +51,9 @@ test("submit_result: tanpa prompt di ask/plan, ditolak di readonly", async () =>
   expect(await check(plan, "submit_result")).toBe("allow")
 })
 
-test("ask_user: tanpa injeksi atau non-TTY → tolak (fail-closed)", async () => {
+test("ask_user: tanpa injeksi → tolak (fail-closed)", async () => {
+  // Bagian ini jalan di semua mesin (TTY atau bukan), jadi dipisah dari
+  // asersi non-TTY agar cakupan fail-closed tidak ikut ter-skip.
   setAskTextFn(undefined)
   let threw = ""
   try {
@@ -60,22 +62,28 @@ test("ask_user: tanpa injeksi atau non-TTY → tolak (fail-closed)", async () =>
     threw = (e as Error).message
   }
   expect(threw).toContain("no question view injected")
-  // Di mesin CI non-TTY, injeksi pun tetap menolak — tidak boleh gantung.
-  setAskTextFn(async () => "ya")
-  try {
-    if (!process.stdin.isTTY) {
-      threw = ""
+})
+
+// v7.33: dulu asersi non-TTY dibungkus `if (!process.stdin.isTTY)` tanpa else —
+// di TTY test dilaporkan PASS tanpa pernah memeriksa apa pun (false-confidence).
+// skipIf membuat kondisi skip terlihat di laporan.
+test.skipIf(process.stdin.isTTY)(
+  "ask_user: injeksi tapi non-TTY → tolak (tak boleh gantung)",
+  async () => {
+    setAskTextFn(async () => "ya")
+    try {
+      let threw = ""
       try {
         await askUserTool.execute({ question: "lanjut?" }, mkctx())
       } catch (e) {
         threw = (e as Error).message
       }
       expect(threw).toContain("interactive terminal")
+    } finally {
+      setAskTextFn(undefined)
     }
-  } finally {
-    setAskTextFn(undefined)
-  }
-})
+  },
+)
 
 test("ask_user: di-gate (prompt di ask/auto, deny di readonly/plan/allowlist)", async () => {
   for (const mode of ["readonly", "plan", "allowlist"] as const) {

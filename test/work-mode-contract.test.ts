@@ -532,7 +532,7 @@ describe("abort — perilaku lama dipertahankan di bawah WorkMode", () => {
 // ── Requirement 12: K-1 always utuh lewat wrapper (subproses HOME terisolasi) ──
 
 describe("K-1 always — persistensi repo-lokal tetap utuh melalui wrapper", () => {
-  test("DISCUSS × ask 'always': tulis <root>/.minicode/allowlist.json + grant sesi", async () => {
+  test("DISCUSS × ask 'always': delegate_task tak dipersisten (satu ASK = satu delegasi)", async () => {
     const root = tmpRoot("always")
     const args = { prompt: "p12-wm-always" }
     const script = `
@@ -557,8 +557,11 @@ describe("K-1 always — persistensi repo-lokal tetap utuh melalui wrapper", () 
     expect(r.first).toBe("allow")
     expect(r.asksAfterFirst).toBe(1)
     expect(r.second).toBe("allow")
-    expect(r.asksAfterSecond).toBe(1)
-    expect(r.allowed).toEqual([r.key])
+    // [AGENT-CONTROL-4] Satu ASK = satu delegasi: broker bisa saja menjawab
+    // "always", tapi saveAlways/matchAllowlist kini menolak delegate_task.
+    expect(r.asksAfterSecond).toBe(2)
+    // Tak ada allowlist.json yang ditulis untuk delegasi.
+    expect(r.allowed).toBeNull()
   })
 })
 
@@ -732,7 +735,7 @@ describe("Invariant #1 — 12 sel × seluruh tool bawaan: WorkMode tak pernah me
         write_file: { path: "probe.txt", content: "x" },
         edit: { path: "probe.txt", old_string: "a", new_string: "b" },
         apply_patch: { patch: "" },
-        move_file: { from: "a.txt", to: "b.txt" },
+        move_file: { path: "a.txt", destination: "b.txt" },
         delete_file: { path: "a.txt" },
         list_dir: { path: "." },
         glob: { pattern: "*.ts" },

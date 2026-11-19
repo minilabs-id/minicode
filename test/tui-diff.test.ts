@@ -3,6 +3,8 @@ import { computeLineDiff, markChangedWords, renderDiffCard } from "../src/ui/ren
 import { stripAnsi } from "../src/ui/render/theme.ts"
 import { displayWidth } from "../src/ui/render/width.ts"
 
+const ESC = String.fromCharCode(27)
+
 test("diff: computeLineDiff identifies added and deleted lines", () => {
   const oldText = "line 1\nline 2\nline 3"
   const newText = "line 1\nline 2 modified\nline 3\nline 4"
@@ -138,22 +140,13 @@ test("diff: baris yang hampir seluruhnya beda tampil polos", () => {
   expect(card).toContain("xxx yyy")
 })
 
-test("diff: kata berubah di-bold di card (COLORTERM truecolor)", () => {
-  const prevCt = process.env.COLORTERM
-  const prevNc = process.env.NO_COLOR
-  process.env.COLORTERM = "truecolor"
-  delete process.env.NO_COLOR
-  // Warna digate stdout.isTTY — stub TTY agar yang diuji palet, bukan gate.
-  Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
-  try {
-    const card = renderDiffCard("f.ts", "const a = 1", "const a = 2")
-    expect(card).toContain("const a = ")
-    expect(card).toContain("\x1b[1m2\x1b[22m")
-  } finally {
-    Object.defineProperty(process.stdout, "isTTY", { value: false, configurable: true })
-    if (prevCt == null) delete process.env.COLORTERM
-    else process.env.COLORTERM = prevCt
-    if (prevNc == null) delete process.env.NO_COLOR
-    else process.env.NO_COLOR = prevNc
-  }
+test("diff: kata berubah tampil polos di card mono (tanpa bold/SGR)", () => {
+  // Renderer full-monochrome: FORCE_MONO membuat semua `c.*` identity. Kata yang
+  // berubah dibedakan oleh prefiks `+`/`-` dan isi teks, bukan oleh bold.
+  // Yang dijaga: teks diff tetap terbaca utuh dan tak ada SGR warna sama sekali.
+  const card = renderDiffCard("f.ts", "const a = 1", "const a = 2")
+  expect(card).toContain("const a = ")
+  expect(card).toContain("+ const a = 2")
+  expect(card).toContain("- const a = 1")
+  expect(card).not.toMatch(new RegExp(`${ESC}\\[[0-9;]*m`))
 })

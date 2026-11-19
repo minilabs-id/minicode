@@ -51,6 +51,13 @@ export interface DockerRunOptions {
   env?: Record<string, string>
   timeoutMs?: number
   signal?: AbortSignal
+  /**
+   * Mode unrestricted (bash) boleh mewariskan kredensial git sempit
+   * (GITHUB_TOKEN/GH_TOKEN/SSH_AUTH_SOCK) ke container. Tanpa ini, sanitasi
+   * kedua di bawah menggugurkan kredensial yang sudah lolos di bash tool —
+   * push via token/SSH jadi gagal diam-diam di sandbox docker.
+   */
+  allowGitCredentials?: boolean
 }
 
 let dockerSpawnForTest: typeof spawn | null = null
@@ -175,8 +182,10 @@ export function runInDocker(
 
   return new Promise((resolveResult) => {
     // env selalu disanitasi dari hasil merge final — secret (API_KEY/TOKEN/...)
-    // tidak pernah diwarisi container walau caller lupa strip.
-    const env = sanitizeSpawnEnv(process.env, opts.env)
+    // tidak pernah diwarisi container walau caller lupa strip. Satu-satunya
+    // passthrough adalah kredensial git pada mode unrestricted yang diteruskan
+    // eksplisit oleh bash tool lewat opts.allowGitCredentials.
+    const env = sanitizeSpawnEnv(process.env, opts.env, opts.allowGitCredentials)
     const p = (dockerSpawnForTest ?? spawn)(dockerExecutable(), args, {
       stdio: ["ignore", "pipe", "pipe"],
       env,

@@ -80,15 +80,24 @@ describe("audit regresi UI/UX: backdrop dimming & multi-line helpers", () => {
     tty = undefined
   })
 
-  test("TuiApp.applyBackdropDim menetralisir reset ANSI dan bold", () => {
-    const colored = "\x1b[1m\x1b[32mhello\x1b[0m world\x1b[22m"
-    const dimmed = TuiApp.applyBackdropDim(colored)
-    // Bold DINETRALKAN (dipetakan ke atribut scrim), bukan dibuang: dibuang
-    // membuat teks bold-only kehilangan penekanan (AUD-003).
-    expect(dimmed).not.toContain("\x1b[1m")
-    expect(dimmed).toContain("hello")
-    expect(dimmed).toContain("world")
-    expect(TuiApp.applyBackdropDim("")).toBe("")
+  test("TuiApp.applyBackdropDim menjaga input identik (scrim mati)", () => {
+    // v7.29: warna NYALA by default di TTY → scrim aktif. Untuk menguji jalur
+    // "scrim mati" kita WAJIB memaksa monokrom lewat MINICODE_COLOR=0; jalur
+    // scrim aktif (AUD-003: bold dinetralkan, `[22m` memulihkan scrim) diuji
+    // oleh test berikutnya tanpa override ini.
+    const savedColor = process.env.MINICODE_COLOR
+    process.env.MINICODE_COLOR = "0"
+    try {
+      const plain = "hello world"
+      expect(TuiApp.applyBackdropDim(plain)).toBe(plain)
+      const colored = "\x1b[1m\x1b[32mhello\x1b[0m world\x1b[22m"
+      // Input ber-ANSI pun dilewatkan utuh saat scrim mati.
+      expect(TuiApp.applyBackdropDim(colored)).toBe(colored)
+      expect(TuiApp.applyBackdropDim("")).toBe("")
+    } finally {
+      if (savedColor === undefined) delete process.env.MINICODE_COLOR
+      else process.env.MINICODE_COLOR = savedColor
+    }
   })
 
   test("applyBackdropDim: `[22m` (kembali normal) TIDAK meninggalkan teks normal", () => {

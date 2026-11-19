@@ -594,6 +594,60 @@ export async function saveTodos(sessionId: string, todos: TodoItem[], cwd: strin
   await atomicWriteText(p, JSON.stringify({ sessionId, updatedAt: Date.now(), todos }, null, 2))
 }
 
+/**
+ * [P0-1] Pulihkan tampilan JSON dari TaskStore setelah `todo_write` gagal.
+ *
+ * TaskStore adalah otoritas; file JSON hanya turunan. Sebelum perbaikan ini,
+ * file dibiarkan berisi `taskId` phantom saat sinkronisasi rollback, sehingga
+ * `todo_read` berbohong dan KEDUA saran lama gagal: "kirim tanpa taskId"
+ * diblokir guard 4A.5 (canonical task masih ada), "pakai taskId dari
+ * todo_read" mengulang id phantom yang sama. Helper ini membaca id yang
+ * benar-benar ada di TaskStore, menulis balik tampilannya, dan mengembalikan
+ * id tersebut supaya pesan error bisa memberi jalur perbaikan yang bekerja.
+ *
+ * `viewBefore` dipakai saat TaskStore rollback ke kosong: file id-less lama
+ * (legacy) tetap sah walau tanpa baris kanonik, jangan dihapus begitu saja.
+ */
+export async function restoreTodoViewFromStore(
+  sessionId: string,
+  cwd: string,
+  viewBefore: readonly TodoItem[],
+): Promise<string[]> {
+  let tasks: Task[]
+  try {
+    tasks = new TaskStore(cwd).listTasks(sessionId)
+  } catch {
+    // Store tak bisa dibaca: tak ada otoritas untuk diturunkan. Jangan
+    // mengarang id — pemanggil tetap menyampaikan diagnostik kegagalannya.
+    return []
+  }
+  if (tasks.length === 0) {
+    // Rollback ke tampilan SEBELUM tulisan yang gagal. Audit deep: jangan
+    // salin `taskId` apa adanya — id itu bisa phantom (dialokasikan tapi tak
+    // jadi commit). Tanpa otoritas TaskStore, menyimpannya verbatim
+    // mengembalikan id hantu yang tak bisa dipakai model. Buang `taskId`,
+    // pertahankan content/status/blockedReason agar daftar legacy tetap ada.
+    const stripped: TodoItem[] = viewBefore.map((t) => ({
+      content: t.content,
+      status: t.status,
+      ...(t.blockedReason ? { blockedReason: t.blockedReason } : {}),
+    }))
+    await saveTodos(sessionId, stripped, cwd).catch(() => {})
+    return []
+  }
+  const mapped: TodoItem[] = [...tasks]
+    .sort((a, b) => a.order - b.order || a.id.localeCompare(b.id))
+    .map((t) => ({
+      content: t.title,
+      status: taskStatusToTodoStatus(t.status),
+      ...(t.status === "BLOCKED" ? { blockedReason: t.blockedReason ?? "blocked" } : {}),
+      taskId: t.id,
+    }))
+  await saveTodos(sessionId, mapped, cwd).catch(() => {})
+  await savePlanSnapshot(sessionId, mapped, cwd).catch(() => {})
+  return mapped.map((t) => t.taskId!).filter((id): id is string => typeof id === "string")
+}
+
 /** P13 P1 — plan artifact: snapshot markdown rencana per sesi.
  * JSON todos bagus untuk mesin tapi tak bisa dibaca kilat manusia; file ini
  * dibaca model berikutnya saat resume lintas sesi tanpa memutar ulang todo.
@@ -685,8 +739,9 @@ export function todoOperationContext(ctx: unknown): { sessionId: string; cwd: st
 
 export const todoWriteTool: Tool = {
   name: "todo_write",
+  // v7.33 (wire contract): tag PLAN (todo = rencana, bukan file/memori).
   description:
-    "Write/replace the todo list for this task. Send the ENTIRE list every time (not a delta). Use for tasks with 3+ steps: keep exactly one item in_progress at a time, mark it completed as soon as it is done. Marking an item completed while verification is failing or stale is REFUSED — it comes back as blocked with the reason, so fix the failing check (or re-verify after newer changes) first.",
+    "PLAN: Write/replace the entire todo list (send the full list, never a delta). Use for 3+ steps: keep exactly one item in_progress. BEFORE re-sending a list that already exists, CALL todo_read and echo every existing item's taskId — an all-id-less full declaration is REJECTED once canonical tasks exist (ids are never invented). Claiming completed while verification is failing/stale is REFUSED — it returns blocked with the reason; fix the check or re-verify first.",
   parameters: {
     type: "object",
     properties: {
@@ -783,6 +838,11 @@ export const todoWriteTool: Tool = {
       )
     }
 
+    // [P0-1] Rekam tampilan SEBELUM menulis. Bila sinkronisasi kanonik rollback,
+    // JSON dipulihkan dari sini (atau dari TaskStore bila masih ada baris), supaya
+    // pasangan JSON↔TaskStore tetap konsisten dan todo_read tak menampilkan id
+    // phantom.
+    const viewBefore = await loadTodos(sessionId, cwd)
     // Simpan isi file todo SEBELUM sinkronisasi TaskStore: urutan ini adalah
     // kontrak 4A.4 (durabel dulu, plan publish tertahan bila sync gagal).
     await saveTodos(sessionId, list, cwd)
@@ -843,21 +903,24 @@ export const todoWriteTool: Tool = {
         })
         if (sync.assignment && sync.assignment.length > 0) assignment = sync.assignment
       } catch (e) {
-        // DIVERGENCE, made visible rather than silent - AND made actionable.
-        // The JSON file keeps the declared list while TaskStore rolled back;
-        // that pairing is the documented 4A.4 divergence (pin: test N), so the
-        // file is deliberately NOT rolled back. Live UAT (tiprouter 0.13.x)
-        // menunjukkan pesan lama ("...the two are now out of step") membuat
-        // model mengulang payload identik tanpa memperbaiki apa pun — pesan
-        // kini membawa panduan pemulihan eksplisit (perbaiki taskId atau
-        // kirim ulang tanpa taskId untuk item yang memang baru).
+        // [P0-1] JSON + TaskStore kini SATU unit yang bisa dipulihkan, bukan
+        // divergence yang dibiarkan. Re-derive tampilan dari otoritas (TaskStore)
+        // lalu sebutkan id yang BENAR di pesan — bukan id phantom dari JSON lama.
+        const validIds = await restoreTodoViewFromStore(sessionId, cwd, viewBefore)
         const err = e as TaskError
+        // Audit deep: saran harus KONSISTEN dengan kenyataan. Dulu pesan
+        // mengatakan "(none — re-send ... with no taskId)" lalu menyuruh
+        // "re-send using ONLY those taskIds" — kontradiktif. Bila tak ada id
+        // sah, Katakan sekali: hilangkan SEMUA taskId.
+        const idsHint =
+          validIds.length > 0
+            ? `Valid taskIds: ${validIds.join(", ")}. Call todo_read, then re-send the full list using ONLY those taskIds; omit taskId only on items that are genuinely new.`
+            : `No canonical taskIds exist — re-send a fresh full list with no taskId (omit every taskId; all items are new).`
         throw new TaskError(
           err.code ?? "TASK_PERSISTENCE_FAILURE",
-          `canonical task sync failed (${err.message}); TaskStore rolled back and the todo JSON file keeps the ` +
-            `declared list (documented divergence - todo_read may show tasks TaskStore does not know). ` +
-            `If the failed items are genuinely NEW tasks, re-send them WITHOUT taskId (omit the field entirely); ` +
-            `only reuse a taskId that todo_read returned for an EXISTING task.`,
+          `canonical task sync failed (${err.message}); no canonical task was committed and the ` +
+            `todo JSON view was re-derived from TaskStore, so todo_read and TaskStore now agree. ` +
+            idsHint,
         )
       }
     }
@@ -892,10 +955,28 @@ export const todoWriteTool: Tool = {
       )
       if (merged.some((t, i) => t.taskId !== list[i]?.taskId)) {
         current = merged
-        // Awaited, not swallowed: leaving a stale view file behind is precisely
-        // what made this defect invisible. If this write fails the operation
-        // reports failure rather than pretending the identity is observable.
-        await saveTodos(sessionId, current, cwd)
+        // [P0-1] TaskStore sudah commit di sini. Kegagalan tulis JSON kedua
+        // harus terlihat dan punya jalur perbaikan, bukan membuat TaskStore
+        // diam-diam lebih baru dari JSON tanpa diagnostik.
+        try {
+          // Awaited, not swallowed: leaving a stale view file behind is precisely
+          // what made this defect invisible.
+          await saveTodos(sessionId, current, cwd)
+        } catch (saveErr) {
+          const validIds = await restoreTodoViewFromStore(sessionId, cwd, viewBefore)
+          // Audit deep: sama seperti jalur sync — bila tak ada id sah yang
+          // bisa disebut, jangan menyarankan "those ids". Katakan sekali agar
+          // jalur perbaikan yang diiklankan benar-benar bisa dijalankan.
+          const idsHint =
+            validIds.length > 0
+              ? `Valid taskIds now: ${validIds.join(", ")}. Call todo_read and re-send using exactly those ids; never invent a taskId.`
+              : `No canonical taskIds — re-send with no taskId (omit every taskId); never invent one.`
+          throw new TaskError(
+            "TASK_PERSISTENCE_FAILURE",
+            `TaskStore committed the canonical tasks but the todo JSON write failed ` +
+              `(${(saveErr as Error).message}). ${idsHint}`,
+          )
+        }
       }
     }
     // Plan artifact ditulis tiap save — murah (atomik, kecil) dan membuat
@@ -926,7 +1007,8 @@ export const todoWriteTool: Tool = {
 
 export const todoReadTool: Tool = {
   name: "todo_read",
-  description: "Read the todo list for this task (the last state written by todo_write).",
+  // v7.33 (wire contract): tag PLAN.
+  description: "PLAN: Read the current todo list (the last state written by todo_write).",
   parameters: { type: "object", properties: {}, additionalProperties: false },
   async execute(_args, ctx) {
     ctx.signal.throwIfAborted()

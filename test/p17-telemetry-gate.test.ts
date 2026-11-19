@@ -71,16 +71,20 @@ describe("CTL-04 — Telemetry Gate BOM Robustness & Structured Failures", () =>
     expect(result.stdout.toString()).toContain("rate=0.17")
   })
 
-  test("gate passes silently when insufficient data (<3 runs)", async () => {
+  test("gate fails on insufficient data (<3 runs) unless --allow-missing", async () => {
     const dir = tempDir()
     const tracesPath = join(dir, ".minicode", "traces.jsonl")
 
-    // Only 2 runs → skip with message
+    // Dua run saja: default harus gagal, mode legacy boleh lewat.
     writeFileSync(tracesPath, `{"ok":true}\n{"ok":false}\n`, "utf8")
 
-    const result = await $`bun ${script} ${dir}`.nothrow()
-    expect(result.exitCode).toBe(0)
-    expect(result.stdout.toString()).toContain("too few runs")
+    const strict = await $`bun ${script} ${dir}`.nothrow()
+    expect(strict.exitCode).toBe(1)
+    expect(strict.stderr.toString()).toContain("insufficient runs")
+
+    const lenient = await $`bun ${script} ${dir} --allow-missing`.nothrow()
+    expect(lenient.exitCode).toBe(0)
+    expect(lenient.stdout.toString()).toContain("too few runs")
   })
 
   test("BOM does not cause parse crash; fails closed cleanly", async () => {

@@ -38,16 +38,18 @@ Coverage naik → naikkan minimum di `scripts/coverage-gate.ts` (per 2026-10-25:
 ## Gate cepat vs lambat (F4.2)
 
 ```bash
-bun run gate:fast   # tsc + lint + test + coverage + pack + bash + bench:smoke + audit:harness (per-commit/CI)
+bun run gate:fast   # tsc + lint + test + coverage + pack + bash + bench:smoke + audit:harness + gate:telemetry (per-commit/CI)
 ```
+
+`gate:telemetry` **fail-closed**: `.minicode/traces.jsonl` wajib ada dan berisi **minimal 3 run** dengan resolve-rate `resolved/total ≥ 0,3`. CI tidak pernah menulis traces (ia menjalankan test/gate, bukan sesi interaktif), sehingga `ci.yml` memakai flag `--allow-missing` sebagai carve-out eksplisit dan menguji jalur strict terpisah memakai artifact sintetis — flag itu tidak menyembunyikan gate yang rusak (bukti: artifact 1 baris ditolak).
 
 Gerbang lambat/stokastik (docker sandbox) tinggal di `slow.yml` — kegagalannya sinyal investigasi, bukan penolakan PR. CI per-commit (`ci.yml`) hanya menjalankan yang deterministik.
 
-### Budget ukuran paket (3.968 KiB)
+### Budget ukuran paket (4.608 KiB)
 
-`bun run gate:pack` mengukur ukuran tarball (`npm pack --dry-run`, KiB) dan menolak bila **melebihi 4.096 KiB (4,0 MiB)**. Angka tunggalnya ada di `scripts/pack-budget.ts` — satu sumber untuk gate dan tes, jadi keduanya tak bisa menyimpang. Batas ini **alarm regresi** (menangkap `node_modules`/`test` ikut terbawa), bukan target ukuran yang perlu dikejar.
+`bun run gate:pack` mengukur ukuran tarball (`npm pack --dry-run`, KiB) dan menolak bila **melebihi 4.608 KiB (4,5 MiB)**. Angka tunggalnya ada di `scripts/pack-budget.ts` — satu sumber untuk gate dan tes, jadi keduanya tak bisa menyimpang. Batas ini **alarm regresi** (menangkap `node_modules`/`test` ikut terbawa), bukan target ukuran yang perlu dikejar.
 
-Batas 4.096 KiB disetujui pemilik pada 2026-11-11 untuk rilis v0.21.0. Jangan menaikkan anggaran tanpa bukti baru dan persetujuan pemilik; ukur dulu runtime serta berkas non-runtime yang dapat dipangkas.
+Batas 4.608 KiB disetujui pemilik pada 2026-11-17 untuk rilis v0.30.0 (re-baseline bagi margin modularisasi & hardening). Jangan menaikkan anggaran tanpa bukti baru dan persetujuan pemilik; ukur dulu runtime serta berkas non-runtime yang dapat dipangkas.
 
 Gerbang lain:
 

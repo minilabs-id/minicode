@@ -49,6 +49,8 @@ Semantik server mode: tiap `tools/call` lewat validateArgs kernel → permission
 minicode config lsp add .ts --command typescript-language-server --args --stdio
 ```
 
-Setelah terdaftar: `lsp_diagnostics`, `lsp_definition`, `lsp_references`, `lsp_hover`, `lsp_symbols`, `lsp_workspace_symbols`. Diagnostics otomatis di `edit`/`write_file` bila server terkonfigurasi. `didClose` cleanup.
+Setelah terdaftar: `lsp_diagnostics`, `lsp_definition`, `lsp_references`, `lsp_hover`, `lsp_symbols`, `lsp_workspace_symbols`, `lsp_rename` (tujuh tool). Diagnostics otomatis di `edit`/`write_file` bila server terkonfigurasi. `didClose` cleanup. Semua tool LSP memakai argumen `path` (v7.38 — dulu `file`).
+
+`lsp_rename` (v7.38) adalah **satu-satunya tool LSP yang menulis** workspace (WorkspaceEdit lewat `atomicWriteText`), jadi **di-gate** seperti git-write (TTY minta sekali, non-TTY/permission ketat tolak). Argumennya: `path` + `symbol` (atau `line`/`character` 0-based) + `newName`. Fail-closed bila tak ada server terkonfigurasi, server tak mengembalikan WorkspaceEdit / edit kosong, `newName` kosong/terlalu panjang/berkarakter terlarang, terlalu banyak edit, edit saling overlap, atau target menyasar owned-state / di luar jail.
 
 Bila LSP tidak jalan: pastikan server terinstall dan command benar. Repo-map regex tetap jalan sebagai fallback (`MINICODE_REPOMAP=regex`).

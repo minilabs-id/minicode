@@ -3,7 +3,7 @@
 // Invariant: tidak ada konfigurasi atau jalur eksekusi yang mengaktifkan
 // overlap operasi tulis di luar kontrak yang didemonstrasikan implementasi.
 // writeConcurrency > 1 hanya didukung untuk write tool ber-kunci args.path;
-// EXCLUSIVE_TOOLS, move_file (from/to), dan WRITE_TOOL tanpa path valid
+// EXCLUSIVE_TOOLS, move_file (path/destination), dan WRITE_TOOL tanpa path valid
 // tetap terserialisasi penuh — dengan penolakan abort tetap prompt.
 //
 // Setiap test diskriminatif: test 1-4 & 6 GAGAL terhadap executor lama
@@ -156,7 +156,7 @@ test("F-01: bash tidak overlap dengan write path pada writeConcurrency > 1", asy
   expect(log).toEqual(["bash:enter", "bash:exit", "write_file:enter", "write_file:exit"])
 })
 
-test("F-01: move_file (from/to) tidak overlap dengan write lain pada writeConcurrency > 1", async () => {
+test("F-01: move_file (path/destination) tidak overlap dengan write lain pada writeConcurrency > 1", async () => {
   const g1 = makeGate()
   const g2 = makeGate()
   const g3 = makeGate()
@@ -164,9 +164,9 @@ test("F-01: move_file (from/to) tidak overlap dengan write lain pada writeConcur
   const exec = parallelExecutor({ concurrency: 6, writeConcurrency: 3 })
   const p = exec.execute(
     [
-      { id: "1", name: "move_file", args: { from: "a.ts", to: "b.ts" } },
+      { id: "1", name: "move_file", args: { path: "a.ts", destination: "b.ts" } },
       { id: "2", name: "write_file", args: { path: "b.ts" } },
-      { id: "3", name: "move_file", args: { from: "c.ts", to: "d.ts" } },
+      { id: "3", name: "move_file", args: { path: "c.ts", destination: "d.ts" } },
     ],
     depsOf([gatedTool("move_file", [g1, g3], log), gatedTool("write_file", [g2], log)]),
   )

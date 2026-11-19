@@ -138,8 +138,8 @@ describe("10.2 cross-dimension frontier contract readiness (6 dimensions)", () =
     expect("newEvidenceSinceFailure" in snap).toBe(true)
   })
 
-  test("TOOL: 38 tool contract + McpSchemaPinRegistry anti-rug-pull + fenceUntrustedToolOutput", () => {
-    expect(TOOL_CONTRACTS).toHaveLength(38)
+  test("TOOL: 41 tool contract + McpSchemaPinRegistry anti-rug-pull + fenceUntrustedToolOutput", () => {
+    expect(TOOL_CONTRACTS).toHaveLength(41)
 
     const reg = new McpSchemaPinRegistry()
     const h1 = computeMcpToolSchemaHash({ name: "t", description: "d", inputSchema: {} })

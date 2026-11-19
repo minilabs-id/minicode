@@ -23,10 +23,28 @@ export function shSingleQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`
 }
 
+/**
+ * v7.32 (L8): bangun error TIMEOUT untuk code_run. Dulu hasil ini DIKEMBALIKAN
+ * sebagai string sukses, padahal bash me-reject dengan bentuk yang sama —
+ * adapter menerima keduanya tapi kontraknya beda. Sekarang code_run melempar
+ * Error dengan teks yang sama persis (tanpa mengubah pesan untuk model).
+ * Diekspor agar test bisa memverifikasi pesan tanpa backend sandbox nyata.
+ */
+export function codeRunTimeoutError(timeoutMs: number, text: string): Error {
+  return new Error(
+    `[TOOL_OUTCOME state=UNKNOWN reason=TIMEOUT side_effect_tier=LOCAL_ENV_MUTATION ` +
+      `timeout_ms=${timeoutMs}]\n` +
+      `Sandboxed run was cut off by the ${timeoutMs} ms timeout. Its side effects are UNKNOWN ` +
+      `(the snippet may have partially run). Do NOT re-run before inspecting workspace state.\n` +
+      (text ? `--- partial output ---\n${text}` : "--- partial output ---\n(none)"),
+  )
+}
+
 export const codeRunTool: Tool = {
   name: "code_run",
+  // v7.33 (wire contract): tag SHELL; syarat backend fail-closed dipertahankan.
   description:
-    "Run a code snippet (python -c / node -e) inside the configured sandbox (Docker, Linux bwrap, or macOS seatbelt — network-isolated). Requires MINICODE_SANDBOX=os|docker with an available backend (unavailable natively on Windows without Docker); refuses otherwise. Python needs an image/environment containing python3.",
+    "SHELL: Run a python/node snippet inside the configured sandbox (Docker/bwrap/seatbelt, network-isolated). Requires MINICODE_SANDBOX with a live backend; refuses otherwise (unavailable natively on Windows without Docker). Python needs an image with python3.",
   parameters: {
     type: "object",
     properties: {
@@ -77,18 +95,12 @@ export const codeRunTool: Tool = {
     ctx.signal.throwIfAborted()
     const text = capMarked(scrubSecrets(settled.output), LIMITS.BASH_OUTPUT_MAX_CHARS).trim()
     // code=null dari runner berarti proses tidak pernah melaporkan exit sendiri:
-    // timeout (dan abort sudah dilempar di atas). Dulu hasil ini tampil sebagai
-    // `exit unknown` tanpa menyebut timeout sama sekali — model tak bisa tahu
-    // efeknya ambiguous. Sekarang dikembalikan dengan tag outcome yang sama
-    // bentuknya dengan jalur bash, bukan sebagai error tak terduga.
+    // timeout (dan abort sudah dilempar di atas). v7.32 (L8): LEMPAR error
+    // (bukan return string sukses) supaya kontraknya identik dengan bash —
+    // keduanya menghasilkan ToolResult{isError:true} lewat jalur reject.
+    // Teks pesannya dipertahankan persis agar parsing jurnal tak berubah.
     if (settled.code === null) {
-      return (
-        `[TOOL_OUTCOME state=UNKNOWN reason=TIMEOUT side_effect_tier=LOCAL_ENV_MUTATION ` +
-        `timeout_ms=${timeoutMs}]\n` +
-        `Sandboxed run was cut off by the ${timeoutMs} ms timeout. Its side effects are UNKNOWN ` +
-        `(the snippet may have partially run). Do NOT re-run before inspecting workspace state.\n` +
-        (text ? `--- partial output ---\n${text}` : "--- partial output ---\n(none)")
-      )
+      throw codeRunTimeoutError(timeoutMs, text)
     }
     if (settled.code !== 0) return `exit ${settled.code}\n${text}`
     return text

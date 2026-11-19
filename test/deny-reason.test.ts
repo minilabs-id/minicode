@@ -147,8 +147,8 @@ describe("app handler reasons", () => {
         const viaEdit = await g("edit", { path: join(rootDir, "linkdir", "config.json") })
         expect(viaEdit.decision).toBe("deny")
         const viaMove = await g("move_file", {
-          from: join(rootDir, "linkdir", "x"),
-          to: join(rootDir, "linkdir", "y"),
+          path: join(rootDir, "linkdir", "x"),
+          destination: join(rootDir, "linkdir", "y"),
         })
         expect(viaMove.decision).toBe("deny")
         // Symlink internal ke target JINAK tidak over-block (kontrak target

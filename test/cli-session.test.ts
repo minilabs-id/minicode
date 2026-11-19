@@ -277,7 +277,9 @@ describe("cli: sesi one-shot dasar", () => {
     const target = join(ws.dir, "hasil.txt")
     expect(existsSync(target)).toBe(true)
     expect(readFileSync(target, "utf8")).toBe("isi dari tool")
-  })
+    // v7.40: spawn CLI + fake provider + writer admission >5s di bawah beban
+    // suite penuh (501 file). Timeout eksplisit, asersi tidak diubah.
+  }, 30_000)
 
   test("error provider tampil ringkas + saran, bukan dump JSON", async () => {
     // 400 dipilih, bukan 429: kategori `invalid_request` langsung `throw` di

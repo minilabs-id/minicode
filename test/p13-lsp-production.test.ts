@@ -3,7 +3,7 @@
 // Milik P13.2 (penutup). Suite P13.1 (kontrak) dan P13.2 (supervisi proses)
 // terpisah dan tak disentuh.
 //
-// Yang dibuktikan file ini adalah jalur PRODUKSI, bukan替 substitute:
+// Yang dibuktikan file ini adalah jalur PRODUKSI, bukan pengganti (substitute):
 //   - config `lspServers` (config global yang dipercaya) → `setupToolLayer` →
 //     `configureServers()` → session LSP → spawn nyata → registrasi ke
 //     SUPERVISI runtime yang sama.

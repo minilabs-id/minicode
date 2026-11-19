@@ -14,13 +14,22 @@ import { displayWidth } from "../src/ui/render/width.ts"
 import { resetAltScreenDepth } from "../src/ui/runtime/screen.ts"
 import { popupBoxWidth } from "../src/ui/screens/dialog.ts"
 import { runPicker } from "../src/ui/screens/picker.ts"
+import { UiSessionState } from "../src/ui/session-state.ts"
 import { createFakeBus, type FakeTty, installFakeTty, KEY } from "./helpers/tui-harness.ts"
 
 let tty: FakeTty | undefined
+// v7.29: warna nyala by default di TTY. Test "tanpa SGR" di bawah ditulis
+// pada era mono paksa, jadi ia menyetel MINICODE_COLOR=0 sendiri & memulihkan.
+let savedColor: string | undefined
 afterEach(() => {
   tty?.restore()
   tty = undefined
   resetAltScreenDepth()
+  if (savedColor !== undefined) {
+    if (savedColor === "") delete process.env.MINICODE_COLOR
+    else process.env.MINICODE_COLOR = savedColor
+    savedColor = undefined
+  }
 })
 
 const lines = (t: FakeTty) => stripAnsi(t.all()).split("\n")
@@ -211,7 +220,12 @@ describe("printer linier: teks tidak terpercaya tetap disanitasi", () => {
   function attach() {
     const t = installFakeTty({ columns: 80, rows: 24 })
     const bus = createFakeBus()
-    const detach = attachSimpleLogger(bus as unknown as EventBus)
+    // v7.40: diff card hanya dirender saat !ui.compact. Pakai instance
+    // UiSessionState sendiri (compact=false) — jangan bergantung `defaultUiState`
+    // yang bisa diubah test lain di suite penuh (state leakage nyata).
+    const uiState = new UiSessionState()
+    uiState.setCompactMode(false)
+    const detach = attachSimpleLogger(bus as unknown as EventBus, { uiState })
     return { tty: t, bus, detach }
   }
 
@@ -249,7 +263,9 @@ describe("printer linier: teks tidak terpercaya tetap disanitasi", () => {
     h.detach()
   })
 
-  test("warna dari diff card tetap lewat setelah sanitasi", async () => {
+  test("teks diff card tetap lewat setelah sanitasi (mono, tanpa SGR)", async () => {
+    savedColor = process.env.MINICODE_COLOR ?? ""
+    process.env.MINICODE_COLOR = "0"
     const h = attach()
     tty = h.tty
     h.bus.emit("execution:completed", {
@@ -259,8 +275,13 @@ describe("printer linier: teks tidak terpercaya tetap disanitasi", () => {
       },
     })
     await new Promise((r) => setTimeout(r, 30))
-    // Masih ada sekuens SGR (warna) — sanitasi tidak membuang pewarnaan.
-    expect(h.tty.combined()).toMatch(new RegExp(`${ESC}\\[[0-9;]*m`))
+    // Renderer mono tak memancarkan warna, jadi yang dijaga adalah teks diff
+    // (path + baris `+`/`-`) tidak hilang saat melewati sanitasi printer linier.
+    const out = h.tty.combined()
+    expect(out).toContain("a.ts")
+    expect(out).toContain("+ c")
+    expect(out).toContain("- b")
+    expect(out).not.toMatch(new RegExp(`${ESC}\\[[0-9;]*m`))
     h.detach()
   })
 

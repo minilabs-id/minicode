@@ -9,12 +9,13 @@ import {
   mcpInventory,
   readMcpResource,
 } from "../mcp/client.ts"
-import { fenceUntrustedToolOutput, isAlreadyFenced, scrubSecrets } from "../policy/scrub.ts"
+import { fenceUntrustedToolOutput, isAlreadyFenced } from "../policy/scrub.ts"
 
 export const mcpListTool: Tool = {
   name: "mcp_list",
+  // v7.33 (wire contract): tag MCP.
   description:
-    "List connected MCP servers with their tools, resources, and prompts. Call this first, before mcp_call / mcp_read / mcp_prompt.",
+    "MCP: List connected MCP servers with their tools, resources and prompts. Call this first, before mcp_call / mcp_read / mcp_prompt.",
   parameters: {
     type: "object",
     properties: {},
@@ -48,10 +49,10 @@ export const mcpListTool: Tool = {
 
 export const mcpCallTool: Tool = {
   name: "mcp_call",
+  // v7.33 (wire contract): tag MCP; hapus "Parameters: ..." (sudah ada di
+  // schema). Pagar "OUTSIDE minicode policy" + outcome-unknown dipertahankan.
   description:
-    "Call a tool on a connected MCP server. Parameters: server id, tool name, and arguments. " +
-    "The server runs OUTSIDE minicode policy: a call may read/write files, network, or processes " +
-    "on the server side — one approval covers one server+tool+args call only. If transport aborts after dispatch, the outcome is unknown; inspect remote state before retrying.",
+    "MCP: Call a tool on a connected MCP server (server, tool, args). The server runs OUTSIDE minicode policy — one approval covers one server+tool+args call only. If transport aborts after dispatch the outcome is unknown; inspect remote state before retrying.",
   parameters: {
     type: "object",
     properties: {
@@ -80,9 +81,9 @@ export const mcpCallTool: Tool = {
     ctx.signal.throwIfAborted()
 
     const ids = getMcpServerIds()
-    if (!ids.includes(sid)) {
-      return `[mcp] server '${sid}' is not connected. Registered servers: ${ids.join(", ") || "(none)"}`
-    }
+    // v7.32: server tak terdaftar = kegagalan. Dulu return string → kernel
+    // menandai isError=false; notConnected() kini melempar (lihat bawah).
+    if (!ids.includes(sid)) notConnected(sid)
 
     try {
       const result = await callMcpTool(sid, tn, a, ctx.signal)
@@ -92,23 +93,38 @@ export const mcpCallTool: Tool = {
         ? capped
         : fenceUntrustedToolOutput(`mcp_call:${sid}.${tn}`, capped)
     } catch (e) {
+      // Mulanya semua error (termasuk isError=true dari server, yang diterjemah
+      // client menjadi Error "MCP tool …") DIKEMBALIKAN sebagai string sukses
+      // `[mcp] error: …`. Akibatnya kernel menandai isError=false dan model
+      // mengira panggilan berhasil. Lempar kembali supaya runCall menandai
+      // kegagalan dengan benar. McpCallOutcomeUnknownError dicek PERTAMA:
+      // perlakuan khususnya (pesan outcome unknown) tetap menang walaupun
+      // signal gugur bersamaan — baru setelah itu cek abort, lalu error biasa.
       if (e instanceof McpCallOutcomeUnknownError) throw e
       ctx.signal.throwIfAborted()
-      return `[mcp] error: ${scrubSecrets((e as Error).message)}`
+      throw e
     }
   },
 }
 
-/** Pesan kesalahan seragam untuk server yang tak terdaftar. */
-function notConnected(sid: string): string {
+/**
+ * Server tak terdaftar = kegagalan, BUKAN hasil. v7.32: versi lama
+ * mengembalikan string `[mcp] … is not connected` yang dibaca kernel sebagai
+ * sukses (isError=false) — jadi lemparkan Error supaya runCall menandai
+ * kegagalan dengan benar. Tidak ada `return` di sini (return type `never`).
+ */
+function notConnected(sid: string): never {
   const ids = getMcpServerIds()
-  return `[mcp] server '${sid}' is not connected. Registered servers: ${ids.join(", ") || "(none)"}`
+  throw new Error(
+    `[mcp] server '${sid}' is not connected. Registered servers: ${ids.join(", ") || "(none)"}`,
+  )
 }
 
 export const mcpReadTool: Tool = {
   name: "mcp_read",
+  // v7.33 (wire contract): tag MCP.
   description:
-    "Read a resource from a connected MCP server (resources/read). Get URIs from mcp_list. Read-only.",
+    "MCP: Read a resource (resources/read) from a connected MCP server; get URIs from mcp_list. Read-only.",
   parameters: {
     type: "object",
     properties: {
@@ -123,23 +139,27 @@ export const mcpReadTool: Tool = {
     const sid = String(server ?? "")
     const u = String(uri ?? "").trim()
     if (!u) throw new Error("uri is required")
-    if (!getMcpServerIds().includes(sid)) return notConnected(sid)
+    if (!getMcpServerIds().includes(sid)) notConnected(sid)
     try {
       const text = await readMcpResource(sid, u, ctx.signal)
       if (!text) return `[mcp] resource '${u}' is empty or returned no text`
       const capped = capMcpText(text)
       return isAlreadyFenced(capped) ? capped : fenceUntrustedToolOutput(`mcp_read:${sid}`, capped)
     } catch (e) {
+      // v7.31: samakan dengan mcp_call — error wajib dilempar supaya kernel
+      // menandai isError. Mengembalikan string membuat tool.failed tampil
+      // sebagai tool.completed di ledger.
       ctx.signal.throwIfAborted()
-      return `[mcp] error: ${scrubSecrets((e as Error).message)}`
+      throw e
     }
   },
 }
 
 export const mcpPromptTool: Tool = {
   name: "mcp_prompt",
+  // v7.33 (wire contract): tag MCP.
   description:
-    "Fetch a prompt template from an MCP server (spec prompts/get) — the server renders its arguments. The result is text to use as context.",
+    "MCP: Fetch a prompt template from an MCP server (prompts/get); the server renders its args and returns text to use as context.",
   parameters: {
     type: "object",
     properties: {
@@ -159,7 +179,7 @@ export const mcpPromptTool: Tool = {
     const sid = String(server ?? "")
     const pn = String(name ?? "").trim()
     if (!pn) throw new Error("name is required")
-    if (!getMcpServerIds().includes(sid)) return notConnected(sid)
+    if (!getMcpServerIds().includes(sid)) notConnected(sid)
     try {
       const text = await getMcpPrompt(sid, pn, (args as Record<string, unknown>) ?? {}, ctx.signal)
       if (!text) return `[mcp] prompt '${pn}' returned no message`
@@ -168,8 +188,11 @@ export const mcpPromptTool: Tool = {
         ? capped
         : fenceUntrustedToolOutput(`mcp_prompt:${sid}`, capped)
     } catch (e) {
+      // v7.31: samakan dengan mcp_call — error wajib dilempar supaya kernel
+      // menandai isError. Mengembalikan string membuat tool.failed tampil
+      // sebagai tool.completed di ledger.
       ctx.signal.throwIfAborted()
-      return `[mcp] error: ${scrubSecrets((e as Error).message)}`
+      throw e
     }
   },
 }

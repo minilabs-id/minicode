@@ -173,7 +173,11 @@ describe("§4-5 permission boundary under composition", () => {
     // The control that stops a vacuous pass: if this also denied, the autonomous
     // policy would be indistinguishable from a broken one.
     const { createPermissionHandler } = await import("../src/policy/permission.ts")
-    const interactive = createPermissionHandler({ mode: "readonly" })
+    const interactive = createPermissionHandler({
+      mode: "readonly",
+      ask: async () => "allow",
+      allowNonTtyAsk: true,
+    })
     expect(await interactive.check({ name: "web_fetch", args: {} } as never, {} as never)).toEqual(
       "allow",
     )
@@ -211,10 +215,10 @@ describe("§2-3 enablement gate read through the PRODUCTION parser", () => {
     // exact defect, and it fails if anyone reintroduces a permissive matcher.
     const productionSays = hasFlag(["--enable-scheduler=false", "x"], "--enable-scheduler")
     const moduleSays = resolveSchedulerGate(["--enable-scheduler=false"]).enabled
-    // The permissive matcher still exists — it is correct for the permission and
-    // plan flags, and was deliberately NOT changed. What changed is that the
-    // Scheduler gate no longer uses it.
-    expect(productionSays).toBe(true)
+    // Audit fix: `hasFlag` sekarang boundary-aware untuk flag Boolean —
+    // `--name=value` tidak lagi mengaktifkan flag tanpa nilai. Scheduler gate
+    // sudah strict sebelumnya, jadi kedua jalur kini sepakat.
+    expect(productionSays).toBe(false)
     expect(moduleSays).toBe(false)
     // And the production call site now follows the strict answer, so the
     // construction decision is driven by `moduleSays`, not `productionSays`.

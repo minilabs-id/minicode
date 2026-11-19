@@ -7,7 +7,9 @@
 // pemotongan lebar tetap di sisi pemanggil.
 import type { UiToolStatus } from "../contract.ts"
 import { t } from "../i18n/locale.ts"
+import { sanitizeAnsiLine } from "./sanitize.ts"
 import { c } from "./theme.ts"
+import { truncateToWidth } from "./width.ts"
 
 /** Kata status lokal ("completed"/"failed"/dst.) — fallback non-warna. */
 export function statusWord(status: UiToolStatus): string {
@@ -27,10 +29,22 @@ export function paintLedger(status: UiToolStatus, line: string): string {
   return c.muted(line)
 }
 
-/** Label run pendek stabil (`run_<8>` | `sub_<8>`) untuk identitas sub-agent. */
+/**
+ * Label run pendek untuk identitas sub-agent.
+ *
+ * Prioritas: `label` manusiawi (`explore-1`, `plan-2`, atau nama dari model),
+ * lalu fallback code-derived (`run_<8>` | `sub_<8>`) bila label absen (event lama).
+ * Nama model = teks tak-terpercaya, jadi WAJIB lewat `sanitizeAnsiLine` dan
+ * dipotong per lebar kolom sebelum dipampilkan di baris ledger satu-baris.
+ */
 export function runMarker(
-  activity: { runId?: string; childSessionId?: string } | undefined,
+  activity: { runId?: string; childSessionId?: string; label?: string } | undefined,
 ): string {
+  const label = activity?.label
+  if (label) {
+    const clean = sanitizeAnsiLine(label).trim()
+    if (clean) return truncateToWidth(clean, 24, "…")
+  }
   const id = activity?.runId ?? activity?.childSessionId
   if (!id) return ""
   const prefix = id.startsWith("run_") ? "run_" : id.startsWith("sub_") ? "sub_" : ""

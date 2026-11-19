@@ -40,6 +40,7 @@ import {
   tombstoneDeadRuns,
   transitionRun,
 } from "../src/session/persistence.ts"
+import { SESSION_LEASE_MS } from "../src/task/session-authority.ts"
 import { isolateHomeForTests } from "./helpers/hermetic-home.ts"
 
 // Hermetic: config global/state mesin tak boleh menentukan provider/model.
@@ -80,7 +81,8 @@ function baseOpts(cwd: string, extra: Record<string, unknown> = {}) {
 }
 
 const T0 = 1_700_000_000_000
-const LEASE = 300_000
+// v7.40: dari sumber kanonik (lease naik 300_000 → 750_000).
+const LEASE = SESSION_LEASE_MS
 
 async function seed(cwd: string, sid: string, n = 2): Promise<void> {
   const msgs = Array.from({ length: n }, (_, i) => ({

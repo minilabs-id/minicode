@@ -11,6 +11,160 @@ import { sanitizeSpawnEnv, scrubSecrets } from "../policy/scrub.ts"
 import { resolveSearchRoot, walkWorkspaceFiles } from "./context.ts"
 import { globToRegExp } from "./glob.ts"
 
+// v7.32 (L6): prefix marker timeout ripgrep. Dipakai dua arah — runRipgrep
+// menandai hasil (walau kosong) dan pemanggil membedakannya dari miss asli.
+export const RIPGREP_TIMEOUT_PREFIX = "… [truncated: ripgrep timeout"
+export const RIPGREP_TIMEOUT_MARKER = `${RIPGREP_TIMEOUT_PREFIX} ${LIMITS.GREP_RIPGREP_TIMEOUT_MS}ms]`
+
+/** Pesan eksplisit saat rg timeout sebelum menghasilkan satu pun match. */
+export function ripgrepTimeoutEmptyMessage(pattern: string, root: string): string {
+  return `ripgrep timed out after ${LIMITS.GREP_RIPGREP_TIMEOUT_MS}ms with no results for /${pattern}/ in ${root} — search incomplete, refine pattern or retry`
+}
+
+// ── v7.38 (L7): pagar ReDoS khusus fallback JS ──
+// Ripgrep memakai regex Rust (waktu linear), tapi walker JS memakai `new RegExp`
+// yang bisa catastrophic backtracking. Kita deteksi bentuk rawan SECARA STATIS
+// sebelum menjalankan regex di fallback, lalu tolak (fail-closed). Pagar ini
+// SENGAJA dipanggil hanya di jalur JS — jalur ripgrep tak pernah terkena, jadi
+// pencarian valid dengan rg tetap byte-identik.
+
+/** Batas panjang baris di walker JS; di atas ini baris dilewati (generous). */
+export const GREP_JS_LINE_MAX_CHARS = 100_000
+
+const REPEAT_OR_BOUNDED = /[+*{]/
+// v7.40: `?` juga quantifier. Disertakan HANYA saat menilai isi grup yang
+// sendiri di-quantify — `(a?b?)*` = nested quantifier (backtracking eksponensial,
+// terbukti ~900ms pada 57 char). Di luar konteks itu `a?b`/suffix opsional
+// sengaja tak ditandai supaya pola normal tak tertolak.
+const REPEAT_WITH_OPTIONAL = /[+*{?]/
+
+/** Buang class/escape/tanda grup supaya analisis tak tertipu oleh literal. */
+function structuralChars(content: string): string {
+  // v7.40 re-audit: slice isi grup bisa diawali prefix grup `(?:`, `(?=`, `(?!`,
+  // `(?<=`, `(?<!`, `(?<name>`, `(?i:`. Karakter `?`/`:` di prefix BUKAN
+  // quantifier — tanpa pembuangan ini `(?:ab)*` salah ditolak sebagai ReDoS.
+  if (content.startsWith("?")) {
+    let j = 1
+    while (j < content.length && !":=!>".includes(content[j]!)) j++
+    if (j < content.length) content = content.slice(j + 1)
+  }
+  let out = ""
+  let inClass = false
+  for (let i = 0; i < content.length; i++) {
+    const c = content[i]!
+    // Prefix grup bersarang di dalam isi (mis. `a(?:b)?`): buang `(?…)` juga.
+    if (c === "(" && content[i + 1] === "?") {
+      i += 2
+      while (i < content.length && !":=!>".includes(content[i]!)) i++
+      continue
+    }
+    if (c === "\\") {
+      i++ // karakter setelah backslash adalah literal/escape, bukan struktur
+      continue
+    }
+    if (c === "[") {
+      inClass = true
+      continue
+    }
+    if (c === "]") {
+      inClass = false
+      continue
+    }
+    if (inClass) continue
+    if (c === "(" || c === ")") continue
+    out += c
+  }
+  return out
+}
+
+/** Alternasi yang diulang rawan bila satu alternatif adalah awalan yang lain. */
+function hasOverlappingAlternation(structural: string): boolean {
+  if (!structural.includes("|")) return false
+  const alts = structural.split("|")
+  for (let i = 0; i < alts.length; i++) {
+    for (let j = i + 1; j < alts.length; j++) {
+      const a = alts[i]!
+      const b = alts[j]!
+      if (a.length === 0 || b.length === 0) return true // alternasi kosong = ambigu
+      if (a.startsWith(b) || b.startsWith(a)) return true // prefix bersama = ambigu
+    }
+  }
+  return false
+}
+
+/**
+ * Deteksi statis regex rawan catastrophic backtracking pada fallback JS:
+ * quantifier bersarang (`(a+)+`, `(a*)*`), alternasi tumpang tindih yang
+ * diulang (`(a|aa)+`), serta backreference ter-quantifier / ke grup
+ * ter-quantifier. Diekspor untuk test; bukan validator regex penuh — sengaja
+ * konservatif (lebih banyak menolak daripada menggantung).
+ */
+export function isReDosPronePattern(pattern: string): boolean {
+  const stack: Array<{ start: number; capture: number }> = []
+  const riskyCapture = new Map<number, boolean>()
+  let captureCount = 0
+
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i]!
+    if (c === "\\") {
+      const next = pattern[i + 1]
+      if (next && next >= "1" && next <= "9") {
+        const after = pattern[i + 2]
+        // Backreference yang diulang, atau yang merujuk grup ter-quantifier.
+        if (after === "+" || after === "*" || after === "{") return true
+        if (riskyCapture.get(Number(next))) return true
+        i++ // lewati digit referensi
+      } else {
+        i++ // lewati karakter ter-escape
+      }
+      continue
+    }
+    if (c === "[") {
+      // Lewati character class: +/*/|/() di dalamnya adalah literal.
+      i++
+      while (i < pattern.length && pattern[i] !== "]") {
+        if (pattern[i] === "\\") i++
+        i++
+      }
+      continue
+    }
+    if (c === "(") {
+      const special = pattern[i + 1] === "?"
+      // Grup capture biasa diberi nomor; lookaround & non-capture tidak.
+      const capture = special ? 0 : ++captureCount
+      stack.push({ start: i, capture })
+      continue
+    }
+    if (c === ")") {
+      const frame = stack.pop()
+      if (!frame) continue
+      const structural = structuralChars(pattern.slice(frame.start + 1, i))
+      const after = pattern[i + 1]
+      // `?` dianggap rawan hanya bila grupnya sendiri di-quantify (`+`/`*`/`{`);
+      // `after === "?"` (grup opsional) tetap dikecualikan seperti semula.
+      const groupQuantified = after === "+" || after === "*" || after === "{"
+      const repeat = groupQuantified ? REPEAT_WITH_OPTIONAL : REPEAT_OR_BOUNDED
+      const risky = repeat.test(structural) || hasOverlappingAlternation(structural)
+      if (frame.capture > 0) riskyCapture.set(frame.capture, risky)
+      // Grup rawan yang diulang (`?` dikecualikan: {0,1} terikat).
+      if (risky && groupQuantified) return true
+    }
+  }
+  return false
+}
+
+/** Pesan isError saat fallback JS menolak pola rawan ReDoS. Null bila aman. */
+export function redosGuardMessage(pattern: string): string | null {
+  if (!isReDosPronePattern(pattern)) return null
+  return (
+    `grep pattern /${pattern}/ is ReDoS-prone on the JS fallback ` +
+    `(nested quantifiers, overlapping alternation, or a quantified backreference) ` +
+    `and was refused before running the regex. Ripgrep handles such patterns safely; ` +
+    `for the JS fallback use a simpler pattern or escape regex metacharacters ` +
+    `(., *, +, ?, (, ), [, ], {, }, |, ^, $, \\) to search for a literal string.`
+  )
+}
+
 async function walkGrep(
   dir: string,
   re: RegExp,
@@ -42,9 +196,14 @@ async function walkGrep(
       if (text.includes("\0")) return
       const lines = text.split("\n")
       for (let i = 0; i < lines.length; i++) {
+        const line = lines[i]!
+        // v7.38 (L7): baris sangat panjang dilewati di fallback. Bahkan pola yang
+        // lolos pagar statis tak boleh menggantung walker pada satu baris raksasa;
+        // jalur ripgrep tetap memprosesnya (regex Rust linear, tak ada ReDoS).
+        if (line.length > GREP_JS_LINE_MAX_CHARS) continue
         re.lastIndex = 0
-        if (re.test(lines[i]!)) {
-          const body = lines[i]!
+        if (re.test(line)) {
+          const body = line
           const cut = body.length > LIMITS.GREP_MATCH_MAX_CHARS
           out.push(
             `${rel}:${i + 1}: ${scrubSecrets(cut ? `${body.slice(0, LIMITS.GREP_MATCH_MAX_CHARS)}…` : body)}`,
@@ -179,8 +338,12 @@ function runRipgrep(
     const timer = setTimeout(() => {
       p.kill("SIGTERM")
       finish(() => {
-        if (out.length > 0 && out.length < limit)
-          out.push(`… [truncated: ripgrep timeout ${LIMITS.GREP_RIPGREP_TIMEOUT_MS}ms]`)
+        // v7.32 (L6): marker timeout HARUS selalu ada, termasuk saat nol hit.
+        // Dulu marker hanya ditambah bila ada sebagian hasil, sehingga timeout
+        // dengan 0 match salah dilaporkan sebagai "no matches" (miss asli).
+        // Pemanggil membedakan lewat prefix marker yang sama dengan jalur
+        // hasil sebagian (dikenali withCapMark).
+        out.push(RIPGREP_TIMEOUT_MARKER)
         resolveOut(out)
       })
     }, LIMITS.GREP_RIPGREP_TIMEOUT_MS)
@@ -224,8 +387,9 @@ function runRipgrep(
 
 export const grepTool: Tool = {
   name: "grep",
+  // v7.33 (wire contract): tag family untuk grouping di model.
   description:
-    "Search a regex across files. Returns file:line: content, capped (100/500 matches) with a refine hint. Skips .git, node_modules, and dotfiles by default; does not follow symlinks. Use for locating symbols or patterns before reading files.",
+    "FILE SEARCH: Search a regex across files; returns file:line: content, capped at 100/500 matches. Skips .git, node_modules, dotfiles; no symlink follow. Use to locate symbols/patterns before reading files.",
   parameters: {
     type: "object",
     properties: {
@@ -265,8 +429,10 @@ export const grepTool: Tool = {
       throw new Error(`invalid regex: ${(e as Error).message}`)
     }
 
+    // v7.33 (wire contract): hasil kosong butuh langkah lanjutan yang jelas —
+    // tanpa ini model mengulang pola/include yang sama persis.
     const noMatch = () =>
-      `no matches for /${rawPat}/ in ${rawRoot}${include ? ` (include ${include})` : ""}`
+      `no matches for /${rawPat}/ in ${rawRoot}${include ? ` (include ${include})` : ""} — broaden pattern or drop include`
     const st = await stat(root).catch(() => null)
     if (!st?.isDirectory()) return noMatch()
     const withDotfiles = includeDotfiles === true
@@ -286,8 +452,12 @@ export const grepTool: Tool = {
           ignoreCase,
           withDotfiles,
         )
+        // v7.32 (L6): rg timeout dengan nol match menyisakan SATU marker —
+        // bedakan dari "no matches" sungguhan supaya model tak mengira pola
+        // memang tak ada (padahal pencarian cuma kehabisan waktu).
+        if (hits.length === 1 && hits[0]!.startsWith(RIPGREP_TIMEOUT_MARKER))
+          return ripgrepTimeoutEmptyMessage(rawPat, rawRoot)
         if (hits.length === 0) return noMatch()
-        // runRipgrep tandai timeout via suffix khusus di elemen terakhir (bila timedOut)
         return withCapMark(hits, lim)
       } catch (e) {
         if ((e as Error).message === "aborted") throw e
@@ -297,6 +467,12 @@ export const grepTool: Tool = {
         )
       }
     }
+
+    // v7.38 (L7): pagar ReDoS HANYA untuk jalur fallback JS. Jalur ripgrep
+    // (regex Rust linear) sudah return di atas dan tak pernah terkena pagar ini.
+    // Lempar Error supaya kernel menandai isError, konsisten dengan "invalid regex".
+    const redosError = redosGuardMessage(pat)
+    if (redosError !== null) throw new Error(redosError)
 
     const incRe = include ? includeToRegExp(include as string) : null
     const ignoreMatchers = await loadIgnoreMatchers(root)
@@ -313,6 +489,9 @@ export const grepTool: Tool = {
       relaxed,
       withDotfiles,
     )
+    // v7.32 (L4): walker memakai urutan readdir yang tak stabil — sort supaya
+    // hasil fallback JS deterministik (sama seperti jalur glob/ripgrep).
+    out.sort()
     return out.length === 0 ? noMatch() : withCapMark(out, lim)
   },
 }
@@ -322,7 +501,7 @@ export function withCapMark(hits: string[], lim: number): string {
   const body = [...hits]
   let suffix = ""
   const last = body[body.length - 1]
-  if (typeof last === "string" && last.startsWith("… [truncated: ripgrep timeout")) {
+  if (typeof last === "string" && last.startsWith(RIPGREP_TIMEOUT_PREFIX)) {
     suffix = `\n${body.pop()}`
   }
   if (body.length > lim) {

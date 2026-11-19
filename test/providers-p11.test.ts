@@ -57,7 +57,8 @@ test("responses: teks mengalir + store:false + finish length eksplisit", async (
     })
     expect(await collect(p)).toEqual(["halo ", "dunia"])
     const body = JSON.parse(seenBody) as Record<string, unknown>
-    expect(body.store).toBe(false)
+    // v7.31: selalu store:true karena id response disimpan untuk chaining.
+    expect(body.store).toBe(true)
     expect(body.model).toBe("m")
     expect("previous_response_id" in body).toBe(false)
   } finally {
@@ -123,8 +124,14 @@ test("responses: previous_response_id dirantai dari completed id", async () => {
     await collect(p)
     await collect(p)
     expect(bodies.length).toBe(2)
+    const first = JSON.parse(bodies[0]!) as Record<string, unknown>
     const second = JSON.parse(bodies[1]!) as Record<string, unknown>
     expect(second.previous_response_id).toBe("resp_abc123")
+    // v7.31: endpoint ketat menolak `store:false` + `previous_response_id`.
+    // Karena id turn pertama disimpan untuk chaining, turn pertama pun store:true.
+    expect(first.store).toBe(true)
+    expect("previous_response_id" in first).toBe(false)
+    expect(second.store).toBe(true)
   } finally {
     srv.stop(true)
   }

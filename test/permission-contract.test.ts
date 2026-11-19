@@ -330,3 +330,83 @@ describe("contract D — K-1 always: persistensi repo-lokal & scope kunci", () =
     }
   })
 })
+
+// ── Audit deep-mode — gerbang network read & delegate_task "Always" ──
+
+describe("audit deep-mode — network read butuh approval di plan/readonly (EXECUTE)", () => {
+  test("plan: web_fetch/web_search ditanya+ditolak; read_file tetap allow tanpa prompt", async () => {
+    tty = installFakeTty({ isTTY: true })
+    const root = tmpRoot("net-plan")
+    try {
+      let asks = 0
+      const h = reasoned({
+        mode: "plan",
+        root,
+        ask: async () => {
+          asks++
+          return "deny"
+        },
+      })
+      expect(
+        await h.check(call("np-1", "web_fetch", { url: "https://example.com" }), {} as never),
+      ).toBe("deny")
+      expect(await h.check(call("np-2", "web_search", { query: "x" }), {} as never)).toBe("deny")
+      expect(asks).toBe(2)
+      // Read-only lokal tak kena gerbang network.
+      expect(await h.check(call("np-3", "read_file", { path: "a.txt" }), {} as never)).toBe("allow")
+      expect(asks).toBe(2)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("readonly: network read juga digerbang walau WorkMode wrapper absen", async () => {
+    tty = installFakeTty({ isTTY: true })
+    const root = tmpRoot("net-ro")
+    try {
+      let asks = 0
+      const h = reasoned({
+        mode: "readonly",
+        root,
+        ask: async () => {
+          asks++
+          return "deny"
+        },
+      })
+      expect(
+        await h.check(call("nr-1", "web_fetch", { url: "https://example.com" }), {} as never),
+      ).toBe("deny")
+      expect(asks).toBe(1)
+      expect(await h.check(call("nr-2", "read_file", { path: "a.txt" }), {} as never)).toBe("allow")
+      expect(asks).toBe(1)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("audit deep-mode — AGENT-CONTROL-4: 'Always' tak berlaku ulang untuk delegate_task", () => {
+  test("ask=always dua delegasi identik → ask tetap dipanggil dua kali", async () => {
+    tty = installFakeTty({ isTTY: true })
+    const root = tmpRoot("dlg-always")
+    try {
+      let asks = 0
+      const h = reasoned({
+        mode: "ask",
+        root,
+        ask: async () => {
+          asks++
+          return "always"
+        },
+      })
+      const args = { prompt: "delegasi yang sama persis" }
+      expect(await h.check(call("da-1", "delegate_task", args), {} as never)).toBe("allow")
+      expect(await h.check(call("da-2", "delegate_task", args), {} as never)).toBe("allow")
+      // Sebelum fix: saveAlways menyimpan grant sesi → matchAllowlist menjawab
+      // "allow" tanpa ask pada delegasi kedua (asks === 1).
+      expect(asks).toBe(2)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})

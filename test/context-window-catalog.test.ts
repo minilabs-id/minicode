@@ -12,6 +12,7 @@ import {
   findContextWindowFromCatalog,
   normalizeModelId,
 } from "../src/policy/context-window-catalog.ts"
+import { CONTEXT_WINDOW_PRESETS } from "../src/policy/context-window-presets.ts"
 import { extractContextWindows } from "../src/policy/pricing.ts"
 
 describe("context window catalog", () => {
@@ -24,13 +25,23 @@ describe("context window catalog", () => {
     ["deepseek-v4", 1_000_000],
     ["deepseek-chat", 131_072],
     ["gpt-5-mini", 400_000],
-    ["gpt-4.1", 1_000_000],
+    // v7.39: diselaraskan dengan preset 1.05M (nilai nyata ~1.047M).
+    ["gpt-4.1", 1_050_000],
     ["gpt-4o", 128_000],
     ["claude-sonnet-4", 200_000],
     ["gemini-2.5-pro", 2_000_000],
     ["qwen3-coder-plus", 262_144],
   ])("keluarga %s → %d token", (model, expected) => {
     expect(findContextWindowFromCatalog(model as string)).toBe(expected)
+  })
+
+  // v7.39: jangan sampai katalog & preset operator beds lagi untuk keluarga
+  // yang sama — dulu GPT-4.1 1M vs 1.05M (≈5% window terbuang, drift tak
+  // terlapor karena guard hanya cek selisih > 2×).
+  test("parity katalog↔preset untuk keluarga dengan preset eksplisit", () => {
+    const preset = CONTEXT_WINDOW_PRESETS.find((p) => p.examples.includes("GPT-4.1"))
+    expect(preset).toBeDefined()
+    expect(findContextWindowFromCatalog("gpt-4.1")).toBe(preset!.tokens)
   })
 
   test("keluarga tak dikenal → undefined", () => {

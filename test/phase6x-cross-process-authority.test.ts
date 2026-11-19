@@ -474,16 +474,18 @@ describe("F01. the production CLI gate refuses every value form", () => {
     expect(source).not.toMatch(/MINICODE_SCHEDULER/)
   })
 
-  test("the generic hasFlag is untouched - its value forms are still its contract", () => {
-    // The fix was in choosing the right matcher for a VALUELESS flag, not in
-    // redefining a shared helper. Weakening `hasFlag` would have silently changed
-    // `--permission`, `--allowlist` and every other value-taking flag.
-    // [FACT] `hasFlag` is unchanged: the permissive `name=value` prefix match is
-    // still there, and `--cwd` is a real registered VALUE flag, so this is asserted
-    // against the helper's actual contract rather than a hypothetical flag name.
-    expect(hasFlag(["--enable-scheduler=false"], "--enable-scheduler")).toBe(true)
+  test("hasFlag fail-closed untuk boolean bentuk nilai; value flag tetap true", () => {
+    // --enable-scheduler adalah flag TANPA nilai. Bentuk `--flag=...` kini sengaja
+    // dianggap TIDAK hadir supaya `--enable-scheduler=false` tak menyalakan gate
+    // hanya karena prefix-nya cocok (klasika bug F01). Ini PERUBAHAN DISENGAJA,
+    // bukan helper yang dilemahkan — resolver produksi memakai aturan yang sama.
+    expect(hasFlag(["--enable-scheduler=false"], "--enable-scheduler")).toBe(false)
+    expect(resolveSchedulerGate(["--enable-scheduler=false"]).enabled).toBe(false)
+    // Value flag asli seperti --cwd tetap menerima bentuk `=` — itu kontraknya.
     expect(hasFlag(["--cwd=C:\\tmp"], "--cwd")).toBe(true)
     expect(hasFlag(["--cwd", "C:\\tmp"], "--cwd")).toBe(true)
+    // Flag boolean POLOS tetap TRUE: jalur opt-in sah yang tak boleh ikut rusak.
+    expect(hasFlag(["--enable-scheduler"], "--enable-scheduler")).toBe(true)
   })
 })
 

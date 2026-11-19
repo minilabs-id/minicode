@@ -123,9 +123,10 @@ function readModalInput<T extends "line" | "choice">(
   mode: T,
   render: (state: ModalRenderState) => void,
   opt: T extends "choice" ? { count: number; quick: Readonly<Record<string, number>> } : object,
+  signal?: AbortSignal,
 ): Promise<T extends "choice" ? number | null : string | null> {
   type R = T extends "choice" ? number | null : string | null
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const o = opt as { count?: number; quick?: Record<string, number> }
     const count = o.count ?? 0
     const quick = o.quick ?? {}
@@ -143,6 +144,11 @@ function readModalInput<T extends "line" | "choice">(
     const pump = createKeyStreamPump({
       state: createDecoderState(),
       onKeys: (keys) => {
+        // Tiap keypress/chunk — termasuk tombol yang tak memetakan ke aksi apa
+        // pun — adalah bukti user masih aktif. Reset di sini (bukan di dalam
+        // `if (changed)`) supaya tombol tak bertujuan tak membiarkan idle guard
+        // membatalkan modal di tengah interaksi (temuan M1).
+        idle.reset()
         let changed = false
         for (const k of keys) {
           const key = k.key
@@ -197,7 +203,6 @@ function readModalInput<T extends "line" | "choice">(
         }
         if (changed) {
           warned = false
-          idle.reset()
           redraw()
         }
         return false
@@ -225,10 +230,36 @@ function readModalInput<T extends "line" | "choice">(
       try {
         process.stdout.removeListener("resize", onResize)
       } catch {}
+      // v7.32: lepas abort listener saat modal selesai supaya tak bocor.
+      if (signal) signal.removeEventListener("abort", onAbort)
       try {
         process.stdin.setRawMode(false)
       } catch {}
       resolve(v)
+    }
+    // v7.32: turn yang dibatalkan harus memutus penungguan jawaban manusia —
+    // tanpa ini modal hanya punya idle-cancel (80+10 dtk) dan abort terasa macet.
+    const onAbort = () => {
+      if (done) return
+      done = true
+      try {
+        pump.dispose()
+      } catch {}
+      idle.dispose()
+      try {
+        process.stdin.removeListener("data", onData)
+      } catch {}
+      try {
+        process.stdout.removeListener("resize", onResize)
+      } catch {}
+      try {
+        process.stdin.setRawMode(false)
+      } catch {}
+      reject(new DOMException("aborted", "AbortError"))
+    }
+    if (signal) {
+      if (signal.aborted) onAbort()
+      else signal.addEventListener("abort", onAbort, { once: true })
     }
     onData = (chunk: Buffer) => pump.push(new Uint8Array(chunk))
     onResize = () => redraw()
@@ -443,7 +474,11 @@ export async function promptAsk(call: ApprovalRequest): Promise<"allow" | "deny"
 /** View pertanyaan ask_user — di-inject ke src/tools/ask_user.ts dari cli/setup.ts.
  * Pertanyaan dari model (tak terpercaya) disanitasi sebelum tampil. Return null
  * bila user membatalkan (Esc/Ctrl+C) atau jawaban kosong. */
-export async function promptAskText(question: string, options?: string[]): Promise<string | null> {
+export async function promptAskText(
+  question: string,
+  options?: string[],
+  signal?: AbortSignal,
+): Promise<string | null> {
   if (!process.stdin.isTTY) return null
   const textSink = getApprovalSink()
   // Paritas promptAsk: tanpa sink + stdout pipe = jawab tak terlihat & pipe
@@ -483,6 +518,7 @@ export async function promptAskText(question: string, options?: string[]): Promi
             { kind: "line", typed, cursor },
           ),
         {},
+        signal,
       )
     } finally {
       try {

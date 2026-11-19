@@ -49,11 +49,13 @@ describe("Transcript", () => {
     const { bus, t } = setup()
     bus.emit("provider:text", { text: "halo " })
     // Belum commit tapi terlihat di viewport (ekor hidup).
+    // v7.28 anchor atas: konten mulai di baris PERTAMA, padding kosong di bawah.
     expect(t.view(40, 3, 0).join("\n")).toContain("halo")
     bus.emit("provider:text", { text: "dunia" })
     bus.emit("turn:completed", {})
     expect(t.size()).toBe(1)
-    expect(t.view(40, 3, 0)[2]).toBe("   halo dunia")
+    expect(t.view(40, 3, 0)[0]).toBe("   halo dunia")
+    expect(t.view(40, 3, 0).slice(1)).toEqual(["", ""])
   })
   test("attempt provider gagal dihapus dari jawaban live dan diberi penanda", () => {
     const { bus, t } = setup()
@@ -172,10 +174,14 @@ describe("Transcript", () => {
     expect(out).toContain("**bukan bold**")
     expect(out).not.toContain("```")
   })
-  test("gema user tidak me-render markdown (literal)", () => {
+  test("gema prompt user menampilkan markdown literal di transkrip (v7.29)", () => {
     const { t } = setup()
     t.pushUser("pakai **bintang** ya")
-    expect(t.view(60, 2, 0).join("\n")).toContain("**bintang**")
+    // v7.29: prompt adalah history biasa — gema `minicode › …` tampil di
+    // viewport dengan markdown LITERAL (tak di-render jadi bold, tak pindah ke card).
+    const out = t.view(60, 4, 0).join("\n")
+    expect(out).toContain("minicode › pakai **bintang** ya")
+    expect(out).not.toContain("minicode › pakai bintang ya")
   })
   test("gema user + error + info + clear", () => {
     const { t } = setup()
@@ -193,15 +199,22 @@ describe("Transcript", () => {
   test("view selalu tepat height (padding) + scrollBack menggeser", () => {
     const { t } = setup()
     t.pushInfo(["a", "b", "c", "d"])
-    expect(t.view(40, 6, 0)).toEqual(["", "", "a", "b", "c", "d"])
-    expect(t.view(40, 2, 2)).toEqual(["a", "b"])
+    // v7.28 anchor atas: `scrollBack = 0` = kepala, konten di Atas dan sisa
+    // tinggi viewport diisi baris kosong DI BAWAH (bukan di atas seperti dulu).
+    expect(t.view(40, 6, 0)).toEqual(["a", "b", "c", "d", "", ""])
+    // scrollBack naik menggulir KE BAWAH menuju ekor: 2 → baris "c","d".
+    expect(t.view(40, 2, 2)).toEqual(["c", "d"])
   })
   test("cap 5000 membuang tertua dan menambahkan marker", () => {
     const { t } = setup()
     const lines = Array.from({ length: 5010 }, (_, i) => `l${i}`)
     t.pushInfo(lines)
     expect(t.size()).toBe(5001)
-    expect(t.view(100, 1, 5000)[0]).toContain("10 early lines")
+    // v7.28 anchor atas: marker evict menandai baris TERTUA, jadi ia duduk di
+    // kepala (scrollBack = 0), bukan di ekor. Di ekor (scrollBack = maks) ada
+    // baris terbaru — kedua ujung tetap diverifikasi.
+    expect(t.view(100, 1, 0)[0]).toContain("10 early lines")
+    expect(t.view(100, 1, 5000)[0]).toBe("l5009")
   })
   test("total() monotonik kebal evict (basis indikator F-08)", () => {
     // size() menyusut saat cap membuang tertua → newCount negatif/hilang.
@@ -233,9 +246,11 @@ describe("Transcript", () => {
     const end = t.pointAt(rows[1]!, 10)!
     expect(t.selectionText(start, end)).toBe("bcdefghijklmnopqrst")
   })
-  test("user prompt wrapped tetap copy tanpa prefix chrome", () => {
+  test("baris wrapped tetap copy tanpa prefix chrome", () => {
     const { t } = setup()
-    t.pushUser("abcdefghijkl")
+    // Prompt user kini di card; pakai baris info untuk menguji pemetaan
+    // seleksi teks terbungkus tanpa prefix dekoratif.
+    t.pushInfo(["abcdefghijkl"])
     const rows = t.viewport(10, 4, 0).rows.filter((row) => row.selectable)
     const start = t.pointAt(rows[0]!, 0)!
     const last = rows[rows.length - 1]!
@@ -262,20 +277,32 @@ describe("Transcript", () => {
     expect(t.view(40, 2, 0).join("\n")).toContain("compacted")
   })
   test("thinking default hidden: transcript bersih, indikator dots dimiliki App", async () => {
+    // State reasoning adalah singleton proses — test lain bisa mengubahnya.
+    // Reset eksplisit ke false supaya asersi "default hidden" tak bergantung
+    // pada urutan test, lalu kembalikan ke nilai semula di finally.
     const { defaultUiState } = await import("../src/ui/session-state.ts")
-    expect(defaultUiState.reasoningVisible).toBe(false)
-    const { bus, t } = setup()
-    bus.emit("provider:extension", { kind: "reasoning", data: { text: "hmm " } })
-    bus.emit("provider:extension", { kind: "reasoning", data: { text: "mikirmodelrahasia" } })
-    const live = t.view(40, 3, 0).join("\n")
-    expect(live).not.toContain("thinking")
-    expect(live).not.toContain("mikirmodelrahasia")
-    bus.emit("turn:completed", {})
-    expect(t.view(40, 3, 0).join("\n")).not.toContain("thinking")
-    expect(
-      defaultUiState.collapsedSectionsSnapshot().some((s) => s.text.includes("mikirmodelrahasia")),
-    ).toBe(true)
-    defaultUiState.clearCollapsedSections()
+    const { setReasoningVisible } = await import("../src/ui/render/reasoning.ts")
+    const prevReasoning = defaultUiState.reasoningVisible
+    setReasoningVisible(false)
+    try {
+      expect(defaultUiState.reasoningVisible).toBe(false)
+      const { bus, t } = setup()
+      bus.emit("provider:extension", { kind: "reasoning", data: { text: "hmm " } })
+      bus.emit("provider:extension", { kind: "reasoning", data: { text: "mikirmodelrahasia" } })
+      const live = t.view(40, 3, 0).join("\n")
+      expect(live).not.toContain("thinking")
+      expect(live).not.toContain("mikirmodelrahasia")
+      bus.emit("turn:completed", {})
+      expect(t.view(40, 3, 0).join("\n")).not.toContain("thinking")
+      expect(
+        defaultUiState
+          .collapsedSectionsSnapshot()
+          .some((s) => s.text.includes("mikirmodelrahasia")),
+      ).toBe(true)
+      defaultUiState.clearCollapsedSections()
+    } finally {
+      setReasoningVisible(prevReasoning)
+    }
   })
   test("thinking expanded: mengalir redup per baris", async () => {
     const { setReasoningVisible } = await import("../src/ui/render/reasoning.ts")
@@ -292,8 +319,8 @@ describe("Transcript", () => {
   })
 })
 
-describe("P1 operator diagnostics in TUI", () => {
-  test("verification.observed dirender (tidak lagi ditelan guard tool.*)", () => {
+describe("P1 operator diagnostics in TUI (renderer flat)", () => {
+  test("verification.observed tidak dirender di renderer flat (event tetap dikonsumsi)", () => {
     const { t, emit } = setupPresentation({
       activities: [activity({ toolCallId: "call-v", name: "edit", target: "a.ts" })],
       turns: [],
@@ -309,10 +336,16 @@ describe("P1 operator diagnostics in TUI", () => {
         observedAt: 1,
       },
     })
-    expect(t.view(80, 3, 0).join("\n")).toContain("verified")
+    // Baris diagnostik verifikasi dihapus; event return lebih awal supaya tak
+    // jatuh ke guard tool.* (itulah alasan konsumsinya tetap dipertahankan).
+    expect(t.view(80, 3, 0).join("\n")).not.toContain("verified")
+    expect(t.view(80, 3, 0).join("\n")).not.toContain("unverified")
+    // Positif: jalur tool biasa masih hidup dan menampilkan satu baris flat.
+    emit("tool.completed", { seq: 3, turnId: 1, toolCallId: "call-v", status: "completed" })
+    expect(t.view(80, 3, 0).join("\n")).toContain("edit a.ts")
   })
 
-  test("consequence.decided menampilkan verdict + next action", () => {
+  test("consequence.decided tidak dirender di renderer flat", () => {
     const { t, emit } = setupPresentation({ activities: [], turns: [] })
     emit("consequence.decided", {
       seq: 3,
@@ -323,12 +356,14 @@ describe("P1 operator diagnostics in TUI", () => {
       message: "verifier script modified",
     })
     const out = t.view(100, 4, 0).join("\n")
-    expect(out).toContain("consequence")
-    expect(out).toContain("BLOCKED")
-    expect(out).toContain("STOP_AND_REPORT")
+    // Verdict/next-action kini derau di transkrip flat: tak ada baris baru.
+    expect(out).not.toContain("consequence")
+    expect(out).not.toContain("BLOCKED")
+    expect(out).not.toContain("STOP_AND_REPORT")
+    expect(t.size()).toBe(0)
   })
 
-  test("context.window memakai occupancy/capacity, bukan session spend", () => {
+  test("context.window tidak dirender di renderer flat", () => {
     const { t, emit } = setupPresentation({ activities: [], turns: [] })
     emit("context.window", {
       seq: 4,
@@ -338,12 +373,14 @@ describe("P1 operator diagnostics in TUI", () => {
       percent: 30,
     })
     const out = t.view(100, 3, 0).join("\n")
-    expect(out).toContain("context window")
-    expect(out).toContain("1,200/4,000")
-    expect(out).toContain("30%")
+    // Occupancy/capacity memang info nyata, tapi bukan lagi baris transkrip.
+    expect(out).not.toContain("context window")
+    expect(out).not.toContain("1,200/4,000")
+    expect(out).not.toContain("30%")
+    expect(t.size()).toBe(0)
   })
 
-  test("task COMPLETED tanpa verification tampil unverified (bukan PASS)", () => {
+  test("task.status COMPLETED tanpa verification tidak dirender di renderer flat", () => {
     const { t, emit } = setupPresentation({ activities: [], turns: [] })
     emit("task.status", {
       seq: 6,
@@ -352,7 +389,11 @@ describe("P1 operator diagnostics in TUI", () => {
       taskStatus: "COMPLETED",
       taskVerification: { verdict: "unverified", checkedAt: "" },
     })
-    expect(t.view(100, 3, 0).join("\n")).toContain("[unverified]")
+    const out = t.view(100, 3, 0).join("\n")
+    // Termasuk penanda `[unverified]`-nya: seluruh baris task kini hilang.
+    expect(out).not.toContain("[unverified]")
+    expect(out).not.toContain("t1")
+    expect(t.size()).toBe(0)
   })
 
   test("tool.denied menampilkan denyReason", () => {
@@ -386,8 +427,10 @@ describe("Transcript.replayHistory (resume)", () => {
       { type: "user.message", text: "buat file a.ts", turnId: 1 },
       { type: "model.completed", text: "Baik, saya buat file-nya.", turnId: 1 },
     ])
+    // v7.29: echo user adalah baris transkrip nyata, bukan helper/card —
+    // replay harus mengembalikan gema `minicode › …` yang benar-benar tampil.
     const out = t.view(120, 8, 0).join("\n")
-    expect(out).toContain("buat file a.ts")
+    expect(out.split("\n").some((line) => line.includes("minicode › buat file a.ts"))).toBe(true)
     expect(out).toContain("Baik, saya buat file-nya.")
   })
 
@@ -418,8 +461,10 @@ describe("Transcript UI audit regressions (Fase 3.2-3.4)", () => {
       t.pushInfo(["jawaban"])
       t.pushUser("pertanyaan dua")
       const rows = t.view(40, 4, 0)
-      expect(rows).toContain("")
-      expect(rows.some((l) => l.includes("minicode > pertanyaan dua"))).toBe(true)
+      // v7.29: prompt kini history — gema `minicode > …` (ASCII) tampil di
+      // transkrip dengan tepat SATU jeda sebelum dan sesudahnya.
+      expect(rows).toEqual(["jawaban", "", "minicode > pertanyaan dua", ""])
+      // Kill-switch ASCII tetap berlaku: panah '›' tak boleh muncul.
       expect(rows.some((l) => l.includes("›"))).toBe(false)
     } finally {
       if (prevAscii === undefined) delete process.env.MINICODE_ASCII
@@ -439,11 +484,14 @@ describe("Transcript UI audit regressions (Fase 3.2-3.4)", () => {
     expect(out).toContain("const a = 1")
   })
 
-  test("mouse selection pada baris user memperhitungkan displayStart chrome prefix", () => {
+  test("gema prompt user di viewport: prefix chrome tak ikut tersalin (v7.29)", () => {
     const { t } = setup()
     t.pushUser("hello world")
     const rows = t.viewport(60, 4, 0).rows
-    const prompt = rows.find((r) => r.text.includes("minicode"))!
+    // v7.29: prompt kini history — baris gema `minicode › hello world` benar-benar
+    // ada di viewport (dulu disembunyikan demi card), tapi chrome tetap dikecualikan
+    // dari sumber seleksi seperti sebelum kartu diperkenalkan.
+    const prompt = rows.find((r) => r.text.includes("minicode › hello world"))!
     expect(prompt.displayStart).toBe(11)
     const start = t.pointAt(prompt, 11)!
     const end = t.pointAt(prompt, 16)!
@@ -511,9 +559,10 @@ describe("Transcript UI audit regressions (Fase 3.2-3.4)", () => {
     const selectable = rows.filter((r) => r.selectable)
     expect(selectable.length).toBe(2)
     const headerRow = selectable[0]!
-    expect(headerRow.displayStart).toBe(3)
+    // Renderer flat: tabel tanpa kotak, konten mulai di kolom 0.
+    expect(headerRow.displayStart).toBe(0)
     expect(headerRow.plainBody).toBeDefined()
-    expect(headerRow.plainBody!).toMatch(/^[│|]/)
+    expect(headerRow.plainBody!).not.toMatch(/^[│|]/)
 
     const pStart = t.pointAt(headerRow, headerRow.displayStart)!
     const pMid = t.pointAt(

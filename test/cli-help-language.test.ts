@@ -57,7 +57,9 @@ describe("/help: kelengkapan & ukuran", () => {
     for (const cmd of ["/undo", "/redo", "/clear", "/copy", "/mode", "/view"])
       expect(teks, cmd).toContain(cmd)
     expect(teks).toContain("[id|history|branches]")
-    expect(teks).toContain("compact, thinking, expand, minimize, fold")
+    // /view kini hanya menerima `thinking, expand` — aksi compact/minimize/fold
+    // dihapus bersama control mati, jadi jangan mengunci permukaan lama.
+    expect(teks).toContain("thinking, expand")
     for (const cmd of [
       "/models",
       "/providers",

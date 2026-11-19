@@ -179,14 +179,20 @@ describe("markdown: fence & inline", () => {
   // sini env COLORTERM saja tak cukup — stub TTY juga.
   const origColorterm = process.env.COLORTERM
   const origIsTty = (process.stdout as unknown as { isTTY?: unknown }).isTTY
+  const origMinicodeColor = process.env.MINICODE_COLOR
   beforeEach(() => {
     process.env.COLORTERM = "truecolor"
+    // v7.29: warna kini nyala by default di TTY. Test di blok ini mengunci
+    // tampilan MONO (teks polos tanpa SGR), jadi paksa MINICODE_COLOR=0.
+    process.env.MINICODE_COLOR = "0"
     Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
   })
   afterEach(() => {
     Object.defineProperty(process.stdout, "isTTY", { value: origIsTty, configurable: true })
     if (origColorterm == null) delete process.env.COLORTERM
     else process.env.COLORTERM = origColorterm
+    if (origMinicodeColor == null) delete process.env.MINICODE_COLOR
+    else process.env.MINICODE_COLOR = origMinicodeColor
   })
 
   // Fence TANPA bahasa adalah bentuk paling umum untuk perintah shell, dan dulu
@@ -203,21 +209,29 @@ describe("markdown: fence & inline", () => {
     expect(stripAnsi(decorateMarkdown(src))).toContain("a_b_c dan `tick`")
   })
 
-  test("fence berbahasa tetap di-highlight", () => {
+  test("fence berbahasa: kode utuh, monokrom, tanpa bar/header", () => {
     const out = decorateMarkdown("```ts\nconst x = 1\n```")
-    expect(out).not.toBe(stripAnsi(out)) // ada warna syntax
-    expect(stripAnsi(out)).toContain("const x = 1")
+    // v7.29: MINICODE_COLOR=0 dipaksa di beforeEach — highlight tetap jalan,
+    // tapi semua SGR dimatikan (jalur mono tetap diuji).
+    expect(out).toBe(stripAnsi(out))
+    expect(out).not.toContain("\x1b")
+    expect(out).toContain("const x = 1")
+    expect(out).not.toContain("│") // tanpa batang samping
+    // Tanpa header bahasa: tak ada baris yang hanya berisi "ts".
+    expect(out.split("\n").some((l) => l.trim() === "ts")).toBe(false)
   })
 
-  test("fence ber-info-string tetap dikenali (isi kode tidak didekorasi)", () => {
-    // Audit render: regex lama menolak ` ```ts title="demo" `, sehingga blok
-    // kode jatuh ke renderInline dan `*a*` diubah jadi italic.
+  test("fence ber-info-string dikenali: kode utuh, tanpa bar/header", () => {
+    // Regex lama menolak ` ```ts title="demo" `, sehingga blok jatuh ke
+    // renderInline dan `*a*` jadi italic. Kini fence tetap dikenali dan isi
+    // kode tidak didekorasi; renderer flat juga membuang header + batang samping.
     const src = '```ts title="demo"\nconst x = *a*\n```'
     const out = decorateMarkdown(src)
-    expect(stripAnsi(out)).toContain("const x = *a*")
+    expect(out).toContain("const x = *a*")
     expect(out).not.toContain("const x = a")
-    // Bahasa tetap diekstrak (highlight tetap jalan).
-    expect(out).not.toBe(stripAnsi(out)) // ada warna syntax
+    expect(out).toBe(stripAnsi(out)) // monokrom: tanpa SGR
+    expect(out).not.toContain("│")
+    expect(out.split("\n").some((l) => l.trim().startsWith("ts"))).toBe(false)
   })
 
   test("fence tak tertutup tidak menghilangkan isi", () => {
@@ -225,10 +239,15 @@ describe("markdown: fence & inline", () => {
     expect(out).toContain("const x = 1")
   })
 
-  test("teks di luar fence tetap didekorasi", () => {
+  test("teks di luar fence polos di renderer flat (tanpa warna)", () => {
     const out = decorateMarkdown("**tebal**\n```\nkode\n```\n*miring*")
-    expect(out).toContain("\x1b[1m") // bold
-    expect(stripAnsi(out)).toContain("kode")
+    // v7.29: dengan MINICODE_COLOR=0, bold/italic tak memancarkan SGR. Test ini
+    // mengunci jalur mono; jalur warna diuji di test "v7.29: markdown ..." di bawah.
+    expect(out).toBe(stripAnsi(out))
+    expect(out).not.toContain("\x1b[1m")
+    expect(out).toContain("tebal")
+    expect(out).toContain("kode")
+    expect(out).toContain("miring")
   })
 
   test("renderInline tidak mengubah teks yang bukan markdown", () => {
@@ -304,6 +323,33 @@ describe("markdown: fence & inline", () => {
       expect(displayWidth(line)).toBeLessThanOrEqual(36)
     }
   })
+})
+
+test("v7.29: markdown mengeluarkan SGR saat TTY + warna aktif", () => {
+  // Pasangan dari blok mono di atas: color-by-default menyala saat TTY tanpa
+  // MINICODE_COLOR/NO_COLOR. Mengunci jalur warna tetap benar-benar teruji.
+  const savedTty = process.stdout.isTTY
+  const savedColorterm = process.env.COLORTERM
+  const savedNoColor = process.env.NO_COLOR
+  const savedMinicodeColor = process.env.MINICODE_COLOR
+  Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
+  process.env.COLORTERM = "truecolor"
+  delete process.env.NO_COLOR
+  delete process.env.MINICODE_COLOR
+  try {
+    const out = decorateMarkdown("**tebal**\n```ts\nconst x = 1\n```")
+    expect(out).toContain("\x1b[")
+    expect(stripAnsi(out)).toContain("tebal")
+    expect(stripAnsi(out)).toContain("const x = 1")
+  } finally {
+    Object.defineProperty(process.stdout, "isTTY", { value: savedTty, configurable: true })
+    if (savedColorterm == null) delete process.env.COLORTERM
+    else process.env.COLORTERM = savedColorterm
+    if (savedNoColor == null) delete process.env.NO_COLOR
+    else process.env.NO_COLOR = savedNoColor
+    if (savedMinicodeColor == null) delete process.env.MINICODE_COLOR
+    else process.env.MINICODE_COLOR = savedMinicodeColor
+  }
 })
 
 describe("format: preview argumen tool", () => {

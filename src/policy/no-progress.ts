@@ -137,7 +137,7 @@ function targetRelPathForTool(
     toolName === "delete_file"
       ? a.path
       : toolName === "move_file"
-        ? a.to
+        ? (a.destination ?? a.to)
         : undefined
   if (typeof raw !== "string" || !raw.trim()) return null
   const root = resolve(workspaceRoot)
@@ -329,8 +329,16 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
     const contract = contractForTool(name)
     if (contract?.sideEffectTier === "WORKSPACE_MUTATION") {
       const a = (call.args ?? {}) as Record<string, unknown>
+      // v7.38: move_file memakai `destination` sebagai target tulis; fallback
+      // `to` untuk args historis. Tool lain tetap memakai `path`.
       const rawPath =
-        typeof a.path === "string" ? a.path : typeof a.to === "string" ? a.to : undefined
+        typeof a.path === "string"
+          ? a.path
+          : typeof a.destination === "string"
+            ? a.destination
+            : typeof a.to === "string"
+              ? a.to
+              : undefined
       if (rawPath) {
         const rel = workspaceRoot ? targetRelPathForTool(name, call.args, workspaceRoot) : null
         const key = normalizeTrackPath(rel ?? rawPath)

@@ -41,8 +41,9 @@ export function clearSubmittedResult(sessionId?: string): void {
 
 export const submitResultTool: Tool = {
   name: "submit_result",
+  // v7.33 (wire contract): tag RESULT; kontrak findings dipertahankan.
   description:
-    "Submit the final structured result of this task as a JSON object (instead of burying it in prose). Call once when done; exec --json surfaces it verbatim. If result.findings is an array of {category, severity, summary, evidence?}, those findings are also surfaced as finding.detected events.",
+    "RESULT: Submit the final structured result as a JSON object (call once when done; exec --json surfaces it verbatim). A result.findings array of {category, severity, summary, evidence?} is also surfaced as finding.detected events.",
   parameters: {
     type: "object",
     properties: {

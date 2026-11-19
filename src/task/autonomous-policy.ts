@@ -196,6 +196,22 @@ export const TOOL_CAPABILITIES: readonly ToolClassification[] = [
     evidence:
       "VERIFIED: publishes local history to a remote - irreversible outside this machine and visible to others. Same class as git_commit; the sub-agent layer strips it too.",
   },
+  // v7.38: restore/checkout menimpa kerja user pada satu path — PRIVILEGED,
+  // bukan otonom, dan masuk EXPLORE strip via kontrak WORKSPACE_MUTATION.
+  {
+    name: "git_restore",
+    capability: "PRIVILEGED",
+    autonomous: false,
+    evidence:
+      "VERIFIED: restores one workspace path from index/ref; destructive and gated via WORKSPACE_MUTATION contract with file jail.",
+  },
+  {
+    name: "git_checkout",
+    capability: "PRIVILEGED",
+    autonomous: false,
+    evidence:
+      "VERIFIED: narrow `git checkout -- <path>` restore; destructive and gated via WORKSPACE_MUTATION contract with file jail.",
+  },
 
   // ── memory (session state) ──
   {
@@ -325,6 +341,13 @@ export const TOOL_CAPABILITIES: readonly ToolClassification[] = [
     capability: "READ_ONLY",
     autonomous: true,
     evidence: "VERIFIED: workspace symbols.",
+  },
+  {
+    name: "lsp_rename",
+    capability: "MUTATING",
+    autonomous: false,
+    evidence:
+      "VERIFIED: applies LSP WorkspaceEdit to workspace files; gated WORKSPACE_MUTATION with per-file jail, fails closed without a server/edit.",
   },
 
   // ── human interaction ──

@@ -7,8 +7,10 @@ import { flexibleMatch } from "./edit.ts"
 // tepat sekali (dengan toleransi fuzzy). Bisa multiple patches.
 export const applyPatchTool: Tool = {
   name: "apply_patch",
+  // v7.33: kalimat keputusan identik dengan edit.ts & write_file.ts (wire
+  // contract). Jangan diubah sendiri-sendiri — test audit membandingkannya.
   description:
-    "Apply SEARCH/REPLACE block(s) to a file. Each search must match exactly once. Blocks apply sequentially to the same content (max 50 blocks per call). Prefer for multiple changes in one file; use edit for a single small change.",
+    "FILE EDIT: Apply SEARCH/REPLACE block(s) to one file (max 50 blocks, applied sequentially). 1 change → edit; ≥2 changes in one file → apply_patch; full rewrite/new file → write_file. Every search block must match exactly once — add surrounding lines if ambiguous. Cannot edit outside the workspace or .minicode/ state.",
   parameters: {
     type: "object",
     properties: {

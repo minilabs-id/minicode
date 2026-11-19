@@ -226,6 +226,25 @@ function isPermissionDenied(content: unknown): boolean {
   return classifyToolResult({ isError: true, content }) === "denied"
 }
 
+/**
+ * Tool shell/git (`bash`, `git_*`, `code_run`) melaporkan kegagalan sebagai teks
+ * biasa `exit N\n…` dengan `isError` TIDAK diset — kernel mengira itu sukses.
+ * Deteksi awal barisnya di sini (pola yang sama dengan isPermissionDenied)
+ * supaya presentasi memancarkan `tool.failed`, bukan `tool.completed`: kalau
+ * dibiarkan, bridge menerjemahkannya jadi status "completed" tanpa pesan dan
+ * ledger transkrip menyembunyikan kegagalan perintah.
+ */
+function isExitCodeFailure(content: unknown): boolean {
+  const text = typeof content === "string" ? content : contentText(content)
+  const t = text.trimStart()
+  // v7.31: timeout/abort menghasilkan `exit null`/`exit unknown`, dan code_run
+  // memakai `[TOOL_OUTCOME state=UNKNOWN reason=TIMEOUT …]` — semuanya adalah
+  // kegagalan dengan efek tak diketahui, bukan `tool.completed`.
+  return (
+    /^exit (?:[1-9]\d*|null|unknown)\b/.test(t) || /^\[TOOL_OUTCOME[^\]]*state=UNKNOWN\b/.test(t)
+  )
+}
+
 function mapToolFailCause(content: unknown): FailCause {
   const t = String(typeof content === "string" ? content : String(content ?? ""))
   if (/^\s*(unknown tool|invalid arguments)/i.test(t)) return "invalid"
@@ -363,7 +382,7 @@ export function createPresentationAdapter(
   const toolStarts = new Map<string, number>()
   const openTools = new Map<
     string,
-    { name: string; parentLink?: ChildSessionLink; childSessionId?: string }
+    { name: string; parentLink?: ChildSessionLink; childSessionId?: string; label?: string }
   >()
   const terminalTools = new Set<string>()
   const openApprovals = new Map<string, boolean>()
@@ -372,6 +391,9 @@ export function createPresentationAdapter(
   // ditebak (§12: fallback tanpa-link, jangan atribusi salah).
   const pendingDelegateCalls: string[] = []
   const childLinks = new Map<string, ChildSessionLink>()
+  // v7.40: finding inkremental dari satu child sering berbagi 24 char awal →
+  // findingId benturan (override di reducer). Pakai counter monotonic per child.
+  const childFindingSeq = new Map<string, number>()
   const counts = { ok: 0, failed: 0, denied: 0, cancelled: 0 }
   const handlers = new Set<(e: DomainEvent) => void>()
   const diag: AdapterDiagnostics = {
@@ -624,12 +646,17 @@ export function createPresentationAdapter(
    * Pasangkan forward anak dengan induk: tepat SATU call delegate_task pending
    * → taut; nol = orphan; >1 = paralel ambigu → tanpa taut (jangan tebak).
    */
-  const resolveChildLink = (childId: string, runId?: string): ChildSessionLink | undefined => {
+  const resolveChildLink = (
+    childId: string,
+    runId?: string,
+    label?: string,
+  ): ChildSessionLink | undefined => {
     const hit = childLinks.get(childId)
     if (hit) {
       // F-AGENT-1: completed may carry the runId too; fill it if the started
       // event predated the enrichment (defensive backfill, idempotent).
       if (runId && !hit.runId) hit.runId = runId
+      if (label && !hit.label) hit.label = label
       return hit
     }
     if (pendingDelegateCalls.length !== 1) {
@@ -641,6 +668,7 @@ export function createPresentationAdapter(
       childSessionId: childId,
       parentSessionId: sessionId,
       ...(runId ? { runId } : {}),
+      ...(label ? { label } : {}),
     }
     childLinks.set(childId, link)
     return link
@@ -655,6 +683,12 @@ export function createPresentationAdapter(
   const extractForwardRunId = (e: unknown): string | undefined => {
     const r = (e as { childRunId?: unknown } | null)?.childRunId
     return typeof r === "string" && r ? r : undefined
+  }
+
+  /** Label manusiawi anak dari event forward; absen = jalur lama. */
+  const extractForwardLabel = (e: unknown): string | undefined => {
+    const l = (e as { childLabel?: unknown } | null)?.childLabel
+    return typeof l === "string" && l ? l : undefined
   }
 
   const cascadeOpenTools = (reason: CancelReason): void => {
@@ -783,8 +817,22 @@ export function createPresentationAdapter(
     })
   })
 
-  sub("step:started", (e: { step?: { index?: unknown } }) => {
-    if (typeof e?.step?.index === "number") currentStep = e.step.index
+  sub("step:started", (e: { step?: { index?: unknown; total?: unknown } }) => {
+    if (typeof e?.step?.index !== "number") return
+    currentStep = e.step.index
+    // Kernel hanya membawa `index` (0-based). `total` dibaca apa adanya bila
+    // suatu jalur menyediakannya; absen = UI tampilkan "step N" tanpa pecahan.
+    // Event DURABLE: seq naik → cache snapshot UI ter-invalidasi saat step baru.
+    const total = typeof e.step.total === "number" ? e.step.total : undefined
+    const n = currentStep + 1
+    publish({
+      ...base(currentTurn),
+      type: "step.started",
+      step: currentStep,
+      ...(total !== undefined ? { total } : {}),
+      // Label netral (bukan i18n) — UI menghitung ulang dari step/total via t().
+      label: total !== undefined ? `step ${n}/${total}` : `step ${n}`,
+    })
   })
 
   sub("step:completed", (e: { step?: { results?: unknown } }) => {
@@ -842,6 +890,7 @@ export function createPresentationAdapter(
     (e: {
       execution?: { call?: { id?: unknown; name?: unknown; args?: unknown } }
       forwardedChild?: unknown
+      childLabel?: unknown
     }) => {
       if (!assertExecutionShape(e)) {
         diag.malformedExecution++
@@ -851,12 +900,16 @@ export function createPresentationAdapter(
       const childId = extractForward(e)
       noteDelegateStarted(call.id, call.name, childId)
       const childRunId = extractForwardRunId(e)
-      const parentLink = childId ? resolveChildLink(childId, childRunId) : undefined
+      const childLabel = extractForwardLabel(e)
+      const parentLink = childId ? resolveChildLink(childId, childRunId, childLabel) : undefined
       toolStarts.set(call.id, Date.now())
       openTools.set(call.id, {
         name: call.name,
         ...(parentLink ? { parentLink } : {}),
         ...(childId ? { childSessionId: childId } : {}),
+        // Label ikut tersimpan di meta → event turunan (progress/completed/
+        // approval) memakai parentLink yang SAMA, sehingga marker tetap stabil.
+        ...(childLabel ? { label: childLabel } : {}),
       })
       if (childId) {
         publish({
@@ -890,6 +943,7 @@ export function createPresentationAdapter(
         result?: { isError?: unknown; content?: unknown }
       }
       forwardedChild?: unknown
+      childLabel?: unknown
     }) => {
       if (!assertExecutionShape(e) || !e.execution.result) {
         diag.malformedExecution++
@@ -900,9 +954,11 @@ export function createPresentationAdapter(
       const childId = extractForward(e)
       noteDelegateSettled(call.id, call.name, childId)
       const childRunId = extractForwardRunId(e)
+      const childLabel = extractForwardLabel(e)
       const meta = openTools.get(call.id)
       const parentLink =
-        meta?.parentLink ?? (childId ? resolveChildLink(childId, childRunId) : undefined)
+        meta?.parentLink ??
+        (childId ? resolveChildLink(childId, childRunId, childLabel) : undefined)
       const t0 = toolStarts.get(call.id)
       const durationMs = t0 !== undefined ? Math.max(0, Date.now() - t0) : 0
       if (!markTerminal(call.id)) return
@@ -931,7 +987,10 @@ export function createPresentationAdapter(
           diag.errors++
         }
       }
-      if (!result.isError) {
+      // Kegagalan `exit N` datang sebagai string sukses dari tool shell/git —
+      // jangan biarkan cabang sukses mempublikasikan tool.completed untuknya.
+      const exitFailure = isExitCodeFailure(result.content)
+      if (!result.isError && !exitFailure) {
         if (count) counts.ok++
         if (call.name === "todo_write") {
           // Plan event terbit DI SINI — setelah tool sukses — bukan di
@@ -1048,6 +1107,69 @@ export function createPresentationAdapter(
   })
 
   sub("provider:extension", (e: { kind?: unknown; data?: unknown }) => {
+    if (e?.kind === "minicode:child-label") {
+      // Judul diri anak datang dari panggilan sampingan `delegate_task`.
+      // BUKAN tool event: hanya menimpa label activity yang sudah ada.
+      const data = e.data as { forwardedChild?: unknown; childLabel?: unknown } | null
+      const childId =
+        typeof data?.forwardedChild === "string" && data.forwardedChild
+          ? data.forwardedChild
+          : undefined
+      const label =
+        typeof data?.childLabel === "string" && data.childLabel ? data.childLabel : undefined
+      if (!childId || !label) return
+      const link = resolveChildLink(childId, undefined, label)
+      if (!link) return
+      // Taut yang sudah ada (dibuat tool.started anak) ikut diperbarui supaya
+      // forward berikutnya memakai judul, bukan label sementara `explore-N`.
+      link.label = label
+      publish({
+        ...childBase(currentTurn, childId, link),
+        type: "activity.label",
+        toolCallId: link.parentToolCallId,
+        label,
+      })
+      return
+    }
+    if (e?.kind === "minicode:child-report") {
+      // v7.35: laporan inkremental dari child delegate_task. Diterjemahkan ke
+      // `finding.detected` yang SUDAH ada (reducer/projection/ACP menanganinya),
+      // jadi tak perlu event type baru. Parent melihat temuan SELAGI child jalan
+      // dan punya jejak walau child timeout — ini kanal "catatan ke induk" yang
+      // sebelumnya hilang (hanya string akhir yang dikembalikan).
+      const data = e.data as {
+        forwardedChild?: unknown
+        childRunId?: unknown
+        childLabel?: unknown
+        finding?: unknown
+        needsEvaluation?: unknown
+      } | null
+      const childId =
+        typeof data?.forwardedChild === "string" && data.forwardedChild
+          ? data.forwardedChild
+          : undefined
+      const finding =
+        typeof data?.finding === "string" && data.finding.trim() ? data.finding.trim() : ""
+      if (!childId || !finding) return
+      const runId = typeof data?.childRunId === "string" ? data.childRunId : undefined
+      const label = typeof data?.childLabel === "string" ? data.childLabel : undefined
+      const parentLink = resolveChildLink(childId, runId, label)
+      const seq = (childFindingSeq.get(childId) ?? 0) + 1
+      childFindingSeq.set(childId, seq)
+      const needsEvaluation = data?.needsEvaluation !== false
+      publish({
+        ...childBase(currentTurn, childId, parentLink),
+        type: "finding.detected",
+        findingId: `child-report:${childId}:${seq}`,
+        category: "child-report",
+        severity: "warning",
+        // [EVALUATE] = penanda jujur: hipotesis anak, bukan kesimpulan terverifikasi.
+        // v7.40: hormati flag produser — finding terverifikasi tak perlu prefiks.
+        summary: `${needsEvaluation ? "[EVALUATE] " : ""}${finding}`,
+        evidence: [finding],
+      })
+      return
+    }
     if (e?.kind === "minicode:attempt") {
       const data = e.data as {
         phase?: unknown

@@ -97,7 +97,7 @@ Kepala tabel penuh ada di [Environment Variables](environment.md); yang paling s
 | `MINICODE_SANDBOX_ALLOW_FALLBACK=1` | Izinkan fallback host secara eksplisit bila backend tak tersedia |
 | `MINICODE_BUDGET_STRICT=1` | Sama dengan `--budget-strict` |
 | `MINICODE_ALLOW_LOCAL_CONFIG=1` | Sama dengan `--allow-local-config` |
-| `MINICODE_WORK_MODE` | `DISCUSS` / `PLAN` / `BUILD` — WorkMode default; precedence ada di [Environment Variables](environment.md) |
+| `MINICODE_WORK_MODE` | `DISCUSS` / `BUILD` — WorkMode default (`PLAN` legacy → `DISCUSS`); precedence ada di [Environment Variables](environment.md) |
 | `MINICODE_TOOL_SCOPE=explore` | Subset read-only |
 | `MINICODE_GREP_ENGINE=js` | Paksa walker internal |
 | `MINICODE_MEMORY_SCOPE` | `cwd` \| `global` \| `all` |

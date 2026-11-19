@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto"
 import type { Tool } from "#minicore"
 import type { ApprovalEventHook, ApprovalHookEvent } from "../presentation/events.ts"
 import { sliceSafeChars } from "./context.ts"
@@ -10,7 +11,11 @@ import { sliceSafeChars } from "./context.ts"
 // luar TTY tool MENOLAK jalan (fail-closed) — model harus memilih default
 // yang aman sendiri, bukan mengarang jawaban user.
 
-export type AskTextFn = (question: string, options?: string[]) => Promise<string | null>
+export type AskTextFn = (
+  question: string,
+  options?: string[],
+  signal?: AbortSignal,
+) => Promise<string | null>
 
 let askTextFn: AskTextFn | undefined
 
@@ -24,7 +29,6 @@ export function setAskTextFn(fn: AskTextFn | undefined): void {
 // tidak membawa id call sendiri, dan pertanyaan ini memang ditujukan ke user
 // langsung, bukan gate atas tool lain.
 let askApprovalHook: ApprovalEventHook | undefined
-let askApprovalCounter = 0
 
 export function setAskApprovalHook(fn: ApprovalEventHook | undefined): void {
   askApprovalHook = fn
@@ -40,8 +44,9 @@ function emitAskApproval(e: ApprovalHookEvent): void {
 
 export const askUserTool: Tool = {
   name: "ask_user",
+  // v7.33 (wire contract): tag INTERACT (interaksi manusia, bukan sub-agent).
   description:
-    "Ask the user a clarifying question mid-run and wait for their answer. Use sparingly — only when blocked on a decision you cannot safely make alone. Fails outside an interactive terminal.",
+    "INTERACT: Ask the user a clarifying question mid-run and wait for the answer. Use sparingly — only when blocked on a decision you cannot safely make alone. Fails outside an interactive terminal.",
   parameters: {
     type: "object",
     properties: {
@@ -64,9 +69,14 @@ export const askUserTool: Tool = {
     const opts = Array.isArray(options)
       ? (options as unknown[]).map((o) => sliceSafeChars(String(o), 200)).slice(0, 8)
       : undefined
+    // ID unik per pemanggilan, TIDAK bergantung counter modul: counter global
+    // bertabrakan ketika beberapa sesi (atau beberapa turn yang di-replay)
+    // berjalan di satu proses, sehingga approval.requested/settled dari sesi
+    // berbeda bisa saling menimpa di reducer/adaptor. UUID menjamin keunikan
+    // lintas sesi tanpa perlu menyentuh permission layer.
+    const approvalId = `ap_${randomUUID()}`
     // Tanpa view ter-inject atau di luar TTY: tolak, jangan gantung.
     // Model harus melanjutkan dengan asumsi paling aman, bukan menunggu.
-    const approvalId = `ap_${++askApprovalCounter}`
     const callInfo = { name: "ask_user", args: { question: q, options: opts } }
     if (!askTextFn) {
       emitAskApproval({ kind: "requested", approvalId, call: callInfo, via: "system" })
@@ -91,7 +101,8 @@ export const askUserTool: Tool = {
     emitAskApproval({ kind: "requested", approvalId, call: callInfo, via: "prompt" })
     let answer: string | null
     try {
-      answer = await askTextFn(q, opts)
+      // v7.32: teruskan sinyal turn ke modal — abort memutus penungguan jawaban.
+      answer = await askTextFn(q, opts, ctx.signal)
     } catch (e) {
       const aborted = (e instanceof Error && e.name === "AbortError") || ctx.signal.aborted
       emitAskApproval({

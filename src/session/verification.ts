@@ -352,17 +352,27 @@ export function classifyChildStatus(
 /**
  * Flag outcome-level untuk status anak (P9.2.1): memakai kosakata outcome
  * yang sudah ada (`timeout`/`aborted`, konsisten dengan
- * summarizeObservedReturn) — BUKAN status baru. Parameter bertipe gabungan
- * penuh agar pemanggil yang variabelnya disempitkan CFA (penugasan di dalam
- * closure tak terbaca di situs finally) tetap bisa memakainya jujur.
+ * summarizeObservedReturn) plus `maxStepsExceeded` untuk pagu langkah —
+ * BUKAN status baru di `ChildStatus`. Parameter bertipe gabungan penuh agar
+ * pemanggil yang variabelnya disempitkan CFA (penugasan di dalam closure tak
+ * terbaca di situs finally) tetap bisa memakainya jujur.
+ *
+ * KENAPA `max_steps_exceeded` ikut dalam "failure set": turn yang berhenti
+ * karena pagu langkah adalah KEGAGALAN, bukan penyelesaian normal. Tanpa flag
+ * ini pemanggil (`src/tools/task.ts`) mengira anak selesai dan mengunci Run
+ * COMPLETED — padahal hasilnya terpotong. Flag ini TIDAK mengubah makna
+ * receipt `committed`/`failed` (delegasi memang jalan); hanya mengubah status
+ * Run anak menjadi INTERRUPTED/UNKNOWN, sama seperti timeout/abort.
  */
 export function childStatusOutcomeFlags(status: ChildStatus): {
   timeout?: true
   aborted?: true
+  maxStepsExceeded?: true
 } {
   return {
     ...(status === "timeout" ? { timeout: true as const } : {}),
     ...(status === "aborted" ? { aborted: true as const } : {}),
+    ...(status === "max_steps_exceeded" ? { maxStepsExceeded: true as const } : {}),
   }
 }
 
@@ -579,6 +589,12 @@ export async function persistEffectReceipt(
     ...(request.outcome?.aborted === true || summary.aborted === true
       ? { aborted: true as const }
       : {}),
+    // v7.31: flag max_steps harus ikut ke receipt durable, bukan hanya
+    // dipakai untuk terminalisasi Run — kalau tidak, pembaca outcome melihat
+    // anak "normal" walau ia mati karena batas langkah.
+    ...(request.outcome?.maxStepsExceeded === true || summary.maxStepsExceeded === true
+      ? { maxStepsExceeded: true as const }
+      : {}),
     ...(request.outcome?.loss !== undefined
       ? { loss: request.outcome.loss }
       : summary.loss
@@ -681,7 +697,16 @@ export async function findIdempotentInvocation(input: {
   }
   const root = requireWorkspaceRoot(input.cwd)
   const loaded = await loadJournal(sessionId, root)
-  if (loaded.status === "unreadable") return { status: "proceed" }
+  // v7.33 fail-closed: journal yang ADA tapi tak terbaca bukan bukti kosong.
+  // Mengembalikan "proceed" di sini akan menjalankan ulang efek yang mungkin
+  // sudah committed (yang hilang hanyalah receipt-nya). Tolak dengan "pending"
+  // agar pemanggil berhenti dan recovery menentukan nasibnya, bukan kita menebak.
+  if (loaded.status === "unreadable") {
+    return {
+      status: "pending",
+      message: `idempotency lookup refused: journal unreadable — effect status unknown`,
+    }
+  }
   let exactTerminal: JournalRecord | undefined
   let exactPending: JournalRecord | undefined
   let conflict: JournalRecord | undefined
@@ -697,7 +722,18 @@ export async function findIdempotentInvocation(input: {
       exactTerminal = exactTerminal ?? record
       continue
     }
-    if (record.state === "pending") exactPending = exactPending ?? record
+    // v7.39 (P0-2): journal mendefinisikan `unknown` sebagai terminal AMBIGU —
+    // eksekusi berhenti tanpa bukti apakah efeknya terjadi. Di gerbang
+    // idempotency ini ia WAJIB diperlakukan seperti `pending`: tolak eksekusi
+    // dan paksa recovery memverifikasi. Membiarkannya jatuh ke "proceed" adalah
+    // blind re-execution atas efek yang mungkin sudah committed.
+    // Audit: `state` bersifat opsional pada JournalRecord. Record mutasi dengan
+    // note+argsHash+kind yang cocok tetapi `state === undefined` (mis. intent
+    // yang terminalnya gagal ditulis) dulu jatuh ke "proceed" — blind
+    // re-execution. Fail-closed: SEMUA state bukan terminal yang dikenal
+    // (pending, unknown, undefined, atau nilai tak dikenal dari journal) =
+    // pending, sehingga eksekusi dihentikan dan recovery yang memutuskan.
+    exactPending = exactPending ?? record
   }
   if (exactTerminal?.state === "committed" || exactTerminal?.state === "failed") {
     const state = exactTerminal.state
@@ -744,6 +780,42 @@ async function runOncePerIdempotencyKey(key: string, runner: () => Promise<unkno
   }
 }
 
+/**
+ * v7.33 fail-closed receipt: sinyal eksplisit saat receipt pasca-efek gagal
+ * ditulis durable. Dulu sinyalnya dibuang (`void receipt.durable`), sehingga
+ * efek yang SUDAH committed di dunia nyata + intent yang masih pending tampak
+ * seperti sukses bersih — recovery lalu bisa menjalankan ulang efek itu.
+ * `loss: "persistence"` memakai kosakata `JournalOutcome` yang sudah ada,
+ * bukan kategori baru.
+ */
+export interface ReceiptLossSignal {
+  readonly kind: "non-durable-receipt"
+  readonly tool: string
+  readonly invocationId: string
+  readonly state: "committed"
+  readonly loss: "persistence"
+}
+
+/**
+ * Bentuk "explicit error" dari sinyal di atas. Composition root bisa memasang
+ * `onReceiptLoss: throwOnReceiptLoss` supaya eksekusi gagal keras alih-alih
+ * mengembalikan hasil seolah tersimpan. Melewatkan kelas `EvidenceIncompleteError`
+ * menjaga satu bahasa galat evidence di seluruh modul.
+ */
+export class ReceiptNotDurableError extends EvidenceIncompleteError {
+  readonly signal: ReceiptLossSignal
+  constructor(signal: ReceiptLossSignal) {
+    super(
+      `verification: refusing clean success — receipt for ${signal.tool}/${signal.invocationId} is non-durable (loss: ${signal.loss})`,
+    )
+    this.signal = signal
+  }
+}
+
+export function throwOnReceiptLoss(signal: ReceiptLossSignal): never {
+  throw new ReceiptNotDurableError(signal)
+}
+
 export interface CanonicalScope {
   sessionId: string
   threadId: string
@@ -751,6 +823,13 @@ export interface CanonicalScope {
   childOf?: string
   getTurnIndex?: () => number | null
   idempotencyKeyFor?: (tool: string, args: unknown) => string | undefined
+  /**
+   * v7.33 fail-closed receipt: dipanggil BILA receipt sukses gagal ditulis
+   * durable. Ini satu-satunya tempat sinyal itu keluar — jangan dibuang lagi.
+   * Opsional (default no-op) agar test lama yang memeriksa outcome mentah
+   * tetap kompatibel; pemanggil produksi wajib menyuntik penolak/pewarta.
+   */
+  onReceiptLoss?: (signal: ReceiptLossSignal) => void | Promise<void>
 }
 
 export interface EvidenceWriter {
@@ -768,7 +847,9 @@ const journalEvidenceWriter: EvidenceWriter = {
  *
  * Ordering is deliberate: awaited intent, then inner execute, then awaited
  * receipt. Intent failure refuses execution; receipt failure preserves the
- * observed tool outcome but leaves evidence incomplete.
+ * observed tool outcome but (v7.33) no longer SILENTLY drops the signal —
+ * `scope.onReceiptLoss` is awaited so the caller can refuse or flag a
+ * committed effect whose terminal never became durable.
  */
 export async function executeCanonicalInvocation(
   tool: Tool,
@@ -853,9 +934,21 @@ export async function executeCanonicalInvocation(
       signalAborted: isSignalAborted(ctx.signal),
       ...(idempotencyKey ? { outcome: { note: idempotencyKey }, dedup: true } : {}),
     })
-    // Receipt failure after an observed return preserves the tool outcome and
-    // leaves the intent pending/unknown. It never fabricates a terminal.
-    void receipt.durable
+    // v7.33 fail-closed receipt: jangan buang sinyal non-durable. Efek sudah
+    // committed di dunia nyata tetapi journal hanya menyimpan intent pending;
+    // tanpa pemberitahuan eksplisit, recovery bisa mengira ini eksekusi baru dan
+    // menjalankan ulang efeknya. Seam ini meneruskan fakta itu ke pemanggil.
+    if (!receipt.durable) {
+      await scope.onReceiptLoss?.({
+        kind: "non-durable-receipt",
+        tool: tool.name,
+        invocationId: intent.invocation.value,
+        state: "committed",
+        loss: "persistence",
+      })
+    }
+    // Observed return tetap dikembalikan; yang berubah adalah pemanggil kini
+    // DIBERITAHU (bukan lagi `void`) bahwa bukti terminalnya tidak durable.
     return result
   }
   if (!idempotencyKey) return runOnce()
@@ -1615,9 +1708,30 @@ export async function captureSessionEvaluationBaseline(
 }
 
 /**
+ * v7.35 (atribusi tamper sadar-sesi): tool yang MAMPU memutasi file workspace.
+ * Dipakai untuk memutus apakah path "kotor" di git boleh diatribusikan ke sesi ini.
+ * Sengaja konservatif (fail-closed): bila ragu, anggap mutating agar deteksi
+ * tampering tetap berjalan penuh. Sesi yang hanya menjalankan tool baca tidak
+ * boleh divonis `EVALUATOR_TAMPER_ATTEMPT` gara-gara proses/sesi LAIN mengubah
+ * file yang memang sudah kotor sejak awal sesi.
+ */
+const WORKSPACE_MUTATING_TOOLS = new Set([
+  "write_file",
+  "edit",
+  "apply_patch",
+  "move_file",
+  "delete_file",
+  "bash",
+  "code_run",
+])
+
+/**
  * Kumpulkan SEMUA file dimutasi milik sesi ini — menggabungkan jurnal induk,
  * jurnal seluruh child sub-agent (`delegate_task`), dan perubahan in-session pada
  * permukaan evaluator/test melalui `bash`/`code_run` (terdeteksi lewat git status).
+ *
+ * v7.35: fallback git-status HANYA dipakai bila sesi (atau child-nya) benar-benar
+ * menjalankan tool mutating. Koleksi berbasis jurnal (langkah a) tetap selalu aktif.
  */
 export async function collectSessionModifiedFiles(
   sessionId: string,
@@ -1631,6 +1745,7 @@ export async function collectSessionModifiedFiles(
     if (loaded?.status === "valid") records = loaded.records
   }
   const combined = new Set<string>(records ? collectModifiedFilesFromJournal(records) : [])
+  const allRecords: JournalRecord[] = records ? [...records] : []
   if (records) {
     const childIds = new Set<string>()
     for (const r of records) {
@@ -1641,24 +1756,36 @@ export async function collectSessionModifiedFiles(
     for (const cid of [...childIds].slice(0, 20)) {
       const childLoaded = await loadJournal(cid, root).catch(() => null)
       if (childLoaded?.status === "valid") {
+        allRecords.push(...childLoaded.records)
         for (const p of collectModifiedFilesFromJournal(childLoaded.records)) {
           combined.add(p)
         }
       }
     }
   }
-  const dirtyPaths = listDirtyEvaluationPaths(root)
-  if (dirtyPaths.length > 0) {
-    const baseline = sessionEvaluationBaselines.get(sessionBaselineKey(sessionId, root))
-    for (const rel of dirtyPaths) {
-      if (!baseline) {
-        combined.add(rel)
-        continue
-      }
-      const prevHash = baseline.get(rel)
-      const nowHash = await hashWorkspaceRel(root, rel)
-      if (prevHash === undefined || prevHash !== nowHash) {
-        combined.add(rel)
+
+  // v7.35: kumpulkan tool mutating dari induk + seluruh child. Path kotor tanpa
+  // satu pun tool mutating tak punya sebab sebab-akibat dengan sesi ini → jangan
+  // disalahatribusikan. Koleksi jurnal di atas tetap dipertahankan apa adanya.
+  const sessionMutatingTools = new Set<string>()
+  for (const r of allRecords) {
+    if (WORKSPACE_MUTATING_TOOLS.has(r.tool)) sessionMutatingTools.add(r.tool)
+  }
+
+  if (sessionMutatingTools.size > 0) {
+    const dirtyPaths = listDirtyEvaluationPaths(root)
+    if (dirtyPaths.length > 0) {
+      const baseline = sessionEvaluationBaselines.get(sessionBaselineKey(sessionId, root))
+      for (const rel of dirtyPaths) {
+        if (!baseline) {
+          combined.add(rel)
+          continue
+        }
+        const prevHash = baseline.get(rel)
+        const nowHash = await hashWorkspaceRel(root, rel)
+        if (prevHash === undefined || prevHash !== nowHash) {
+          combined.add(rel)
+        }
       }
     }
   }

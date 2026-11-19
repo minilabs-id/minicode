@@ -9,9 +9,11 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { LIMITS } from "../src/constants.ts"
 import { createPermissionHandler } from "../src/policy/permission.ts"
+import { resolveSubAgentTimeout } from "../src/policy/subagent-timeout.ts"
 import { sanitizeSessionId } from "../src/session/checkpoint.ts"
 import { appendMutationIntent, appendMutationTerminal } from "../src/session/journal.ts"
 import {
+  clearSubAgentHistory,
   clearSubAgentSessionFactory,
   delegateTaskTool,
   EXPLORE_TOOL_NAMES,
@@ -79,7 +81,7 @@ function fakeFactory(
 
 // ── 1. Komposisi toolset anak ──
 
-test("delegate: explore = 12 read-only tepat; plan = 29 tanpa denylist", async () => {
+test("delegate: explore = 12 read-only tepat; plan = 32 tanpa denylist", async () => {
   const restore = providerEnv()
   const dir = tmpRoot()
   const prevTodo = todoSession.id
@@ -98,7 +100,10 @@ test("delegate: explore = 12 read-only tepat; plan = 29 tanpa denylist", async (
     seen.length = 0
     await delegateTaskTool.execute({ prompt: "x", mode: "plan" }, ctxFor(dir, "auto"))
     const planNames = new Set(seen[0]!.tools.map((t) => t.name))
-    expect(planNames.size).toBe(29)
+    // v7.38: 32 = 29 lama + git_restore/git_checkout/lsp_rename. Ketiganya
+    // workspace-mutation sekelas write_file/edit (working tree), BUKAN
+    // keputusan riwayat bersama seperti git_commit/git_push yang tetap dibuang.
+    expect(planNames.size).toBe(32)
     for (const banned of [
       "delegate_task",
       "write_memory",
@@ -161,8 +166,8 @@ test("delegate: forced explore untuk parent plan/readonly/ask; default explore",
     // toolset explore penuh + izin anak auto (mapping task.ts:449 — parent
     // selain allowlist → auto). Untuk parent ask ini kasus F-07: bila cabang
     // `ask` hilang dari forcedExplore (task.ts:235), mode "plan" yang diminta
-    // berubah jadi 29 tool sehingga assertion sAsk di bawah merah (begitu
-    // pula outAsk di atas).
+    // berubah jadi 32 tool (29 lama + 3 tool baru v7.38) sehingga assertion
+    // sAsk di bawah merah (begitu pula outAsk di atas).
     const [sPlan, sReadonly, sAsk, sAuto] = seen
     const asExplore = (s: SubAgentSpec) => s.tools.map((t) => t.name).sort()
     for (const s of [sPlan!, sReadonly!, sAuto!]) {
@@ -221,7 +226,10 @@ test("delegate: budget/timeout/cwd/journal plumbing", async () => {
     // di-clamp ke cap delegasi, BUKAN ke DEFAULT_MAX_STEPS sesi utama (200) —
     // memakai default sesi utama berarti memperluas kewenangan delegasi.
     expect(spec.maxSteps).toBe(LIMITS.SUB_AGENT_MAX_STEPS)
-    expect(spec.timeoutMs).toBe(LIMITS.SUB_AGENT_TIMEOUT_MS)
+    // Timeout default kini adaptif: prompt pendek ("x") dapat 0.6× basis.
+    expect(spec.timeoutMs).toBe(resolveSubAgentTimeout({ promptLength: "x".length }))
+    // Label auto-generated: prefix mode + nomor urut monoton per proses.
+    expect(spec.label).toMatch(/^plan-\d+$/)
     expect(spec.cwd).toBe(dir) // cwd parent diwariskan
     expect(spec.permissionMode).toBe("auto") // SELALU auto, bukan parent
     expect(spec.journal?.parentSessionId).toBe("p-plumb")
@@ -232,6 +240,87 @@ test("delegate: budget/timeout/cwd/journal plumbing", async () => {
     seen.length = 0
     await delegateTaskTool.execute({ prompt: "x" }, ctxFor(dir, "auto"))
     expect(seen[0]!.maxSteps).toBe(LIMITS.SUB_AGENT_BUDGET_EXPLORE)
+  } finally {
+    todoSession.id = prevTodo
+    clearSubAgentSessionFactory()
+    restore()
+    await cleanup(dir)
+  }
+})
+
+test("delegate: timeoutMs per-delegate divalidasi fail-closed, nama dipakai apa adanya", async () => {
+  const restore = providerEnv()
+  const dir = tmpRoot()
+  const prevTodo = todoSession.id
+  todoSession.id = "p-timeout-name"
+  try {
+    const seen: SubAgentSpec[] = []
+    setSubAgentSessionFactory(fakeFactory(seen))
+    // Valid → diteruskan apa adanya; nama dari caller menang atas auto-label.
+    await delegateTaskTool.execute(
+      { prompt: "x", timeoutMs: 450_000, name: "explore-auth" },
+      ctxFor(dir, "auto"),
+    )
+    expect(seen[0]!.timeoutMs).toBe(450_000)
+    expect(seen[0]!.label).toBe("explore-auth")
+    // Invalid (negatif/NaN) → default; terlalu besar → clamp ke batas timer JS.
+    // v7.34 — test ini menguji VALIDASI timeoutMs, bukan adaptivitas: hapus
+    // riwayat tiap sub-kasus supaya "pengalaman" anak eksplisit di atas tak
+    // memotong pagu default yang sedang diuji di sini.
+    for (const bad of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      seen.length = 0
+      clearSubAgentHistory()
+      await delegateTaskTool.execute({ prompt: "x", timeoutMs: bad }, ctxFor(dir, "auto"))
+      expect(seen[0]!.timeoutMs).toBe(resolveSubAgentTimeout({ promptLength: "x".length }))
+    }
+    seen.length = 0
+    clearSubAgentHistory()
+    await delegateTaskTool.execute(
+      { prompt: "x", timeoutMs: LIMITS.MAX_TIMER_DELAY_MS + 10_000 },
+      ctxFor(dir, "auto"),
+    )
+    expect(seen[0]!.timeoutMs).toBe(LIMITS.MAX_TIMER_DELAY_MS)
+  } finally {
+    todoSession.id = prevTodo
+    clearSubAgentSessionFactory()
+    restore()
+    await cleanup(dir)
+  }
+})
+
+test("delegate: 5-way fan-out dapat label explore-1..5 dan timeout berbeda per caller", async () => {
+  const restore = providerEnv()
+  const dir = tmpRoot()
+  const prevTodo = todoSession.id
+  todoSession.id = "p-fanout-5"
+  try {
+    const seen: SubAgentSpec[] = []
+    // Pool default 3 → 2 antre; clock mulai saat slot didapat (bukan saat submit),
+    // jadi antrean TIDAK boleh mengubah timeout yang diteruskan ke tiap anak.
+    setSubAgentSessionFactory(fakeFactory(seen))
+    const timeouts = [180_000, 210_000, 240_000, 270_000, 300_000]
+    await Promise.all(
+      timeouts.map((timeoutMs) =>
+        delegateTaskTool.execute(
+          { prompt: "scan", mode: "explore", timeoutMs },
+          ctxFor(dir, "auto"),
+        ),
+      ),
+    )
+    expect(seen).toHaveLength(5)
+    const labels = seen.map((s) => s.label!)
+    // Label monoton per proses (bisa mulai dari angka berapa pun tergantung test
+    // sebelumnya, tapi harus 5 angka berurutan dengan prefix explore-).
+    const nums = labels.map((l) => {
+      expect(l).toMatch(/^explore-\d+$/)
+      return Number(l.slice("explore-".length))
+    })
+    expect(new Set(nums).size).toBe(5)
+    expect(Math.max(...nums) - Math.min(...nums)).toBe(4)
+    // Tiap caller mempertahankan timeout-nya sendiri (urutan sesuai submit).
+    expect(seen.map((s) => s.timeoutMs).sort((a, b) => a - b)).toEqual(
+      [...timeouts].sort((a, b) => a - b),
+    )
   } finally {
     todoSession.id = prevTodo
     clearSubAgentSessionFactory()
@@ -436,9 +525,9 @@ test("delegate: file tool tak boleh tulis state minicode (semua mode)", async ()
           throw new Error(`${mode} edit ${t} tidak ditolak`)
         if ((await check("delete_file", { path: t })) !== "deny")
           throw new Error(`${mode} delete_file ${t} tidak ditolak`)
-        if ((await check("move_file", { from: "a.txt", to: t })) !== "deny")
+        if ((await check("move_file", { path: "a.txt", destination: t })) !== "deny")
           throw new Error(`${mode} move→ ${t} tidak ditolak`)
-        if ((await check("move_file", { from: t, to: "b.txt" })) !== "deny")
+        if ((await check("move_file", { path: t, destination: "b.txt" })) !== "deny")
           throw new Error(`${mode} move ${t}→ tidak ditolak`)
       }
       // BACA tetap boleh; file user biasa tetap bisa tulis.

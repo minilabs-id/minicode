@@ -70,7 +70,11 @@ export const EXECUTION_PATHS: Readonly<Record<string, RegisteredPath>> = {
   "src/tools/git.ts": {
     cls: "external-tool",
     entry: "runGit",
-    proof: "spawn(",
+    // Spawn kini lewat seam injeksi `(gitSpawnForTest ?? spawn)(`, sehingga
+    // literal `spawn(` lama tak ada lagi di berkas. Penanda HARUS menunjuk ke
+    // titik efek samping yang benar-benar dipanggil, bukan sekadar import —
+    // kalau tidak, T2 jadi hiasan dan tak membuktikan jalur eksekusi (audit M15).
+    proof: "(gitSpawnForTest ?? spawn)(",
     note: "git_* tools. Admission = permission handler + path jail.",
   },
   "src/tools/grep.ts": {
@@ -299,6 +303,13 @@ export const EXECUTION_PATHS: Readonly<Record<string, RegisteredPath>> = {
     entry: "self-update restart (spawn process.execPath, argv dipertahankan)",
     proof: "waitChildExit",
     note: "Restart setelah update. Mewarisi argv pemanggil. Bukan eksekusi user work.",
+  },
+  // v7.32: handoff /shell ke shell asli operator — bukan eksekusi work model.
+  "cli/tui.ts": {
+    cls: "external-integration",
+    entry: "withShell handoff (/shell): releaseTerminal → spawn(stdio:inherit) → reacquireTerminal",
+    proof: "waitChildExit",
+    note: "Shell interaktif yang diminta operator lewat slash command. stdio:inherit di terminal nyata; bukan jalur runtime dan bukan tool model.",
   },
 }
 

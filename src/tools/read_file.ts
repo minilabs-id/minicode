@@ -158,8 +158,10 @@ async function formatHandleRange(
 
 export const readFileTool: Tool = {
   name: "read_file",
+  // v7.33 (wire contract): tag FILE SEARCH supaya model mengelompokkannya
+  // dengan glob/grep tanpa membaca seluruh teks deskripsi.
   description:
-    "Read a text file in the workspace with line numbers. Output is N: <line> and a footer telling the next offset. Large files MUST be read in chunks via offset/limit (max 2MB per file, 5000 lines per call, 2000 chars per line). Prefer this over `cat` in bash. Cannot read outside the workspace, secrets, or node_modules.",
+    "FILE SEARCH: Read a text file with line numbers (N: <line>) and a next-offset footer. Large files MUST be paged via offset/limit (max 2MB per file, 5000 lines/call, 2000 chars/line). Prefer this over `cat` in bash. Cannot read outside the workspace, secrets, or node_modules.",
   parameters: {
     type: "object",
     properties: {

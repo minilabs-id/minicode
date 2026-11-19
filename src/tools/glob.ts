@@ -35,8 +35,9 @@ export function globToRegExp(glob: string): RegExp {
 
 export const globTool: Tool = {
   name: "glob",
+  // v7.33 (wire contract): tag family untuk grouping di model.
   description:
-    "Search files with a glob pattern (e.g. **/*.ts, src/**/*.js). Returns relative paths, capped at 100 by default. Skips .git, node_modules, and dotfiles by default (set includeDotfiles:true for .github/.eslintrc/etc.).",
+    "FILE SEARCH: Find files by glob pattern (e.g. **/*.ts). Returns relative paths, capped at 100 by default; skips .git, node_modules and dotfiles (set includeDotfiles:true for .github/.eslintrc/etc.).",
   parameters: {
     type: "object",
     properties: {
@@ -76,7 +77,13 @@ export const globTool: Tool = {
         if (re.test(rel) || re.test(name)) out.push(rel)
       },
     )
-    if (out.length === 0) return `no files match ${pattern} in ${rawRoot}`
+    // v7.33 (wire contract): beri langkah lanjutan saat kosong, jangan biarkan
+    // model mengulang pola/cwd yang sama tanpa perubahan.
+    if (out.length === 0) return `no files match ${pattern} in ${rawRoot} — verify pattern and cwd`
+    // v7.32 (L4): readdir/context walker mengembalikan urutan tergantung FS —
+    // tanpa sort hasil berubah-ubah antar mesin dan limit memotong file yang
+    // berbeda. Sort dulu supaya output deterministik sebelum dipotong.
+    out.sort()
     return out.slice(0, lim).join("\n")
   },
 }

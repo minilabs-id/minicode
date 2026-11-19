@@ -105,6 +105,15 @@ describe("t()", () => {
       "ts.turnCkpt",
       // "Tool" adalah istilah produk (bukan diterjemahkan menjadi Alat).
       "appr.tool",
+      // v7.35: kategori tool adalah label teknis dari wire contract tool —
+      // sengaja identik di en/id supaya mapping kategori tak bergeser saat
+      // locale berubah (dipakai sebagai kunci, bukan teks yang dibaca user).
+      "ts.toolCategory.command",
+      "ts.toolCategory.edit",
+      "ts.toolCategory.read",
+      "ts.toolCategory.subagent",
+      "ts.toolCategory.thought",
+      "ts.toolCategory.other",
     ])
     const same = (Object.keys(en) as (keyof typeof en)[]).filter(
       (k) => id[k] === en[k] && !NEUTRAL.has(k),

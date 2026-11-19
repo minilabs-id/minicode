@@ -168,7 +168,15 @@
 // sehingga pemecahan modul `cli/bootstrap/*`, `src/session/db/*`, `src/task/db/*`
 // serta penyempurnaan wire Responses/ergonomi membutuhkan ruang napas ~256 KiB.
 // Tetap alarm regresi `node_modules`/`test/`, bukan target bebas membengkak.
-export const PACK_SIZE_BUDGET_KIB = 4608
+// [Re-baseline 4.608 -> 5.000 KiB, disetujui pemilik 2026-11-19]
+// Bukti: paket aktual 4.709 KiB / 331 file pasca audit total v7.32-v7.40 —
+// kontrak +714 baris, task.ts +570, transcript.ts +334, lsp.ts +311, Plus 1
+// modul baru (subagent-timeout.ts). Semua dokumen paket direferensikan (tak
+// bisa dikeluarkan tanpa merusak tautan gate 5b). Full gate pada kandidat ini:
+// tsc 0 / lint 819 file 0 / bun test 6484 pass 0 fail / coverage 89,81% funcs
+// 90,83% lines. Naikkan ke 5.000 KiB memberi margin ~290 KiB untuk fitur
+// lanjutan; tetap alarm regresi node_modules/test/, bukan target bebas membengkak.
+export const PACK_SIZE_BUDGET_KIB = 5000
 
 /**
  * True bila ukuran paket (KiB) masih di dalam budget.

@@ -83,8 +83,10 @@ test("§12 [C] move A→B lalu retry: tolak, B utuh", async () => {
   try {
     const ctx = ctxFor(dir)
     writeFileSync(join(dir, "a.txt"), "isi")
-    await moveFileTool.execute({ from: "a.txt", to: "b.txt" }, ctx)
-    await expect(moveFileTool.execute({ from: "a.txt", to: "b.txt" }, ctx)).rejects.toThrow()
+    await moveFileTool.execute({ path: "a.txt", destination: "b.txt" }, ctx)
+    await expect(
+      moveFileTool.execute({ path: "a.txt", destination: "b.txt" }, ctx),
+    ).rejects.toThrow()
     expect(readFileSync(join(dir, "b.txt"), "utf8")).toBe("isi")
   } finally {
     cleanup(dir)

@@ -13,12 +13,17 @@ function isWrite(call: ToolCall): boolean {
 }
 
 // Kunci file-lock: hanya WRITE_TOOLS dengan args.path string valid.
-// EXCLUSIVE_TOOLS (tanpa path) dan move_file (memakai from/to) sengaja tidak
-// punya kunci — inilah yang membuat writeConcurrency > 1 tidak aman untuk
+// EXCLUSIVE_TOOLS (tanpa path) dan move_file (memakai path+destination) sengaja
+// tidak punya kunci — inilah yang membuat writeConcurrency > 1 tidak aman untuk
 // mereka (F-01). Klasifikasi batch memakai fungsi ini; jangan diganti dengan
 // cek `isWrite` saja.
 function getLockPath(call: ToolCall, cwd: string | undefined): string | null {
   if (!WRITE_TOOLS.has(call.name)) return null
+  // v7.38: wire move_file kini punya `path`, tetapi mengunci HANYA ujung sumber
+  // memberi ilusi aman (race terjadi di `destination`). Karena itu tetap
+  // dibiarkan tanpa kunci → batch terserialisasi penuh, identik dengan perilaku
+  // sebelum rename `from`/`to` (kontrak F-01 tidak berubah).
+  if (call.name === "move_file") return null
   const p = (call.args as Record<string, unknown>)?.path
   if (typeof p !== "string" || !p) return null
   // normalisasi: resolve abs + lowerCase di Windows agar ./a.ts vs a.ts tidak miss lock
@@ -187,7 +192,7 @@ export function parallelExecutor(
 
     // F-01 (P5 §C1): slot tulis (writeConcurrency > 1) hanya didemonstrasikan
     // aman untuk write tool ber-kunci args.path. Batch yang mengandung write
-    // tanpa kunci — EXCLUSIVE_TOOLS (bash dsb.), move_file (from/to), atau
+    // tanpa kunci — EXCLUSIVE_TOOLS (bash dsb.), move_file (path/destination), atau
     // WRITE_TOOL tanpa path valid — dijalankan sekuensial penuh. Ini menutup
     // overlap dua bash, bash vs write path, dan dua move_file yang dulu lolos
     // pada wc > 1 tanpa bukti keselamatan; batch murni write ber-path tetap

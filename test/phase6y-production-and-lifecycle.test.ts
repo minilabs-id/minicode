@@ -621,8 +621,15 @@ describe("§29 evidence quality: does the test drive the production function?", 
     expect(store.getTask(S, tid)?.status).toBe("IN_PROGRESS")
   })
 
-  test("hasFlag is asserted to be UNCHANGED, so the fix did not weaken a shared helper", () => {
-    expect(hasFlag(["--enable-scheduler=false"], "--enable-scheduler")).toBe(true)
+  test("hasFlag fail-closed untuk boolean bentuk nilai (F01), value flag tetap true", () => {
+    // --enable-scheduler tak menerima nilai: `--enable-scheduler=false` WAJIB
+    // dianggap absen, kalau tidak gate autonomous nyala hanya karena prefix
+    // cocok. Resolver produksi memakai aturan yang sama, jadi keduanya diuji.
+    expect(hasFlag(["--enable-scheduler=false"], "--enable-scheduler")).toBe(false)
+    expect(resolveSchedulerGate(["--enable-scheduler=false"]).enabled).toBe(false)
+    // Value flag --cwd tetap menerima `=` — kontrak lama yang sah dipertahankan.
     expect(hasFlag(["--cwd=C:\\x"], "--cwd")).toBe(true)
+    // Flag boolean polos tetap TRUE: jalur opt-in sah yang tak boleh ikut rusak.
+    expect(hasFlag(["--enable-scheduler"], "--enable-scheduler")).toBe(true)
   })
 })

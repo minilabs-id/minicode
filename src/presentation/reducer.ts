@@ -435,6 +435,9 @@ export function reduce(
             ? { childSessionId: event.parentLink.childSessionId }
             : {}),
           ...(event.parentLink?.runId ? { runId: event.parentLink.runId } : {}),
+          // Nama sub-agent ikut Activity supaya runMarker() di UI menampilkan
+          // `explore-1` alih-alih kode `run_<8>` (placeholder manusiawi).
+          ...(event.parentLink?.label ? { label: event.parentLink.label } : {}),
           identity: event.identity,
           ...(target ? { target } : {}),
           status: "running",
@@ -462,6 +465,13 @@ export function reduce(
         }
         if (isToolTerminal(a.status)) diag.lateEvent++
         else a.progress = event.message
+        return state
+      }
+      case "step.started": {
+        // Progres langkah murni observasi DURABLE: cukup pastikan turn ada
+        // (seq sudah dinaikkan di atas lewat DURABILITY). Sengaja TIDAK
+        // membuat entry/baris ledger — baris progres hidup di slot composer UI.
+        ensureTurn(state, event.sessionId, event.turnId, seq, event.ts)
         return state
       }
       case "tool.completed":
@@ -514,6 +524,32 @@ export function reduce(
           method: event.method,
           observedAt: event.observedAt,
         }
+        return state
+      }
+      case "activity.label": {
+        // Judul diri sub-agent menimpa LABEL activity yang sudah ada — bukan
+        // observasi baru, jadi tak boleh membuat activity (menjaga LIVE ledger
+        // tetap berisi baris nyata, bukan phantom).
+        // Lookup persis dulu (kontrak event), lalu fallback ke activity tool anak
+        // yang menaut ke delegate yang sama: judul biasanya tiba setelah
+        // tool.started anak ter-forward, sehingga kuncinya bukan toolCallId induk.
+        const a = state.activities.get(activityKey(event.sessionId, event.toolCallId))
+        if (a) {
+          if (a.label !== event.label) a.label = event.label
+          return state
+        }
+        let updated = false
+        for (const entry of state.activities.values()) {
+          if (
+            entry.childSessionId === event.sessionId &&
+            entry.parentToolCallId === event.toolCallId &&
+            entry.label !== event.label
+          ) {
+            entry.label = event.label
+            updated = true
+          }
+        }
+        if (!updated) diag.lateEvent++
         return state
       }
       case "approval.requested": {

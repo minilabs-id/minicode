@@ -7,7 +7,11 @@
 
 import type { Tool, ToolContext } from "#minicore"
 import { isCanonicalEvidenceCovered } from "../session/journal.ts"
-import { type CanonicalScope, executeCanonicalInvocation } from "../session/verification.ts"
+import {
+  type CanonicalScope,
+  executeCanonicalInvocation,
+  throwOnReceiptLoss,
+} from "../session/verification.ts"
 
 const UNWRAPPED = Symbol.for("minicode.p210.unwrapped-tool")
 
@@ -22,7 +26,13 @@ export function withEvidence(tool: Tool, scope: CanonicalScope): Tool {
     async execute(input: unknown, ctx: ToolContext): Promise<unknown> {
       // Awaited intent precedes inner execute; awaited receipt follows return.
       // No inner execution begins before durable invocation identity exists.
-      return executeCanonicalInvocation(inner, input, ctx, scope)
+      // v7.33: production wiring — kehilangan receipt durable bukan lagi dibuang
+      // diam-diam; caller dapat sinyal keras lewat throwOnReceiptLoss. Scope yang
+      // sudah menyediakan handler sendiri tetap dihormati (override).
+      const effectiveScope: CanonicalScope = scope.onReceiptLoss
+        ? scope
+        : { ...scope, onReceiptLoss: throwOnReceiptLoss }
+      return executeCanonicalInvocation(inner, input, ctx, effectiveScope)
     },
   }
   ;(wrapped as MaybeWrappedTool)[UNWRAPPED] = inner

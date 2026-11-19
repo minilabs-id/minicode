@@ -86,6 +86,13 @@ export type CycleStop =
   | "claim-wrong-state"
   | "ownership-unavailable"
   | "already-dispatched"
+  /**
+   * [AUDIT] Dispatch bridge gagal (melempar / bukan callable / scheduler sudah
+   * berhenti sesudah claim). Sebelumnya ternary di runCycle mengembalikan
+   * "already-dispatched" untuk DUA cabang — kegagalan dispatch tak bisa
+   * dibedakan dari hand-off yang berhasil. Nilai ini menjaga sinyal itu.
+   */
+  | "dispatch-failed"
   | "not-running"
   /**
    * [PHASE 6T] The runtime was already busy when the cycle was evaluated.
@@ -773,8 +780,11 @@ export class Scheduler {
       instruction: this.instruction,
       sessionId: this.sessionId,
     })
+    // [AUDIT] Bedakan hand-off sukses dari kegagalan dispatch. Ternary lama
+    // mengembalikan "already-dispatched" di kedua cabang (dead ternary), sehingga
+    // bridge yang melempar tak terlihat di CycleResult.stop / telemetri.
     return {
-      stop: dispatched.ok ? "already-dispatched" : "already-dispatched",
+      stop: dispatched.ok ? "already-dispatched" : "dispatch-failed",
       dispatched,
       recovered,
     }

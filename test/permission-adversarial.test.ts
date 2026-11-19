@@ -50,7 +50,10 @@ test("allow-all tetap menolak tulis di luar root", async () => {
     ).toBe("deny")
     expect(await check("allow-all", root, "read_file", { path: "/etc/passwd" })).toBe("deny")
     expect(
-      await check("allow-all", root, "move_file", { from: "a", to: join(tmpdir(), "b") }),
+      await check("allow-all", root, "move_file", {
+        path: "a",
+        destination: join(tmpdir(), "b"),
+      }),
     ).toBe("deny")
   } finally {
     rmSync(root, { recursive: true, force: true })
@@ -110,7 +113,7 @@ test("readonly menolak seluruh mutasi file/git/memory/task", async () => {
       ["write_file", { path: "a.txt", content: "x" }],
       ["edit", { path: "a.txt", oldString: "a", newString: "b" }],
       ["apply_patch", { path: "a.txt", patches: [] }],
-      ["move_file", { from: "a", to: "b" }],
+      ["move_file", { path: "a", destination: "b" }],
       ["delete_file", { path: "a" }],
       ["git_commit", { message: "m" }],
       ["write_memory", { text: "x" }],
@@ -127,10 +130,10 @@ test("readonly menolak seluruh mutasi file/git/memory/task", async () => {
       const got = await check("readonly", root, name, args)
       if (got !== "deny") throw new Error(`readonly × ${name}: got ${got}`)
     }
-    // …tetapi network read-only eksplisit diizinkan (semantik terdokumentasi:
-    // "read-only filesystem" ≠ "tanpa egress"). Bukan lubang, tapi harus sadar.
-    expect(await check("readonly", root, "web_fetch", { url: "https://example.com" })).toBe("allow")
-    expect(await check("readonly", root, "web_search", { query: "x" })).toBe("allow")
+    // [audit deep-mode] Network read kini lewat gerbang approval juga di mode
+    // readonly (EXECUTE). Di jalur headless tanpa ask → deny (fail-closed).
+    expect(await check("readonly", root, "web_fetch", { url: "https://example.com" })).toBe("deny")
+    expect(await check("readonly", root, "web_search", { query: "x" })).toBe("deny")
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -145,7 +148,7 @@ test("plan hanya mengizinkan read-only + todo_write/delegate_task/submit_result"
       ["write_file", { path: "a.txt", content: "x" }, "deny"],
       ["edit", { path: "a.txt", oldString: "a", newString: "b" }, "deny"],
       ["apply_patch", { path: "a.txt", patches: [] }, "deny"],
-      ["move_file", { from: "a", to: "b" }, "deny"],
+      ["move_file", { path: "a", destination: "b" }, "deny"],
       ["delete_file", { path: "a" }, "deny"],
       ["git_commit", { message: "m" }, "deny"],
       ["write_memory", { text: "x" }, "deny"],
@@ -401,7 +404,7 @@ test("jail argumen: git paths, lsp file, bash cwd di luar root ditolak", async (
     expect(
       await check("auto", root, "git_commit", { message: "m", paths: ["a.txt"] }, allowAsk),
     ).toBe("allow")
-    expect(await check("auto", root, "lsp_definition", { file: "/etc/passwd" })).toBe("deny")
+    expect(await check("auto", root, "lsp_definition", { path: "/etc/passwd" })).toBe("deny")
     expect(await check("auto", root, "bash", { cmd: "echo hi", cwd: "/.." })).toBe("deny")
     expect(await check("auto", root, "glob", { pattern: "*.ts", cwd: "/.." })).toBe("deny")
   } finally {
@@ -441,26 +444,29 @@ test("move restore dari .trash ke workspace lolos; selain itu dua arah deny", as
     // Restore sah: bukan deny (allow-all → allow; mode lain ikut mode check).
     expect(
       await check("allow-all", root, "move_file", {
-        from: join(".minicode", ".trash", "a.txt"),
-        to: "docs/a.txt",
+        path: join(".minicode", ".trash", "a.txt"),
+        destination: "docs/a.txt",
       }),
     ).toBe("allow")
     // Menanam ke state: deny.
     expect(
-      await check("allow-all", root, "move_file", { from: "docs/a.txt", to: ".minicode/x.txt" }),
+      await check("allow-all", root, "move_file", {
+        path: "docs/a.txt",
+        destination: ".minicode/x.txt",
+      }),
     ).toBe("deny")
     // Menggeser state keluar (sebar bukti): deny.
     expect(
       await check("allow-all", root, "move_file", {
-        from: join(".minicode", "sessions.db"),
-        to: "docs/s.db",
+        path: join(".minicode", "sessions.db"),
+        destination: "docs/s.db",
       }),
     ).toBe("deny")
     // Trash ke trash = tetap state: deny (hanya keluar workspace yang sah).
     expect(
       await check("allow-all", root, "move_file", {
-        from: join(".minicode", ".trash", "a.txt"),
-        to: join(".minicode", "b.txt"),
+        path: join(".minicode", ".trash", "a.txt"),
+        destination: join(".minicode", "b.txt"),
       }),
     ).toBe("deny")
   } finally {

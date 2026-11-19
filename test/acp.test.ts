@@ -568,8 +568,20 @@ describe("acp: smoke initialize→shutdown via stdio", () => {
         env: { ...HERMETIC_ENV, MINICODE_HOME: home },
       })
       // Tunggu startup SELESAI total (transpile + wiring) — server yang benar
-      // menunggu selamanya; yang buggy sudah exit 1 via one-shot.
-      await new Promise((r) => setTimeout(r, 15000))
+      // menunggu selamanya; yang buggy sudah exit 1 via one-shot. Jangan tidur
+      // buta 15 dtk lalu cek sekali: pol exitCode tiap 100 ms dan gagal SEGERA
+      // bila proses mati lebih awal (regresi yang dijaga test ini). Stdout
+      // sengaja tidak dikonsumsi di sini — reader dibuat setelah poll.
+      const readyDeadline = Date.now() + 15_000
+      let earlyExit: number | null = null
+      while (Date.now() < readyDeadline) {
+        if (proc.exitCode !== null) {
+          earlyExit = proc.exitCode
+          break
+        }
+        await new Promise((r) => setTimeout(r, 100))
+      }
+      expect(earlyExit, `ACP server keluar lebih awal (code ${earlyExit})`).toBeNull()
       expect(proc.exitCode).toBeNull()
       const reader = (proc.stdout as ReadableStream<Uint8Array>).getReader()
       const lines: string[] = []

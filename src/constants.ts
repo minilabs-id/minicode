@@ -1,4 +1,26 @@
 /** Centralized magic numbers — full English naming. Single source for limits. */
+
+/**
+ * Ambang timer JS (`setTimeout`). Sengaja didefinisikan SEBELUM `LIMITS` supaya
+ * helper env di bawah bisa memakainya tanpa referring ke objek yang sedang
+ * dibangun. Angka ini = `LIMITS.MAX_TIMER_DELAY_MS`; duplikasi satu angka platform
+ * ini disengaja (tidak ada cara lain memakai konstanta di dalam literal yang sama).
+ */
+const JS_TIMER_MAX = 2_147_483_647
+
+/**
+ * Baca limit numerik dari env saat modul dimuat. Nilai tak valid (NaN/Infinity,
+ * di bawah min, di atas max) dibuang → default dipakai. Ini pola fail-closed
+ * yang sama dengan `src/app/session.ts`: konfigurasi rusak tak boleh berubah
+ * jadi abort instan (timeout ≤ 0) atau timer 1 ms (timeout > 2^31-1).
+ */
+function envBoundedInt(name: string, fallback: number, min: number, max: number): number {
+  const raw = process.env[name]
+  if (raw === undefined || raw.trim() === "") return fallback
+  const n = Number(raw)
+  return Number.isFinite(n) && n >= min && n <= max ? Math.floor(n) : fallback
+}
+
 export const LIMITS = {
   /** Maksimum timer JS; nilai lebih besar diklem agar tidak berubah jadi 1ms. */
   MAX_TIMER_DELAY_MS: 2_147_483_647,
@@ -28,6 +50,21 @@ export const LIMITS = {
   MCP_HTTP_BODY_MAX_BYTES: 8_388_608,
   MCP_REQUEST_TIMEOUT_MS: 30_000,
   TASK_SUB_AGENT_MAX_TOKENS: 2_000,
+  /**
+   * Pagu output untuk panggilan samping pembuatan judul diri sub-agent.
+   * Sengaja sangat kecil: judul hanya 2–4 kata, jadi mengizinkan generasi
+   * panjang hanya membuang token dan menambah latensi panggilan paralel yang
+   * tak boleh menahan kerja anak.
+   */
+  TITLE_MAX_TOKENS: 32,
+  /**
+   * Watchdog total untuk panggilan judul diri. Panggilan ini SPAWN PARALEL
+   * dengan turn anak, tapi tetap harus dibatasi: provider yang diam tanpa
+   * satu byte akan memegang timer/listener sampai turn anak selesai bila tak
+   * ada batas ini. Nilai pendek sengaja — judul yang telat tak berguna lagi
+   * karena ledger sudah memakai label sementara (`explore-N`).
+   */
+  CHILD_TITLE_TIMEOUT_MS: 8_000,
   /** Context & memory */
   SYSTEM_PROMPT_MAX_CHARS: 8_000,
   /** Batas baca per skill sebelum dirender sebagai instruksi pada prompt. */
@@ -162,7 +199,15 @@ export const LIMITS = {
   DEFAULT_MAX_STEPS: 200,
   EXECUTOR_CONCURRENCY: 6,
   EXECUTOR_WRITE_CONCURRENCY: 1,
-  SUB_AGENT_POOL_SIZE: 3,
+  /**
+   * Slot konkuren untuk sub-agen. Default 3 (cocok untuk laptop 4-core).
+   * Env `MINICODE_SUB_AGENT_POOL_SIZE` meng-override (1..16). CATATAN: fan-out
+   * 5 explorer butuh 5 slot agar kelima anak benar-benar jalan paralel —
+   * dengan 3 slot, 2 anak mengantri. Antrian itu sendiri BUKAN penyebab
+   * "turn exceeded ...ms" (clock mulai saat slot didapat), tapi menaikkan
+   * pool ke 5 menghilangkan antrean dan total wall-clock lebih pendek.
+   */
+  SUB_AGENT_POOL_SIZE: envBoundedInt("MINICODE_SUB_AGENT_POOL_SIZE", 3, 1, 16),
   SUB_AGENT_BUDGET_EXPLORE: 5,
   SUB_AGENT_BUDGET_PLAN: 15,
   /** [T-008] Cap langkah eksplisit untuk sub-agent tetap 50 walau default sesi
@@ -172,7 +217,36 @@ export const LIMITS = {
    * lebih sempit. Terpisah dari `DEFAULT_MAX_STEPS` supaya perubahan default
    * sesi utama tidak diam-diam memperluas kewenangan delegasi. */
   SUB_AGENT_MAX_STEPS: 50,
-  SUB_AGENT_TIMEOUT_MS: 120_000,
+  /**
+   * Timeout satu turn sub-agen. Naik dari 120_000 → 300_000 (5 menit):
+   * 120 detik terlalu ketat untuk explorer paralel di repo besar (5 fan-out
+   * sering kena "turn exceeded 120000ms" dan teks partial terbuang).
+   * Env `MINICODE_SUB_AGENT_TIMEOUT_MS` meng-override dengan validasi yang sama
+   * seperti `src/app/session.ts` (finite, > 0, ≤ batas timer JS).
+   */
+  SUB_AGENT_TIMEOUT_MS: envBoundedInt("MINICODE_SUB_AGENT_TIMEOUT_MS", 300_000, 1, JS_TIMER_MAX),
+  /**
+   * Interval watchdog liveness sub-agent. Tiap ~2 detik watchdog memeriksa
+   * apakah anak masih mengirim `step:started`/`step:completed`. KENAPA 2 dtk:
+   * cukup cepat untuk menghentikan anak yang diam sebelum timeout penuh
+   * (5 menit), tapi jarang cukup untuk menambah beban pada pool paralel.
+   */
+  SUB_AGENT_HEARTBEAT_INTERVAL_MS: 2_000,
+  /**
+   * Atap anggaran DIAM anak sebelum watchdog mengambil tindakan. Anggaran
+   * aktual = `min(resolvedTimeout / 4, angka ini)`. KENAPA ada atap: timeout
+   * yang sangat besar (override caller) tak boleh membuat anak bisu dibiarkan
+   * berjam-jam; 120 dtk masih di atas jeda wajar antar-langkah model.
+   */
+  SUB_AGENT_IDLE_BUDGET_CAP_MS: 120_000,
+  /**
+   * v7.33: batas teks partial yang diselamatkan saat turn sub-agent timeout.
+   * Dipindah dari konstanta lokal `src/tools/task.ts` ke sini supaya satu
+   * sumber angka untuk pagu output child (sejajar CHILD_RESULT_SUMMARY_MAX di
+   * session/verification.ts). 1,2k char cukup meninggalkan jejak partial tanpa
+   * menggelembungkan pesan error parent.
+   */
+  MAX_PARTIAL_CHARS: 1_200,
   /** Network / providers */
   RETRY_AFTER_MAX_MS: 30_000,
   /** F-11: batas TOTAL satu request provider (server hung = turn hung tanpa
@@ -223,6 +297,11 @@ export const LIMITS = {
   PRICING_CACHE_TTL_MS: 86_400_000,
   LSP_DIAGNOSTICS_TIMEOUT_MS: 5_000,
   LSP_INIT_TIMEOUT_MS: 15_000,
+  /** v7.38: pagu `lsp_rename` — nama simbol baru & jumlah edit WorkspaceEdit.
+   * Tanpa pagu, server LSP jahat bisa memaksa tool menulis ribuan file/edit
+   * dalam satu panggilan (biaya & risiko di luar authority satu rename). */
+  LSP_RENAME_MAX_NAME_CHARS: 200,
+  LSP_RENAME_MAX_EDITS: 500,
   VERIFY_DEFAULT_TIMEOUT_MS: 30_000,
   WEB_FETCH_BODY_HARD_CAP_CHARS: 2_000_000,
   WEB_RESPONSE_BODY_HARD_CAP_BYTES: 2_000_000,

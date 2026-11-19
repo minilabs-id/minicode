@@ -134,8 +134,12 @@ function isAmbiguousMatch(content: string, needle: string, first?: MatchResult |
 
 export const editTool: Tool = {
   name: "edit",
+  // v7.33: satu aturan keputusan Yang SAMA di edit/apply_patch/write_file.
+  // Sebelumnya tiap deskripsi saling mengarahkan secara melingkar ("prefer edit
+  // for small", "prefer apply_patch for multiple", "prefer edit for small"),
+  // sehingga model tak punya aturan deterministik saat memilih tool.
   description:
-    "Edit a file with a string replacement. oldString must appear exactly once in the file — include surrounding lines to make it unique. Whitespace/indentation mismatch is tolerated (fuzzy). Prefer edit for small targeted changes; use apply_patch for multiple changes. Cannot edit files outside the workspace or .minicode/ state.",
+    "FILE EDIT: Replace an exact string with another in one file. 1 change → edit; ≥2 changes in one file → apply_patch; full rewrite/new file → write_file. Every search block must match exactly once — add surrounding lines if ambiguous. Whitespace/indentation mismatch is tolerated (fuzzy). Cannot edit outside the workspace or .minicode/ state.",
   parameters: {
     type: "object",
     properties: {

@@ -156,7 +156,7 @@ describe("panel aktivitas di Transcript (TUI)", () => {
       .map(stripAnsi)
       .filter((line) => line.startsWith("+ "))
 
-  test("panel ON: tool selesai di turn berjalan tampil sebagai grup live", () => {
+  test("flat: tool selesai tidak menghasilkan grup panel live", () => {
     const { t, emit } = setupTui(true)
     emit({ type: "turn.started", seq: 1, turnId: 1 })
     emit({
@@ -178,12 +178,15 @@ describe("panel aktivitas di Transcript (TUI)", () => {
       tsStart: 1,
     })
     const lines = groupLines(t)
-    expect(lines).toHaveLength(1)
-    expect(lines[0]).toContain("explore")
-    expect(lines[0]).toContain("2 tools")
+    // Renderer flat (FLAT_RENDERER): panel aktivitas dihapus. Tool yang selesai
+    // masuk activityFold yang kini dibuang, jadi nama tool TIDAK dibawa baris
+    // flat — yang dijaga adalah tak ada grup `+ explore` maupun jejak ganda.
+    expect(lines).toHaveLength(0)
+    expect(t.view(80, 12, 0).join("\n")).not.toContain("+ explore")
+    expect(t.size()).toBe(0)
   })
 
-  test("panel ON: turn selesai meng-commit grup tanpa duplikat", () => {
+  test("flat: turn selesai meng-commit SATU baris ringkas, bukan grup duplikat", () => {
     const { t, emit } = setupTui(true)
     emit({ type: "turn.started", seq: 1, turnId: 1 })
     emit({
@@ -195,14 +198,17 @@ describe("panel aktivitas di Transcript (TUI)", () => {
       status: "completed",
       tsStart: 1,
     })
-    // Sebelum turn selesai: satu baris grup live.
-    expect(groupLines(t)).toHaveLength(1)
+    expect(groupLines(t)).toHaveLength(0)
     emit({ type: "turn.completed", seq: 3, turnId: 1 })
-    // Setelah: tetap SATU (live dikosongkan, fold di-commit) — bukan dua.
-    expect(groupLines(t)).toHaveLength(1)
+    // Sebelumnya baris grup di-commit saat turn selesai; kini cukup satu
+    // baris kategori (`+ 1 read`) — bukan grup `+ explore`, bukan duplikasi.
+    expect(groupLines(t)).toHaveLength(0)
+    const screen = t.view(80, 12, 0).map(stripAnsi).join("\n")
+    expect(screen).not.toContain("+ explore")
+    expect(screen.split("\n").filter((l) => l.includes("+ 1 read"))).toHaveLength(1)
   })
 
-  test("panel ON: failed tool and reason remain visible before and after completion", () => {
+  test("flat: tool gagal + alasan tetap tampil sebagai satu baris sebelum dan sesudah turn selesai", () => {
     const { t, emit } = setupTui(true)
     emit({ type: "turn.started", seq: 1, turnId: 1 })
     emit({
@@ -215,8 +221,11 @@ describe("panel aktivitas di Transcript (TUI)", () => {
       message: "unknown job id",
     })
     const visible = () => t.view(120, 20, 0).map(stripAnsi).join("\n")
+    // Tool gagal TIDAK masuk fold-sunyi: baris flat tetap memikul nama + alasan.
     expect(visible()).toContain("bash_output · failed: unknown job id")
-    expect(visible()).toContain("1 failed")
+    // Hitungan agregat `1 failed` dulu berasal dari ringkasan grup — kini hilang.
+    expect(visible()).not.toContain("1 failed")
+    expect(groupLines(t)).toHaveLength(0)
     emit({ type: "turn.completed", seq: 3, turnId: 1 })
     expect(visible()).toContain("bash_output · failed: unknown job id")
     expect(visible().match(/unknown job id/g)).toHaveLength(1)

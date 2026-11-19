@@ -182,9 +182,8 @@ test("A2 aborted/max_steps/error + truncated: penanda jujur dua sumbu", async ()
     })
     const [lineMax] = await warningLines("p922-a2c", dir, t0)
     expect(lineMax).toContain("(observed child status: max_steps_exceeded; receipt: committed)")
-    expect(lineMax).toContain(
-      "prior child output: [sub-agent explore error] turn max steps exceeded",
-    )
+    // v7.30: summary step limit kini eksplisit (`?/5` bila details tak ada).
+    expect(lineMax).toContain("prior child output: [sub-agent explore error] step limit reached")
     const [lineErr] = await warningLines("p922-a2d", dir, t0)
     expect(lineErr).toContain("(observed child status: error; receipt: committed)")
     expect(lineErr).toContain("prior child output: [sub-agent explore error] model exploded")
@@ -496,4 +495,12 @@ test("F2 modul formatter murni: tanpa writer, tanpa impor otoritas", async () =>
   const indexSrc = await Bun.file("cli/index.ts").text()
   expect(indexSrc.includes("formatDelegateRecoveryLine")).toBe(true)
   expect(indexSrc.includes("process.exit(1)")).toBe(true)
+  // [AGENT-CONTROL-1] Helper yang SAMA kini dipakai jalur interaktif: wiring
+  // dibuktikan structural (CLI penuh butuh provider + TUI, tak dijalankan di sini).
+  expect(indexSrc.includes("async function emitDelegateRecoveryLines(")).toBe(true)
+  expect(indexSrc.includes("await emitDelegateRecoveryLines(sid, wcwd, t0)")).toBe(true)
+  expect(indexSrc.includes("await emitDelegateRecoveryLines(ctx.sessionId, ctx.cwd, since)")).toBe(
+    true,
+  )
+  expect(indexSrc.includes("ctx.runPromptWithVerify = async (p, signal) => {")).toBe(true)
 })

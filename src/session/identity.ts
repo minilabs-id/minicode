@@ -61,6 +61,14 @@ export interface CanonicalSessionIdentity {
   readonly bootId: string
   readonly alias?: string
   readonly resumed: boolean
+  /**
+   * Sid kanonik sudah punya baris sesi durable (dipakai `--session <id>` takeover
+   * maupun `--resume`). `resumed` sengaja TIDAK diubah untuk `--session` karena
+   * flag itu berarti "mulai baru dengan id ini" (histori tak di-load), tetapi
+   * WorkMode tersimpan TETAP harus dipulihkan — kalau tidak, CLI default DISCUSS
+   * ditulis ulang ke baris EXECUTE yang sudah ada.
+   */
+  readonly hasStoredSession: boolean
 }
 
 // SATU-SATUNYA generator id sesi di CLI. Hex acak sudah aman-sanitizer
@@ -171,16 +179,21 @@ export function resolveSessionIdentity(opts: {
       }
       alias = rawSession
     }
-    return { sid, bootId, ...(alias ? { alias } : {}), resumed: true }
+    return { sid, bootId, ...(alias ? { alias } : {}), resumed: true, hasStoredSession: true }
   }
   const rawSession = opts.sessionFlag ?? ""
   if (rawSession) {
     const sid = sanitizeSessionPart(rawSession)
     if (rawSession !== sid) noteLossyProvenance(rawSession, sid, cwd)
     assertNoFsKeyConflict(sid, sid, cwd)
-    return { sid, bootId, resumed: false }
+    return { sid, bootId, resumed: false, hasStoredSession: sessionRowExists(sid, cwd) }
   }
-  return { sid: sanitizeSessionPart(mintSessionId()), bootId, resumed: false }
+  return {
+    sid: sanitizeSessionPart(mintSessionId()),
+    bootId,
+    resumed: false,
+    hasStoredSession: false,
+  }
 }
 
 // Read-path kompatibel untuk perintah baca (sessions export): alias →

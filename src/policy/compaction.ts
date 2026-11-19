@@ -643,7 +643,9 @@ export function createLlmCompaction(opts: LlmCompactionOptions = {}): Compaction
       }
       attachAbort()
       try {
-        const before = store.messages.length
+        const beforeMessages = store.messages
+        const beforeCount = beforeMessages.length
+        const beforeTokens = estimateMessages(beforeMessages, minicodeEstimator)
         const attemptOpts = {
           keepRecentTurns: cOpts.keepRecentTurns,
           provider: opts.provider,
@@ -714,12 +716,17 @@ export function createLlmCompaction(opts: LlmCompactionOptions = {}): Compaction
             recoveryState.attemptsUsed = decision.attempt
           }
         }
-        // F3.1: ukur progres per jumlah pesan. Ringkasan LLM normal
-        // mengganti prefix puluhan pesan jadi 1 (progres ≫ ambang); output
-        // raksasa tunggal tak terkompresi → progres ~0 beruntun = thrash.
-        // Panjang sama persis = no-op early-return TANPA panggilan LLM
-        // (tak ada biaya terbakar) — bukan thrash, jangan hitung.
-        if (out.length === before) {
+        // F3.1: ukur progres dari TOKEN, bukan cacah pesan. Kernel memakai
+        // "token turun ATAU jumlah pesan turun" sebagai tanda ada kemajuan
+        // (loop.ts `reduced`); cerminkan di sini dengan `max`. Kompaksi konten
+        // yang jumlah pesannya sama tapi payload menyusut dulu skor 0 → dua
+        // kejadian mematikan jalur LLM permanen. Menyisipkan pesan ringkasan
+        // juga dulu memberi progres negatif; dengan token, penurunan nyata
+        // tetap terlihat (termasuk saat `out.length > before`).
+        const afterTokens = estimateMessages(out, minicodeEstimator)
+        // No-op sejati: jumlah pesan DAN token identik → hasil LLM tak lebih
+        // baik dari fallback; pakai fallback mekanikal, jangan hitung thrash.
+        if (out.length === beforeCount && afterTokens === beforeTokens) {
           return boundCompactionResult(
             store,
             fallback.compact(store, { keepRecentTurns: 1 }),
@@ -728,7 +735,9 @@ export function createLlmCompaction(opts: LlmCompactionOptions = {}): Compaction
             summaryChars(),
           )
         }
-        const progress = before > 0 ? (before - out.length) / before : 1
+        const tokenProgress = beforeTokens > 0 ? (beforeTokens - afterTokens) / beforeTokens : 1
+        const countProgress = beforeCount > 0 ? (beforeCount - out.length) / beforeCount : 1
+        const progress = Math.max(tokenProgress, countProgress)
         if (progress < LIMITS.COMPACTION_THRASH_MIN_PROGRESS) lowProgressStreak++
         else lowProgressStreak = 0
         if (lowProgressStreak >= LIMITS.COMPACTION_THRASH_MAX_STREAK && !llmDisabled) {
@@ -1108,8 +1117,15 @@ export async function compactWithLlm(
         watch.signal,
       )
       for await (const ev of stream) {
-        // Chunk apa pun = provider masih hidup: reset ke batas idle antar-chunk.
-        armWatchdog(LIMITS.COMPACTION_LLM_IDLE_TIMEOUT_MS, "llm compaction idle timeout")
+        // v7.31: event SINTETIS (`minicode:attempt` dari withStreamGuards) bukan
+        // byte provider — jangan reset first-byte watchdog dengan itu, kalau
+        // tidak timer 25 dtk dibatalkan sebelum satu byte pun masuk.
+        const synthetic =
+          ev.type === "extension" && (ev.kind === "minicode:attempt" || ev.kind === "usage")
+        if (!synthetic) {
+          // Chunk konten nyata = provider masih hidup: reset ke idle antar-chunk.
+          armWatchdog(LIMITS.COMPACTION_LLM_IDLE_TIMEOUT_MS, "llm compaction idle timeout")
+        }
         // Kontrak (Phase 6, E5): tangkap usage dari stream kompaksi — dulu
         // di-skip diam-diam (hanya text/finish yang dibaca) sehingga belanja
         // kompaksi tak pernah masuk budget.

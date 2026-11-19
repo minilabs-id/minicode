@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createPermissionHandler } from "../src/policy/permission.ts"
+import { osSandboxAvailable } from "../src/sandbox/os.ts"
 import { codeRunTool } from "../src/tools/code_run.ts"
 import { deleteFileTool } from "../src/tools/delete_file.ts"
 import { moveFileTool } from "../src/tools/move_file.ts"
@@ -10,6 +11,11 @@ import { readImageTool } from "../src/tools/read_image.ts"
 
 // Regression test 4 tool P13 P0: move_file, delete_file, read_image, code_run.
 // Hermetic: tiap test memakai tmp dir sendiri; tanpa jaringan; tanpa TTY.
+
+// v7.33: dulu tiap test code_run melakukan `if (!osSandboxAvailable()) return`
+// di dalam body — hasilnya dilaporkan PASS meski tak ada backend (false-confidence).
+// Pakai test.skip supaya ketiadaan backend terlihat sebagai SKIP di laporan.
+const sbIt = osSandboxAvailable() ? test : test.skip
 
 let dir = ""
 const ctx = () => ({ cwd: dir, signal: new AbortController().signal }) as never
@@ -28,7 +34,10 @@ afterEach(() => {
 
 test("move_file: pindah + auto-mkdir parent", async () => {
   writeFileSync(join(dir, "a.txt"), "hello")
-  const r = (await moveFileTool.execute({ from: "a.txt", to: "sub/b.txt" }, ctx())) as string
+  const r = (await moveFileTool.execute(
+    { path: "a.txt", destination: "sub/b.txt" },
+    ctx(),
+  )) as string
   expect(r).toContain("moved")
   expect(existsSync(join(dir, "sub/b.txt"))).toBe(true)
   expect(existsSync(join(dir, "a.txt"))).toBe(false)
@@ -37,13 +46,15 @@ test("move_file: pindah + auto-mkdir parent", async () => {
 
 test("move_file: menolak keluar workspace & sensitif & tak ada", async () => {
   writeFileSync(join(dir, "a.txt"), "x")
-  await expect(moveFileTool.execute({ from: "../o.txt", to: "b.txt" }, ctx())).rejects.toThrow(
-    /outside/,
-  )
-  await expect(moveFileTool.execute({ from: "a.txt", to: ".env" }, ctx())).rejects.toThrow()
-  await expect(moveFileTool.execute({ from: "nope.txt", to: "b.txt" }, ctx())).rejects.toThrow(
-    /not found/,
-  )
+  await expect(
+    moveFileTool.execute({ path: "../o.txt", destination: "b.txt" }, ctx()),
+  ).rejects.toThrow(/outside/)
+  await expect(
+    moveFileTool.execute({ path: "a.txt", destination: ".env" }, ctx()),
+  ).rejects.toThrow()
+  await expect(
+    moveFileTool.execute({ path: "nope.txt", destination: "b.txt" }, ctx()),
+  ).rejects.toThrow(/not found/)
 })
 
 test("delete_file: soft-delete ke .minicode/.trash + restore via move", async () => {
@@ -55,7 +66,7 @@ test("delete_file: soft-delete ke .minicode/.trash + restore via move", async ()
   const m = /\.trash[\\/]([^\s)]+)/.exec(r)
   expect(m).not.toBeNull()
   await moveFileTool.execute(
-    { from: join(".minicode", ".trash", m![1]!), to: "restored.txt" },
+    { path: join(".minicode", ".trash", m![1]!), destination: "restored.txt" },
     ctx(),
   )
   expect(readFileSync(join(dir, "restored.txt"), "utf8")).toBe("bye")
@@ -64,7 +75,7 @@ test("delete_file: soft-delete ke .minicode/.trash + restore via move", async ()
 test("move_file: dest yang ada dibackup ke trash, bukan ditimpa diam-diam", async () => {
   writeFileSync(join(dir, "a.txt"), "new")
   writeFileSync(join(dir, "b.txt"), "old")
-  const r = (await moveFileTool.execute({ from: "a.txt", to: "b.txt" }, ctx())) as string
+  const r = (await moveFileTool.execute({ path: "a.txt", destination: "b.txt" }, ctx())) as string
   expect(r).toContain("backed up")
   expect(readFileSync(join(dir, "b.txt"), "utf8")).toBe("new")
 })
@@ -120,43 +131,40 @@ test("code_run: menolak tanpa sandbox", async () => {
   ).rejects.toThrow(/requires MINICODE_SANDBOX/)
 })
 
-test("code_run: node echo via sandbox", async () => {
+sbIt("code_run: node echo via sandbox", async () => {
   // Eksekusi nyata butuh backend sandbox (bwrap/seatbelt/docker) — tanpa itu
   // code_run fail-closed (lihat test fail-closed di bawah + hardening-boundary).
-  const { osSandboxAvailable } = await import("../src/sandbox/os.ts")
-  if (!osSandboxAvailable()) return
+  // Skip via sbIt (bukan return diam-diam) agar tak ada klaim PASS tanpa backend.
   process.env.MINICODE_SANDBOX = "os"
   const r = (await codeRunTool.execute({ lang: "node", code: "console.log(2+3)" }, ctx())) as string
   expect(r).toContain("5")
 })
 
-test("code_run: timeout membunuh loop tak berujung (tanpa hang)", async () => {
-  const { osSandboxAvailable } = await import("../src/sandbox/os.ts")
-  if (!osSandboxAvailable()) return
+sbIt("code_run: timeout membunuh loop tak berujung (tanpa hang)", async () => {
+  // Butuh runner sandbox nyata untuk memicu timeout; tanpa backend test diskip
+  // secara terlihat (sbIt), bukan dianggap lolos.
   process.env.MINICODE_SANDBOX = "os"
   const t0 = Date.now()
-  const r = (await codeRunTool.execute(
-    { lang: "node", code: "while(true){}", timeout: 500 },
-    ctx(),
-  )) as string
-  // Kontrak yang diuji: kembali (bukan menggantung) DAN beri tahu model bahwa
-  // efeknya ambiguous. Batas atas wall-clock sengaja longgar (60 dtk) karena
-  // ini bukan uji performa — runner CI berbagi-pakai bisa 20x lebih lambat dari
-  // 508 ms lokal, dan ambang ketat hanya menghasilkan flake, bukan sinyal bug.
+  // v7.32: timeout dilempar (isError), samakan dengan bash/tool lain — bukan
+  // string sukses. Tetap menghentikan loop (bukan hang).
+  let msg = ""
+  try {
+    await codeRunTool.execute({ lang: "node", code: "while(true){}", timeout: 500 }, ctx())
+    throw new Error("expected timeout rejection")
+  } catch (e) {
+    msg = (e as Error).message
+  }
+  // Batas wall-clock longgar (60 dtk) — runner CI bisa jauh lebih lambat.
   expect(Date.now() - t0).toBeLessThan(60_000)
-  expect(typeof r).toBe("string")
-  // Dulu timeout keluar sebagai reject tak tertangkap (tes gagal di Linux CI);
-  // kini hasilnya dilaporkan dengan tag outcome yang bisa diparse model.
-  expect(r).toContain("state=UNKNOWN reason=TIMEOUT")
-  expect(r).toContain("timeout_ms=500")
+  expect(msg).toContain("state=UNKNOWN reason=TIMEOUT")
+  expect(msg).toContain("timeout_ms=500")
 })
 
-test("code_run: substitusi shell $(...) tidak dieksekusi (tanpa shell)", async () => {
+sbIt("code_run: substitusi shell $(...) tidak dieksekusi (tanpa shell)", async () => {
   // Regresi S2: versi lama merangkai `node -e "<code>"` lewat shell:true,
   // sehingga $(...)/backtick di kode dieksekusi shell SEBELUM node.
   // Kini kode jadi satu argumen single-quoted untuk `sh -c` runner.
-  const { osSandboxAvailable } = await import("../src/sandbox/os.ts")
-  if (!osSandboxAvailable()) return
+  // Butuh runner sandbox nyata; skip terlihat bila backend tak ada.
   process.env.MINICODE_SANDBOX = "os"
   const r = (await codeRunTool.execute(
     { lang: "node", code: 'console.log("$(echo PWNED)")' },
@@ -172,10 +180,10 @@ test("permission: move/delete butuh tulis, read_image read-only", async () => {
   const all = createPermissionHandler({ mode: "allow-all", root: dir })
   const deps = { signal: new AbortController().signal } as never
   const call = (name: string, args: unknown) => [{ name, args }, deps] as unknown as [never, never]
-  expect(await ro.check(...call("move_file", { from: "a", to: "b" }))).toBe("deny")
+  expect(await ro.check(...call("move_file", { path: "a", destination: "b" }))).toBe("deny")
   expect(await ro.check(...call("delete_file", { path: "a" }))).toBe("deny")
   expect(await ro.check(...call("read_image", { path: "a.png" }))).toBe("allow")
-  expect(await plan.check(...call("move_file", { from: "a", to: "b" }))).toBe("deny")
-  expect(await all.check(...call("move_file", { from: "a", to: "b" }))).toBe("allow")
+  expect(await plan.check(...call("move_file", { path: "a", destination: "b" }))).toBe("deny")
+  expect(await all.check(...call("move_file", { path: "a", destination: "b" }))).toBe("allow")
   expect(await all.check(...call("delete_file", { path: "a" }))).toBe("allow")
 })

@@ -23,7 +23,11 @@ export const CONTEXT_WINDOW_CATALOG: ContextWindowCatalogEntry[] = [
   { family: "deepseek-v4", tokens: 1_000_000 },
   { family: "deepseek-v3.2", tokens: 1_000_000 },
   { family: "deepseek", tokens: 131_072 },
-  { family: "gpt-4.1", tokens: 1_000_000 },
+  // v7.39: GPT-4.1 = 1_047_576 token nyata ≈ 1.05M. Catalog dulu 1_000_000
+  // (rounded-down) sementara preset operator 1_050_000 → keduanya kini sama,
+  // menghilangkan ~5% under-use (kompaksi terlalu awal) & drift yang tak
+  // pernah terlapor karena guard hanya memeriksa selisih > 2×.
+  { family: "gpt-4.1", tokens: 1_050_000 },
   { family: "gpt-5", tokens: 400_000 },
   { family: "gpt-4o", tokens: 128_000 },
   { family: "gpt-4", tokens: 128_000 },

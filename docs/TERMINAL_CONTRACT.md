@@ -1,4 +1,622 @@
-# Kontrak Terminal MiniCode (TUI fullscreen — v7.21, unreleased)
+# Kontrak Terminal MiniCode (TUI fullscreen — v7.40, unreleased)
+
+> **Status & presedensi (dibaca dulu).** Entri v7.22 di bawah ini adalah
+> **catatan sejarah** dan sebagian besar sudah **ditimpa oleh v7.29+** (lihat
+> entri v7.29–v7.37): warna kini NYALA by default di TTY (`MINICODE_COLOR=0`
+> memaksa monokrom), zero-state KOSONG tanpa logo maupun hint, dan — sejak
+> v7.37 — ringkasan status/aktivitas **dipotong per segmen narasi** (bukan
+> satu baris akumulatif di ekor). v7.29 yang mengosongkan kolom chat untuk
+> status sudah ditimpa. Jangan baca klaim v7.22/v7.29/v7.36 sebagai perilaku
+> saat ini.
+>
+> **Aturan presedensi:** versi tertinggi menang; bila kontradiksi, entri dengan
+> nomor versi terbesar yang berlaku. Entri lama tetap dipertahankan sebagai
+> sejarah, bukan gambaran tampilan saat ini.
+
+Perubahan v7.40 (unreleased — audit total & remediasi mendalam):
+
+Hasil audit mendalam 8 area (tools, policy, session, app+task, UI+CLI,
+docs+gate+CI, test quality, modul remaining). Bug fungsional/keamanan
+diperbaiki; yang butuh ADR dicatat sebagai residual di bawah.
+
+1. **Tools.** ReDoS guard menangkap `?`-quantified group (`(a?b?)*$`, runtime-
+   proven exponential); `git_restore`/`git_checkout` preflight filter driver
+   (fail-closed RCE); `runGit` cap gabungan stdout+stderr; `todo_write` rollback
+   tak mengembalikan phantom `taskId`; `[FINDING]` child tahan chunk terbelah +
+   flush saat turn tutup; `lsp_rename` batas `newText`, preflight semua target &
+   rollback; `delegationKey` = hash FNV-1a.
+2. **Storage/policy.** `unknown`/`undefined` state → refuse; `deleteJournalFile`
+   benar-benar sinkron; chmod 0600 DB+WAL+SHM tiap open; `epoch-moved-unexpected`
+   → `REFUSED_UNEXPECTED_EPOCH_MOVE` + release lease; LSP path-jail dari flag
+   (tak double-jail); `ask_user` disembunyikan di EXECUTE×auto; lease floor 75 dtk;
+   scrub password pendek + JWT tanpa signature; navy fence scheduler mencakup
+   semua transisi pelepas-owner.
+3. **App/runtime.** `dispatch-failed` stop value (dead ternary); docker shim
+   meneruskan AbortSignal & memetakan exit non-nol → `failed`; estimasi token
+   memakai tool wire-visible saja.
+4. **UI/CLI/presentation.** `finding.detected` (entri `[EVALUATE]`) kini
+   dirender di TUI (dulu cuma di presenter linear); findingId counter monotonic
+   per child; `needsEvaluation` dihormati; bus `turn:completed` ikut flush fold;
+   `lsp_rename` masuk kategori edit; writer lease dilepas saat startup throw;
+   5 kunci i18n mati dihapus.
+5. **Docs/gate/test.** Drift tools.md/security.md/mcp-lsp.md/contributing.md/
+   CHANGELOG diperbaiki; `phase6y-mutation` exit non-zero saat ada mutant
+   survive; test source-text/exact-string diganti assertion struktural; skip
+   ReDoS terlihat (`skipIf`).
+
+**Residual butuh ADR (sengaja tidak diubah):**
+- `responses.ts`: `input` riwayat penuh + `previous_response_id` → konteks
+  terduplikasi di server (biaya/privasi); perlu pilihan stateless vs chaining.
+- `db-path.ts`: fallback global `sessions.db` adalah desain test-locked.
+- `git-hardening.discoverFilterDrivers` tanpa `--local`: filter global (LFS)
+  terhitung repo filter → false-positive pada mesin dengan LFS.
+
+Peta proteksi: `test/audit-fix-deep-audit-*.test.ts`,
+`test/audit-fix-writer-startup-leak.test.ts`, `test/audit-fix-live-inline-status.test.ts`,
+`test/audit-fix-child-report.test.ts`, `test/phase6y-property-stress-timing.test.ts`.
+
+Perubahan v7.39 (unreleased — remediasi audit storage/TaskStore/konteks):
+
+Hasil audit read-only atas orkestrasi penyimpanan, TaskStore & konteks. Delapan
+rekomendasi prioritas dieksekusi (satu skip dengan alasan, lihat bawah).
+
+1. **TaskStore seam (P0).** `todo_write` kini memotret view sebelum tulis;
+   `restoreTodoViewFromStore()` menurunkan ulang JSON dari TaskStore (otoritas)
+   pada kegagalan sync ATAU tulis merged-id. Phantom `taskId` hilang, pesan
+   error menyebut id valid & repair yang benar-benar bekerja. General startup
+   repair di-wire di `cli/setup.ts` setelah writer admission.
+2. **`unknown` = refuse (P0).** `findIdempotentInvocation` memperlakukan
+   `state:"unknown"` seperti `pending` → tool tak pernah dijalankan ulang buta.
+3. **Lease leak (P1).** `takeoverEpochUnderLease()` melepas lease saat
+   `takeoverSessionEpoch` melempar, lalu me-rethrow error aslinya.
+4. **IMMEDIATE + CAS (P1).** `synchronizeCanonicalTasks` pakai transaksi
+   IMMEDIATE; `expectedRevision` + `refuseSchedulerRequeue()` mencegah
+   `todo_write` basa menimpa task yang di-claim scheduler.
+5. **Boundary konteks (P1).** `safeBaseSeq` tak lagi menggeser maju; boundary
+   tak aman → fallback histori penuh (nol kehilangan pesan/tool result).
+6. **Thrash guard (P1).** Progress kompaksi diukur dari estimasi token
+   (`max(token, count)`), bukan `messages.length` — kompaksi content-only tak
+   lagi mematikan jalur LLM.
+7. **P2 aman.** chmod `-wal`/`-shm` jadi 0600; `context.window` di-wire di
+   `onContextWindowEscalated`; katalog GPT-4.1 1M → 1.05M sinkron dengan preset.
+
+**Skip P2-7 (db-path):** global fallback `sessions.db` adalah desain yang
+dikunci test (`cli-subcommands.test.ts` "global scope"), bukan bug murni —
+menyatukan resolusi = perubahan perilaku observable yang butuh ADR owner.
+
+Peta proteksi: `test/audit-fix-todo-recovery.test.ts`,
+`test/audit-fix-verify-unknown-and-lease.test.ts`,
+`test/audit-fix-context-boundary-and-thrash.test.ts`, `test/session-epoch.test.ts`,
+`test/context-window-catalog.test.ts`, `test/phase4a4-production-sync.test.ts`.
+
+Perubahan v7.38 (unreleased — 3 tool baru, wire parameter seragam, ReDoS guard):
+
+1. **Tool baru (38 → 41).** `git_restore` & `git_checkout` (path-restore
+   sempit, argv array + `--`, jail, gated) memakai `runGit` hardened;
+   `lsp_rename` menerapkan `WorkspaceEdit` nyata per-file dengan jail &
+   `isError` saat server/kapabilitas absen (fail-closed). Semua via `ws(...)`
+   → `WORKSPACE_MUTATION`, `jailTarget:"file"`, `gatedByDefault:true`.
+2. **Wire parameter disatukan.** Tool LSP `file` → `path`; `move_file`
+   `from`/`to` → `path`/`destination` di schema + execute + **semua** call
+   site (permission jail, executor, binding, no-progress, journal, test).
+   Helper non-wire mempertahankan fallback `from`/`to` hanya untuk args
+   historis. `lsp_rename` masuk `LSP_WIRE_TOOLS`.
+3. **Grep ReDoS guard (L7).** `isReDosPronePattern()` mendeteksi nested
+   quantifier / quantifier-backref di **JS fallback saja** (ripgrep Rust
+   regex tetap linear & tak terkena). Pattern berbahaya → `isError`
+   eksplisit; `GREP_JS_LINE_MAX_CHARS = 100_000` mencegah hang pada baris
+   sangat panjang. Reguler & jalur ripgrep byte-identik.
+4. **Derivasi count.** Pin jumlah tool/contract/kelas mutasi diperbarui
+   (41 total, 12 explore, 32 plan-anak, 18 read-only, 15 kelas mutasi jurnal).
+
+Peta proteksi: `test/audit-fix-new-tools-and-wire.test.ts`,
+`test/audit-fix-grep-redos.test.ts`, `test/grep-security.test.ts`,
+`test/audit-fix-governance.test.ts` (path jail pada tool gated baru),
+`test/journal-verify.test.ts`, `test/delegate-audit.test.ts`.
+
+Perubahan v7.37 (unreleased — ringkasan DIPOTONG per segmen narasi):
+
+> v7.36 salah tangkap: baris statusnya akumulatif sepanjang turn. v7.37
+> menggantinya dengan pola OpenCode — satu baris count **per segmen laporan**,
+> di-flush tepat di bawah narasi yang mendahului tool, lalu di-reset.
+
+1. **Segment fold.** `stream()` `src/ui/tui/transcript.ts` mendeteksi transisi
+   narasi baru (`pending` kosong setelah tool `commit()` sementara
+   `activityFold` masih berisi) → `flushActivityFold()` dipanggil SEKARANG,
+   bukan menunggu `turn.completed`. Baris permanen `+ N …` mendarat setelah
+   narasi segmen itu, lalu fold dikosongkan untuk segmen berikutnya.
+2. **Hitungan per segmen, bukan kumulatif.** `liveSummaryRows()` kini
+   membaca fold segmen berjalan saja; tiap update progres model memproduksi
+   barisnya sendiri. Contoh: `+ 2 command · 2 read`, lalu segmen berikutnya
+   `+ 3 command · 1 edit · 10 subagent`, dst. Turn tutup hanya mem-flush sisa
+   segmen terakhir (tanpa dobel).
+3. **Kategori `subagent`.** `delegate_task` dipetakan ke kategori baru
+   (bukan `other`) dengan token i18n `ts.toolCategory.subagent` di en/id.
+   Urutan: `command · edit · read · subagent · thought · other`.
+4. **Tool gagal ikut dihitung.** Status apa pun (`completed`/`failed`/…
+   ) masuk fold segmen; pesan kegagalan tetap di baris tool individual.
+5. **Invariant tak berubah.** Composer `minicode ›`, footer `indicatorLine`,
+   alt-screen, warna-by-default/`MINICODE_COLOR=0`, sanitasi, dan `displayWidth`
+   tetap seperti v7.36.
+
+Peta proteksi: `test/audit-fix-live-inline-status.test.ts` (cut-off per segmen,
+reset hitungan, `subagent`, tool gagal, live-vs-permanen, tanpa duplikasi),
+`test/activity-fold.test.ts`, `test/i18n.test.ts` (parity token baru),
+`test/audit-fix-clean-composer.test.ts`, `test/tui-app.test.ts`.
+
+Perubahan v7.36 (unreleased — status & daftar tool live di bawah narasi — DITIMPA v7.37):
+
+1. **Ringkasan aktivitas LIVE.** `Transcript.projectAll()` menyisipkan
+   `liveSummaryRows()` tepat SETELAH `pendingRows(w)` — jadi baris
+   `+ N command · N read · 1 thought` (sumber: `formatFoldSummary`, sama
+   persisnya dengan ringkasan permanen) mengikuti ekor narasi yang sedang
+   mengalir, bukan baru muncul saat `turn.completed` dan bukan di footer.
+   Cache `projectedBase` dipaksa invalidsaat `activityFold` aktif, sehingga
+   hitungan ikut berubah tiap tool selesai.
+2. **Daftar tool saat per-tool ditahan.** Bila `minimizeActivity`/panel aktif,
+   baris kedua `Tool: name1 · name2` ditambahkan (nama lewat `sanitizeAnsiLine`,
+   dipotong per lebar kolom). Di mode default baris per-tool sudah live, jadi
+   tidak ada duplikasi nama — hanya ringkasan kategori yang ditambah.
+3. **Transisi bersih.** `flushActivityFold()` mengosongkan fold saat turn tutup:
+   baris live lenyap, baris permanen muncul — tepat satu ringkasan, tanpa
+   duplikasi. Detail per-tool tetap di `/expand`.
+4. **Invariant tak tersentuh.** Alt-screen, composer `minicode ›`, footer
+   `indicatorLine`, warna-by-default/`MINICODE_COLOR=0`, dan aturan
+   `displayWidth` tetap seperti sebelumnya; baris baru memakai token `c.*`
+   dan `sourceId:-1, selectable:false`.
+
+Peta proteksi: `test/audit-fix-live-inline-status.test.ts` (urutan di bawah
+narasi, tanpa duplikasi, gating daftar tool, sanitasi), `test/activity-fold.test.ts`
+(baris live saat minimize + satu ringkasan permanen),
+`test/audit-fix-clean-composer.test.ts`, `test/tui-app.test.ts`.
+
+Perubahan v7.35 (unreleased — laporan child, atribusi tamper, unifikasi scroll):
+
+1. **Kanal laporan child inkremental.** `delegate_task` menginstruksikan child
+   memancarkan baris `[FINDING] <severity> | <file:line> | <ringkasan>`; baris
+   pertama dikirim lebih awal sebelum baca mendalam. Tool layer menangkapnya,
+   memancarkan `minicode:child-report`, dan adapter menerjemahkannya ke event
+   `finding.detected` (entri `[EVALUATE]`) yang sudah ada — UI melihat temuan
+   SELAGI child bekerja dan tidak kehilangan hasil saat timeout (dulu yang
+   sampai hanya kalimat pembuka). Partial pada jalur error memakai temuan
+   terstruktur, bukan teks mentah. Deskripsi tool mengingatkan induk supaya
+   **mengevaluasi** temuan (hipotesis, bukan kesimpulan).
+2. **Atribusi tamper sadar-sesi.** `collectSessionModifiedFiles` hanya memakai
+   fallback git-status bila jurnal sesi/child memuat tool mutasi
+   (`write_file`/`edit`/`bash`/`code_run`/…). Audit baca-saja tak lagi divonis
+   `EVALUATOR_TAMPER_ATTEMPT` karena perubahan proses lain. Deteksi tetap
+   fail-closed untuk sesi yang benar-benar mutate.
+3. **Onboarding `todo_write`.** Deskripsi tool kini eksplisit: wajib
+   `todo_read` lalu echo `taskId` sebelum mengirim ulang daftar yang sudah ada;
+   deklarasi tanpa id ditolak. Sebelumnya model baru tahu lewat error
+   `TASK_IDENTITY_REQUIRED`.
+4. **`scrollBy` memakai `viewH` yang sama dengan jalur scroll lain.** Sebelumnya
+   PgDn menghitung `page = max(1, viewH - 1)`, sementara `scrollRows`/`jumpEdge`/
+   `followTail` memakai `wrapped - viewH`. Akibatnya satu PgDn kurang dari satu
+   viewport penuh dan ekor butuh satu langkah tambahan yang tak mengubah
+   tampilan. Kini `page = viewH` dan `max = max(0, wrapped - viewH)` identik di
+   semua jalur, jadi PgDn mencapai ekor sejati tanpa langkah no-op.
+
+Peta proteksi: `test/audit-fix-child-report.test.ts` (ekstraksi `[FINDING]`,
+partial saat gagal, adapter → `finding.detected`, penanda `[EVALUATE]`),
+`test/audit-fix-tamper-attribution.test.ts` + `test/p2-verification.test.ts`
+(atribusi sadar-sesi & fail-closed), `test/audit-fix-todo-onboarding.test.ts`
+(deskripsi protokol todo), `test/tui-app.test.ts` (PgDn mencapai ekor tepat
+sejumlah halaman penuh), `test/audit-fix-doc-ui-cleanup.test.ts` (penjaga
+kontrak dokumen).
+
+Perubahan v7.22 (renderer flat — sejarah, sebagian ditimpa v7.29+):
+
+0. **Posisi historis.** Entri ini mendokumentasikan transisi ke renderer flat.
+   Klaim visual di dalamnya TIDAK berlaku lagi; rujuk entri v7.29+ untuk
+   keadaan saat ini.
+1. **Monokrom penuh (historis).** v7.22 dulu memaksa `colorLevel() === 0`
+   (`FORCE_MONO`). Sejak v7.29 warna nyala by default di TTY; hanya
+   `MINICODE_COLOR=0` (atau non-TTY/`TERM=dumb`) yang memaksa monokrom.
+2. **Zero-state (historis).** v7.22 menghapus logo/hint dari transkrip. v7.29+
+   mempertahankan zero-state KOSONG: baris kosong + composer + footer, tanpa
+   logo maupun hint idle (kunci `app.idleHint` sudah dihapus dari en/id di
+   v7.40).
+3. **Transkrip hanya esensial.** Teks user/model, error, dan SATU baris tool
+   ringkas tetap tampil. Yang DIHAPUS: activity panel, activity fold/ringkasan
+   `/expand`, baris running/thinking, turn summary + `ckpt`, dan baris ledger
+   diagnostik untuk `task.status`, `consequence.decided`, `context.window/cutoff`,
+   `verification.observed` (event tetap dikonsumsi, tak dirender).
+4. **Tanpa outline/garis/kotak di konten.** Code fence tak memakai bar `│` dan
+   tak memuat header bahasa (cukup indentasi dua kolom). Tabel markdown memakai
+   `box:false` (kolom rata, tanpa bingkai). Dropdown `/` memakai `listRow` tanpa
+   border.
+5. **Footer tetap satu baris**, disesuaikan ke monokrom (spark/timer/mode/model/
+   cwd/konteks/permission). Indikator status sementara tetap menggantikan baris
+   footer, bukan menambah tinggi frame.
+6. **Kop sesi saat exit dihapus total.** `cli/index.ts` tidak lagi melakukan
+   clear-screen + `renderSessionSummary`; scrollback dikembalikan apa adanya.
+7. Peta proteksi diperbarui: `test/tui-app.test.ts`, `test/tui-transcript.test.ts`,
+   `test/footer-render.test.ts`, `test/activity-panel.test.ts`,
+   `test/activity-fold.test.ts`, `test/thinking-area.test.ts`,
+   `test/presentation-projections.test.ts`, `test/tui-format.test.ts`,
+   `test/render-audit-2026-11.test.ts`, `test/ui-audit-regressions.test.ts`,
+   `test/writer-inventory.test.ts` (zero-state, tanpa warna, tanpa panel/fold/
+   thinking/diagnostik, fence & tabel flat, tanpa kop exit).
+
+Perubahan v7.22.1 (control-system fixes — tidak mengubah kontrak visual v7.22):
+
+1. **Peringatan recovery menjangkau jalur interaktif.** `cli/index.ts` kini
+   memancarkan baris `[recovery]` yang SAMA (lewat helper tunggal
+   `emitDelegateRecoveryLines`) baik di `catch` one-shot maupun di pembungkus
+   `runPromptWithVerify` yang dipasang sebelum `runTui(ctx)`. Sebelumnya hanya
+   one-shot yang memberi peringatan; turn TUI yang gagal setelah anak
+   `committed` bisa mendelegasi ulang buta dan menggandakan efek samping
+   (docs/AGENTS.md:25). Helper hanya membaca jurnal + memformat, tanpa retry,
+   tulis jurnal, atau prompt, dan memakai satu sink stderr yang sama sehingga
+   inventaris writer tak bertambah.
+2. **Gated tool tetap fail-closed di non-TTY meski broker daemon di-inject.**
+   `allowNonTtyAsk` di `src/policy/permission.ts` hanya membuka carve-out untuk
+   tool non-gated (mis. `web_fetch`); `delegate_task` dan tool gated lain tetap
+   menuntut TTY. Daemon broker tak boleh mengubah ASK non-TTY menjadi jalur
+   persetujuan delegasi (docs/AGENTS.md:8, docs/exec.md).
+3. **`visible === callable` untuk EXECUTE × allowlist.** `workModeVisible`
+   (`src/app/tool-layer.ts`) menyembunyikan `GATED_TOOLS`/MCP saat
+   `permissionMode === "allowlist"` karena handler `allowlist` menolak semuanya;
+   model tak lagi melihat tool yang tak bisa dipanggil.
+4. **"Always" tidak berlaku ulang untuk `delegate_task`.** `canAlwaysForCall`
+   menggantikan `canPersistAlways` di `gatedPrompt` (`canAlways: false`), sehingga
+   kartu persetujuan tak pernah menawarkannya; broker daemon hanya balas
+   allow/deny. Satu approval ASK hanya mencakup satu delegasi (K-1 `saveAlways`
+   untuk tool lain tetap utuh).
+5. **Dokumentasi:** `docs/exec.md` memuat aturan eksplisit delegasi non-TTY
+   (ditolak, fail-closed) yang dirujuk `docs/AGENTS.md`, dan `docs/AGENTS.md`
+   memperjelas jangkauan warning recovery serta larangan "Always".
+
+Peta proteksi: `test/audit-fix-agent-control-recovery-interactive.test.ts`,
+`test/agent-contract.test.ts`, `test/work-mode-tool-visibility.test.ts`,
+`test/p92-recovery-warning-envelope.test.ts`,
+`test/p15-phase2-contracts-approval-recovery.test.ts`.
+
+Perubahan v7.34 (adaptive sub-agent hidup + PTY test):
+
+1. **Riwayat anak adaptif benar-benar dipakai.** `task.ts` menyimpan riwayat
+   delegasi per-process yang dibatasi (32 entri, best-effort, key
+   `${mode}:${prompt[0..64]}`). `prior` (steps/duration/success) kini dilempar
+   ke `resolveSubAgentTimeout` — anak sukses cepat (<60s) memotong pagu turn
+   berikutnya. Policy tetap murni; riwayat ada di tool layer.
+2. **Step-escalation per-delegasi.** Jika anak sebelumnya berakhir
+   `max_steps_exceeded`, delegasi berikutnya untuk key sama menaikkan `maxSteps`
+   lewat `nextStepLimit(prevCap, observedSteps)` (plafon `SUB_AGENT_MAX_STEPS`).
+   Tanpa kegagalan sebelumnya tidak ada kenaikan; `maxSteps` eksplisit caller
+   selalu menang.
+3. **Test PTY `/shell` jujur.** `test/audit-fix-shell-pty.test.ts` menjalankan
+   CLI nyata di PTY: `/shell` → lepas alt-screen (`ESC[?1049l`) → marker unik
+   dari `echo` → `exit` → alt-screen masuk lagi (`ESC[?1049h`) + composer.
+   E2E penuh hanya di POSIX; di win32 (ConPTY input fragil) test partial yang
+   terbatas hanya membuktikan release + prompt shell. Keduanya memakai
+   `test.skipIf` — skip terlihat, bukan PASS diam-diam.
+4. **Drift test dibetulkan.** `test/p9-admission-boundaries.test.ts` B3 dulu
+   memaku timeout 300s tetap; kini membandingkan dengan
+   `resolveSubAgentTimeout()` dan memeriksa batas timer — kontrak adaptif
+   dipertahankan, bukan diubah.
+
+Peta proteksi: `test/audit-fix-subagent-adaptive-history.test.ts`,
+`test/audit-fix-shell-pty.test.ts`, `test/p9-admission-boundaries.test.ts`,
+`test/delegate-audit.test.ts`, `test/audit-fix-subagent-adaptive.test.ts`.
+
+Perubahan v7.33 (kritik wire contract & governance):
+
+1. **Otorisasi tool LIVE.** `createLiveAuthorizedTools()` menggantikan snapshot
+   statis `authorizedTools` — predicate membaca array `rest.tools` yang di-mutasi
+   in-place oleh `setWorkMode`/`setPermissionMode`. Transisi DISCUSS↔EXECUTE kini
+   menjaga `visible === callable` juga untuk tool MCP runtime.
+2. **Single source of truth benar-benar tunggal.** `ToolContractMetadata`
+   memiliki flag `jailTarget`/`internalWrite`/`noPrompt`/`allowedInPlan`; semua
+   Set di `permission.ts` (FILE_WRITE, INTERNAL_WRITE, NO_PROMPT, PLAN_EXTRA,
+   jail groups) dan `PLAN_EXTRA_TOOL_NAMES` diturunkan dari `TOOL_CONTRACTS`.
+   Tool workspace-mutation baru (`ws(...)`) otomatis ter-jail & auto-allowed.
+3. **Fail-closed receipt.** Journal tak terbaca → `findIdempotentInvocation`
+   mengembalikan `pending` (refuse), bukan `proceed`. Kehilangan receipt durable
+   tidak lagi dibuang via `void` — `onReceiptLoss` (production wiring di
+   `src/tools/evidence.ts` memakai `throwOnReceiptLoss`) memberi sinyal keras.
+   Scope read-only tetap bypass jurnal (mutation-scoped).
+4. **Jujurnya test.** Test sandbox/TOCTOU/non-TTY yang dulu `return` diam-diam
+   kini `test.skip` terlihat; ada integration test `bash exit 7` nyata,
+   `ctx.cwd ≠ process.cwd()` untuk jail, dan test REFUSED_ berbasis perilaku
+   (isError), bukan regex sumber. Pin exact-string dilonggarkan.
+5. **Wire contract lebih hemat** (lihat deskripsi tool): family tag, aturan
+   edit→apply_patch→write_file yang identik, deskripsi `bash`/`web_search`
+   dipangkas, empty-result diberi next-step, dan LSP menyatakan posisi 0-based
+   vs 1-based.
+
+Peta proteksi: `test/audit-fix-governance.test.ts`,
+`test/audit-fix-receipt-failclosed.test.ts`, `test/audit-fix-shell-handoff.test.ts`,
+`test/audit-fix-tool-tests-quality.test.ts`, `test/audit-fix-wire-contract.test.ts`,
+`test/new-tools.test.ts`, `test/tools.test.ts`, `test/cli-commands.test.ts`.
+
+Perubahan v7.32 (audit per-tool + shell interaktif):
+
+1. **Error semantics per-tool.** 6 tool LSP, `notConnected()` MCP, dan 4 jalur
+   `REFUSED_*` sub-agent kini **melempar** error (isError), bukan string sukses;
+   sentinel "tidak ada hasil" tetap string. `git` timeout me-reject dengan
+   `effective.reason` (bukan `exit null`). `code_run` timeout melempar (paritas
+   `bash`). Hasil LSP dibatasi (diagnostics 50, symbols 100).
+2. **Efisiensi & konsistensi tool.** `web_search` pasang abort listener sebelum
+   cek `aborted`; `bash` membersihkan timer/listener di `error` maupun `close`
+   dan menggabungkan cap stdout+stderr (20k total); `bash_kill` membatalkan timer
+   lama; `glob`/`grep` mengurutkan hasil; `read_memory` `topK` di-clamp 1..25;
+   `grep` membedakan timeout dari "no matches"; `ask_user` meneruskan sinyal
+   turn ke modal (abort memutus penungguan jawaban).
+3. **Shell interaktif via handoff (`/shell`).** Composition root melepas
+   alt-screen + raw mode (`releaseTerminal`), spawn shell asli dengan
+   `stdio:"inherit"` (PTY/terminal asli — `vim`, warna, resize jalan), lalu
+   `reacquireTerminal()` saat shell selesai. Tidak ada PTY adapter in-TUI,
+   sehingga invariant #1/I3 & writer-inventory tetap utuh. Non-TTY/one-shot
+   menolak fail-closed. Perintah `bash` untuk model tetap non-interaktif oleh
+   desain (model mengirim string perintah, bukan mengetik ke PTY).
+
+Peta proteksi: `test/audit-fix-tool-errors.test.ts`,
+`test/audit-fix-tool-efficiency.test.ts`, `test/hardening-boundary.test.ts`,
+`test/new-tools.test.ts`, `test/mcp-resources-prompts.test.ts`,
+`test/cli-command-audit-regressions.test.ts`, `test/audit-fix-deep-tool-*.test.ts`.
+
+Perubahan v7.31 (audit bug menyeluruh):
+
+1. **Kontrol:** drag-selection auto-scroll dibalik ke arah tepi yang benar
+   (anchor atas → tepi atas = ke lama); abort user ditangkap di `runTurnOnce`
+   sehingga toast "stopped" tampil dan tak ada error line permanen di transkrip;
+   scroll bound memakai `viewportHeight` tanpa `-1` (off-by-one hilang).
+2. **Sub-agent:** watchdog liveness kini menghitung `provider:text` sebagai
+   bukti hidup (streaming panjang tak lagi salah di-abort); flag
+   `maxStepsExceeded` ikut ke receipt durable; `SESSION_RENEW_INTERVAL_MS`
+   diturunkan dari lease.
+3. **Tool/keamanan:** `isExitCodeFailure` mengenali `exit null/unknown` dan
+   `[TOOL_OUTCOME state=UNKNOWN …]`; `mcp_read`/`mcp_prompt` melempar error
+   (isError) alih-alih string sukses; OS sandbox meneruskan kredensial git saat
+   unrestricted; timer eskalasi `bash_kill` dibersihkan saat job close.
+4. **Persistensi/provider:** `activity.label` punya validator replay (self-title
+   selamat dari restart); tool events tak lagi lolos dengan `||` (mencegah state
+   sesi terhapus); `history_summaries` ikut dihapus saat sesi dihapus; Responses
+   API selalu `store:true` agar chaining valid; watchdog first-byte kompaksi tak
+   dibatalkan event sintetis `minicode:attempt`.
+
+Peta proteksi: `test/tui-app.test.ts`, `test/delegate-audit.test.ts`,
+`test/p92-child-result-envelope.test.ts`, `test/providers-p11.test.ts`,
+`test/mcp-resources-prompts.test.ts`, `test/audit-fix-deep-tool-failed-exit.test.ts`.
+
+Perubahan v7.30 (receipt ke footer, ringkasan tool, sub-agent adaptif, caret):
+
+1. **Riwayat percakapan hanya berisi percayakan.** Semua receipt (copy,
+   `/mode`, `/view`, `/lang`, steer/queue, unknown command) kini lewat
+   `app.showToast()` → footer indicator, bukan `transcript.pushInfo`. Startup
+   notices, approval, dan output perintah nyata tetap di transkrip. Prioritas
+   indicator: toast > abort hint > baris-baru.
+2. **Ringkasan tool satu baris per turn.** `flushActivityFold()` aktif lagi:
+   `  + 5 command · 3 edit · 1 thought` (kategori dari nama tool, tanpa kotak/
+   grup). Detail lengkap tetap di `/expand`. Baris ini sekaligus jadi pemisah
+   antar turn/laporan. Baris tool live saat turn berjalan tetap tampil.
+3. **Sub-agent adaptif & diawasi.** Timeout dihitung `resolveSubAgentTimeout`
+   dari panjang prompt + riwayat (default 300s, env tetap dihormati). Watchdog
+   `step:started`/`execution:started` memperbarui `lastProgressAt`; bila stall
+   melebihi `min(timeout/4, 120s)`, child di-abort via `session.abort()` tanpa
+   mengganggu turn induk. `max_steps_exceeded` kini mencatat outcome
+   (`maxStepsExceeded:true`) → Run INTERRUPTED, bukan COMPLETED, dengan pesan
+   `step limit reached (N/M)`.
+4. **Caret prompt menempel di `›`.** Spasi trailing dihapus dari `promptFirst()`;
+   bar tegak DECSCUSR kini tampil tepat setelah `minicode ›`, bukan setelah
+   spasi tak terlihat.
+
+Peta proteksi: `test/audit-fix-footer-receipts.test.ts`,
+`test/audit-fix-compact-tool-summary.test.ts`, `test/audit-fix-subagent-adaptive.test.ts`,
+`test/p92-child-result-envelope.test.ts`, `test/p92-recovery-warning-envelope.test.ts`,
+`test/tui-app.test.ts`, `test/cli-command-audit-regressions.test.ts`.
+
+Perubahan v7.29 (warna, chat bersih, sparkle adaptif, prompt sebagai history):
+
+1. **Prompt jadi history, card dihapus.** `projectRows()` tidak lagi
+   menyembunyikan gema user terakhir; `cardRows`/`promptCard`/`lastUserPrompt()`
+   dihapus. Prompt yang dikirim tampil langsung di transkrip sebagai baris
+   `minicode › …`, bukan band mengambang. Semua turunan `cardH` collapse ke 0
+   sehingga tinggi frame & pemetaan mouse tetap konsisten.
+2. **Warna menyala by default di TTY.** `FORCE_MONO` dihapus; prioritas:
+   `MINICODE_COLOR=0|false|off|no` → monokrom, lalu `NO_COLOR` (0 = nyala),
+   lalu non-TTY/`TERM=dumb` → level 0, baru `COLORTERM`/`TERM`/`getColorDepth`.
+   Heading memakai `accentBold`, inline code `brightCyan`, keyword/string/angka
+   di `highlight.ts` (magenta/hijau/kuning), tool `accentAlt`. `stripAnsi()`
+   tetap menghasilkan teks identik — hierarki tidak bergantung pada warna saja.
+3. **Kolom chat bersih.** `busyProgressLine`/`activityStatus`/`activityRow`/
+   `composerProgressPrefix`/`thinkingActive` dihapus dari `app.ts`. Composer
+   SELALU menampil `minicode ›` + draft, siap diketik, walau turn berjalan.
+   Status kerja pindah ke footer `indicatorLine` (slot yang sudah ada).
+   **Catatan v7.36:** keputusan "chat bersih" ini tetap berlaku untuk
+   *composer* dan `app.ts` (tak ada progress row di sana), TAPI ringkasan
+   aktivitas kini kembali live di dalam **transkrip** di bawah narasi —
+   lihat entri v7.36 yang menimpa bagian "status hanya di footer".
+4. **Sparkle adaptif.** `FooterStatus.streamIntervalMs` baru; `app.ts` mengukur
+   jeda antar `provider:text` (jendela 6 sampel) → interval 120/150/220/320 ms;
+   `sparkFrame` memakai interval itu. Model cepat = kelip cepat & terang-redup
+   lebih sering. `MINICODE_MOTION=0` tetap mematikan animasi.
+5. **Lingkaran unrestricted** (`glyphs.unlock` `○` / `[OPEN]`) kini benar-benar
+   merah via `c.red` saat warna menyala; tetap polos di mode monokrom.
+6. **Pemisah narasi→tool.** Satu baris kosong disisipkan sebelum baris tool
+   pertama per turn (analog `marginTop=1` OpenCode), bukan tiap tool.
+
+Peta proteksi: `test/audit-fix-color-mode.test.ts`, `test/theme*.test.ts`,
+`test/highlight.test.ts`, `test/tui-app.test.ts`, `test/tui-transcript.test.ts`,
+`test/footer-render.test.ts`, `test/audit-fix-deep-control-tui.test.ts`,
+`test/audit-fix-live-progress.test.ts`.
+
+Perubahan v7.28 (anchor transkrip atas ala OpenCode):
+
+1. **Transkrip di-anchor dari ATAS.** `Transcript.viewport()` kini memakai
+   `firstIndex = min(scrollBack, max(0, len - height))` (sebelumnya dihitung
+   dari ekor). Saat konten lebih pendek dari viewport, baris kosong ditaruh
+   DI BAWAH (`rows.push`), bukan di atas — pesan mulai dari baris pertama,
+   ruang kosong berada tepat di atas card/composer yang tetap di bawah.
+2. **Makna `scrollBack` berubah.** `0` = kepala/teratas; nilai besar bergerak
+   ke bawah; `scrollBack = maks` = ekor (terbaru). PgUp/PgDn dan wheel
+   mengikuti arah ini; Home → `0`, End → maks. `followTail()` (dipanggil saat
+   ketik/submit) kini men-set `scrollBack` ke maks.
+3. **Auto-follow tetap "sticky at tail".** Seperti OpenCode (`stickyStart`
+   bottom + toggle saat away), minicode hanya mengikuti ekor bila user sudah
+   di ekor. Stream yang masuk saat userscroll ke atas TIDAK merampas posisi;
+   indikator `app.newBelow` muncul bila `scrollBack < maks`.
+4. **Drift `lastWrapped` dihapus.** Karena baris baru ditambahkan di bawah,
+   mereka tidak menggeser baris yang sedang terlihat — koreksi posisi lama
+   tidak lagi diperlukan. Tinggi frame, `transcriptTop`, `composerTop`, dan
+   pemetaan mouse/seleksi tidak berubah (viewport tetap tepat `viewH` baris).
+
+Peta proteksi: `test/tui-transcript.test.ts` (padding bawah, scrollBack arah,
+cap/marker), `test/tui-app.test.ts` (PgUp/PgDn, wheel, indikator baris baru,
+kembali ke ekor saat ketik, seleksi lintas jeda).
+
+Perubahan v7.27 (narasi kerja aktif & progres live):
+
+1. **Sistem prompt meminta narasi seimbang.** Blok `# Communication` (sekitar
+   700 char, sebelum `opts.extra` dan semua blok DATA agar selamat dari cap
+   8000) mengarahkan model: ceritakan kerja dalam kalimat pendek, konfirmasi
+   tujuan + pendekatan di awal tugas non-trivial, satu kalimat sebelum tool
+   non-rutin, sebut sub-agent yang di-spawn + ringkas temuannya + flag
+   ketidaksesuaian, dan tutup dengan catatan/caveat. Delegasi juga didorong
+   lebih awal untuk riset/audit paralel (scope kecil, ≤5 temuan) tanpa
+   mengubah aturan otorisasi/WorkMode.
+2. **Satu baris progres live, flat & monokrom.** Event durable baru
+   `step.started` (dari `step:started` kernel) dan `plan.updated` dari
+   `todo_write` kini tampil di slot status/composer yang SAMA — tidak
+   menambah tinggi frame. Prioritas: abort hint > langkah > rencana `todos
+   d/t` > tool berjalan (+elapsed) > dots thinking. Baris ini TETAP tampil
+   walau user mengetik draft (draft berbagi baris, prefix progres di depan).
+   Tanpa warna, tanpa kotak, tanpa panel/ledger/turn-summary.
+3. **Replay progres.** `step.started` divalidasi eksplisit di
+   `isValidEventShape` (`src/session/persistence.ts`) agar tidak ditolak saat
+   `decodePresentationEvent` saat resume — cache snapshot tetap invalidasi
+   via `state.seq` yang naik.
+
+Peta proteksi: `test/audit-fix-communication-prompt.test.ts`,
+`test/audit-fix-live-progress.test.ts`, `test/tui-app.test.ts`,
+`test/presentation-projections.test.ts`, `test/presentation-bridge.test.ts`,
+`test/context-audit.test.ts`, `test/instruction-trust.test.ts`.
+
+Perubahan v7.26 (sub-agent lebih kokoh & bernama):
+
+1. **`delegate_task.timeoutMs` dapat diatur per panggilan.** Skema menerima
+   `timeoutMs` opsional (finite, >0, dibatasi `MAX_TIMER_DELAY_MS`); nilai
+   invalid ditolak fail-closed. Sebelumnya timeout 120 dtk di-hardwire untuk
+   semua child, sehingga fan-out 5 `explore` mudah kena `turn exceeded 120000ms`.
+2. **Default timeout 300 dtk + env override.** `SUB_AGENT_TIMEOUT_MS` naik dari
+   120_000 ke 300_000 dan bisa diubah lewat `MINICODE_SUB_AGENT_TIMEOUT_MS`
+   (divalidasi saat module load). `SESSION_LEASE_MS` diturunkan
+   `ceil(timeout * 2.5)` dari konstanta yang sama (tak lagi angka hardcode), dan
+   default autonomous mengikuti konstanta itu.
+3. **Pool bisa diatur** lewat `MINICODE_SUB_AGENT_POOL_SIZE` (1..16, default 3).
+   Fan-out 5 benar-benar paralel bila di-set 5; antrean bukan penyebab timeout
+   (clock mulai saat slot didapat), tapi ini membuka opsi tersebut.
+4. **Timeout fail-soft dengan hasil parsial.** Teks yang sudah mengalir
+   (`provider:text` / extension `text`, reasoning dikecualikan) dikumpulkan
+   (cap 1.200 char) dan disertakan di pesan induk + receipt, bukan dibuang.
+   Status child tetap `timeout`, ACE FAIL/BLOCKED, efek filesystem tidak
+   di-rollback, dan slot pool tetap dilepas (verifikasi `finally` di pool).
+5. **Nama sub-agent menggantikan kode opak.** Arg `name` opsional; bila kosong
+   dibuat label otomatis `explore-1`, `plan-2`, … Label dinormalisasi (karakter
+   kontrol dibuang, maks 40 char) dan disanitasi sekali lagi saat render oleh
+   `runMarker()`, yang mengutamakannya di atas fallback `run_<8>`/`sub_<8>`.
+   Rantai: `tagForwarded` → `ChildSessionLink` → `Activity` →
+   `UiPresentationActivity` → `reducer` → `presentation-bridge` → `cli/setup`
+   → marker di TUI & renderer linear.
+
+Peta proteksi: `test/audit-fix-subagent-timeout-name.test.ts`,
+`test/delegate-audit.test.ts`, `test/presentation-projections.test.ts`,
+`test/p9-admission-boundaries.test.ts`, `test/phase6y-lease-core.test.ts`.
+
+Perubahan v7.25 (audit mendalam kontrol ↔ render ↔ mode ↔ tool):
+
+1. **Kontrol:**
+   - flag `awaitingSecondEsc` menggantikan ketergantungan pada `lastAbortAt`
+     saja; mengetik draft baru setelah abort melepaskan gesture quit.
+   - Card prompt mengikuti `transcript.lastUserPrompt()`, sehingga steering saat
+     busy langsung terlihat di card (bukan prompt lama).
+   - `buildLayout` tidak lagi dipanggil dari callback backdrop saat popup
+     suspended — frame redup dibekukan sekali saat `suspend()`.
+   - `abortHintOn` di-reset di `turn:started`.
+   - overflow paste >512 KiB tetap dalam mode paste sampai `ESC[201~`; parser
+     mouse SGR membatasi pencarian `;` ke dalam rune sequence saat ini.
+2. **Mode & permission:**
+   - cleanup background job dipasang juga di `process.once("exit")` (selain
+     `close()`), jadi SIGTERM/SIGHUP tak meninggalkan child detached.
+   - `abortRequested` dibersihkan saat turn baru dibuat, bukan di `submit()`;
+     auto-resume background job tetap bisa menerima steering.
+   - `code_run` disembunyikan di EXECUTE × allowlist (`visible === callable`).
+   - "Always" untuk `delegate_task` diblokir juga di policy (`saveAlways`,
+     `matchAllowlist`), bukan hanya di view.
+   - footer membaca mode permission live (satu sumber dengan `/status`).
+   - `--session <id>` takeover memulihkan WorkMode tersimpan.
+   - `readonly`/`plan` kini meng-gate `web_fetch`/`web_search` lewat `ask`
+     (headless = deny).
+3. **Tool:**
+   - `exit N` dari git/bash/code_run diklasifikasikan sebagai `tool.failed`
+     dengan pesan exit (tampil di ledger flat & linear), bukan sukses.
+   - `isAlreadyFenced()` mewajibkan nonce — pagar start-only dari konten
+     eksternal ditolak dan dibungkus ulang.
+   - `runGit` menolak saat `signal.aborted`; retry commit cek `throwIfAborted`.
+   - error MCP dilempar lagi agar `isError` terdeteksi (bukan string sukses).
+   - kredensial git diteruskan ke sandbox docker saat mode `unrestricted`.
+   - deskripsi `web_search` tidak lagi mengklaim SSRF guard yang tak dipakai.
+   - ID approval unik per permintaan (`randomUUID`), bukan counter global.
+
+Peta proteksi: `test/audit-fix-deep-control-*.test.ts`,
+`test/audit-fix-deep-mode-*.test.ts`, `test/audit-fix-deep-tool-*.test.ts`,
+`test/tui-queue.test.ts`, `test/work-mode-*.test.ts`, `test/permission-*.test.ts`,
+`test/scrub-fence.test.ts`, `test/p15-phase4-context-fence-and-e2e.test.ts`,
+`test/phase6s-autonomous-permission-policy.test.ts`,
+`test/phase6v-adversarial-audit.test.ts`.
+
+Perubahan v7.24 (ritme spasi transkrip):
+
+1. **Satu baris kosong untuk setiap batas blok.** `pushUser` kini menyisipkan
+   jeda SEBELUM dan SESUDAH prompt user; gema user terakhir (yang dipindah ke
+   card v7.23) ikut tersaring sebelum normalisasi, sehingga jeda sebelum card
+   tetap tepat satu baris. `projectAll` memakai `normalizeBlankRuns` — run dua
+   atau lebih baris kosong diruntuhkan jadi satu, baik di jalur cache maupun
+   jalur dinamis (streaming/activity).
+2. **Card hanya menyimpan jeda bawahnya.** Jeda atas card disuplai baris kosong
+   dari viewport yang sudah dinormalisasi (bukan padding card), sehingga tidak
+   ada dobel spasi antara jawaban/model dan card prompt.
+3. Ritme akhir per turn: `user → (1 kosong) → jawaban/tools → (1 kosong) →
+   card prompt berikutnya → (1 kosong) → composer → (1 kosong) → footer`.
+
+Peta proteksi: `test/tui-transcript.test.ts` (jeda antar-turn, prompt mentah
+untuk card, seleksi baris terbungkus), `test/tui-app.test.ts` (card tepat di
+atas composer tanpa gema dobel), `test/presentation-projections.test.ts`,
+`test/activity-panel.test.ts`.
+
+Perubahan v7.23 (card prompt & perbaikan kontrol TUI — melanjutkan v7.22):
+
+1. **Prompt user jadi card transparan di atas composer.** `TuiApp` menyimpan
+   prompt terakhir dan merendernya sebagai box yang outline + background-nya
+   memakai warna terminal (nyata secara struktural, tak terlihat secara visual:
+   tanpa garis, tanpa SGR). Card diposisikan TEPAT di atas composer; seluruh
+   teks jawaban, tool, dan aktivitas turn berjalan dirender DI ATAS card.
+   Gema inline `minicode › <prompt>` di viewport disembunyikan supaya tak dobel
+   (card menggantikannya). Tinggi viewport, posisi kursor composer, dan
+   `composerTop` sudah disesuaikan dengan tinggi card.
+2. **Kontrol mati dihapus.** `Ctrl+O`/`Ctrl+T` tidak lagi terikat dan tidak
+   tercantum di `/help keys`; `/view compact|fold|minimize` dihapus dari
+   `VIEW_ACTIONS` (kini hanya `thinking|expand`). Flag lama tetap di `TuiHost`
+   sebagai no-op tanpa receipt — tidak ada lagi umpan balik palsu "tool output:
+   compact" / "thinking: expanded" di renderer flat yang tak mengonsumsinya.
+3. **Decoder input aman untuk Alt/ESC.** `ESC` + byte printable kini menghasilkan
+   `ignore` (bukan `esc`), sehingga `Alt+b` di composer tidak meng-abort turn
+   sibuk. Lone-ESC dan `Alt+Enter` (`ESC+CR`) tetap dipertahankan, termasuk bila
+   terpisah di dua chunk stdin (`pendingLoneEsc`). Overflow bracketed-paste
+   mundur ke batas codepoint UTF-8 terakhir (tanpa `U+FFFD`).
+4. **Double-Esc quit tidak hilang.** Pen-cekan `lastAbortAt` (1,5 dtk) kini
+   dilakukan SEBELUM cabang busy/idle, sehingga abort yang langsung selesai
+   tetap bisa diikuti Esc kedua sebagai quit (bukan `/undo`).
+5. **Approval & steering.** Idle guard approval di-reset pada SETIAP ketikan/
+   chunk (I21), bukan hanya pada perubahan state. Steering fallback menolak
+   antrean (`abortRequested`) antara abort unwind dan submit berikutnya — niat
+   yang dibatalkan tak boleh hidup lagi sebagai turn baru.
+
+Peta proteksi: `test/tui-app.test.ts` (card, posisi composer, double-Esc),
+`test/audit-fix-control-decoder.test.ts`, `test/audit-fix-control-dead-keys.test.ts`,
+`test/prompt-engine.test.ts`, `test/input-recovery.test.ts`, `test/tui-queue.test.ts`,
+`test/approval-tui.test.ts`, `test/cli-command-audit-regressions.test.ts`.
 
 Perubahan v7.21 (steering transaksional & penagihan langkah):
 
@@ -33,14 +651,15 @@ Perubahan v7.20 (perapian teks render & keterbacaan idle):
    `│ ts` (bar yang sama dengan isi blok) alih-alih `· ts` yang terbaca seperti
    poin daftar — di TUI maupun renderer linear.
 4. **Zero-state idle ramah dibaca.** Logo tetap di pojok kiri atas, plus satu
-   baris hint redup `app.idleHint`; identitas tidak diduplikasi dari footer.
+   baris hint redup (kunci `app.idleHint`, sudah dihapus di v7.40);
+   identitas tidak diduplikasi dari footer.
 5. **Kop sesi rata kolom.** Lebar label dihitung dari label terpanjang locale
    aktif, bukan `padEnd(7)` mati — `Pemakaian` (9) dulu merusak perataan.
 
 Peta proteksi: `test/tui-transcript.test.ts` (ledger sukses `›`, header fence),
 `test/presentation-projections.test.ts` (status non-sukses ber-`·`, baris run
 anak, ringkasan turn), `test/activity-panel.test.ts` (alasan gagal tetap tampil),
-`test/tui-app.test.ts` (zero-state logo+hint), `test/session-summary.test.ts`
+`test/tui-app.test.ts` (zero-state kosong tanpa logo/hint), `test/session-summary.test.ts`
 (kop sesi), `test/i18n.test.ts` (kunci ringkasan turn di kedua locale).
 
 Perubahan v7.19 (remediasi audit & ergonomi UX):
@@ -63,7 +682,8 @@ Perubahan v7.19 (remediasi audit & ergonomi UX):
    (`\u0080–\u009f`); wizard menjaga pesan error sampai user menekan Enter/Esc.
 4. **Zero-state clean (logo kecil pojok kiri atas), ritme transkrip, seleksi akurat, & ASCII konsisten.**
    Saat transkrip kosong dan idle, logo kecil minicode (`14×9` half-block) tampil
-   di pojok kiri atas, diikuti SATU baris hint redup (`app.idleHint`: mulai /
+   di pojok kiri atas, diikuti SATU baris hint redup (`app.idleHint` historis,
+   dihapus v7.40: mulai /
    `/help` / `Ctrl+D`) satu baris di bawahnya. Identitas (model/CWD) tidak
    diulang karena footer sudah memuatnya; hint hilang begitu user mengetik atau
    transkrip terisi, dan tidak ditambahkan bila tinggi viewport tak cukup (logo
@@ -272,7 +892,7 @@ tampil. Jawaban model membuang blank line di tepi dan merapatkan jeda berulang
 di luar code fence; isi code fence tetap literal.
 
 Perubahan v7.8: sesi baru dan sesi legacy tanpa WorkMode mulai di `Discuss`;
-operator hanya dapat memilih `Discuss`, `Plan`, atau `Build`. Permission Mode
+operator hanya dapat memilih `Discuss` atau `Build` (`Plan` legacy → `Discuss`). Permission Mode
 awal `Auto` dan kontrolnya hanya `Auto`/`Ask`. Dropdown `/` menampilkan nama
 command tanpa slash, judul, deskripsi, atau baris tambahan. (Sejak v7.18
 jendela command memakai judul konteks; dropdown `/` tetap tanpa judul.) Baris
@@ -339,10 +959,11 @@ proteksi").
 ## Sifat produk
 
 - **Interaktif (TTY mampu)**: aplikasi fullscreen alternate-screen dari start
-  sampai quit. Area transkrip bergaya shell (prompt `minicode ›`, jawaban
-  model, ledger `›`), status bar bawah, popup kecil di atas transkrip yang
-  tetap terlihat (redup) di belakang. Keluar = buffer utama kembali persis
-  (transkrip sesi tidak di-dump ke scrollback).
+  sampai quit. Area transkrip FLAT & MONOKROM: prompt `minicode ›`, jawaban
+  model, dan satu baris tool ringkas `› nama target`; tanpa panel, kotak, garis,
+  atau warna. Status bar satu baris di bawah. Popup masih melukis regionnya
+  sendiri di atas transkrip. Keluar = buffer utama kembali persis; kop sesi
+  tidak dicetak (transkrip sesi tidak di-dump ke scrollback).
 - **Non-interaktif** (one-shot prompt, `exec`, pipe/redirect/CI): cetak polos,
   tak pernah membuka TUI.
 - Tanpa panel/sidebar; mouse app-level untuk wheel scroll dan drag-selection
@@ -354,8 +975,8 @@ proteksi").
 | Stream | Isi | Catatan |
 |---|---|---|
 | stdout | Permanent output pada non-interaktif; frame TUI saat sesi interaktif | `App` satu-satunya pemilik frame interaktif; machine output tetap murni |
-| stderr | Human-facing progress/diagnostic: ledger tool (`› …` hijau/merah), reasoning (default tersembunyi/minimized; `MINICODE_SHOW_THINKING=1` atau `/view thinking` / `Ctrl+T` / `--verbose` menampilkan), warning, error | Boleh transient rendering bila stderr TTY |
-| keduanya | Warna hanya bila stream TTY (`stdout.isTTY`); `NO_COLOR` menang; TERM/COLORTERM env TIDAK menyalakan warna pada pipe/redirect | Lihat `src/ui/render/theme.ts` `colorLevel()` |
+| stderr | Human-facing progress/diagnostic: satu baris tool `› …`, warning, error Reasoning tidak dirender di transkrip flat | Boleh transient rendering bila stderr TTY |
+| keduanya | **TANPA warna sama sekali** (v7.22): `colorLevel() === 0` dipaksa; `NO_COLOR`/`COLORTERM`/`stdout.isTTY` tak mengubah byte output. Urutan cursor/alt-screen tetap TTY-only | Lihat `src/ui/render/theme.ts` `FORCE_MONO` |
 
 Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
 0 animasi spinner, 0 ANSI yang tidak diperlukan, output deterministic.**
@@ -573,33 +1194,35 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
      job background hidup, badge `◷ N` (jam berputar pelan, `N` = jumlah job)
      tampil di samping spark; fallback ASCII `[BG:N]`. `✦` tetap
      menjadi indikator proses hidup;
-     timer `HH.MM.SS` berada tepat di sebelahnya. Idle=redup; saat aktif hanya
-     detik putih, menit ikut terang setelah 60 dtk, dan jam setelah 1 jam.
-     Reasoning memakai dots `...` → `..` → `.` → `..` →
-     `...`, sedangkan teks `Working`/`Thinking`/`Running` tidak tampil. Bullet
-     separator dihapus; field dipisahkan oleh spasi dan warna. Prompt `minicode ›`
+     timer `HH.MM.SS` berada tepat di sebelahnya. Sejak v7.22 semua field
+     MONOKROM: tak ada level warna idle/aktif/60 dtk/1 jam; yang berubah hanya
+     glyph spark dan format timer. Reasoning memakai dots `...` → `..` → `.`
+     → `..` → `...`, sedangkan teks `Working`/`Thinking`/`Running` tidak tampil.
+     Bullet separator dihapus; field dipisahkan oleh spasi. Prompt `minicode ›`
      tampil saat boot/idle, hilang saat busy, dan kembali otomatis setelah turn
      selesai; aksi edit/histori tetap dapat membuka composer.
      `MINICODE_MOTION=0` membuat dots dan sparkle statis tetapi tidak
      menghilangkan feedback; satu baris kosong memisahkan composer dari footer.
 14. Binding TUI: mouse wheel (X10/SGR) scroll transkrip; drag kiri app-level
-     membuat selection transkrip yang kontinu melintasi jeda paragraf, border
-     tabel, header kode, serta tepi viewport dan `Ctrl+C` menyalinnya; klik
+     membuat selection transkrip yang kontinu melintasi jeda paragraf, baris
+     tabel flat, isi fence kode, serta tepi viewport dan `Ctrl+C` menyalinnya; klik
      pada baris composer manapun memindahkan kursor langsung ke posisi klik;
      PgUp/PgDn scroll; **Shift+PgUp/PgDn (ESC[5;2~/6;2, modifier 2) = setengah
      halaman; Home/End saat prompt KOSONG = lompat baris-teratas/ekor
      transkrip (baris berisi = editing awal/akhir baris; dropdown terbuka =
      jalur engine)**; Up/Down bernavigasi antar-baris visual pada prompt
      terbungkus/multi-baris (menjaga kolom) lalu ke histori saat di baris
-     visual pertama/terakhir; Tab WorkMode / Shift+Tab PermissionMode; Ctrl+O/T
-     compact/thinking; Ctrl+D baris-kosong
+     visual pertama/terakhir; Tab WorkMode / Shift+Tab PermissionMode
+     (v7.23: `Ctrl+O`/`Ctrl+T` serta `/view compact|fold|minimize` sudah DIHAPUS
+     karena tak punya target visual di renderer flat); Ctrl+D baris-kosong
      keluar; Esc membersihkan selection lebih dulu, lalu batal input / abort
      turn (busy: ketikan hidup & Enter menyelipkan informasi tambahan ke turn
-     aktif, dengan antrean sebagai fallback; Tab/Shift+Tab/Ctrl+O/T/R ditahan,
+     aktif, dengan antrean sebagai fallback; Tab/Shift+Tab ditahan,
      Esc = abort yang juga membuang antrean;
      berlaku juga saat layar MENCIUT: abort+scroll selalu lolos
-     agar turn bisa dibatalkan tanpa kill -9; abort pertama menampilkan status
-     `Stopping` + hint keluar sekali, abort kedua dalam 1,5 detik menutup sesi).
+     agar turn bisa dibatalkan tanpa kill -9; abort pertama menampilkan hint
+     `app.abortHint` ("abort sent — press Esc again to quit") sekali, abort kedua
+     dalam 1,5 detik menutup sesi — token lama `Stopping` tidak lagi dipakai).
      Saat idle dan composer kosong, dua Esc dalam 500 ms membuka picker `/undo`;
      Esc yang membersihkan teks, selection, atau dropdown tidak ikut gesture ini.
      Ini adalah selection buffer TUI, bukan native terminal selection. Idle
@@ -610,17 +1233,17 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
 16. Popup komposit: region tanpa clear + union-clear anti-hantu + clearRegion
     saat tutup + suspend/resume berpasangan; layar tak mampu = tolak bersuara
     + batal.
-17. Transkrip append-only di memori (cap 5000), viewport ikut ekor otomatis;
-     ketikan baru kembali ke ekor; stream turn TIDAK merampas posisi baca;
+17. Transkrip append-only di memori (cap 5000), viewport anchor ATAS (v7.28)
+     dengan sticky follow ke ekor; ketikan baru kembali ke ekor (`scrollBack`
+     = maks); stream turn TIDAK merampas posisi baca;
      repaint live coalesce 30ms dan clock activity 200ms (layar tak buta
      saat turn). Composer memakai tinggi tetap: prompt saat editing, dots saat
      reasoning, atau tool target; satu baris kosong selalu memisahkannya dari
-     footer. Proyeksi presentasi: baris running di-pin dari snapshot, elapsed
-     tetap pada ledger tool, status tool final memakai warna + kata hanya untuk
-     status NON-sukses (`failed`/`denied`/`cancelled`/`interrupted` dipisah
-     `·`; `completed` tidak mencetak kata karena baris hijau sudah menyatakan
-     hasilnya), retry dan grup anak mengikuti model, serta ringkasan turn masuk
-     sebagai system entry dengan counter nol dan `ckpt` kosong DILEWATI.
+     footer. Proyeksi presentasi (v7.22): tool tampil sebagai SATU baris ringkas
+     `› nama target`; status hanya untuk NON-sukses (`failed`/`denied`/
+     `cancelled`/`interrupted`, dipisah `·`) dan TANPA warna. Activity panel/
+     fold, area thinking, baris running, dan ringkasan turn (counter/`ckpt`)
+     TIDAK dirender; event diagnostik non-tool tetap dikonsumsi tanpa baris.
      **Retry provider:** setiap `model.delta`/`reasoning.delta` live membawa
      `attemptId`. Bila attempt gagal setelah mengirim konten, TUI membuang
      ekor attempt yang belum di-commit dan menambah diagnostic invalidasi.
@@ -645,7 +1268,8 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
     Handoff draft/notice dikonsumsi sekali agar tidak diwariskan saat pindah sesi.
     `/copy [n]` menyalin 1–10 turn terakhir (default 1,
     oldest-to-newest) melalui OSC 52.
-19. Dropdown `/` inline berbingkai; Enter pada menu melengkapi + kirim.
+19. Dropdown `/` inline TANPA bingkai (renderer flat); `listRow` memakai marker
+     kolom tetap, Enter pada menu melengkapi + kirim, Tab melengkapi tanpa kirim.
 20. Lebar kotak popup **diskalakan dari lebar layar secara dinamis saat resize**:
     `popupBoxWidth(cols) = min(max(40, min(88, floor(cols*0.6))), cols-4)`
     (v7.14; adaptif `resize` di seluruh permukaan sejak v7.19). Semua
@@ -841,43 +1465,25 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
     transkrip (fail-open untuk data, fail-closed untuk overlay). Dropdown `/`
     tetap inline dan TIDAK termasuk perubahan ini.
 
+37. **Agent control system (v7.22.1).** (a) Peringatan `[recovery]` pasca anak
+    `committed` dipancarkan di JALUR one-shot maupun interaktif/TUI — helper
+    tunggal di `cli/index.ts`, display-only, satu writer stderr; (b) tool gated
+    (minimum `delegate_task`) tetap hard-deny di non-TTY walau `allowNonTtyAsk`
+    / broker daemon di-inject — carve-out hanya untuk tool non-gated; (c) daftar
+    tool yang `visible` di wire untuk EXECUTE × `allowlist` hanya memuat tool
+    yang benar-benar `callable` (GATED_TOOLS/MCP disembunyikan); (d) opsi
+    "Always" tidak tersedia untuk `delegate_task`, sehingga satu approval ASK
+    hanya mencakup satu delegasi. Kontrak visual monokrom/flat v7.22 tidak
+    diubah oleh invariant ini.
+
 ## Grammar (ringkas)
 
-prompt `minicode ›` tampil saat boot/idle dan hilang saat busy (dropdown `/`
-berbingkai di atasnya; `Tab` melengkapi command terpilih saat terbuka, dan
-memutar WorkMode saat tertutup) · logo kecil minicode di pojok kiri atas saat transkrip kosong/idle ·
-status bar `✦ 00.00.00 Discuss  model  cwd … context  Auto ●`
-(timer redup idle; detik putih aktif, menit mulai terang di 60 dtk, jam di 1
-jam; tanpa bullet separator; permission rata kanan dekat token konteks; label
-`Work Mode:`/`Permission Mode:` dihapus; `●` kuning = bash allow-list aktif,
-abu = tidak, `○` merah = unrestricted; badge `◷ N` bila job background hidup)
-+ satu spacer sebelum footer · ledger tool
-`  › name target` (hijau) / `  › name target · <status>: pesan` (merah) saat error ·
-ringkasan turn `turn N · <counter non-nol> · ckpt <id> · <durasi>` · error `pesan` berwarna merah sekali per
-kegagalan · pesan error TUI = formatter kanonik (`formatError`,
-`src/ui/render/errors.ts`): credential di-redaksi (bearer/key/query), escape
-ANSI dibuang, body provider diringkas + dipotong; `e.message` mentah tak
-pernah tampil · thinking: dots clock / alir thinking terbaca · popup: konten redup di
-belakang + kotak terpusat (form di dalam) + Esc tutup · approval tercatat ·
-`/status`, `/sessions history`, `/help`, `/context` & `/view expand` tampil di jendela output
-command di atas chat (v7.18) ·
-`/mode` = satu pintu dua sumbu (`discuss|build` = WorkMode intent layer,
-`auto|ask` = permission mode) ·
-`/view fold` = lipat aktivitas tool per turn (`MINICODE_MINIMIZE_ACTIVITY`, ON di TUI) —
-baris ledger per-tool dirangkum jadi SATU baris ringkas (`n tools · nama · x ok · y gagal`),
-tidak hilang diam-diam; detail dibuka via `/view expand` ·
-tabel markdown dirender kotak ber-garis (opencode-like) ber-`wrap` (konten panjang
-tidak kepotong) + margin kiri 3 kolom (adaptif di lebar < 36); area teks jawaban
-(paragraf, heading, daftar, blockquote, code block) ber-margin kiri 3 kolom
-dengan hanging-indent wrap untuk daftar/paragraf multi-tingkat agar lanjutan teks
-tidak melewati batas kiri tingkatnya serta jeda baris kosong antar-poin/heading/blok ·
-Projection V2: `› name target … running`, ledger status ber-warna/kata,
-retry/grup anak (anak ber-identitas run = baris `↳ run_<8>` sendiri; tanpa
-identitas run = hitungan `n child tools`), ringkasan turn, dan marker evict
-sesuai flag ·
+prompt `minicode ›` tampil saat boot/idle dan hilang saat busy (dropdown `/` TANPA bingkai; `Tab` melengkapi command terpilih saat terbuka, dan memutar WorkMode saat tertutup) · transkrip kosong TANPA logo/hint · prompt user terakhir = CARD TRANSPARAN tepat di atas composer (teks/tools dirender di atasnya; gema inline `minicode › <prompt>` disembunyikan) · jeda SATU baris kosong di setiap batas blok (user↔jawaban/tools, antar turn, card↔composer) · status bar `✦ 00.00.00 Discuss  model  cwd … context  Auto ●` FULL MONOKROM (format timer tetap; tanpa level warna; `●`/`○` tetap penanda permission; badge `◷ N` bila job background hidup) + satu spacer sebelum footer · SATU baris tool ringkas `› name target` (` · <status>` hanya untuk non-sukses; tanpa warna) · error `pesan` sekali per kegagalan · pesan error TUI = formatter kanonik (`formatError`, `src/ui/render/errors.ts`): credential di-redaksi (bearer/key/query), escape ANSI dibuang, body provider diringkas + dipotong; `e.message` mentah tak pernah tampil · popup: konten redup di belakang + kotak terpusat (form di dalam) + Esc tutup · approval tercatat · `/status`, `/sessions history`, `/help`, `/context` & `/view expand` tampil di jendela output command di atas chat · `/mode` = satu pintu dua sumbu (`discuss|build` = WorkMode intent layer, `auto|ask` = permission mode) · `/view compact|fold|minimize` dan `Ctrl+O`/`Ctrl+T` sudah DIHAPUS (`VIEW_ACTIONS` = `thinking|expand`; `TuiHost` no-op tanpa receipt) · tabel markdown FLAT tanpa kotak ber-`wrap` (konten panjang tidak kepotong) + margin kiri 3 kolom (adaptif di lebar < 36); fence kode tanpa bar `│` dan tanpa header bahasa; area teks jawaban (paragraf, heading, daftar, blockquote, code block) ber-margin kiri 3 kolom dengan hanging-indent wrap · Projection V2: marker evict tetap; baris running, area thinking, baris diagnostik non-tool, dan ringkasan turn TIDAK dirender ·
 
-`Esc` saat turn = abort (+ hint sekali, antrean dibuang); busy = composer hidup, Enter menyelipkan
-info tambahan ke turn aktif (`steer` di batas step; fallback antrean) ·
+`Esc` saat turn = abort (+ hint sekali, antrean dibuang); Esc kedua dalam 1,5 dtk
+= quit walau turn langsung selesai; `ESC`+printable (Alt) diabaikan, bukan abort ·
+busy = composer hidup, Enter menyelipkan info tambahan ke turn aktif (`steer` di
+batas step; fallback antrean ditolak selama `abortRequested`) ·
 Mouse wheel = scroll transkrip, PgUp/PgDn = scroll, Shift+PgUp/PgDn = setengah
 halaman, Home/End (prompt kosong) = lompat top/ekor · indikator `↓ N baris baru` ·
 tab dihitung 8 kolom (batas atas stop
@@ -934,11 +1540,11 @@ panjang).
 - `test/tui-app.test.ts` + `test/tui-lang.test.ts` — I18 draft awal/handoff rewind:
   multiline dan Unicode tetap utuh, escape dibuang, tidak auto-submit, env sekali pakai.
 - `test/tui-app.test.ts` — I1/I13/I14/I17-I20 (baris indikator dipotong ke
-  lebar frame walau locale id 51 kolom; logo kecil pojok kiri atas saat boot kosong tanpa teks welcome;
+  lebar frame walau locale id 51 kolom; v7.22: zero-state KOSONG tanpa logo/hint;
   `Tab` autolengkap dropdown `/` vs putar WorkMode saat menu tertutup; klik pada
   baris composer hasil wrap (>5 baris scrolled maupun baris lanjutan) serta
   navigasi visual panah Up/Down pada paragraf panjang; drag seleksi kontinu
-  melintasi jeda paragraf, border tabel, header kode, dan keluar batas viewport;
+  melintasi jeda paragraf, baris tabel flat, isi fence, dan keluar batas viewport;
   prompt idle bertahan setelah Esc;
   `repaint()` tak melukis saat suspended; boot/exit pairing, transcript
   viewport, mouse-wheel/drag-selection/PgUp/PgDn scroll + indikator, prompt
@@ -951,6 +1557,11 @@ panjang).
   `test/tui-transcript.test.ts` + `test/presentation-projections.test.ts`;
   P0: jalur error TUI meredaksi credential — sentinel bearer tak pernah tampil
   di layar).
+- `test/tui-app.test.ts` + `test/audit-fix-control-decoder.test.ts` +
+  `test/audit-fix-control-dead-keys.test.ts` — v7.23: card prompt transparan di
+  atas composer (tanpa gema inline dobel), teks/tools di atas card; Esc+printable
+  tak meng-abort, `Alt+Enter` lintas chunk, batas UTF-8 paste, double-Esc quit,
+  Ctrl+O/T dan `/view compact|fold|minimize` tak lagi terikat.
 - `test/prompt-engine.test.ts` — decoder streaming CSI/SGR/X10 (`Alt+Enter`,
   CSI-u `Shift+Enter`, `modifyOtherKeys` → `ctrl-j`, batas payload bracketed
   paste 512 KiB, `Tab` complete di menu terbuka), wheel menjadi key scroll,
@@ -965,20 +1576,18 @@ panjang).
   ketika berbahasa, delimiter fence disembunyikan, isi fence dan gema user tetap
   literal).
 - `test/screen-buffer.test.ts` — parser frame harness (unit).
-- `test/tui-transcript.test.ts` — I7/I12/I17/I22 (ledger satu baris per tool
-  ber-chevron `›`, status sukses TIDAK mencetak kata status, header fence `│ ts`,
-  cap 5000 + marker evict, `total()` monotonik kebal evict, viewport, thinking
-  minimized/expanded).
-- `test/thinking-area.test.ts` — I22 area thinking: blok live maks 10 baris (header/`… N baris lagi`), ringkasan 1 baris + detail `/view expand` saat turn selesai, tanpa duplikasi, dan fallback legacy saat panel OFF.
-- `test/presentation-projections.test.ts` — I12/I17/I32 (projection
-  snapshot, running/elapsed, status terminal, retry/child grouping, summary,
-  marker evict + `total()` monotonik, dan parity flag OFF) + F-AGENT-1
-  (baris per-run `↳ run_<8>`/`sub_<8>` untuk anak ber-identitas run; tiga anak
-  paralel = tiga baris; anak tanpa identitas run tetap satu baris ledger induk
-  `n child tools`; status non-sukses dipisah `·`; ringkasan turn melewati
-  counter nol dan `ckpt` kosong) + F-TASK-1 (baris ledger `t<n> <status> parent=… dependsOn=[…]
-  r<rev>`; jalur **linear** merender baris sama + proyeksi `normal`
-  mempertahankan notice task — PROMPT 06 Area D).
+- `test/tui-transcript.test.ts` — I7/I12/I17/I22 (v7.22: satu baris tool
+  ber-chevron `›` tanpa warna, status sukses TIDAK mencetak kata status, fence
+  TANPA bar `│`/header bahasa, baris diagnostik non-tool TIDAK dirender, cap
+  5000 + marker evict, `total()` monotonik kebal evict, viewport).
+- `test/thinking-area.test.ts` — I22 (v7.22: area thinking dan marker
+  `+ thinking`/`… N baris lagi` TIDAK dirender, tak ada yang di-commit).
+- `test/presentation-projections.test.ts` — I12/I17/I32 (v7.22: projection
+  snapshot, marker evict + `total()` monotonik; **ringkasan turn, `ckpt`, dan
+  baris status task TIDAK dirender di renderer flat** — test meng-assert
+  absensinya; status non-sukses pada baris tool dipisah `·` tanpa warna).
+  Jalur linear/ACP untuk status task tetap diuji di
+  `test/presentation-linear-acp.test.ts`.
 - `test/presentation-linear-acp.test.ts` — I33 (linear projection
   status/duration/receipt dan lifecycle ACP terstruktur; parity policy-vs-legacy)
   + PROMPT 06 Area D (`task.status` → baris ledger linear **dan** envelope ACP
@@ -994,6 +1603,11 @@ panjang).
   kata `exec` milik user tetap utuh).
 - PROMPT 06 Area A — `test/ui-instance-isolation.test.ts`: state renderer
   per-instans (dua sesi nyata; env = bootstrap saja).
+- `test/p92-recovery-warning-envelope.test.ts` — I37(a) (baris `[recovery]` dari
+  jurnal committed nyata: status/preview amplop, legacy byte-identik, sanitasi
+  display, read-only, dan wiring `cli/index.ts`).
+- `test/p15-phase2-contracts-approval-recovery.test.ts` — I37(b)/(d) (kontrak
+  approval/recovery Phase 2: tidak ada grant persisten lintas delegasi).
 - PROMPT 06 Area B — `test/approval-integrity.test.ts`: binding args-hash +
   fingerprint target difoto sebelum prompt dan diverifikasi di barrier efek
   (deny `"stale"` bila berubah), termasuk jalur kernel nyata.
@@ -1024,8 +1638,9 @@ panjang).
   tanpa `·`/titik dua; label id/en; `listRow` memakai kolom marker tetap).
   ASCII fallback getter panah/chevron/caret dikunci inventory glyph di
   `test/cli-help-language.test.ts`.
-- `test/theme-levels.test.ts` — I6/UI-RENDER (palet 16-warna memakai SGR 16,
-  256-warna `38;5`, truecolor `38;2`; mono identitas).
+- `test/theme-levels.test.ts` + `test/theme.test.ts` — I6/UI-RENDER (v7.22:
+  semua level terminal — 16/256/truecolor — tetap MONOKROM identitas; tidak ada
+  SGR warna walau `COLORTERM=truecolor` dan `stdout.isTTY`).
 - `test/render-audit-2026-11.test.ts` — audit renderer 2026-11-12 (proyeksi
   pending dimemo per baris → tidak O(n²); SGR majemuk diproses berurutan di
   `truncateToWidth`; indentasi `wordWrap`; SGR opak di highlight; cap input &
@@ -1064,10 +1679,18 @@ panjang).
   handler PM: 18 sel matriks, gerbang approval `PLAN × PM` termasuk `web_fetch`/
   `web_search`, `DISCUSS` memblokir network read, `describeDenial` per pemilik
   keputusan, `always`/K-1 tetap utuh, `__setMode` tak mencabut ceiling).
-- `test/work-mode-tool-visibility.test.ts` — I35 (visibilitas tool = irisan
-  permission mode ∧ WorkMode; `DISCUSS` tepat 16 tool baca lokal tanpa network
-  read; `PLAN × readonly/allowlist` tak memperluas di luar 18 `READONLY_TOOL_NAMES`;
-  tool MCP ikut dibatasi).
+- `test/work-mode-tool-visibility.test.ts` — I35/I37(c) (visibilitas tool =
+  irisan permission mode ∧ WorkMode; `DISCUSS` tepat 16 tool baca lokal tanpa
+  network read; `PLAN × readonly/allowlist` tak memperluas di luar 18
+  `READONLY_TOOL_NAMES`; tool MCP ikut dibatasi; **EXECUTE × allowlist**
+  menyembunyikan `GATED_TOOLS`/MCP yang pasti ditolak handler — `visible ===
+  callable`).
+- `test/agent-contract.test.ts` — I37(b)/(d) (delegasi headless non-TTY deny
+  termasuk broker permissive; satu approval ASK per delegasi).
+- `test/audit-fix-agent-control-recovery-interactive.test.ts` — I37(a)/(b)/(d)
+  (envelope peringatan recovery di jalur kegagalan interaktif — wiring
+  `runPromptWithVerify` + formatter nyata atas jurnal committed — dan regresi
+  broker non-TTY / "Always" untuk `delegate_task`).
 - `test/work-mode-hooks.test.ts` — I35 (hooks: `DISCUSS` dan `PLAN` menahan
   semua `.minicode/hooks/*` di seluruh `PermissionMode`; hanya `EXECUTE` yang
   mengikuti permission mode; pemanggil lama tanpa WorkMode kompatibel).
@@ -1075,8 +1698,8 @@ panjang).
   tak ada eskalasi lewat mode child; default tanpa WorkMode = perilaku lama).
 - `test/work-mode-cli.test.ts` — I35 (`--work-mode`/env: flag > env > persisted
   resume > default DISCUSS; nilai invalid → DISCUSS + peringatan; input operator
-  hanya DISCUSS/PLAN/BUILD; `--verify`
-  ditolak fail-closed pada DISCUSS/PLAN; ACP `workMode` + fallback env; daemon
+  hanya DISCUSS/BUILD (`PLAN` legacy → DISCUSS + peringatan); `--verify`
+  ditolak fail-closed pada DISCUSS; ACP `workMode` + fallback env; daemon
   `workMode` parity).
 - `test/tui-app.test.ts`, `test/tui-popup.test.ts` — I13/I14/I17 (composer
   editing/busy, dots clock, timer, cursor, resize, popup; teardown saat initial,

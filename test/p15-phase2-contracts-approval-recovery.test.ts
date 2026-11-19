@@ -29,6 +29,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { ApprovalBroker, verifyApprovalBinding } from "../src/daemon/approvals.ts"
 import { createApproval, getApproval } from "../src/daemon/store.ts"
+import { canAlwaysForCall } from "../src/policy/permission.ts"
 import {
   AUTONOMOUS_TOOL_NAMES,
   contractForTool,
@@ -93,7 +94,7 @@ const setOf = (xs: readonly string[]) => new Set(xs)
 describe("TOOL-01/LOOP-INV-04 — registry kontrak tool = sumber tunggal", () => {
   const TIERS = ["PURE_READ", "WORKSPACE_MUTATION", "LOCAL_ENV_MUTATION", "EXTERNAL_IRREVERSIBLE"]
 
-  test("semua 38 tool terdaftar dengan tier valid, tanpa duplikat", () => {
+  test("semua 41 tool terdaftar dengan tier valid, tanpa duplikat", () => {
     expect(TOOL_CONTRACTS).toHaveLength(allTools.length)
     const names = TOOL_CONTRACTS.map((c) => c.name)
     expect(new Set(names).size).toBe(names.length)
@@ -116,7 +117,16 @@ describe("TOOL-01/LOOP-INV-04 — registry kontrak tool = sumber tunggal", () =>
   test("derivation identik dengan nilai kontrak yang diharapkan konsumen", () => {
     // WRITE_TOOLS = path-serialized-write (tool tulis file dengan lock path)
     expect(setOf([...WRITE_TOOLS])).toEqual(
-      new Set(["write_file", "edit", "apply_patch", "move_file", "delete_file"]),
+      new Set([
+        "write_file",
+        "edit",
+        "apply_patch",
+        "move_file",
+        "delete_file",
+        "git_restore",
+        "git_checkout",
+        "lsp_rename",
+      ]),
     )
     // EXCLUSIVE_TOOLS = tanpa path tunggal → batch penuh sekuensial
     expect(setOf([...EXCLUSIVE_TOOLS])).toEqual(
@@ -140,6 +150,9 @@ describe("TOOL-01/LOOP-INV-04 — registry kontrak tool = sumber tunggal", () =>
         "git_commit",
         "git_push",
         "ask_user",
+        "git_restore",
+        "git_checkout",
+        "lsp_rename",
       ]),
     )
     // EXPLORE_TOOL_NAMES = subset read-only sub-agen explore
@@ -629,6 +642,22 @@ describe("LOOP-INV-08 — approval terikat argsHash + invocationId (fail-closed)
       db3.prepare("PRAGMA table_info(daemon_approvals)").all() as { name: string }[],
     ).toHaveLength(once)
     db3.close()
+  })
+})
+
+// ── 4b. AGENT-CONTROL-4: satu approval ASK = satu delegasi ────────────────
+
+describe("AGENT-CONTROL-4 — Always tidak berlaku ulang untuk delegate_task", () => {
+  test("delegate_task tak pernah menawarkan Always, tool lain tetap bisa", () => {
+    const args = { prompt: "delegasi yang sama persis" }
+    // Satu klik "Always" pada delegasi identik akan menyetujui semua delegasi
+    // berikutnya tanpa izin baru — docs/AGENTS.md:8 melarangnya.
+    expect(canAlwaysForCall({ name: "delegate_task", args } as never)).toBe(false)
+    expect(canAlwaysForCall({ name: "git_commit", args: { paths: ["a"] } } as never)).toBe(true)
+    // Kontrak lama (murni soal ukuran args) sengaja dipertahankan.
+    expect(
+      canAlwaysForCall({ name: "write_file", args: { path: "a", content: "b" } } as never),
+    ).toBe(true)
   })
 })
 

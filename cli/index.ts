@@ -40,6 +40,35 @@ import { dispatch } from "./router.ts"
 import { createChildCompaction, createCliSession } from "./setup.ts"
 
 /**
+ * [AGENT-CONTROL-1] Baris peringatan `[recovery]` untuk jendela waktu tertentu.
+ * Dipakai oleh DUA jalur kegagalan: catch one-shot yang exit(1) dan pembungkus
+ * turn interaktif (runPromptWithVerify). Sebelum perbaikan hanya jalur one-shot
+ * yang memancarkannya, sehingga setelah turn gagal pasca-anak committed, turn
+ * berikutnya bisa mendelegasi ulang buta dan menggandakan efek samping anak
+ * (docs/AGENTS.md:25). Display-only: baca jurnal + format, TANPA retry, tulis
+ * jurnal, atau prompt. Satu sink `process.stderr.write` yang sama dipakai kedua
+ * jalur agar inventaris writer (test/writer-inventory.test.ts) tak bertambah.
+ */
+async function emitDelegateRecoveryLines(
+  sessionId: string,
+  cwd: string | undefined,
+  sinceTs: number,
+): Promise<number> {
+  try {
+    const { committedDelegatesSince } = await import("../src/session/journal.ts")
+    const { formatDelegateRecoveryLine } = await import("./recovery-warning.ts")
+    const done = await committedDelegatesSince(sessionId, cwd, sinceTs)
+    for (const d of done) {
+      process.stderr.write(c.yellow(`${formatDelegateRecoveryLine(d)}\n`))
+    }
+    return done.length
+  } catch {
+    // Diagnostik recovery tak boleh menggagalkan turn yang memang sudah gagal.
+    return 0
+  }
+}
+
+/**
  * Jaring terakhir proses (audit freeze/ceket 2026-11-16).
  *
  * Tanpa handler ini, SATU rejection/throw yang lolos (dari hook async, timer,
@@ -664,36 +693,35 @@ if (enterRepl) {
     setupBar.stop()
     setupBar = null
   }
+  // [AGENT-CONTROL-1] Sebelum perbaikan, baris [recovery] hanya keluar dari
+  // catch one-shot di bawah — jalur TUI/interaktif tak pernah memilikinya.
+  // Akibatnya, setelah sebuah turn gagal berikut delegasi committed, turn
+  // berikutnya bisa mendelegasi ulang buta dan menggandakan efek samping anak.
+  // Bungkus runPromptWithVerify (dipasang SEBELUM runTui meng-destructure ctx)
+  // agar SETIAP kegagalan turn interaktif memancarkan baris yang identik dengan
+  // jalur one-shot, lewat sink diagnostik yang sama — tidak menyentuh alt-screen
+  // dengan writer baru dan tidak menulis jurnal/prompt.
+  const runPromptBase = ctx.runPromptWithVerify.bind(ctx)
+  ctx.runPromptWithVerify = async (p, signal) => {
+    const since = Date.now()
+    try {
+      return await runPromptBase(p, signal)
+    } catch (e) {
+      await emitDelegateRecoveryLines(ctx.sessionId, ctx.cwd, since)
+      throw e
+    }
+  }
   const { runTui } = await import("./tui.ts")
-  const replStart = Date.now()
   try {
     await runTui(ctx)
   } catch (error) {
     process.stderr.write(`[error] ${formatError(error)}\n`)
     process.exitCode = 1
   }
-  // Kop ringkasan sesi saat exit (logo + detail). HANYA untuk sesi interaktif
-  // nyata (stdout TTY): `--interactive` lewat pipe/paksa TUI tanpa terminal
-  // harus TIDAK menulis apa pun ke stdout (dicek test startup-failure).
-  // Clear screen + home digabung SATU write dengan summary (OAP-008: writer
-  // count per berkas dibatasi) — keluar alternate-screen tak selalu kembalikan
-  // kursor ke baris bersih (ConPTY), jadi clear mencegah tumpang-tindih teks.
-  if (process.stdout.isTTY) {
-    try {
-      const u = ctx.usage.getSession(ctx.modelRef.current)
-      const { renderSessionSummary } = await import("../src/ui/render/session-summary.ts")
-      const summary = renderSessionSummary({
-        sessionId: ctx.sessionId,
-        model: ctx.modelRef.current ?? "default",
-        totalTokens: u.totalTokens,
-        inputTokens: u.inputTokens,
-        cacheReadTokens: u.cacheReadTokens,
-        ...(u.cost != null ? { cost: u.cost } : {}),
-        durationMs: Date.now() - replStart,
-      })
-      process.stdout.write(`\x1b[2J\x1b[H${summary}`)
-    } catch {}
-  }
+  // Renderer flat: kop sesi saat exit dihapus total. Keluar alternate-screen
+  // sudah mengembalikan scrollback apa adanya; clear-screen + ringkasan hanya
+  // menimpa riwayat yang masih ingin dibaca user. Tidak ada stdout write baru
+  // di jalur ini (writer count juga otomatis turun).
 } else {
   // P12 S2.2 (F-DISCUSS-4) + P0.2: one-shot linear memakai `ctx.workMode`
   // efektif (termasuk hasil pulihan `--resume`).
@@ -791,18 +819,12 @@ if (enterRepl) {
     // Audit #04 P1: sama seperti REPL — turn gagal setelah delegasi
     // committed = efek anak tetap ada. One-shot tak punya retry loop, tapi
     // user yang menjalankan ulang manual butuh peringatan yang sama.
-    try {
-      const { committedDelegatesSince } = await import("../src/session/journal.ts")
-      const { formatDelegateRecoveryLine } = await import("./recovery-warning.ts")
-      const done = await committedDelegatesSince(sid, wcwd, t0)
-      // P9.2.2.1: tiap baris diperkaya observasi amplop anak (status +
-      // preview ringkasan, sudah disanitasi display di formatter); record
-      // legacy/rusak jatuh ke baris legacy byte-identik. Display-only di
-      // dalam catch yang selalu exit — tanpa retry, tanpa tulis baru.
-      for (const d of done) {
-        process.stderr.write(c.yellow(`${formatDelegateRecoveryLine(d)}\n`))
-      }
-    } catch {}
+    // [AGENT-CONTROL-1] helper yang SAMA dengan jalur interaktif: tiap baris
+    // diperkaya observasi amplop anak (status + preview ringkasan, sudah
+    // disanitasi display di formatter); record legacy/rusak jatuh ke baris
+    // legacy byte-identik. Display-only di catch yang selalu exit — tanpa
+    // retry, tanpa tulis baru.
+    await emitDelegateRecoveryLines(sid, wcwd, t0)
     const uErr = usage.getSession(modelRef.current)
     await writeTrace(wcwd, {
       sessionId: sid,

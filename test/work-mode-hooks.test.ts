@@ -211,5 +211,8 @@ describe("integrasi produksi — transisi WorkMode & PermissionMode menghentikan
       if (savedProbeOut === undefined) delete process.env.PROBE_OUT
       else process.env.PROBE_OUT = savedProbeOut
     }
-  })
+    // v7.40: createCliSession + fake provider + hook Node butuh >5s di bawah
+    // beban suite penuh — timeout eksplisit supaya tak jadi flake (bukan pelemahan
+    // asersi; semua countRuns tetap diverifikasi).
+  }, 30_000)
 })

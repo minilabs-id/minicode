@@ -6,12 +6,13 @@ import { contextUnrestricted, requireToolCwd } from "./context.ts"
 
 export const deleteFileTool: Tool = {
   name: "delete_file",
+  // v7.33 (wire contract): tag family + satukan deskripsi path (workspace).
   description:
-    "Delete a file (soft-delete to .minicode/.trash/ with undo via move). Use for removing files.",
+    "FILE EDIT: Delete a file (soft-delete to .minicode/.trash/; restore via move_file).",
   parameters: {
     type: "object",
     properties: {
-      path: { type: "string", description: "relative file path" },
+      path: { type: "string", description: "path relative to the workspace root" },
     },
     required: ["path"],
     additionalProperties: false,

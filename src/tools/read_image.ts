@@ -40,12 +40,13 @@ function detectImageMime(ext: string, buf: Buffer): string {
 
 export const readImageTool: Tool = {
   name: "read_image",
+  // v7.33 (wire contract): tag family + satukan deskripsi path (workspace).
   description:
-    "Read an image file as base64 for vision review (PNG/JPG/WebP/GIF). Returns data URL + token estimate.",
+    "FILE SEARCH: Read an image (PNG/JPG/WebP/GIF) as a base64 data URL for vision review, plus a token estimate.",
   parameters: {
     type: "object",
     properties: {
-      path: { type: "string", description: "relative image file path" },
+      path: { type: "string", description: "path relative to the workspace root" },
     },
     required: ["path"],
     additionalProperties: false,

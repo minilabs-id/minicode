@@ -142,7 +142,9 @@ describe("askLine: dropdown & seleksi", () => {
     const p = askLine({ prompt: "> ", hints })
     await tty.ready()
     await tty.send("/s")
-    await tty.send(KEY.esc)
+    // Lone-ESC di-flush pompa setelah ~50ms. Kirim Enter lebih awal membuat
+    // decoder mengira ESC+CR = Alt+Enter, jadi dropdown tak pernah tutup.
+    await tty.send(KEY.esc, 60)
     await tty.send(KEY.enter, 30)
     expect(await p).toBe("/s")
   })
@@ -271,7 +273,9 @@ describe("askLine: reverse-i-search (Ctrl+R)", () => {
     await tty.send("draf")
     await tty.send(KEY.ctrlR, 30)
     await tty.send("fitur")
-    await tty.send(KEY.esc, 30)
+    // Tunggu flush lone-ESC (>50ms) sebelum Enter — kalau tidak, ESC+CR
+    // terbaca Alt+Enter dan mode cari tak pernah dibatalkan.
+    await tty.send(KEY.esc, 60)
     await tty.send(KEY.enter, 30)
     expect(await p).toBe("draf")
   })
@@ -297,7 +301,9 @@ describe("askLine: reverse-i-search (Ctrl+R)", () => {
     await tty.send("zzz") // tak ada cocok — (failed reverse-i-search)
     await tty.send(KEY.ctrlU, 30) // hapus query
     expect(visible(tty)).toContain("(reverse-i-search)") // masih mode cari
-    await tty.send(KEY.esc, 30)
+    // Sama seperti tes Esc lain: beri waktu flush lone-ESC sebelum Enter
+    // supaya tak berubah jadi Alt+Enter.
+    await tty.send(KEY.esc, 60)
     await tty.send(KEY.enter, 30)
     expect(await p).toBe("draf")
   })

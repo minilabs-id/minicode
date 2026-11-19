@@ -59,15 +59,17 @@ bash_kill({ id: "bg_xxxxxxxx" })
 
 Batas `BASH_BACKGROUND_MAX_JOBS`; semua job mati saat CLI keluar.
 
-## Git (read + satu penulis)
+## Git (read + write ter-gate)
 
 | Tool | Fungsi | Catatan |
 |---|---|---|
 | `git_status` | `status --porcelain + diff --stat + log -10` | cwd jail |
 | `git_diff` | `diff` unstaged atau `--staged` | — |
 | `git_log` | `log --oneline -n` | — |
-| `git_commit` | Commit saja | **Di-gate** seperti `delegate_task` (TTY = minta sekali, non-TTY = tolak; `readonly/plan/allowlist` = tolak). Menolak sebelum staging jika config Git efektif memuat custom filter; tinjau filter terpercaya lalu lakukan commit manual. Sub-agent tidak mendapatkannya. Yang sengaja tidak ada: amend/reset/rebase/checkout/branch -D/stash drop. Pesan via `-m` tunggal agar `$()`/backtick tidak dieksekusi; `git add -- <paths>` agar file `-weird.txt` tidak jadi flag |
+| `git_commit` | Commit saja | **Di-gate** seperti `delegate_task` (TTY = minta sekali, non-TTY = tolak; `readonly/plan/allowlist` = tolak). Menolak sebelum staging jika config Git efektif memuat custom filter; tinjau filter terpercaya lalu lakukan commit manual. Sub-agent tidak mendapatkannya. Yang sengaja tidak ada: amend/reset/rebase/branch -D/stash drop (branch-switching juga tak ada — `git_checkout` hanya path-restore). Pesan via `-m` tunggal agar `$()`/backtick tidak dieksekusi; `git add -- <paths>` agar file `-weird.txt` tidak jadi flag |
 | `git_push` | Push branch lokal ke remote | **Di-gate** seperti `git_commit`; butuh branch/remote eksplisit atau `setUpstream`. Hardening `GIT_SAFE_BASE` menetralkan hook pre-push + filter repo. Di mode `unrestricted`, kredensial git sempit (`GH_TOKEN`/`GITHUB_TOKEN`/`SSH_AUTH_SOCK`) diteruskan ke subprocess; di mode lain push hanya berhasil bila kredensial sudah tersedia di mesin (mis. credential helper OS). Sub-agent tidak mendapatkannya |
+| `git_restore` | Restore SATU path dari index/ref (`git restore`) | GIT WRITE, **di-gate** seperti `git_commit`. Sempit: `path` tunggal, opsional `ref` (`--source`) / `staged` (unstage index ← HEAD); tanpa branch/ref deletion, tanpa `--force`. Argumen argv array + `runGit` menetralkan hook/filter repo. Fail-closed: path luar root/sensitif/owned-state ditolak sebelum git jalan |
+| `git_checkout` | Restore SATU path dari index (`git checkout -- <path>`) | GIT WRITE, **di-gate** seperti `git_commit`. Hanya path-restore — sengaja TIDAK ada bentuk `git checkout <branch>` (switch branch mengubah seluruh working tree). Argumen argv array + `runGit` menetralkan hook/filter repo; path luar root/sensitif/owned-state ditolak |
 
 ## Web
 
@@ -113,11 +115,12 @@ Butuh `minicode config lsp add` dulu. Setelah terdaftar:
 | Tool | Fungsi |
 |---|---|
 | `lsp_diagnostics` | Diagnostik 1 file |
-| `lsp_definition` | Lokasi definisi (`file+symbol` atau `line/character`) |
+| `lsp_definition` | Lokasi definisi (`path` + `symbol` atau `line/character`) |
 | `lsp_references` | Semua referensi se-repo |
 | `lsp_hover` | Info tipe |
 | `lsp_symbols` | Outline dokumen |
 | `lsp_workspace_symbols` | Cari se-workspace; query kosong = populer |
+| `lsp_rename` | Rename simbol via WorkspaceEdit (SATU-SATUNYA tool LSP yang menulis) — argumen `path` + `symbol`/`line`/`character` + `newName`; **di-gate** seperti git-write. Fail-closed: tolak bila tak ada server, WorkspaceEdit tak didukung/kosong, atau edit menyasar owned-state / di luar jail; batas nama & jumlah edit ada di `LIMITS` |
 
 `didClose` cleanup otomatis.
 

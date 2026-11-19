@@ -114,14 +114,18 @@ export function flagNameOf(token: string): string | null {
   return KNOWN_FLAGS.has(name) ? name : null
 }
 
-export function hasFlag(argv: string[], name: string): boolean {
+export function hasFlag(argv: readonly string[], name: string): boolean {
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i]
     if (!token) continue
     if (token === "--") return false
     const flag = flagNameOf(token)
     if (flag) {
-      if (token === name || token.startsWith(`${name}=`)) return true
+      if (token === name) return true
+      // `--flag=value` HANYA sah untuk value flag. Untuk boolean flag,
+      // `--allow-all=false` dulu dihitung sebagai `--allow-all` hadir →
+      // mengaktifkan mode privileged. Fail-closed: bentuk itu = TIDAK hadir.
+      if (token.startsWith(`${name}=`) && valueFlags.has(flag)) return true
       if (valueFlags.has(flag) && !token.includes("=")) i++
       continue
     }
@@ -150,7 +154,17 @@ export function allowLocalConfig(argv: string[]): boolean {
 
 /** Cek --allow-local-config / env pada argv subcommand. */
 export function allowLocalSubcommand(argv: readonly string[]): boolean {
-  return argv.includes("--allow-local-config") || process.env.MINICODE_ALLOW_LOCAL_CONFIG === "1"
+  // Pakai hasFlag (bukan argv.includes) supaya `--allow-local-config=false`
+  // TIDAK mengaktifkan opt-in — kelas bug yang sama dengan hasFlag di finding 4.
+  // argv subcommand diawali NAMA PERINTAH (bukan prompt), jadi token leading
+  // bukan-flag dilewati dulu; kalau tidak, boundary-aware hasFlag akan berhenti
+  // di `providers` dan flag aslinya tak pernah terlihat.
+  let start = 0
+  while (start < argv.length && argv[start] && !argv[start]!.startsWith("-")) start++
+  return (
+    hasFlag(argv.slice(start), "--allow-local-config") ||
+    process.env.MINICODE_ALLOW_LOCAL_CONFIG === "1"
+  )
 }
 
 /** Ambil positional ke-`index` dari argv subcommand (tolak `-*`). */

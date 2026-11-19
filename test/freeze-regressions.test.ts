@@ -31,8 +31,18 @@ async function drain(gen: AsyncIterable<unknown>): Promise<void> {
 describe("provider idle timeout", () => {
   test("provider yang diam total gagal di batas DIAM, bukan batas total", async () => {
     // Tak pernah mengirim satu event pun — persis "endpoint hidup tapi bisu".
+    // Generator digantung TANPA setTimeout: timer 10 dtk lama tak bisa dibatalkan
+    // oleh `.return()`/idle-timeout dan meninggalkan handle di event loop.
+    // Sebagai gantinya generator menunggu promise manual yang dilepas di cleanup.
+    let release!: () => void
+    const stalled = new Promise<void>((resolve) => {
+      release = resolve
+    })
     const provider = makeProvider(async function* () {
-      await new Promise<void>((resolve) => setTimeout(resolve, 10_000))
+      await stalled
+      // Biome useYield: generator wajib memuat `yield`, tapi cabang ini tak
+      // pernah jalan — provider harus tetap diam total saat idle-timeout diuji.
+      if (Date.now() < 0) yield { type: "finish", reason: "stop" }
     })
     const guarded = withStreamGuards(provider as never, {
       timeoutMs: 60_000,
@@ -44,6 +54,9 @@ describe("provider idle timeout", () => {
       await drain(guarded.stream({} as never, new AbortController().signal))
     } catch (e) {
       message = (e as Error).message
+    } finally {
+      // Lepaskan generator yang menggantung agar tak ada suspend/timer sisaan.
+      release()
     }
     const elapsed = Date.now() - started
     expect(message).toContain("sent nothing")

@@ -21,6 +21,7 @@
 // menghentikan turn karena log gagal akan merusak lebih banyak daripada gap.
 
 import { createHash } from "node:crypto"
+import { unlinkSync } from "node:fs"
 import { mkdir, open, readFile, stat } from "node:fs/promises"
 import { dirname, isAbsolute, join, relative, resolve } from "node:path"
 import { atomicWriteText } from "../lib/atomic-write.ts"
@@ -92,6 +93,8 @@ export interface JournalOutcome {
   truncated?: true
   timeout?: true
   aborted?: true
+  /** v7.31: childturn dipotong oleh batas max_steps (bukan timeout/abort). */
+  maxStepsExceeded?: true
   loss?: "none" | "response" | "persistence" | "unknown"
   uncertainty?: "none" | "ambiguous-effect" | "unverified-external" | "evidence-incomplete"
   observedAt?: number
@@ -528,11 +531,16 @@ export function journalPath(sessionId: string, cwd?: string): string {
 
 export function deleteJournalFile(sessionId: string, cwd?: string): void {
   // Lifecycle: ikut hapus sesi/TTL (best-effort, sinkron agar materai).
-  void import("node:fs").then(({ unlinkSync }) => {
-    try {
-      unlinkSync(journalPath(sessionId, cwd))
-    } catch {}
-  })
+  // Audit: dulu ini `void import("node:fs").then(unlinkSync)` — ternyata
+  // ASINKRON meski kontrak dan pemanggil mengira sinkron. Pemanggil bisa
+  // membaca journal lagi sebelum unlink selesai (race). Sekarang unlinkSync
+  // dipanggil langsung: benar-benar selesai sebelum fungsi kembali, seperti
+  // yang dijanjikan signature `: void` dan komentar "sinkron agar materai".
+  try {
+    unlinkSync(journalPath(sessionId, cwd))
+  } catch {
+    // Best-effort: file mungkin memang sudah tak ada.
+  }
 }
 
 /**

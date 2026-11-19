@@ -692,9 +692,16 @@ const STATIC_DENY: [RegExp, string][] = [
  * menutup bypass, sementara bentuk mentah menangkap pola yang justru hilang
  * saat quote dibuang (mis. `--upload-file "x"`).
  */
-export function inspectBashCommand(rawCmd: string, cwd?: string): BashVerdict {
+export function inspectBashCommand(rawCmd: string, cwd?: string, root?: string): BashVerdict {
   const raw = rawCmd
   const norm = normalizeCommand(rawCmd)
+  // `cwd` = direktori tempat shell me-resolve operand relatif; `root` = batas
+  // workspace yang dijail. Keduanya HARUS terpisah: bash dijalankan dengan
+  // cwd = sessionRoot + args.cwd, tetapi jail tetap di sessionRoot. Memakai
+  // satu nilai untuk dua peran (sebelumnya cwd dipakai sebagai root) membuat
+  // `cat sub/link/secret` (link → /outside) lolos dan `cat ../x` dari sub
+  // salah ditolak. Default `root = cwd` menjaga perilaku pemanggil lama.
+  const containmentRoot = root ?? cwd
   const both = (re: RegExp): boolean => re.test(norm) || re.test(raw)
   // Aturan statis dievaluasi pada bentuk yang teks-kutip-inert-nya sudah
   // dikosongkan (blankQuotedDataArgs), sehingga `echo "rm -rf /"` tidak lagi
@@ -730,7 +737,7 @@ export function inspectBashCommand(rawCmd: string, cwd?: string): BashVerdict {
       if (cwd != null) {
         const abs = isAbsolute(t) ? resolve(t) : resolve(cwd, t)
         if (
-          isRealPathOutsideRoot(abs, cwd) ||
+          isRealPathOutsideRoot(abs, containmentRoot!) ||
           isSensitive(t) ||
           isSensitive(abs) ||
           isOwnedState(t) ||
@@ -775,6 +782,20 @@ export function inspectBashCommand(rawCmd: string, cwd?: string): BashVerdict {
       }
       if (isOwnedState(t) || isOwnedState(resolve(cwd ?? ".", t))) {
         return { denied: true, reason: "link to owned state" }
+      }
+      // Target link di LUAR workspace = jail bypass kelas dua: `ln -s
+      // /tmp/outside link` lalu tulis/baca lewat `link/...` melewati cek path
+      // tool file. Sebelumnya hanya isSensitive/isOwnedState yang dicek, jadi
+      // target absolut jinak di luar root lolos. Samakan dengan cek redirect:
+      // resolusi terhadap cwd efektif, containment terhadap root workspace,
+      // realpath menangkap symlink perantara (dan fallback ENOENT untuk target
+      // yang belum ada). Tanpa cwd, pakai heuristik konservatif `..`/absolut.
+      if (cwd != null) {
+        const abs = isAbsolute(t) ? resolve(t) : resolve(cwd, t)
+        if (isRealPathOutsideRoot(abs, containmentRoot!))
+          return { denied: true, reason: "link target outside workspace" }
+      } else if (/^\.\.(?:[\\/]|$)|\b[a-zA-Z]:[\\/]|^\/(?!dev\/null$)|^~(?:[\\/]|$)/.test(t)) {
+        return { denied: true, reason: "link target outside workspace" }
       }
       return null
     }
@@ -852,7 +873,7 @@ export function inspectBashCommand(rawCmd: string, cwd?: string): BashVerdict {
       // Owned-state (.minicode/config dkk) simetris dengan jail file tools:
       // tulis lewat shell tak boleh lebih longgar dari write_file.
       if (
-        isRealPathOutsideRoot(abs, cwd) ||
+        isRealPathOutsideRoot(abs, containmentRoot!) ||
         isSensitive(t) ||
         isSensitive(abs) ||
         isOwnedState(t) ||
@@ -962,7 +983,8 @@ export function inspectBashCommand(rawCmd: string, cwd?: string): BashVerdict {
       }
       if (cwd != null) {
         const abs = isAbsolute(t) ? resolve(t) : resolve(cwd, t)
-        if (isRealPathOutsideRoot(abs, cwd)) return { denied: true, reason: "outside workspace" }
+        if (isRealPathOutsideRoot(abs, containmentRoot!))
+          return { denied: true, reason: "outside workspace" }
       } else if (/^\.\.(?:[\\/]|$)|\b[a-zA-Z]:[\\/]|^\/(?!dev\/null$)|^~(?:[\\/]|$)/.test(t)) {
         return { denied: true, reason: "outside workspace" }
       }

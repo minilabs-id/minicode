@@ -30,7 +30,7 @@ Permission → Jail → Bash Guard → Argument Validation → Executor → Jour
 
 ## Mode dan akses
 
-Kontrol mode punya tiga sumbu: **WorkMode** (`DISCUSS`/`PLAN`/`BUILD`) membatasi cara kerja agent; **PermissionMode** (`AUTO`/`ASK`) menentukan kapan dibutuhkan persetujuan manusia; **Tool Access Policy** menentukan capability yang tersedia. Nilai internal `readonly`, `plan`, `allowlist`, dan `allow-all` masih ada untuk batas akses dan kompatibilitas, tetapi bukan empat mode pengawasan tambahan. Hard deny path jail, owned-state, dan bash-guard tetap berlaku. Detail kombinasi dan interface ada di [Memilih Mode](choosing-mode.md) dan [Policy & Sandbox](policy-sandbox.md).
+Kontrol mode punya tiga sumbu: **WorkMode** (`DISCUSS`/`BUILD`, dengan `PLAN` sebagai nilai legacy yang dinormalkan ke `DISCUSS`) membatasi cara kerja agent; **PermissionMode** (`AUTO`/`ASK`) menentukan kapan dibutuhkan persetujuan manusia; **Tool Access Policy** menentukan capability yang tersedia. Nilai internal `readonly`, `plan`, `allowlist`, dan `allow-all` masih ada untuk batas akses dan kompatibilitas, tetapi bukan empat mode pengawasan tambahan. Hard deny path jail, owned-state, dan bash-guard tetap berlaku. Detail kombinasi dan interface ada di [Memilih Mode](choosing-mode.md) dan [Policy & Sandbox](policy-sandbox.md).
 
 ## Lapisan perlindungan bash
 
@@ -103,10 +103,12 @@ Setiap turn checkpoint shadow-git + recovery journal `.minicode/journal-<sesi>.j
 Minicode **tidak menyediakan tool** untuk (terverifikasi di `src/tools/`):
 
 - `git fetch`, `pull`, `clone` — tak ada tool git jaringan pembaca
-- `git reset`, `amend`, `rebase`, `checkout`, `branch -D`, `stash drop`
+- `git reset`, `amend`, `rebase`, `branch -D`, `stash drop`
 - Eksekusi remote / deploy bawaan
 
 Satu-satunya operasi jaringan git adalah `git_push` (di-gate seperti `git_commit`: TTY minta sekali, non-TTY tolak, `readonly/plan/allowlist` tolak, sub-agent tidak mendapatkannya). Tool ini memakai hardening `GIT_SAFE_BASE` dan di mode `unrestricted` mendapat kredensial git sempit (lihat §Mode dan akses).
+
+Tool git-write lain yang **di-gate** seperti `git_commit`: `git_restore` dan `git_checkout` (v7.38). Keduanya sengaja SEMPIT — satu `path`, tanpa branch switching / `--force` / hapus ref; argumen dibangun sebagai argv array dan lewat `runGit` yang menetralkan hook/filter repo, dengan fail-closed untuk path luar root/sensitif/owned-state. `git_checkout` hanya path-restore (`git checkout -- <path>`), bukan `git checkout <branch>` — switch branch mengubah seluruh working tree dan bisa menimpa kerja user.
 
 Catatan jujur: operasi lain tetap BISA diketik lewat `bash` (tunduk pada bash-guard + jail, BUKAN larangan). `git` via bash menjalankan konfigurasi repo apa adanya (hook/filter/driver milik repo). Tool baca `git_*` dinetralkan; `git_push` menetralkan hook/filter via `GIT_SAFE_BASE`; `git_commit` menolak sebelum staging bila filter Git terkonfigurasi. Di repo tak-terpercaya, utamakan tool baca dan tinjau konfigurasi sebelum memakai Git manual.
 

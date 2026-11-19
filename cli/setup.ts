@@ -142,7 +142,11 @@ import {
   type AdoptTaskSpec,
   adoptUnfinishedTask,
 } from "../src/session/cross-session-adoption.ts"
-import { formatSessionIdentityLine, resolveSessionIdentity } from "../src/session/identity.ts"
+import {
+  type CanonicalSessionIdentity,
+  formatSessionIdentityLine,
+  resolveSessionIdentity,
+} from "../src/session/identity.ts"
 import {
   attachMutationJournal,
   finalizeJournal,
@@ -290,6 +294,55 @@ export class ConcurrentAgentSessionError extends Error {
         `session ${attempted} refused (one agent session per process)`,
     )
     this.name = "ConcurrentAgentSessionError"
+  }
+}
+
+// Cleanup job background saat proses keluar. `close()` hanya jalan pada shutdown
+// normal; handler sinyal di src/ui/tui/app.ts memanggil process.exit() langsung,
+// jadi event `exit` adalah satu-satunya titik yang tetap terjangkau pada
+// SIGTERM/SIGHUP. `process.exit()` menjalankan handler `exit` (events sinkron),
+// berbeda dengan `SIGKILL` yang memang tak bisa dijaring siapa pun.
+let backgroundExitCleanupInstalled = false
+
+export function backgroundJobExitCleanup(): void {
+  // killAllBackgroundJobs() iterasi map + hapus semua entri → idempoten, aman
+  // dipanggil dua kali (dari close() lalu dari exit, atau dari exit berkali-kali).
+  killAllBackgroundJobs()
+}
+
+export function installBackgroundJobExitCleanup(): void {
+  if (backgroundExitCleanupInstalled) return
+  backgroundExitCleanupInstalled = true
+  process.once("exit", backgroundJobExitCleanup)
+}
+
+/**
+ * v7.40 (audit): pelepasan lease saat startup GAGAL setelah admission tetapi
+ * sebelum `close()` terdaftar. Renew timer (unref) memperpanjang lease tanpa
+ * batas; tanpa pembersihan ini sesi berikutnya kena WRITER_REFUSED sampai
+ * proses mati. Produksi memanggil lewat closure yang memakai `writerClosed` +
+ * `stopWriterRenewTimer` yang SAMA dengan `close()` — bukan state teardown
+ * paralel. Diekspor sebagai seam uji (test menyuntik spy, bukan provider nyata).
+ *
+ * `markClosed` dipanggil sebelum `release` supaya pemanggilan kedua (exit
+ * handler setelah cleanup fase startup, atau sebaliknya) jadi no-op —
+ * token-guarded release di store juga idempoten, tapi flag ini mencegah
+ * pelepasan lease milik sesi lain yang kebetulan memakai token yang sama.
+ */
+export interface WriterStartupCleanupState {
+  readonly isClosed: () => boolean
+  readonly markClosed: () => void
+  readonly stopRenewTimer: () => void
+  readonly release: () => void
+}
+
+export function releaseWriterLeaseAfterStartupThrow(state: WriterStartupCleanupState): void {
+  // Matikan timer DULU: kalau release gagal sekalipun, jangan biarkan
+  // perpanjangan lanjut menyimpan lease mati (fail-closed).
+  state.stopRenewTimer()
+  if (!state.isClosed()) {
+    state.markClosed()
+    state.release()
   }
 }
 
@@ -562,6 +615,27 @@ export interface CliSession {
 
 export { createChildCompaction, parseVerifyTestEvidence, toPresentationEvent }
 
+/**
+ * WorkMode efektif = sinyal eksplisit operator > WorkMode tersimpan > default CLI.
+ * Sebelumnya hanya `identity.resumed` yang memicu pulihan, sehingga `--session`
+ * yang menimpa baris EXECUTE memakai default DISCUSS dan menimpanya lewat
+ * createSession/saveSessionWorkMode. Sekarang keberadaan baris durable saja sudah
+ * cukup (takeover maupun resume) — `--resume` tetap tak berubah perilakunya.
+ */
+export function resolveWorkModeForIdentity(
+  identity: Pick<CanonicalSessionIdentity, "sid" | "resumed" | "hasStoredSession">,
+  workMode: "DISCUSS" | "EXECUTE",
+  workModeExplicit: boolean,
+  cwd?: string,
+): { persistedWorkMode?: "DISCUSS" | "EXECUTE"; effectiveWorkMode: "DISCUSS" | "EXECUTE" } {
+  const hasStored = identity.resumed || identity.hasStoredSession
+  const persistedWorkMode = hasStored ? loadSessionWorkMode(identity.sid, cwd) : undefined
+  return {
+    ...(persistedWorkMode !== undefined ? { persistedWorkMode } : {}),
+    effectiveWorkMode: hasStored && !workModeExplicit ? (persistedWorkMode ?? "DISCUSS") : workMode,
+  }
+}
+
 export async function createCliSession(opts: CliSessionOptions): Promise<CliSession> {
   const {
     cwd,
@@ -600,6 +674,9 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   // Env hanya jadi nilai awal; sesi lain di proses yang sama punya state
   // sendiri sehingga tak saling menimpa collapse/compact/reasoning.
   const uiState = new UiSessionState()
+  // Pasang sekali per proses: jalur sinyal (process.exit) tak pernah menjalankan
+  // close(), jadi cleanup job background harus punya jalur `exit` yang pasti.
+  installBackgroundJobExitCleanup()
   const modelRef = { current: modelOverride }
   // Collector diagnostik startup. Saat REPL + stderr TTY, bar loading
   // menggantikan teks proses verbose — baris diagnostik (resume/recovery/
@@ -647,6 +724,12 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   const writerToken = writerTokenFor(bootId)
   const admission = acquireSessionWriter({ sessionId, cwd, bootId, token: writerToken })
   if (!admission.ok) throw admission.error
+  // v7.39 (P0-1): general startup repair untuk mode interaktif. Sebelumnya
+  // JSON↔TaskStore hanya diselaraskan saat adoption/verify-settle/scheduler
+  // claim — sehingga sesi yang crash di tengah `todo_write` bisa boot dengan
+  // view JSON phantom. Re-derive dari TaskStore (otoritas) SEKALI di sini,
+  // best-effort, sebelum ada interaksi model.
+  await syncTodoViewsFromTaskStore(sessionId, cwd ?? process.cwd()).catch(() => undefined)
   let expectedEpoch = admission.admission.epoch
   let writerStale = false
   let writerStaleNote = ""
@@ -690,9 +773,12 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   }
   // P0.2 (Q5): saat `--resume` tanpa sinyal WorkMode eksplisit, pulihkan
   // WorkMode tersimpan dari metadata sesi (NULL/PLAN legacy → default DISCUSS).
-  const persistedWorkMode = identity.resumed ? loadSessionWorkMode(sessionId, cwd) : undefined
-  const effectiveWorkMode: "DISCUSS" | "EXECUTE" =
-    identity.resumed && !workModeExplicit ? (persistedWorkMode ?? "DISCUSS") : workMode
+  const { persistedWorkMode, effectiveWorkMode } = resolveWorkModeForIdentity(
+    identity,
+    workMode,
+    workModeExplicit,
+    cwd,
+  )
   // P0.2 (Q4): tolak startup (fail-closed) bila `--verify` digabung dengan
   // WorkMode DISCUSS (baik dari flag/env maupun pulihan `--resume`).
   if (verify && effectiveWorkMode !== "EXECUTE") {
@@ -722,6 +808,12 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   let writerRenewTimer: ReturnType<typeof setInterval> | undefined
   let renewWarned = false
   let writerClosed = false
+  // v7.40 (re-audit): bedakan GAGAL startup dari crash SETELAH startup sukses.
+  // `exit` saat startup gagal → lease dilepas; `exit` tanpa close() setelah
+  // startup sukses → lease HARUS mengorphan sampai expiry (kontrak 6AD S7).
+  // Tanpa flag ini safety-net menyamakan keduanya dan membatalkan eksklusivitas
+  // penulis lintas-proses.
+  let startupSucceeded = false
   const stopWriterRenewTimer = () => {
     try {
       if (writerRenewTimer !== undefined) clearInterval(writerRenewTimer)
@@ -751,6 +843,29 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     writerRenewTimer.unref?.()
   }
   startWriterRenewTimer()
+
+  // v7.40 (audit): safety net untuk galat tak tertangkap antara admission dan
+  // terdaftarnya `close()`. Renew timer di atas menjaga lease tetap hidup;
+  // bila startup melempar sebelum `close()` sempat membersihkan, listener
+  // `exit` inilah yang melepas lease + mematikan timer saat proses berakhir.
+  // Memakai `writerClosed`/`stopWriterRenewTimer` yang sama dengan `close()`,
+  // jadi tak ada state teardown kedua yang bisa beda pendapat.
+  const cleanupWriterOnStartupFailure = () => {
+    // v7.40 (re-audit): setelah startup sukses, safety-net TIDAK boleh melepas
+    // lease. `process.exit()` tanpa close() (crash/kill) justru harus
+    // meninggalkan lease orphan yang memblokir takeover sampai expiry (6AD S7).
+    // `writerClosed` hanya menjaga jalur close(); flag ini menjaga jalur exit.
+    if (startupSucceeded) return
+    releaseWriterLeaseAfterStartupThrow({
+      isClosed: () => writerClosed,
+      markClosed: () => {
+        writerClosed = true
+      },
+      stopRenewTimer: stopWriterRenewTimer,
+      release: () => releaseSessionWriter(sessionId, writerToken, cwd),
+    })
+  }
+  process.once("exit", cleanupWriterOnStartupFailure)
 
   // P2.2 — pagar pra-turn. JANGAN belanjakan provider untuk turn yang tak
   // bisa persist: basi → lewati turn (histori kernel utuh) + flag untuk
@@ -842,9 +957,22 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   // fase session-setup ke stderr (`[startup] rag 8432ms`). Tanpa env = diam.
   const startupPhase = async <T>(name: string, fn: () => Promise<T>): Promise<T> => {
     const s = Date.now()
-    onPhase?.(name)
     try {
+      onPhase?.(name)
       return await fn()
+    } catch (e) {
+      // v7.40 (audit): phase startup = titik lempar nyata paling awal
+      // (createProviderLayer/tool-layer/kernel-session). Bersihkan lease +
+      // timer di SINI juga, supaya host panjang-usia (ACP) yang menangkap
+      // galat bisa re-acquire tanpa menunggu event `exit`. Galat asli tetap
+      // dilempar (fail-closed); cleanup best-effort tak menimpani pesannya.
+      cleanupWriterOnStartupFailure()
+      // Catatan (re-audit): safety-net `process.once("exit", …)` SENGAJA tetap
+      // terpasang di jalur throw — ia idempoten & di-guard `writerClosed`
+      // (plus `startupSucceeded` yang masih false di sini), jadi fire saat exit
+      // tak berbahaya. Melepasnya di sini justru menghilangkan jaring pengaman
+      // bila host menangkap error lalu exit tanpa close().
+      throw e
     } finally {
       if (process.env.MINICODE_DEBUG_STARTUP === "1")
         startupWrite(`[startup] ${name} ${Date.now() - s}ms\n`)
@@ -1057,6 +1185,14 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   let contextCanonicalBaseline: readonly unknown[] | undefined
   let budgetTailPrefix: readonly unknown[] | undefined
   let budgetTailInitialMessages: readonly Message[] | undefined
+  // `--session <id>` yang menimpa baris lama bukan resume (histori tak di-load),
+  // tetapi tetap memulihkan WorkMode tersimpan. Beri tahu operator supaya
+  // perubahan otoritas ini terlihat, bukan diam-diam mengubah default CLI.
+  if (!identity.resumed && identity.hasStoredSession && persistedWorkMode !== undefined) {
+    startupWrite(
+      `[session] takeover ${sessionId}: WorkMode ${effectiveWorkMode === "EXECUTE" ? "BUILD" : effectiveWorkMode} restored from stored session metadata\n`,
+    )
+  }
   if (identity.resumed) {
     // P0.2 (Q5 / Invariant #6) — transparansi resume: WorkMode dipulihkan dari
     // metadata sesi bila operator tidak memberi sinyal eksplisit (NULL legacy
@@ -1463,6 +1599,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       ...(a.target ? { target: a.target } : {}),
       status: a.status as UiToolStatus,
       tsStart: a.tsStart,
+      ...(a.label ? { label: a.label } : {}),
       ...(a.tsEnd !== undefined ? { tsEnd: a.tsEnd } : {}),
       ...(a.durationMs !== undefined ? { durationMs: a.durationMs } : {}),
       ...(a.summary ? { summary: a.summary } : {}),
@@ -1691,7 +1828,8 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   todoSession.cwd = cwd
   // View pertanyaan ask_user — composition root meng-inject, tool menolak
   // jalan tanpanya (fail-closed, sama seperti `ask` pada permission).
-  setAskTextFn(promptAskText)
+  // v7.32: teruskan AbortSignal turn ke modal ask_user.
+  setAskTextFn((question, options, signal) => promptAskText(question, options, signal))
   // Cermin observability ask_user → adaptor presentasi (perilaku tool utuh).
   setAskApprovalHook((e) => {
     presentation?.publishApproval(e)
@@ -1829,6 +1967,14 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       // bahwa ada BUKTI overflow dan berapa nilai barunya, agar bisa memutuskan
       // menyetel `contextWindows` permanen bila perlu.
       onContextWindowEscalated: (info) => {
+        // v7.39: beri MAKNA pada event `context.window` yang selama ini cuma
+        // didefinisikan adapter tanpa pemanggil produksi. Eskalasi = bukti
+        // overflow nyata → ini titik aman untuk mengirim occupancy ke meter UI.
+        presentation?.noteContextWindow({
+          usedTokens: info.observedTokens,
+          windowTokens: info.toTokens,
+          turnId: session.state.turnCount,
+        })
         const currentKey = routedContextModel()
         const baseForInfo = resolveContextWindow(cfg, info.model, contextWindowTokens).tokens
         const baseForCurrent = resolveContextWindow(cfg, currentKey, contextWindowTokens).tokens
@@ -3698,6 +3844,9 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     } catch (e) {
       warnLine(`run terminal mark failed: ${(e as Error).message}`)
     }
+    // v7.40: jangan biarkan safety-net `exit` menumpuk pada host yang
+    // membangun banyak sesi; ditutupnya sesi ini sudah melepas lease di bawah.
+    process.off("exit", cleanupWriterOnStartupFailure)
     writerClosed = true
     stopWriterRenewTimer()
     releaseSessionWriter(sessionId, writerToken, cwd)
@@ -3712,6 +3861,12 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       process.stdin.pause()
     } catch {}
   }
+
+  // v7.40 (re-audit): titik tepat di mana startup dinyatakan SELESAI — semua
+  // startupPhase sudah lewat dan context siap dikembalikan. Sejak ini safety-net
+  // `exit` jadi no-op: crash tanpa close() mengorphankan lease (6AD S7), bukan
+  // melepasnya. Galat sebelum titik ini sudah ditangani catch startupPhase.
+  startupSucceeded = true
 
   return {
     session,

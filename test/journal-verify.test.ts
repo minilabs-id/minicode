@@ -179,9 +179,12 @@ test("verify: crash matrix A–K vs keputusan", () => {
   expect(k.clean).toBe(true)
 })
 
-// ── F7 klasifikasi via eksekusi aktual (37 tool) ──
+// ── F7 klasifikasi via eksekusi aktual (41 tool) ──
 
-test("verify: hanya 13 kelas mutasi yang menulis saat event aktual", async () => {
+// v7.38: 3 tool mutasi baru (`git_restore`/`git_checkout`/`lsp_rename`) ikut
+// menulis journal lewat wiring generik → 15 kelas (dulu 12; judul lama "13"
+// sudah keliru sebelum perubahan ini).
+test("verify: hanya 15 kelas mutasi yang menulis saat event aktual", async () => {
   const dir = tmpRoot()
   try {
     const bus = fakeBus()
@@ -198,7 +201,9 @@ test("verify: hanya 13 kelas mutasi yang menulis saat event aktual", async () =>
       const id = `k${i++}`
       bus.fire("execution:started", started(t.name, benign, id))
     }
-    const recs = await waitLines("cl1", dir, 12)
+    // v7.40: 41 tool → jurnal async butuh >5s di bawah beban suite penuh;
+    // polling 20s (bukan sleep) menjaga determinisme tanpa melemahkan asersi.
+    const recs = await waitLines("cl1", dir, 12, 20_000)
     const tools = new Set(recs.map((r) => r.tool))
     expect([...tools].sort()).toEqual(
       [
@@ -208,8 +213,11 @@ test("verify: hanya 13 kelas mutasi yang menulis saat event aktual", async () =>
         "edit",
         "apply_patch",
         "forget_memory",
+        "git_checkout",
         "git_commit",
         "git_push",
+        "git_restore",
+        "lsp_rename",
         "mcp_call",
         "move_file",
         "write_file",

@@ -60,8 +60,11 @@ async function withKeylessRequest<T>(
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(new Error("timeout")), 8000)
   const onAbort = () => controller.abort(signal.reason)
-  if (signal.aborted) controller.abort(signal.reason)
-  else signal.addEventListener("abort", onAbort, { once: true })
+  // Pasang listener DULU, baru cek `aborted` (pola web_fetch.ts): kalau cek
+  // lebih dulu, abort yang mendarat di celah check→addEventListener hilang
+  // karena listener tak pernah terpasang (temuan L1).
+  signal.addEventListener("abort", onAbort, { once: true })
+  if (signal.aborted) onAbort()
   try {
     return await fn(controller)
   } finally {
@@ -594,8 +597,14 @@ async function paperSearchAll(query: string, count: number, signal: AbortSignal)
 
 export const webSearchTool: Tool = {
   name: "web_search",
+  // v7.33 (wire contract): deskripsi lama mengulang 12 nilai enum DUA KALI
+  // (prosa + daftar provider) — buang prosa, satu-satunya sumber nilai ada di
+  // `enum` di bawah. Alias `so`/`issues`/`grepapp` sudah diterima execute(),
+  // jadi ikut dideklarasikan agar schema jujur (test lama tidak mem-pin enum).
+  // Frasa "fixed public search-provider endpoints" dipertahankan karena test
+  // audit sebelumnya memverifikasi klaim SSRF yang sudah diperbaiki.
   description:
-    "Search the web (Tavily/Brave/Keyless Firecrawl-Mwmbl-Marginalia) or keyless developer sources (Stack Overflow, Hacker News, GitHub, Wikipedia, papers). Use source=dev for coding research. Returns top results with snippets. Uses web_fetch under the hood with SSRF guard.",
+    "WEB: Search the web via fixed public search-provider endpoints. Use source='dev' for programming questions, 'papers' for academic papers.",
   parameters: {
     type: "object",
     properties: {
@@ -603,15 +612,17 @@ export const webSearchTool: Tool = {
       count: { type: "number", description: "max results (default 5, max 10)" },
       source: {
         type: "string",
-        description:
-          "web (default), stackoverflow, hn, github, github-issues, grep, wikipedia, arxiv, crossref, openalex, papers (OpenAlex+arXiv+Crossref), or dev (Stack Overflow + HN + GitHub repos/issues + grep.app)",
+        description: "search source; 'web' (default), 'dev', 'papers', or one specific provider",
         enum: [
           "web",
           "stackoverflow",
+          "so",
           "hn",
           "github",
           "github-issues",
+          "issues",
           "grep",
+          "grepapp",
           "wikipedia",
           "arxiv",
           "crossref",
@@ -664,8 +675,9 @@ export const webSearchTool: Tool = {
         const controller = new AbortController()
         const t = setTimeout(() => controller.abort(), 8000)
         const onAbort = () => controller.abort(ctx.signal.reason)
+        // Listener dulu, cek aborted setelahnya — tutup celah abort race (L1).
+        ctx.signal.addEventListener("abort", onAbort, { once: true })
         if (ctx.signal.aborted) onAbort()
-        else ctx.signal.addEventListener("abort", onAbort, { once: true })
         try {
           const res = await fetch("https://api.tavily.com/search", {
             method: "POST",
@@ -712,8 +724,9 @@ export const webSearchTool: Tool = {
         const t = setTimeout(() => controller.abort(), 8000)
         // Tautkan pembatalan parent (sebelumnya hanya Tavily yang menautkan).
         const onAbort = () => controller.abort(ctx.signal.reason)
-        if (ctx.signal.aborted) controller.abort(ctx.signal.reason)
-        else ctx.signal.addEventListener("abort", onAbort, { once: true })
+        // Listener dulu, cek aborted setelahnya — tutup celah abort race (L1).
+        ctx.signal.addEventListener("abort", onAbort, { once: true })
+        if (ctx.signal.aborted) onAbort()
         try {
           const res = await fetch(
             `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(q)}&count=${n}`,
@@ -785,8 +798,9 @@ export const webSearchTool: Tool = {
         const controller = new AbortController()
         const t = setTimeout(() => controller.abort(), 8000)
         const onAbort = () => controller.abort(ctx.signal.reason)
-        if (ctx.signal.aborted) controller.abort(ctx.signal.reason)
-        else ctx.signal.addEventListener("abort", onAbort, { once: true })
+        // Listener dulu, cek aborted setelahnya — tutup celah abort race (L1).
+        ctx.signal.addEventListener("abort", onAbort, { once: true })
+        if (ctx.signal.aborted) onAbort()
         try {
           const res = await fetch(ddgUrl, {
             signal: controller.signal,

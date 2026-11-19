@@ -3,7 +3,15 @@ export { bashKillTool, bashOutputTool, bashTool } from "./bash.ts"
 export { codeRunTool } from "./code_run.ts"
 export { deleteFileTool } from "./delete_file.ts"
 export { editTool } from "./edit.ts"
-export { gitCommitTool, gitDiffTool, gitLogTool, gitPushTool, gitStatusTool } from "./git.ts"
+export {
+  gitCheckoutTool,
+  gitCommitTool,
+  gitDiffTool,
+  gitLogTool,
+  gitPushTool,
+  gitRestoreTool,
+  gitStatusTool,
+} from "./git.ts"
 export { globTool } from "./glob.ts"
 export { grepTool } from "./grep.ts"
 export {
@@ -11,6 +19,7 @@ export {
   lspDiagnosticsTool,
   lspHoverTool,
   lspReferencesTool,
+  lspRenameTool,
   lspSymbolsTool,
   lspWorkspaceSymbolsTool,
 } from "./lsp.ts"
@@ -24,6 +33,7 @@ export { submitResultTool } from "./submit_result.ts"
 export { delegateTaskTool } from "./task.ts"
 export { todoReadTool, todoSession, todoWriteTool } from "./todo.ts"
 export { webFetchTool } from "./web_fetch.ts"
+export { webSearchTool } from "./web_search.ts"
 export { writeFileTool } from "./write_file.ts"
 
 import type { Tool } from "#minicore"
@@ -32,7 +42,15 @@ import { bashKillTool, bashOutputTool, bashTool } from "./bash.ts"
 import { codeRunTool } from "./code_run.ts"
 import { deleteFileTool } from "./delete_file.ts"
 import { editTool } from "./edit.ts"
-import { gitCommitTool, gitDiffTool, gitLogTool, gitPushTool, gitStatusTool } from "./git.ts"
+import {
+  gitCheckoutTool,
+  gitCommitTool,
+  gitDiffTool,
+  gitLogTool,
+  gitPushTool,
+  gitRestoreTool,
+  gitStatusTool,
+} from "./git.ts"
 import { globTool } from "./glob.ts"
 import { grepTool } from "./grep.ts"
 import {
@@ -40,6 +58,7 @@ import {
   lspDiagnosticsTool,
   lspHoverTool,
   lspReferencesTool,
+  lspRenameTool,
   lspSymbolsTool,
   lspWorkspaceSymbolsTool,
 } from "./lsp.ts"
@@ -71,6 +90,8 @@ export const allTools: Tool[] = [
   gitLogTool,
   gitCommitTool,
   gitPushTool,
+  gitRestoreTool,
+  gitCheckoutTool,
   webFetchTool,
   webSearchTool,
   readMemoryTool,
@@ -89,6 +110,7 @@ export const allTools: Tool[] = [
   lspHoverTool,
   lspSymbolsTool,
   lspWorkspaceSymbolsTool,
+  lspRenameTool,
   moveFileTool,
   deleteFileTool,
   readImageTool,

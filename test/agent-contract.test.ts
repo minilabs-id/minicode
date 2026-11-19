@@ -47,6 +47,8 @@ interface ScenarioOpts {
   ask?: (call: { name: string; args?: unknown }) => Promise<"allow" | "deny" | "always">
   maxSteps?: number
   stubTty?: boolean
+  /** [AGENT-CONTROL-2] Simulasikan broker daemon yang meng-inject ask non-TTY. */
+  allowNonTtyAsk?: boolean
 }
 
 interface ScenarioResult {
@@ -78,6 +80,7 @@ async function runScenario(name: string, opts: ScenarioOpts): Promise<ScenarioRe
       permissionMode: opts.mode,
       cwd: dir,
       ...(opts.ask ? { ask: opts.ask } : {}),
+      ...(opts.allowNonTtyAsk ? { allowNonTtyAsk: true } : {}),
       ...(opts.maxSteps ? { maxSteps: opts.maxSteps } : {}),
     })
     const calls: string[] = []
@@ -771,6 +774,42 @@ describe("audit #12: delegation behavior", () => {
       // Non-TTY: gerbang persetujuan menuntut terminal hidup — approver
       // ter-inject pun tak membuka gated tool. Fail-closed by design.
       expect(r.calls).toEqual([])
+      expect(reqText(r.requests[1])).toMatch(/denied|deny|approv/i)
+    } finally {
+      Object.defineProperty(process.stdin, "isTTY", { value: prevTty, configurable: true })
+      await cleanup(r.dir)
+    }
+  })
+
+  test("delegasi non-TTY + broker permissive: tetap deny (AGENT-CONTROL-2)", async () => {
+    // Regression: allowNonTtyAsk (dipakai daemon → ApprovalBroker) dulu mengubah
+    // non-TTY ASK menjadi jalur approval, termasuk delegate_task. Carve-out
+    // kini HANYA untuk tool non-gated, jadi broker tak boleh membuka delegasi.
+    const prevTty = process.stdin.isTTY
+    Object.defineProperty(process.stdin, "isTTY", { value: false, configurable: true })
+    let approvals = 0
+    const r = await runScenario("delegatedenybroker", {
+      tools: [delegateTaskTool],
+      mode: "ask",
+      allowNonTtyAsk: true,
+      ask: async () => {
+        approvals++
+        return "allow"
+      },
+      script: [
+        {
+          events: [
+            toolCall("delegate_task", { prompt: "x", mode: "explore" }),
+            finish("tool_calls"),
+          ],
+        },
+        { events: [text("cannot delegate headless"), finish("stop")] },
+      ],
+    })
+    try {
+      expect(r.calls).toEqual([])
+      // Non-vakum: broker memang tersedia & permissive, tapi tak pernah dipanggil.
+      expect(approvals).toBe(0)
       expect(reqText(r.requests[1])).toMatch(/denied|deny|approv/i)
     } finally {
       Object.defineProperty(process.stdin, "isTTY", { value: prevTty, configurable: true })

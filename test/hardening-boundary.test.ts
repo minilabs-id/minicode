@@ -181,9 +181,9 @@ test("LSP workspace/symbol yang menggantung kalah oleh abort", async () => {
     const p = lspWorkspaceSymbolsTool.execute({ query: "x" }, ctx) as Promise<string>
     setTimeout(() => c.abort(new Error("batal-induk")), 200)
     const t0 = Date.now()
-    const out = await p
-    // Tool menangkap abort menjadi string [lsp] — bukan success, bukan hang.
-    expect(out).toMatch(/\[lsp\].*batal-induk/i)
+    // v7.32: abort dilempar (isError), bukan string `[lsp]` sukses — samakan
+    // dengan MCP. Tetap menghentikan penungguan, bukan hang.
+    await expect(p).rejects.toThrow(/batal-induk/i)
     expect(Date.now() - t0).toBeLessThan(10_000)
   } finally {
     await cleanup(dir)

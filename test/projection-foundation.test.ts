@@ -34,6 +34,7 @@ import {
   shrinkThreadHistory,
   transitionRun,
 } from "../src/session/persistence.ts"
+import { SESSION_LEASE_MS } from "../src/task/session-authority.ts"
 
 function ws(): string {
   const dir = mkdtempSync(join(tmpdir(), "mc-p27-"))
@@ -54,7 +55,9 @@ function hashMessages(cwd: string, sid: string): string {
 }
 
 const T0 = 1_700_000_000_000
-const LEASE = 300_000
+// v7.40: turunkan dari sumber kanonik (hardcode 300_000 dulu bikin skenario
+// "lease kedaluwarsa" pakai waktu yang masih hidup → takeover gagal).
+const LEASE = SESSION_LEASE_MS
 
 test("P2.7-1: projection create/read round-trip", async () => {
   const cwd = ws()

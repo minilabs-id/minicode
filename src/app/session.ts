@@ -63,6 +63,38 @@ import {
 } from "../policy/work-mode.ts"
 import type { ApprovalEventHook } from "../presentation/events.ts"
 
+/**
+ * [v7.33 / audit F1] Predikat otorisasi LIVE untuk Tool Access Policy.
+ *
+ * `tools` adalah array LIVE milik tool-layer (`setupToolLayer().sessionTools`)
+ * yang dimutasi IN-PLACE oleh `setWorkMode`/`setPermissionMode` saat operator
+ * Shift+Tab. Snapshot `new Set(tools.map(...))` sekali di awal sesi membekukan
+ * otorisasi: tool MCP yang baru terlihat di EXECUTE tetap dianggap
+ * tak-terkonfigurasi (`auto` deny "MCP tool not configured/authorized") —
+ * melanggar invarian `visible === callable`. Predikat ini membaca ulang array
+ * tiap pemanggilan (dan lewat `refresh()` dari setter mode), sehingga izin
+ * mengikuti visibilitas nyata di KEDUA arah transisi. Tanpa tool = fail-closed.
+ */
+export function createLiveAuthorizedTools(
+  tools: readonly { readonly name: string }[] | undefined,
+): { hasAuthorizedTool(name: string): boolean; refresh(): void } {
+  const authorized = new Set<string>()
+  const refresh = (): void => {
+    authorized.clear()
+    for (const t of tools ?? []) authorized.add(t.name)
+  }
+  refresh()
+  return {
+    // Refresh per-call: jamin live walau urutan wiring setter mode berubah
+    // (composition root memanggil ctl.set* SEBELUM setTool* di cli/setup.ts).
+    hasAuthorizedTool: (name: string): boolean => {
+      refresh()
+      return authorized.has(name)
+    },
+    refresh,
+  }
+}
+
 // Kebijakan kompaksi lebih agresif: ringkas lebih DINI daripada default kernel
 // (75%/90%), supaya konteks jarang menyentuh dinding. Untuk jendela model
 // nyata (>= 16k), selaraskan ambang medium/high dengan `contextBudgetFor` agar
@@ -377,6 +409,29 @@ function annotateLastUserMessage(messages: readonly Message[], note: string): re
   return messages
 }
 
+/** [AUDIT] Skema tool yang benar-benar dikirim di wire LLM. `stream()` sudah
+ * membuang `hiddenWireTools` dari `req.tools` sebelum estimasi token; endpoint
+ * token estimate lewat `liveToolSchemas()` dulu TIDAK membuangnya, sehingga
+ * code_run, mcp_*, ask_user ikut terhitung. Satu filter untuk dua jalur supaya
+ * angka estimasi selalu mencerminkan wire yang nyata. Diekspor agar bisa
+ * dipinjam test tanpa perlu membangun sesi penuh. */
+type WireToolSchema = Parameters<typeof estimateTools>[0][number]
+
+export function visibleWireToolSchemas<T extends WireToolSchema>(
+  tools: readonly T[],
+  hiddenWireTools?: ReadonlySet<string>,
+): Pick<T, "name" | "description" | "parameters">[] {
+  const visible =
+    hiddenWireTools && hiddenWireTools.size > 0
+      ? tools.filter((t) => !hiddenWireTools.has(t.name))
+      : tools
+  return visible.map((t) => ({
+    name: t.name,
+    description: t.description,
+    parameters: t.parameters,
+  }))
+}
+
 export async function createMinicodeSession(
   opts: Partial<
     Omit<SessionConfig, "permissions" | "estimator" | "recovery" | "system" | "executor">
@@ -609,10 +664,12 @@ export async function createMinicodeSession(
   // mendelegasikan keputusan ke base apa adanya (perilaku identik) tetapi
   // tetap menyediakan __setWorkMode.
   //
-  // Tool Access Policy: set tool terotorisasi = tool yang terlihat/terdaftar
+  // Tool Access Policy: tool terotorisasi = tool yang terlihat/terdaftar
   // (termasuk MCP runtime dari server terkonfigurasi). Dipakai `auto` untuk
   // membedakan MCP sah dari MCP tak-terkonfigurasi (fail-closed deny).
-  const authorizedTools = new Set((rest.tools ?? []).map((t) => t.name))
+  // v7.33: LIVE, bukan snapshot — `rest.tools` adalah array yang dimutasi
+  // tool-layer saat Shift+Tab (lihat createLiveAuthorizedTools).
+  const authorized = createLiveAuthorizedTools(rest.tools)
   const permissions =
     opts.permissionHandler ??
     createWorkModePermissionHandler({
@@ -626,7 +683,7 @@ export async function createMinicodeSession(
         restrictBash,
         ...(bashAllowlist ? { bashAllowlist } : {}),
         onApprovalEvent,
-        authorizedTools,
+        hasAuthorizedTool: authorized.hasAuthorizedTool,
         // [Area B · PROMPT 06] Store per-sesi: persetujuan dari sesi A tak
         // bisa dipakai sebagai bukti di sesi B.
         approvalBindings,
@@ -761,6 +818,9 @@ export async function createMinicodeSession(
       setMode: (m) => {
         if (withMode.__getMode() !== m) authorizationVersion++
         withMode.__setMode(m)
+        // v7.33: segarkan otorisasi saat PM berganti (DEFENSE-IN-DEPTH;
+        // predikat juga refresh per-call, jadi aman walau wiring berubah).
+        authorized.refresh()
       },
       getMode: () => withMode.__getMode(),
       // restrictBash adalah opsi tetap (bukan state handler) — dibaca langsung
@@ -781,6 +841,9 @@ export async function createMinicodeSession(
         const norm = normalizeWorkMode(m)
         if (wm.__getWorkMode() !== norm) authorizationVersion++
         wm.__setWorkMode(norm)
+        // v7.33: segarkan otorisasi saat WM berganti (DEFENSE-IN-DEPTH;
+        // predikat juga refresh per-call, jadi aman walau wiring berubah).
+        authorized.refresh()
       },
       getWorkMode: () => wm.__getWorkMode(),
     })
@@ -795,6 +858,14 @@ export async function createMinicodeSession(
   let lastTurnMode: ModeSnapshot | null = null
   let activeTurnTransitionNote = ""
   let turnSentStream = false
+  // [Audit] Tiga state di atas BERSAMA untuk semua run() dalam sesi ini. Run
+  // kedua yang datang saat run pertama masih aktif akan ditolak core sebagai
+  // "busy"; tanpa penanda pemilik, penolakan itu menimpa state dan finally-nya
+  // menghapus anotasi transisi / menggagalkan update lastTurnMode milik turn
+  // yang masih hidup. Token monoton + pemilik aktif menjaga cleanup tetap milik
+  // run yang benar-benar berjalan.
+  let runSeq = 0
+  let stateOwner = 0
   const computeLiveSystem = (): string => {
     const pm = livePermissionModeForSystem()
     const wm = liveWorkModeForSystem()
@@ -1189,12 +1260,7 @@ export async function createMinicodeSession(
       }
     },
   }
-  const liveToolSchemas = () =>
-    registeredTools.map((t) => ({
-      name: t.name,
-      description: t.description,
-      parameters: t.parameters,
-    }))
+  const liveToolSchemas = () => visibleWireToolSchemas(registeredTools, hiddenWireTools)
   const core = createCoreSession({
     ...rest,
     contextWindowTokens: contextWindowForModel(currentContextModel()),
@@ -1345,19 +1411,29 @@ export async function createMinicodeSession(
       return core.contextTokens
     },
     run(input: string, runOpts?: { signal?: AbortSignal; model?: string }) {
-      activeContextModel = runOpts?.model ?? opts.model
-      const modelForRun = activeContextModel
-      const startMode: ModeSnapshot = {
-        workMode: liveWorkModeForSystem(),
-        permissionMode: livePermissionModeForSystem(),
+      const myToken = ++runSeq
+      // Hanya run yang menjadi pemilik core yang boleh menulis state bersama.
+      // Bila ada pemilik aktif, core.run() akan menolak "busy"; kita biarkan
+      // state turn pertama utuh dan TIDAK menjalankan cleanup penolakan itu.
+      if (stateOwner === 0) {
+        stateOwner = myToken
+        activeContextModel = runOpts?.model ?? opts.model
+        const startMode: ModeSnapshot = {
+          workMode: liveWorkModeForSystem(),
+          permissionMode: livePermissionModeForSystem(),
+        }
+        activeTurnTransitionNote = lastTurnMode
+          ? buildModeTransitionNote(lastTurnMode, startMode)
+          : ""
+        turnSentStream = false
       }
-      activeTurnTransitionNote = lastTurnMode
-        ? buildModeTransitionNote(lastTurnMode, startMode)
-        : ""
-      turnSentStream = false
+      const modelForRun = runOpts?.model ?? opts.model
       return core
         .run(input, runOpts)
         .finally(() => {
+          // Bersihkan HANYA bila run ini masih pemilik state. Penolakan "busy"
+          // dari run concurrent tak boleh menyentuh state turn yang aktif.
+          if (myToken !== stateOwner) return
           if (turnSentStream) {
             lastTurnMode = {
               workMode: liveWorkModeForSystem(),
@@ -1366,6 +1442,7 @@ export async function createMinicodeSession(
           }
           activeTurnTransitionNote = ""
           turnSentStream = false
+          stateOwner = 0
         })
         .catch((error: unknown) => {
           // Kernel melaporkan kehabisan konteks sebagai `budget_exceeded` dengan

@@ -31,51 +31,6 @@ afterAll(
         const code = (error as { code?: string }).code
         // Windows may briefly retain SQLite/WAL handles after close; a finite
         // retry smooths that release delay while a persistent leak still fails.
-        if (attempt === 3) {
-          // DIAG-TEMP
-          const fs = require("node:fs") as typeof import("node:fs")
-          const log: string[] = []
-          const walk = (d: string) => {
-            for (const e of fs.readdirSync(d, { withFileTypes: true })) {
-              const p = join(d, e.name)
-              if (e.isDirectory()) walk(p)
-              else {
-                try {
-                  fs.unlinkSync(p)
-                  log.push(`unlink OK ${p}`)
-                } catch (er) {
-                  log.push(`unlink FAIL ${p}: ${(er as Error).message}`)
-                }
-              }
-            }
-          }
-          try {
-            walk(workspace)
-          } catch (er) {
-            log.push(`walk err ${(er as Error).message}`)
-          }
-          try {
-            fs.rmSync(workspace, { recursive: true })
-            log.push("rmSync after unlink OK")
-          } catch (er) {
-            log.push(`rmSync after unlink FAIL: ${(er as Error).message}`)
-            Bun.gc(true)
-            try {
-              fs.rmSync(workspace, { recursive: true })
-              log.push("rmSync after GC OK")
-            } catch (er2) {
-              log.push(`rmSync after GC FAIL: ${(er2 as Error).message}`)
-            }
-          }
-          // Diagnostik cleanup bersifat best-effort: tulis ke tmpdir (path
-          // scratch agen lama bisa tak ada dan justru menggagalkan test).
-          try {
-            fs.writeFileSync(
-              join(tmpdir(), "minicode-coverage-gaps-diag.txt"),
-              `cwd=${process.cwd()}\n${log.join("\n")}\n`,
-            )
-          } catch {}
-        }
         if ((code !== "EBUSY" && code !== "EPERM") || attempt === 9) throw error
         await Bun.sleep(Math.min(50 * 2 ** attempt, 1_000))
       }
@@ -193,9 +148,13 @@ describe("memory tools: file lokal", () => {
     const w = (await writeMemoryTool.execute({ text: "catatan uji" }, ctx)) as string
     expect(w).toBeTruthy()
     const all = (await readMemoryTool.execute({ query: "" }, ctx)) as string
-    expect(all).toBeTruthy()
+    // String truthy selalu benar — buktikan isinya benar-benar terbaca.
+    expect(all).toContain("catatan uji")
     const f = (await forgetMemoryTool.execute({ query: "catatan uji" }, ctx)) as string
     expect(f).toBeTruthy()
+    // Baca ulang: teks harus benar-benar hilang, bukan cuma laporan sukses.
+    const after = (await readMemoryTool.execute({ query: "" }, ctx)) as string
+    expect(after).not.toContain("catatan uji")
   })
 
   test("write kosong & query kosong ditolak", async () => {

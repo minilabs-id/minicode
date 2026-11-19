@@ -20,11 +20,14 @@ export function formatArgsPreview(args: unknown): string {
   // status satu-baris: sanitasi agar `\n`/ANSI tak memecah baris/menyuntik.
   try {
     const a = args as Record<string, unknown>
-    if (a.path) return sanitizeAnsiLine(String(a.path))
+    // path/pattern/query juga berasal dari model/MCP dan bisa sangat panjang
+    // (path 500+ char). Tanpa kap, printer linier menyalurkannya utuh ke stderr
+    // pada jalur one-shot — samakan dengan command/cmd/prompt.
+    if (a.path) return safeSlice(sanitizeAnsiLine(String(a.path)), 60)
     if (a.command) return safeSlice(sanitizeAnsiLine(String(a.command)), 60)
     if (a.cmd) return safeSlice(sanitizeAnsiLine(String(a.cmd)), 60)
-    if (a.pattern) return sanitizeAnsiLine(String(a.pattern))
-    if (a.query) return sanitizeAnsiLine(String(a.query))
+    if (a.pattern) return safeSlice(sanitizeAnsiLine(String(a.pattern)), 60)
+    if (a.query) return safeSlice(sanitizeAnsiLine(String(a.query)), 60)
     if (a.prompt) return safeSlice(sanitizeAnsiLine(String(a.prompt)), 40)
     return safeSlice(sanitizeAnsiLine(JSON.stringify(a)), 40)
   } catch {

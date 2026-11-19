@@ -281,19 +281,22 @@ describe("MCP client: mcp_read", () => {
     expect(out).toContain("is empty")
   })
 
-  test("resource tak dikenal → pesan error server, bukan crash", async () => {
+  test("resource tak dikenal → error dilempar (isError), bukan string sukses", async () => {
     const url = serveMcp(fullServer)
     await connectAll([{ id: "s", url, allowPrivateHost: true }])
     const { mcpReadTool } = await import("../src/tools/mcp_call.ts")
-    const out = (await mcpReadTool.execute({ server: "s", uri: "x://nope" }, ctx)) as string
-    expect(out).toContain("[mcp] error")
-    expect(out).toContain("tidak ditemukan")
+    // v7.31: samakan dengan mcp_call — error dilempar supaya kernel menandai
+    // isError dan ledger tak mengklaim sukses.
+    await expect(mcpReadTool.execute({ server: "s", uri: "x://nope" }, ctx)).rejects.toThrow()
   })
 
-  test("server tak terhubung → pesan yang menyebut server terdaftar", async () => {
+  test("server tak terhubung → error dilempar (isError), bukan string sukses", async () => {
+    // v7.32: notConnected() melempar Error supaya kernel menandai isError —
+    // dulu return string membuat tool.failed tampil sebagai tool.completed.
     const { mcpReadTool } = await import("../src/tools/mcp_call.ts")
-    const out = (await mcpReadTool.execute({ server: "hantu", uri: "x://y" }, ctx)) as string
-    expect(out).toContain("is not connected")
+    await expect(mcpReadTool.execute({ server: "hantu", uri: "x://y" }, ctx)).rejects.toThrow(
+      /is not connected/,
+    )
   })
 
   test("uri kosong ditolak", async () => {
@@ -330,12 +333,12 @@ describe("MCP client: mcp_prompt", () => {
     expect(payloadLines(out)).toHaveLength(2)
   })
 
-  test("prompt tak dikenal → pesan error server", async () => {
+  test("prompt tak dikenal → error dilempar (isError)", async () => {
     const url = serveMcp(fullServer)
     await connectAll([{ id: "s", url, allowPrivateHost: true }])
     const { mcpPromptTool } = await import("../src/tools/mcp_call.ts")
-    const out = (await mcpPromptTool.execute({ server: "s", name: "hantu" }, ctx)) as string
-    expect(out).toContain("[mcp] error")
+    // v7.31: sama dengan mcp_read — jangan kembalikan string error sukses.
+    await expect(mcpPromptTool.execute({ server: "s", name: "hantu" }, ctx)).rejects.toThrow()
   })
 
   test("name kosong ditolak", async () => {

@@ -31,6 +31,7 @@ import {
   resetEmbeddingCircuitBreaker,
   revokeByProvenance,
   searchHybrid,
+  setMemoryWriteFaultInjectorForTest,
 } from "../src/memory/vector.ts"
 import { writeMemoryTool } from "../src/tools/memory.ts"
 
@@ -58,6 +59,10 @@ const memoryLine = (text: string, tags: unknown[]): string =>
 
 afterEach(() => {
   resetEmbeddingCircuitBreaker()
+  // injector global: WAJIB dilepas di sini, bukan di badan test. Bila assertion
+  // di tengah test melempar sebelum reset manual, injector tetap terpasang dan
+  // merembes ke test D5/D6 berikutnya (cascade failure yang sulit dilacak).
+  setMemoryWriteFaultInjectorForTest(null)
   while (dirs.length > 0) {
     try {
       rmSync(dirs.pop()!, { recursive: true, force: true })
@@ -132,12 +137,16 @@ describe("Area E: D2 — revoke by provenance (AND, fail-closed)", () => {
 describe("Area E: D3 — reconcile mengadopsi vector-only", () => {
   test("entri vector-only masuk MEMORY.md (hilang) → konsisten tanpa kehilangan", async () => {
     const dir = tempDir()
-    const { setMemoryWriteFaultInjectorForTest } = await import("../src/memory/vector.ts")
     setMemoryWriteFaultInjectorForTest((stage) => {
       if (stage === "after_vector_before_file") throw new Error("crash setelah vector")
     })
-    await expect(addMemory("vector-only entry D3", { cwd: dir })).rejects.toThrow()
-    setMemoryWriteFaultInjectorForTest(null)
+    try {
+      await expect(addMemory("vector-only entry D3", { cwd: dir })).rejects.toThrow()
+    } finally {
+      // Pertahanan ganda: afterEach juga melepas, tapi try/finally menjamin
+      // pelepasan walau assertion di atas gagal di dalam test ini sendiri.
+      setMemoryWriteFaultInjectorForTest(null)
+    }
 
     let file = ""
     try {
@@ -151,6 +160,24 @@ describe("Area E: D3 — reconcile mengadopsi vector-only", () => {
     )
     // Tidak ada baris yang dihapus.
     expect(rowCount(dir)).toBe(1)
+  })
+})
+
+describe("Area E: cleanup injector fault", () => {
+  test("injector sengaja dibiarkan terpasang saat assertion gagal", async () => {
+    const dir = tempDir()
+    setMemoryWriteFaultInjectorForTest(() => {
+      throw new Error("fault sengaja untuk uji cleanup")
+    })
+    // Simulasi kegagalan assertion: addMemory melempar karena injector dan kita
+    // TIDAK reset manual — setelah test ini afterEach yang harus menonaktifkannya.
+    await expect(addMemory("fault sengaja", { cwd: dir })).rejects.toThrow("fault sengaja")
+  })
+
+  test("injector tidak merembes ke test berikutnya", async () => {
+    const dir = tempDir()
+    // Bila injector masih terpasang, addMemory akan melempar dan test ini gagal.
+    await expect(addMemory("tanpa fault", { cwd: dir })).resolves.toBeDefined()
   })
 })
 

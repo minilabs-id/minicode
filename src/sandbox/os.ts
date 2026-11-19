@@ -68,6 +68,8 @@ export interface OsSandboxOptions {
   env?: Record<string, string>
   timeoutMs?: number
   network?: "none" | "bridge"
+  /** v7.31: samakan dengan Docker — kiи kredensial git saat unrestricted. */
+  allowGitCredentials?: boolean
 }
 
 function escapeSeatbelt(s: string): string {
@@ -174,7 +176,10 @@ export function runInOsSandbox(
     )
   }
   const abs = resolve(cwd)
-  const sanitizedEnv = sanitizeSpawnEnv(process.env, opts.env) as Record<string, string>
+  const sanitizedEnv = sanitizeSpawnEnv(process.env, opts.env, opts.allowGitCredentials) as Record<
+    string,
+    string
+  >
   const timeout = opts.timeoutMs ?? LIMITS.DOCKER_TIMEOUT_MS
   const targets = discoverSandboxMaskTargets(abs)
 

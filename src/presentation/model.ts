@@ -46,6 +46,11 @@ export interface ActivityEntry {
    * satu run anak; retry = run baru.
    */
   runId?: string
+  /**
+   * Label manusiawi sub-agent (dari `ChildSessionLink.label`). Opsional agar
+   * replay event lama tetap terbaca; UI memakai ini sebelum code-derived marker.
+   */
+  label?: string
   identity: ToolIdentity
   target?: string
   status: ToolStatus

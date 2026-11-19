@@ -117,7 +117,7 @@ describe("audit fixes — file, edit, move, patch, read", () => {
     writeFileSync(join(dir, "foo.ts"), "export const v = 1\n", "utf8")
 
     const out = (await moveFileTool.execute(
-      { from: "foo.ts", to: "Foo.ts" },
+      { path: "foo.ts", destination: "Foo.ts" },
       makeCtx(dir),
     )) as string
     expect(out).toContain("moved foo.ts -> Foo.ts")

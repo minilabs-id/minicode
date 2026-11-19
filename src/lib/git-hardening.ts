@@ -45,15 +45,51 @@ export interface FilterDriver {
  * `git config`, tanpa hook/filter/pager). Kegagalan discovery melempar error:
  * pemanggil tidak boleh menganggap ketidakmampuan memeriksa sebagai tidak ada
  * filter. Dipakai neutralizer plumbing dan preflight `git_commit`.
+ *
+ * Hanya config LOKAL (`--local`, yakni `.git/config`) beserta file yang
+ * di-include-nya (`--includes`) yang dihitung. Model ancaman = repo yang dibuka
+ * membawa definisi filter sendiri; itu SELALU lokal (bisa lewat `[include]`).
+ * Filter global/sistem (mis. Git LFS di Git-for-Windows) bukan ancaman repo:
+ * tanpa `--local` definition LFS operator dilaporkan sebagai filter repo dan
+ * mem-blokir setiap commit/restore (false positive). Catatan: sengaja TIDAK
+ * menyaring berdasarkan pemakaian di `.gitattributes` — sumber atribut bisa
+ * tersebar (per-dir, `.git/info/attributes`, `core.attributesFile`), dan kalau
+ * ada satu sumber yang terlewat, filter yang benar-benar jalan lolos (fail-open).
+ * Lebih aman menolak semua filter lokal; `--local` sudah cukup hilangkan FP.
  */
 export async function discoverFilterDrivers(cwd: string): Promise<FilterDriver[]> {
+  // `--local` = baca HANYA `.git/config` repo. Tanpa ini, `git config` ikut
+  // mengembalikan filter global/sistem (LFS) yang memicu penolakan palsu.
+  // `--includes` WAJIB: `--local` saja TIDAK mengikuti `[include] path=...`
+  // dari config repo, sehingga repo jahat bisa menyembunyikan filter di file
+  // yang di-include dan lolos (fail-open). `--local --includes` tetap TIDAK
+  // membaca scope global/sistem (include chain mulai dari file lokal saja).
   const r = spawnSync(
     resolveTrustedExecutable("git"),
-    ["config", "--name-only", "--get-regexp", "^filter\\..*\\.(clean|smudge|process)$"],
+    [
+      "config",
+      "--local",
+      "--includes",
+      "--name-only",
+      "--get-regexp",
+      "^filter\\..*\\.(clean|smudge|process)$",
+    ],
     { cwd, encoding: "utf8", timeout: 10_000 },
   )
   if (r.error) throw new Error(`unable to inspect Git filter configuration: ${r.error.message}`)
   if (r.status === 1 && !r.stdout?.trim()) return []
+  // v7.40 re-audit: `--local` di luar repo (cwd tanpa `.git`) exit 128 dengan
+  // pesan "--local can only be used inside a git repository". Itu berarti TAK
+  // ADA `.git/config` → mustahil ada repo-local filter → aman return [].
+  // Error lain (IO/parse) TETAP fail-closed dilempar.
+  if (
+    r.status === 128 &&
+    /--local can only be used inside a git repository|not a git repository/i.test(
+      String(r.stderr ?? ""),
+    )
+  ) {
+    return []
+  }
   if (r.status !== 0) {
     throw new Error(`unable to inspect Git filter configuration (git exited ${String(r.status)})`)
   }

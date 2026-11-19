@@ -8,8 +8,10 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { tmpdir } from "node:os"
+import type { ToolContext } from "#minicore"
 import type { CliSession } from "../cli/setup.ts"
 import { runTui } from "../cli/tui.ts"
+import { createBashJobTools, killAllBackgroundJobs } from "../src/tools/bash.ts"
 import { resetLocaleState, setSessionLocale } from "../src/ui/i18n/locale.ts"
 import { createFakeBus, installFakeTty, KEY } from "./helpers/tui-harness.ts"
 
@@ -184,6 +186,94 @@ describe("TUI: informasi tambahan saat turn berjalan", () => {
       expect(h.submitted).toEqual(["jalan"])
     } finally {
       await tty!.send(KEY.ctrlD)
+      await runP
+    }
+  })
+
+  test("M2: celah abort→submit tak boleh mengisi ulang antrean (turn hantu)", async () => {
+    const h = harness({ steerAccepted: false })
+    const runP = runTui(h.session)
+    try {
+      await startBusy(h, "jalan")
+      await tty!.send("dulu")
+      await tty!.send(KEY.enter)
+      await tty!.waitForScreen((f) => f.some((line) => line.includes("queued #1")))
+      // Turn masih terblokir di gate, jadi App tetap busy setelah abort,
+      // dan Enter berikutnya lewat jalur host.enqueue (bukan submit baru).
+      await tty!.send(KEY.esc, 90)
+      await tty!.send("setelah abort")
+      await tty!.send(KEY.enter)
+      await tty!.waitForScreen((f) => f.some((line) => line.includes("not queued")))
+      expect(h.steered).toEqual([])
+      h.release()
+      await new Promise((r) => setTimeout(r, 30))
+      // Antre lama dibuang, antre baru ditolak → tak ada turn kedua.
+      expect(h.submitted).toEqual(["jalan"])
+    } finally {
+      await tty!.send(KEY.ctrlD)
+      await runP
+    }
+  })
+})
+
+describe("TUI: abortRequested & footer live mode (audit deep-mode)", () => {
+  test("auto-resume job background setelah abort menerima steering (flag di-clear di turn baru)", async () => {
+    const savedAuto = process.env.MINICODE_AUTORESUME_BG
+    process.env.MINICODE_AUTORESUME_BG = "1"
+    const h = harness()
+    const runP = runTui(h.session)
+    try {
+      await startBusy(h, "pertama")
+      // Esc = abort: abortRequested=true, niat lama dibatalkan.
+      await tty!.send(KEY.esc, 90)
+      h.release()
+      await tty!.waitForScreen((f) => f.some((line) => line.includes("(stopped)")))
+
+      // Job background selesai → onBackgroundJobFinished memanggil runTurn()
+      // LANGSUNG (tak lewat submit()). Sebelum fix, turn baru ini mewarisi
+      // abortRequested=true sehingga semua steering ditolak.
+      const { bash } = createBashJobTools("deep-autoresume")
+      const ctx = {
+        signal: new AbortController().signal,
+        cwd: tmpdir(),
+        emit() {},
+      } as unknown as ToolContext
+      await bash.execute({ cmd: "echo deep-done", background: true }, ctx)
+      await waitFor(() => h.submitted.length === 2, "turn auto-resume mulai")
+
+      await tty!.send("lanjutan setelah resume")
+      await tty!.send(KEY.enter)
+      await tty!.waitForScreen((f) =>
+        f.some((line) => line.includes("steered into the running turn")),
+      )
+      expect(h.steered).toContain("lanjutan setelah resume")
+      h.release()
+    } finally {
+      h.release()
+      killAllBackgroundJobs()
+      await tty?.send(KEY.ctrlD)
+      await runP
+      if (savedAuto === undefined) delete process.env.MINICODE_AUTORESUME_BG
+      else process.env.MINICODE_AUTORESUME_BG = savedAuto
+    }
+  })
+
+  test("footer membaca permissions.getMode() live, bukan snapshot mode", async () => {
+    const h = harness()
+    h.session.permissions = {
+      getMode: () => "ask",
+      getRestrictBash: () => false,
+      setMode: () => {},
+    } as never
+    const runP = runTui(h.session)
+    try {
+      tty = installFakeTty({ columns: 90, rows: 24 })
+      await tty.ready()
+      // `permissionMode` di fixture = "auto"; kalau footer masih memakai mode
+      // basi, labelnya "Auto" dan assertion ini gagal.
+      await tty.waitForScreen((f) => f.some((line) => line.includes("Ask")))
+    } finally {
+      await tty?.send(KEY.ctrlD)
       await runP
     }
   })

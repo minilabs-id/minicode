@@ -13,7 +13,8 @@
 //   4. Vendor kernel lengkap (tanpa itu `bun install` bersih akan gagal).
 //   5. Ukuran wajar — deteksi kalau `node_modules` atau test ikut terbawa.
 //      Batasnya ada di `scripts/pack-budget.ts` (satu sumber angka;
-//      re-baseline 3,5 MiB disetujui owner — lihat komentar di sana).
+//      re-baseline 4.608 KiB / 4,5 MiB disetujui owner 2026-11-17, v0.30.0
+//      — riwayat alasan tiap kenaikan ada di komentar file itu).
 //
 // Usage: bun scripts/pack-check.ts [--verbose]
 
@@ -106,7 +107,11 @@ const DYNAMIC_IMPORT = /import\(\s*["'](\.[^"']+)["']\s*\)/g
 // cli/index.ts. Tanpa ini, gateway import berhenti di wrapper dan tak lagi
 // memverifikasi graf cli/index.ts (regresi kualitas gate, bukan kegagalan).
 const SIDE_IMPORT = /(?:^|\n)\s*import\s+["'](\.[^"']+)["']/g
-const BARE_IMPORT = /from\s+["'](minicore(?:\/[^"']*)?)["']/g
+// Alias kernel memakai `#minicore` (lihat field `imports` di package.json),
+// bukan `minicore` polos. Pola lama mengharuskan `minicore` berkutip persis →
+// tak pernah cocok, sehingga gate vendor lolos vacuously (0 spesifier). Terima
+// bentuk static/dynamic/side-effect dan, untuk kompatibilitas, bentuk polos.
+const BARE_IMPORT = /(?:\bfrom\s+|\bimport\s*\(\s*|\bimport\s+)["'](#?minicore(?:\/[^"']*)?)["']/g
 
 function readIfPacked(rel: string): string | null {
   if (!inPack(rel)) return null
@@ -117,6 +122,15 @@ function readIfPacked(rel: string): string | null {
 const visited = new Set<string>()
 const missing: { from: string; target: string }[] = []
 const bareTargets = new Set<string>()
+const vendorMissing: string[] = []
+
+/** Pemetaan tunggal alias `#minicore` → berkas vendor yang ikut terkemas. */
+function minicoreVendorPath(spec: string): string {
+  const normalized = spec.startsWith("#") ? spec.slice(1) : spec
+  const sub =
+    normalized === "minicore" ? "src/core/index.ts" : normalized.replace(/^minicore\//, "src/")
+  return `vendor/minicore/${sub}`
+}
 
 function walk(rel: string): void {
   const norm = rel.replace(/\\/g, "/")
@@ -144,7 +158,12 @@ function walk(rel: string): void {
   BARE_IMPORT.lastIndex = 0
   let b: RegExpExecArray | null = BARE_IMPORT.exec(src)
   while (b !== null) {
-    bareTargets.add(b[1]!)
+    const spec = b[1]!
+    bareTargets.add(spec)
+    const vendorPath = minicoreVendorPath(spec)
+    // Telusuri modul vendor juga: import relatif di dalam kernel ikut diverifikasi.
+    if (!inPack(vendorPath)) vendorMissing.push(`${spec} → ${vendorPath}`)
+    else walk(vendorPath)
     b = BARE_IMPORT.exec(src)
   }
 }
@@ -161,17 +180,15 @@ check(
 )
 
 // ── 3. vendor kernel ──
-// Semua spesifier `minicore/...` harus ada di vendor yang terkemas.
-const vendorMissing: string[] = []
-for (const spec of bareTargets) {
-  const sub = spec === "minicore" ? "src/core/index.ts" : spec.replace(/^minicore\//, "src/")
-  const vendorPath = `vendor/minicore/${sub}`
-  if (!inPack(vendorPath)) vendorMissing.push(`${spec} → ${vendorPath}`)
-}
+// `walk` mengisi `bareTargets` dan `vendorMissing` sambil menelusuri graf import.
+// Gate HARUS gagal bila tak ada spesifier: tanpa ini, regex yang kelak tak lagi
+// cocok membuat pemeriksaan ini lolos secara vacuous (regresi nyata).
 check(
   `vendor kernel lengkap (${bareTargets.size} spesifier)`,
-  vendorMissing.length === 0,
-  vendorMissing.slice(0, 5).join("; "),
+  bareTargets.size > 0 && vendorMissing.length === 0,
+  bareTargets.size === 0
+    ? "tak ada spesifier #minicore terdeteksi — pemeriksaan menjadi no-op"
+    : vendorMissing.slice(0, 5).join("; "),
 )
 check("vendor/minicore/package.json ikut", inPack("vendor/minicore/package.json"))
 

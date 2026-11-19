@@ -65,16 +65,17 @@ export interface ApprovalBinding {
 /**
  * Path absolut target file untuk tool tertentu.
  *
- * `move_file` punya DUA ujung (from + to): keduanya jadi bukti, karena
- * perubahan salah satu ujung mengubah operasi yang disetujui.
+ * `move_file` punya DUA ujung (path + destination): keduanya jadi bukti, karena
+ * perubahan salah satu ujung mengubah operasi yang disetujui. Fallback lama
+ * dipertahankan untuk binding yang dibuat sebelum rename wire v7.38.
  */
 export function approvalTargetPaths(tool: string, args: unknown, root: string): string[] {
   if (!FILE_TARGET_TOOLS.has(tool)) return []
   const a = (args ?? {}) as Record<string, unknown>
   const str = (v: unknown): string => (typeof v === "string" ? v : "")
   if (tool === "move_file") {
-    const from = str(a.from)
-    const to = str(a.to)
+    const from = str(a.path ?? a.from)
+    const to = str(a.destination ?? a.to)
     return [from, to].filter((p) => p !== "").map((p) => resolve(root, p))
   }
   const p = str(a.path)

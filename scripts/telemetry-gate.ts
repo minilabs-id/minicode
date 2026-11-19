@@ -1,26 +1,30 @@
 // Telemetry gate — cek resolve-rate dari traces.jsonl.
-// Target: resolved/total >= 0.3 (dari bench baseline; warn, bukan block).
+// Target: resolved/total >= 0.3 (dari bench baseline).
 //
-// [Fase 9 / 9.3 CTL-06] Mode `--require-min-runs` (alias `--self-test`):
-// alih-alih skip diam-diam saat data kurang, exit non-zero agar jalur evaluasi
-// aktif di CI tidak terlewati karena traces.jsonl tidak ada/kurang 3 run.
-// Default lama (`--self-test` absent) tetap skip → exit 0 agar integrasi lama
-// yang tidak pernah menulis trace tidak gagal mendadak.
+// Data WAJIB ada dan cukup (minimal 3 run): gate GAGAL bila traces.jsonl hilang
+// atau sparse. Flag `--allow-missing` mengembalikan perilaku legacy (skip diam-
+// diam) hanya untuk integrasi lama yang memang tak pernah menulis trace.
+// `--require-min-runs` / `--self-test` tetap diterima sebagai alias, supaya
+// pemanggil lama tidak error — strict kini sudah menjadi default.
 import { existsSync, readFileSync } from "node:fs"
 import { resolve } from "node:path"
 
 const argv = process.argv.slice(2)
-const requireMinRuns = argv.includes("--require-min-runs") || argv.includes("--self-test")
+const allowMissing = argv.includes("--allow-missing")
 const cwd = argv.find((a) => !a.startsWith("--")) ?? "."
 const file = resolve(cwd, ".minicode", "traces.jsonl")
 
+function fail(message: string): never {
+  console.error(`[gate] ERROR: ${message}`)
+  process.exit(1)
+}
+
 if (!existsSync(file)) {
-  if (requireMinRuns) {
-    console.error("[gate] ERROR: traces.jsonl missing while --require-min-runs set")
-    process.exit(1)
+  if (allowMissing) {
+    console.log("[gate] no traces.jsonl — skipping telemetry gate (--allow-missing)")
+    process.exit(0)
   }
-  console.log("[gate] no traces.jsonl — skipping telemetry gate")
-  process.exit(0)
+  fail("traces.jsonl missing (butuh minimal 3 run; pakai --allow-missing untuk legacy skip)")
 }
 
 const rawTraces = readFileSync(file, "utf8")
@@ -44,14 +48,11 @@ console.log(
   `[gate] runs=${traces.length} resolved=${ok}/${traces.length} rate=${rate.toFixed(2)} (target ${TARGET})`,
 )
 if (traces.length < 3) {
-  if (requireMinRuns) {
-    console.error(
-      `[gate] ERROR: insufficient runs (${traces.length} < 3) while --require-min-runs set`,
-    )
-    process.exit(1)
+  if (allowMissing) {
+    console.log("[gate] too few runs — passing (insufficient data, --allow-missing)")
+    process.exit(0)
   }
-  console.log("[gate] too few runs — passing (insufficient data)")
-  process.exit(0)
+  fail(`insufficient runs (${traces.length} < 3)`)
 }
 if (rate < TARGET) {
   console.warn(`[gate] WARN: resolve rate ${rate.toFixed(2)} < ${TARGET}`)

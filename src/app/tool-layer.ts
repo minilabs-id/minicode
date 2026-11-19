@@ -4,6 +4,7 @@ import { configureServers as lspConfigure } from "../lsp/client.ts"
 import { connectAll as mcpConnectAll } from "../mcp/client.ts"
 import {
   EXPLORE_TOOL_NAMES,
+  GATED_TOOLS,
   PLAN_EXTRA_TOOL_NAMES,
   READONLY_TOOL_NAMES,
 } from "../policy/tool-contract.ts"
@@ -26,6 +27,9 @@ const LSP_WIRE_TOOLS = [
   "lsp_hover",
   "lsp_symbols",
   "lsp_workspace_symbols",
+  // v7.38: rename juga butuh server; sembunyikan dari wire saat LSP kosong
+  // (wireCapability hiding), sama seperti tool LSP baca.
+  "lsp_rename",
 ] as const
 
 /**
@@ -59,7 +63,15 @@ export function workModeVisible(
 ): boolean {
   const wm = workMode === "EXECUTE" ? "EXECUTE" : "DISCUSS"
   if (isMcpToolName(name)) {
-    return wm === "EXECUTE" && permissionMode !== "readonly" && permissionMode !== "plan"
+    // [AGENT-CONTROL-3] Handler `allowlist` menolak SEMUA tool gated/MCP
+    // (permission.ts: `isGated → deny`). Menampilkannya di wire hanya membuat
+    // model membuang langkah mencoba tool yang pasti ditolak — sembunyikan.
+    return (
+      wm === "EXECUTE" &&
+      permissionMode !== "readonly" &&
+      permissionMode !== "plan" &&
+      permissionMode !== "allowlist"
+    )
   }
   if (wm === "DISCUSS") {
     if (permissionMode === "readonly" || permissionMode === "allowlist") {
@@ -71,6 +83,18 @@ export function workModeVisible(
   if (permissionMode === "readonly") return READONLY_TOOL_NAMES.has(name)
   if (permissionMode === "plan")
     return READONLY_TOOL_NAMES.has(name) || PLAN_EXTRA_TOOL_NAMES.has(name)
+  // [AGENT-CONTROL-3] `allowlist` mem-blokir GATED_TOOLS di permission handler;
+  // jangan tampilkan tool yang tak mungkin bisa dipanggil (visible === callable).
+  // `code_run` juga selalu ditolak handler allowlist (butuh sandbox, dan bukan
+  // termasuk FILE/INTERNAL/READONLY), jadi sembunyikan bersama gated/MCP — kalau
+  // tidak, model membuang langkah mencoba tool yang pasti deny.
+  if (permissionMode === "allowlist") return !GATED_TOOLS.has(name) && name !== "code_run"
+  // v7.40 (audit): di EXECUTE × `auto`, `ask_user` masih dikirim di wire tetapi
+  // handler permission AUTO menolaknya deterministik (permission.ts:1064).
+  // visible ≠ callable — sembunyikan agar model tak membuang langkah mencoba
+  // tool yang pasti deny. Hiding headless (interactiveAsk:false) TETAP di
+  // computeUnavailableWireTools; jangan campur atau hapus di sini.
+  if (name === "ask_user" && permissionMode === "auto") return false
   return true
 }
 

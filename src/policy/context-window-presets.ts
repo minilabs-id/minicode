@@ -50,7 +50,8 @@ export const CONTEXT_WINDOW_PRESETS: readonly ContextWindowPreset[] = [
   { tokens: 500_000, label: "500K", examples: "Grok 4.5–4.7" },
   { tokens: 1_000_000, label: "1M", examples: "Claude 5.x, DeepSeek V4, Qwen3.x Max" },
   { tokens: 1_048_576, label: "1M (1024²)", examples: "Gemini, Kimi K3, GLM 5.x" },
-  { tokens: 1_050_000, label: "1.05M", examples: "OpenAI GPT-4.1 / 5.x / 6.x" },
+  // v7.39: GPT-5 itu 400K (entri sendiri), bukan 1.05M — contoh lama menyesatkan.
+  { tokens: 1_050_000, label: "1.05M", examples: "OpenAI GPT-4.1 (~1.047M)" },
   { tokens: 2_000_000, label: "2M", examples: "Grok 4.20, Gemini 1.5 Pro (lama)" },
   { tokens: 4_000_000, label: "4M", examples: "Groq Kimi/GPT-OSS (host besar)" },
   { tokens: 10_000_000, label: "10M", examples: "Llama 4 Scout" },

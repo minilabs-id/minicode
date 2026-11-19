@@ -62,6 +62,19 @@ kegagalan.
 
 Batasan v1 yang jujur: tiap `run` = sesi BARU (tanpa thread/resume); SATU run dalam terbang (run kedua ditolak, bukan antre); tool gated DITOLAK tanpa TTY (fail-closed, sama seperti CI) — IDE yang butuh tulis/eksekusi memakai mode auto dengan allowlist atau prompt yang self-contained.
 
+## Delegasi di non-TTY: ditolak, fail-closed
+
+`delegate_task` termasuk tool gated. Di non-TTY (one-shot via pipe, `exec`, ACP,
+atau daemon) delegasi **selalu ditolak** tanpa prompting, apakah PermissionMode
+`ASK` atau bukan. Pengecualian broker persetujuan daemon (`allowNonTtyAsk`,
+yaitu `permissionAsk` yang di-inject) **hanya berlaku untuk tool non-gated**
+(mis. `web_fetch`); ia tidak boleh mengubah `delegate_task` maupun tool gated
+lainnya menjadi jalur persetujuan. Alasannya: efek samping anak tetap ada
+walau turn parent gagal, sehingga persetujuan tanpa operator yang hadir bisa
+menggandakan kerja. Satu persetujuan ASK hanya mencakup **satu** delegasi —
+opsi "Always" sengaja tidak tersedia untuk `delegate_task`. Lihat
+[Sub-Agents](agents.md) untuk batas anak dan peringatan recovery.
+
 ```bash
 printf '%s\n' '{"id":1,"method":"initialize"}' '{"id":2,"method":"shutdown"}' | minicode acp
 ```
@@ -104,7 +117,7 @@ minicode exec "$(cat task.md)" --json
 ## Catatan keamanan untuk CI
 
 - Config lokal `.minicode/config.json` **diabaikan secara default** (`--allow-local-config` untuk percayai) — repo clone-an tidak bisa men-spawn MCP atau menyedot prompt. Di runner yang Anda kendalikan penuh, boleh diaktifkan.
-- `git_commit` dan semua tool MCP **di-gate**: di non-TTY selalu ditolak. CI yang butuh commit harus lewat jalur lain (mis. workflow git, bukan agent).
+- `git_commit`, `delegate_task`, dan semua tool MCP **di-gate**: di non-TTY selalu ditolak, termasuk bila broker persetujuan daemon di-inject. CI yang butuh commit atau delegasi harus lewat jalur lain (mis. workflow git, bukan agent).
 - Env kredensial di-scrub dari subprocess; `GITHUB_TOKEN` dkk. tidak bocor ke tool `bash`. Detail di [Keamanan](security.md).
 
 ## Lanjut

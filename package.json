@@ -58,7 +58,7 @@
     "test:live": "bun scripts/test-live.ts",
     "test:qa": "bun scripts/live-qa.ts",
     "test:coverage": "bun test --coverage",
-    "gate:fast": "bun x tsc --noEmit && bun run lint && bun test && bun run gate:coverage && bun run gate:pack && bun run gate:bash && bun run bench:smoke && bun run audit:harness",
+    "gate:fast": "bun x tsc --noEmit && bun run lint && bun test && bun run gate:coverage && bun run gate:pack && bun run gate:bash && bun run bench:smoke && bun run audit:harness && bun run gate:telemetry",
     "gate:coverage": "bun scripts/coverage-gate.ts",
     "gate:bash": "bun experiments/bash-bypass-probe.ts && bun experiments/bash-bypass-probe.ts --mode allowlist",
     "gate:pack": "bun scripts/pack-check.ts",

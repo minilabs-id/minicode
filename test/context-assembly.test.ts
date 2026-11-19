@@ -167,7 +167,7 @@ test("P2.8-7: base_seq=0 → tanpa ringkasan, histori utuh", async () => {
   const cwd = ws()
   await seed(cwd, "s", 2)
   const view = assembleContext("s", DEFAULT_THREAD_ID, cwd)
-  // Tak ada proyeksi sama sekali → jalur全覆盖 fallback.
+  // Tak ada proyeksi sama sekali → jalur fallback penuh.
   expect(view.coveredSeq).toBe(0)
   expect(view.messages.length).toBe(2)
 })
@@ -206,7 +206,7 @@ test("P2.8-10: proyeksi thread lain tidak dipakai", async () => {
   const cwd = ws()
   await seed(cwd, "s", 3)
   createThread("s", cwd, { threadId: "th_lain" })
-  // Proyeksi hidup di th_default;组装 th_lain harus fallback (tidak baca milik lain).
+  // Proyeksi hidup di th_default; untuk th_lain harus fallback (tidak baca milik lain).
   buildProjection("s", DEFAULT_THREAD_ID, "milik default", cwd, { expectedEpoch: 0 })
   const other = assembleContext("s", "th_lain", cwd)
   expect(other.source).toBe("messages")
@@ -246,7 +246,7 @@ test("P2.8-11b: cakupan parsial = STALE (semantik P2.7) → replay penuh", async
 
 test("P2.8-12: ekor mulai tepat di base_seq (batas aman, tool terpisah)", async () => {
   const cwd = ws()
-  // Histori panjang tanpa pasangan tool di batas →、若 CURRENT mencakup penuh.
+  // Histori panjang tanpa pasangan tool di batas → bila CURRENT mencakup penuh.
   await seed(cwd, "s", 6)
   buildProjection("s", DEFAULT_THREAD_ID, "r", cwd, { expectedEpoch: 0 })
   const view = assembleContext("s", DEFAULT_THREAD_ID, cwd)

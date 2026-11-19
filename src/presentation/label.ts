@@ -54,7 +54,12 @@ function clip(s: string, max: number): string {
 export function targetOf(args: unknown): string | undefined {
   if (typeof args !== "object" || args === null) return undefined
   const a = args as Record<string, unknown>
-  if (typeof a.path === "string" && a.path) return a.path
+  // v7.38: move_file kini `path` → `destination` (dulu `from` → `to`).
+  if (typeof a.path === "string" && a.path) {
+    const dest = typeof a.destination === "string" ? a.destination : ""
+    if (dest) return `${a.path} → ${dest}`
+    return a.path
+  }
   if (typeof a.from === "string" && a.from) {
     const to = typeof a.to === "string" ? a.to : ""
     return to ? `${a.from} → ${to}` : a.from
