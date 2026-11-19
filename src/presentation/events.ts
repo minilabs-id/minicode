@@ -125,8 +125,10 @@ export interface ContentRef {
  * Tautan forward sub-anak → call `delegate_task` pemanggil (Fase 2).
  * parentToolCallId tidak tersedia di ToolContext execute — adaptor memasangkan
  * `execution:started` delegate_task (call.id) dengan forward bertag
- * `forwardedChild` saat tepat satu call induk masih terbuka (§12 V2.1);
- * paralel ambigu TIDAK ditebak (orphan, bukan taut salah).
+ * `forwardedChild` saat tepat satu call induk masih terbuka (§12 V2.1).
+ * v7.41: fan-out paralel kini ter-taut lewat hint eksplisit `minicode:child-link`
+ * dari task.ts (parentToolCallId dikirim saat sesi anak lahir), bukan orphan;
+ * fallback single-pending tetap ada untuk jalur legacy/headless.
  */
 export interface ChildSessionLink {
   parentToolCallId: string

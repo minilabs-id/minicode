@@ -356,7 +356,13 @@ export async function buildSystemPrompt(
       "Narrate your work in short, plain sentences as you go — the user should not have to guess what you are doing.",
       "Before a non-trivial task, restate the goal and approach in 1-2 sentences (a short confirmation, not a plan).",
       "Before non-routine tool calls, say in one sentence what and why; don't announce every read.",
-      "When delegating, name the sub-agents and why; on return, summarize their findings and explicitly flag any disagreement between agents or with the repo.",
+      "When delegating, name the sub-agents and why; on return, summarize their findings and explicitly flag any disagreement between agents or with the repo. Never stay silent after a delegation finishes — tell the user what the sub-agent(s) did and what you will do with the findings.",
+      // v7.41 (user request): monitor sub-agents & background scripts. The
+      // runtime auto-recap covers the "idle" case; this directive covers the
+      // in-turn case — the model must narrate the moment a child reports back
+      // instead of silently chaining more tool calls.
+      "Act as a manager when the work is large or parallel: delegate scoped work to sub-agents, monitor their [EVALUATE] reports, then synthesize. When the task is small or can be done directly, just do it yourself — don't delegate for its own sake.",
+      "If a tool or web/browser source keeps failing, don't retry blindly — change approach: a different tool, a different search source/provider, or local repo evidence. State briefly what you switched and why.",
       'When done, state what changed and verified plus caveats or follow-ups ("done, but ...").',
       "Ask permission only when blocked on a real decision, not for ordinary steps.",
       "Narrate in the user's language (see Language rule above).",

@@ -949,6 +949,17 @@ export function createPermissionHandler(
     const key = `${call.name}:${argsJson}`
     if (!sessionGrants.includes(key)) sessionGrants.push(key)
     allowlistCache = null
+    // [AUDIT-FIX #2] Grant "always" untuk TOOL GATED tinggal di memori sesi
+    // (sessionGrants), TIDAK dipersist ke allowlist. Allowlist — baik global
+    // maupun repo-lokal — tidak ter-scope ke root/sesi yang sedang aktif:
+    // satu klik "always" pada call gated tanpa argumen (mis. `git_commit:{}`,
+    // `ask_user:{}`) akan jadi blanket grant yang berlaku di SETIAP sesi dan
+    // cwd berikutnya = persetujuan palsu lintas-sesi. Tool gated adalah
+    // capability sensitif (commit/push/delegasi/MCP) yang approval-nya wajib
+    // segar per sesi. Bash/tool non-gated sengaja TETAP dipersist — perilaku
+    // lama ini mungkin diandalkan operator untuk pola perintah rutin — jadi
+    // hanya `isGated(name)` yang dikecualikan dari penulisan ke disk.
+    if (isGated(call.name)) return Promise.resolve()
     // Eksplisit `allowLocalConfig === false` (sesi runtime tanpa opt-in) menyimpan Always ke global
     // agar tidak mengotori repo, sementara pemanggil langsung tanpa flag mempertahankan K-1 lokal.
     return saveAllowlist(
@@ -1003,9 +1014,12 @@ export function createPermissionHandler(
         // keluar membuat model retry buta): tulis/baca file = pakai tool file
         // terjail; shell penuh = operator pilih --allow-all/--sandbox docker.
         if (decision.reason === "no matching pattern")
+          // [AUDIT-FIX #3] command mentah bisa memuat kredensial (mis. token di
+          // argumen). Alasan deny ini sampai ke model DAN log — scrub dulu,
+          // sebelum dipotong, agar secret tak terekho bebas ke permukaan itu.
           return deny(
             call,
-            `allowlist: no matching pattern for "${decision.command.slice(0, 80)}" — file work: use read_file/write_file/edit; full shell: rerun with --allow-all / --sandbox docker / MINICODE_BASH_ALLOWLIST`,
+            `allowlist: no matching pattern for "${scrubSecrets(decision.command).slice(0, 80)}" — file work: use read_file/write_file/edit; full shell: rerun with --allow-all / --sandbox docker / MINICODE_BASH_ALLOWLIST`,
           )
         return deny(call, `allowlist: ${decision.reason}`)
       }
@@ -1097,9 +1111,11 @@ export function createPermissionHandler(
           const decision = decideBashCommand(cmd, devBashAllowlist, root)
           if (!decision.ok) {
             if (decision.reason === "no matching pattern")
+              // [AUDIT-FIX #3] Sama seperti cabang allowlist: secret di command
+              // tak boleh bocor lewat alasan deny ke model/log (fail-closed).
               return deny(
                 call,
-                `allowlist: no matching pattern for "${decision.command.slice(0, 80)}" — file work: use read_file/write_file/edit; full shell: rerun with --allow-all / --sandbox docker / MINICODE_BASH_ALLOWLIST`,
+                `allowlist: no matching pattern for "${scrubSecrets(decision.command).slice(0, 80)}" — file work: use read_file/write_file/edit; full shell: rerun with --allow-all / --sandbox docker / MINICODE_BASH_ALLOWLIST`,
               )
             return deny(call, `allowlist: ${decision.reason}`)
           }

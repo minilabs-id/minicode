@@ -176,9 +176,11 @@ describe("audit #11: permukaan pack tepat", () => {
 //   3. gate `pack-check` memakai budget yang sama (tak ada angka liar di
 //      dua tempat).
 describe("budget ukuran paket", () => {
-  test("budget = 4.608 KiB (4,50 MiB) sesuai keputusan owner", () => {
-    expect(PACK_SIZE_BUDGET_KIB).toBe(4608)
-    expect(PACK_SIZE_BUDGET_KIB / 1024).toBeCloseTo(4.5, 6)
+  test("budget = 5.000 KiB (4,88 MiB) sesuai keputusan owner 2026-11-19", () => {
+    // v7.41: re-baseline 4.608 -> 5.000 KiB disetujui pemilik setelah audit total
+    // (paket aktual 4.709 KiB / 331 file). Sumber angka tetap pack-budget.ts.
+    expect(PACK_SIZE_BUDGET_KIB).toBe(5000)
+    expect(PACK_SIZE_BUDGET_KIB / 1024).toBeCloseTo(4.8828125, 6)
   })
 
   test("ukuran tepat di bawah budget lolos; di atas budget GAGAL", () => {

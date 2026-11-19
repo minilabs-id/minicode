@@ -91,13 +91,23 @@ const subAgentHistory = new Map<string, SubAgentHistoryEntry>()
  * prompt mentah" sekaligus menghilangkan tabrakan awalan. */
 export function delegationKey(mode: string, prompt: string): string {
   try {
-    let h = 0x811c9dc5
     const s = String(prompt)
+    // KENAPA dua seed: satu FNV-1a 32-bit bisa bertabrakan untuk dua prompt
+    // berbeda, dan tabrakan riwayat = timeout/cap anak berikutnya diambil dari
+    // pengalaman delegasi yang SALAH. Dua seed dengan primitif berbeda setara
+    // 64-bit (peluang tabrakan praktis nol) tanpa menyimpan prompt mentah.
+    // KENAPA panjang ikut dilipat: dua prompt dengan awal identik namun beda
+    // panjang tetap harus beda kunci walau kedua hash kebetulan sama.
+    let h1 = 0x811c9dc5
+    let h2 = 0x9e3779b9
     for (let i = 0; i < s.length; i++) {
-      h ^= s.charCodeAt(i)
-      h = Math.imul(h, 0x01000193)
+      const code = s.charCodeAt(i)
+      h1 = Math.imul(h1 ^ code, 0x01000193)
+      h2 = Math.imul(h2 ^ code, 0x0100019b)
     }
-    return `${mode}:${(h >>> 0).toString(16)}`
+    h1 = Math.imul(h1 ^ s.length, 0x01000193)
+    h2 = Math.imul(h2 ^ s.length, 0x0100019b)
+    return `${mode}:${(h1 >>> 0).toString(16)}:${(h2 >>> 0).toString(16)}:${s.length}`
   } catch {
     return `${mode}:`
   }
@@ -284,6 +294,24 @@ export type SubAgentSessionFactory = (spec: SubAgentSpec) => Promise<SubAgentSes
 
 let sessionFactory: SubAgentSessionFactory | undefined
 
+/**
+ * Id call `delegate_task` yang sedang dieksekusi. Adaptor presentasi mengisinya
+ * dari event `execution:started` yang dipancarkan kernel SEBELUM `tool.execute`
+ * (executor.ts). Karena emit + pemanggilan execute berada dalam satu blok
+ * sinkron (tanpa await), tiap delegasi—termasuk fan-out paralel—menangkap id
+ * miliknya sendiri di awal `execute` sebelum hook apa pun bisa menimpanya.
+ * Fail-soft: absen = jalur lama (heuristik satu pending di adaptor).
+ */
+let activeDelegateCallId: string | undefined
+
+export function setActiveDelegateCallId(id: string | undefined): void {
+  activeDelegateCallId = id
+}
+
+export function getActiveDelegateCallId(): string | undefined {
+  return activeDelegateCallId
+}
+
 export function setSubAgentSessionFactory(factory: SubAgentSessionFactory): void {
   sessionFactory = factory
 }
@@ -311,6 +339,8 @@ export function clearSubAgentSessionFactory(): void {
   parentRouting = {}
   childExecutionRunner = undefined
   parentRunIdFn = () => null
+  // Isolasi test: id call delegasi tak boleh bocor ke eksekusi berikutnya.
+  activeDelegateCallId = undefined
   // P12 S2.2 — reset WorkMode & governance induk agar test terisolasi.
   subAgentWorkModeFn = () => undefined
   subAgentGovernanceFn = () => ({})
@@ -480,6 +510,11 @@ export const delegateTaskTool: Tool = {
     additionalProperties: false,
   },
   async execute({ prompt, mode, maxSteps, timeoutMs, name }, ctx) {
+    // Tangkap id call induk SEGERA, sebelum await pertama. Kernel menemani
+    // `execution:started` delegate_task dengan pemanggilan execute ini dalam
+    // satu tick sinkron — jadi walau executor menjalankan 3 delegasi paralel,
+    // masing-masing membaca id miliknya (bukan id delegasi terakhir).
+    const parentToolCallId = getActiveDelegateCallId()
     // Parent plan/readonly memaksa sub-agen read-only agar tidak jadi celah
     // izin (paksa explore). Mode live diambil dari ToolContext.permissionMode
     // yang diteruskan kernel per turn, bukan dari teks prompt.
@@ -742,6 +777,21 @@ export const delegateTaskTool: Tool = {
           (e as Error).message ?? e,
         ).slice(0, 300)}`,
       )
+    }
+    // KENAPA hint eksplisit: adaptor induk tak bisa menebak pasangan
+    // delegate_task→anak bila 3 call berjalan paralel (3 id pending). Calon
+    // anak baru saja lahir di sini; kirim id induk yang ditangkap di awal
+    // execute supaya adaptor menautkan LANGSUNG, sebelum event [FINDING] awal
+    // sempat jadi yatim. Fail-soft: tanpa id (jalur test/headless) adaptor
+    // jatuh ke heuristik lama.
+    if (parentToolCallId) {
+      try {
+        ctx.emit({
+          type: "provider:extension",
+          kind: "minicode:child-link",
+          data: { forwardedChild: childId, parentToolCallId, childRunId, childLabel },
+        })
+      } catch {}
     }
     // P2.10 canonical coverage for plain child tools. Delegate itself keeps
     // its explicit parent-side intent; dotted tools are excluded by design.

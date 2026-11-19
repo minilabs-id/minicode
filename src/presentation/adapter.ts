@@ -14,6 +14,7 @@
 
 import { type CanonicalAssignmentTable, decodeCanonicalAssignments } from "../task/assignment.ts"
 import { classifyToolResult, denyReasonOf, summarizeArgs } from "../telemetry/trace.ts"
+import { setActiveDelegateCallId } from "../tools/task.ts"
 import { extractCommittedTodoStatuses, normalizeTodos } from "../tools/todo.ts"
 import type {
   ApprovalEventHook,
@@ -245,6 +246,19 @@ function isExitCodeFailure(content: unknown): boolean {
   )
 }
 
+/**
+ * `delegate_task` mengembalikan ringkasan kegagalan sebagai STRING biasa
+ * (kontrak direct-call tetap byte-identik). Tanpa deteksi ini kernel mengira
+ * delegasi gagal = sukses, ledger/ACP menyembunyikan kegagalan, dan auto-recap
+ * mengirim "sub-agent finished" padahal anak timeout/max steps/gagal.
+ * Pola ini mengunci awalan persis yang dipancarkan task.ts; jalur sukses
+ * (`sub-agent (m) done: …`) sengaja TIDAK cocok.
+ */
+function isSubAgentFailureSummary(content: unknown): boolean {
+  const text = typeof content === "string" ? content : contentText(content)
+  return /^\[sub-agent [^\]\n]*error\]/.test(text.trimStart())
+}
+
 function mapToolFailCause(content: unknown): FailCause {
   const t = String(typeof content === "string" ? content : String(content ?? ""))
   if (/^\s*(unknown tool|invalid arguments)/i.test(t)) return "invalid"
@@ -391,6 +405,10 @@ export function createPresentationAdapter(
   // ditebak (§12: fallback tanpa-link, jangan atribusi salah).
   const pendingDelegateCalls: string[] = []
   const childLinks = new Map<string, ChildSessionLink>()
+  // Pasangan EKSPLISIT dari hint `minicode:child-link`: parentToolCallId → anak.
+  // Beda dari `pendingDelegateCalls` (heuristik FIFO): hint datang dari tool
+  // yang tahu identitas induknya, jadi Parallel fan-out tak perlu ditebak.
+  const delegateChildren = new Map<string, Set<string>>()
   // v7.40: finding inkremental dari satu child sering berbagi 24 char awal →
   // findingId benturan (override di reducer). Pakai counter monotonic per child.
   const childFindingSeq = new Map<string, number>()
@@ -623,6 +641,15 @@ export function createPresentationAdapter(
       diag.anomalies++
       return false
     }
+    // v7.41 (audit rendering #4): toolCallId = UUID unik, tak pernah recur →
+    // Set ini murni retensi. Batasi seperti reducer (4096) dengan eviksi FIFO
+    // supaya sesi panjang tak bocor memori. Dedup untuk id yang masih relevan
+    // tetap benar (id lama yang ter-eviksi tak mungkin muncul lagi).
+    const CAP = 4096
+    if (terminalTools.size >= CAP) {
+      const oldest = terminalTools.values().next().value
+      if (oldest !== undefined) terminalTools.delete(oldest)
+    }
     terminalTools.add(id)
     openTools.delete(id)
     toolStarts.delete(id)
@@ -632,7 +659,13 @@ export function createPresentationAdapter(
   const noteDelegateStarted = (callId: string, name: string, forwarded?: string): void => {
     // Forward anak tidak mendaftar sebagai induk; hanya call parent asli.
     if (forwarded) return
-    if (name === "delegate_task") pendingDelegateCalls.push(callId)
+    if (name === "delegate_task") {
+      pendingDelegateCalls.push(callId)
+      // Kernel memancarkan event ini sinkron SEBELUM tool.execute. Menimpa
+      // penunjuk aktif di sini menjamin setiap delegasi (termasuk paralel)
+      // menangkap id induknya sendiri di awal execute — bukan id terakhir.
+      setActiveDelegateCallId(callId)
+    }
   }
 
   const noteDelegateSettled = (callId: string, name: string, forwarded?: string): void => {
@@ -643,8 +676,45 @@ export function createPresentationAdapter(
   }
 
   /**
-   * Pasangkan forward anak dengan induk: tepat SATU call delegate_task pending
-   * → taut; nol = orphan; >1 = paralel ambigu → tanpa taut (jangan tebak).
+   * Daftarkan tautan EKSPLISIT dari hint tool. Idempoten: hint bisa tiba
+   * berulang (retry) dan event lanjutan boleh menyempurnakan runId/label.
+   */
+  const registerExplicitChildLink = (
+    childId: string,
+    parentToolCallId: string,
+    runId?: string,
+    label?: string,
+  ): ChildSessionLink => {
+    let link = childLinks.get(childId)
+    if (!link) {
+      link = {
+        parentToolCallId,
+        childSessionId: childId,
+        parentSessionId: sessionId,
+        ...(runId ? { runId } : {}),
+        ...(label ? { label } : {}),
+      }
+      childLinks.set(childId, link)
+    } else {
+      // Hint adalah sumber kebenaran identitas induk: bila heuristik lama
+      // lebih dulu membuat taut (satu pending), koreksi ke id sebenarnya.
+      link.parentToolCallId = parentToolCallId
+      if (runId && !link.runId) link.runId = runId
+      if (label && !link.label) link.label = label
+    }
+    let children = delegateChildren.get(parentToolCallId)
+    if (!children) {
+      children = new Set()
+      delegateChildren.set(parentToolCallId, children)
+    }
+    children.add(childId)
+    return link
+  }
+
+  /**
+   * Pasangkan forward anak dengan induk. Prioritas: (1) taut eksplisit dari
+   * hint tool, (2) fallback lama tepat SATU pending (jalur legacy/headless),
+   * (3) nol/>1 = orphan — jangan menebak pasangan paralel.
    */
   const resolveChildLink = (
     childId: string,
@@ -990,7 +1060,9 @@ export function createPresentationAdapter(
       // Kegagalan `exit N` datang sebagai string sukses dari tool shell/git —
       // jangan biarkan cabang sukses mempublikasikan tool.completed untuknya.
       const exitFailure = isExitCodeFailure(result.content)
-      if (!result.isError && !exitFailure) {
+      const delegateFailure =
+        call.name === "delegate_task" && !childId && isSubAgentFailureSummary(result.content)
+      if (!result.isError && !exitFailure && !delegateFailure) {
         if (count) counts.ok++
         if (call.name === "todo_write") {
           // Plan event terbit DI SINI — setelah tool sukses — bukan di
@@ -1086,7 +1158,8 @@ export function createPresentationAdapter(
           type: "tool.failed" as const,
           toolCallId: call.id,
           durationMs,
-          cause: mapToolFailCause(result.content),
+          // Kegagalan anak adalah kegagalan agen, bukan eksekusi shell.
+          cause: delegateFailure ? "agent" : mapToolFailCause(result.content),
           message: firstLine(result.content, 200),
           expandRef: { toolCallId: call.id, idx: 0 },
           ...(drift ? { schemaDrift: drift } : {}),
@@ -1107,6 +1180,31 @@ export function createPresentationAdapter(
   })
 
   sub("provider:extension", (e: { kind?: unknown; data?: unknown }) => {
+    if (e?.kind === "minicode:child-link") {
+      // Ikatan eksplisit delegate_task → anak, dikirim tool saat sesi anak
+      // lahir. Ini yang menyelamatkan fan-out paralel: tanpa ini adaptor hanya
+      // punya >1 call pending dan membuang semua temuan awal sebagai orphan.
+      // Hanya bare wire state — TIDAK mempublikasikan DomainEvent (no-drift).
+      const data = e.data as {
+        forwardedChild?: unknown
+        parentToolCallId?: unknown
+        childRunId?: unknown
+        childLabel?: unknown
+      } | null
+      const childId =
+        typeof data?.forwardedChild === "string" && data.forwardedChild
+          ? data.forwardedChild
+          : undefined
+      const parentToolCallId =
+        typeof data?.parentToolCallId === "string" && data.parentToolCallId
+          ? data.parentToolCallId
+          : undefined
+      if (!childId || !parentToolCallId) return
+      const runId = typeof data?.childRunId === "string" ? data.childRunId : undefined
+      const label = typeof data?.childLabel === "string" ? data.childLabel : undefined
+      registerExplicitChildLink(childId, parentToolCallId, runId, label)
+      return
+    }
     if (e?.kind === "minicode:child-label") {
       // Judul diri anak datang dari panggilan sampingan `delegate_task`.
       // BUKAN tool event: hanya menimpa label activity yang sudah ada.
@@ -1562,6 +1660,7 @@ export function createPresentationAdapter(
       handlers.clear()
       pendingDelegateCalls.length = 0
       childLinks.clear()
+      delegateChildren.clear()
       openTools.clear()
       toolStarts.clear()
       openApprovals.clear()
@@ -1569,6 +1668,41 @@ export function createPresentationAdapter(
       turnSummaryProvider = undefined
     },
   }
+}
+
+/**
+ * Pasang pembuangan resource anak pada SETIAP terminal turn. Kernel memancarkan
+ * `turn:interrupted` saat abort/timeout (session.ts) dan TIDAK pernah
+ * `turn:completed` — mendengarkan completed saja membuat adapter + jurnal anak
+ * tetap hidup setelah anak mati. Idempoten: terminal pertama yang tiba membuang
+ * semua listener lalu resource, terminal berikutnya jadi no-op.
+ */
+export function disposeOnTerminal(
+  events: EventBusLike,
+  dispose: () => void,
+  types: readonly string[] = ["turn:completed", "turn:interrupted", "turn:failed"],
+): () => void {
+  let done = false
+  const offs: Array<() => void> = []
+  const once = (): void => {
+    if (done) return
+    done = true
+    for (const off of offs) {
+      try {
+        off()
+      } catch {
+        // Lepas listener tak boleh melempar.
+      }
+    }
+    offs.length = 0
+    try {
+      dispose()
+    } catch {
+      // Pembuangan tak boleh menggagalkan turn (fail-soft observability).
+    }
+  }
+  for (const type of types) offs.push(events.on(type, once))
+  return once
 }
 
 export type { ApprovalEventHook, ChildSessionLink }

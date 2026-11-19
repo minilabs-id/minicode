@@ -159,6 +159,275 @@ function decodeEnvText(name: string): string | undefined {
   }
 }
 
+// v7.41 — Rekap sub-agent `delegate_task`. Sebelumnya model induk DIAM saat anak
+// selesai; sekarang satu prompt rekap ditembakkan hanya saat sebuah turn tuntas
+// DAN UI idle. Tool biasa sengaja tak ikut: hitungan per-segment sudah
+// mencakupnya. Semua batas (jumlah entri, panjang ringkasan, satu prompt/turn,
+// anti-loop) sengaja dipusatkan di helper murni di bawah supaya bisa diuji tanpa
+// harness TTY — dan supaya perilaku fail-closed mudah diaudit.
+export const CHILD_RECAP_MAX_ENTRIES = 8
+export const CHILD_RECAP_SUMMARY_MAX_CHARS = 300
+
+/** Opt-out mirror `MINICODE_AUTORESUME_BG`. Terima env eksplisit supaya murni. */
+export function isChildRecapEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.MINICODE_AUTORESUME_CHILD !== "0"
+}
+
+export interface ChildRecapFireInput {
+  enabled: boolean
+  pendingCount: number
+  queuedCount: number
+  suspended: boolean
+  abortActive: boolean
+  aborted: boolean
+  inRecapTurn: boolean
+}
+
+/**
+ * Keputusan murni: bolehkah rekap ditembakkan? Mengumpulkan SEMUA guard di satu
+ * tempat. `abortActive`/`aborted` menolak turn yang masih jalan atau dibatalkan;
+ * `queuedCount` mendahulukan pesan user; `inRecapTurn` = kunci anti-loop.
+ */
+export function shouldFireChildRecap(i: ChildRecapFireInput): boolean {
+  return (
+    i.enabled &&
+    i.pendingCount > 0 &&
+    i.queuedCount === 0 &&
+    !i.suspended &&
+    !i.abortActive &&
+    !i.aborted &&
+    !i.inRecapTurn
+  )
+}
+
+export interface ChildRecapTracker {
+  /** tool.started — hanya `delegate_task` yang id-nya dilacak. */
+  noteStarted(toolCallId: string, name: string): void
+  /** tool.completed — kembalikan true bila ringkasan benar-benar tersimpan. */
+  noteCompleted(toolCallId: string, summary: string): boolean
+  /** Bersihkan id saat tool berakhir tanpa summary (failed/denied/cancelled). */
+  noteTerminal(toolCallId: string): void
+  setEnabled(v: boolean): void
+  setInRecapTurn(v: boolean): void
+  readonly enabled: boolean
+  readonly inRecapTurn: boolean
+  readonly pendingCount: number
+  /** Ambil SEMUA ringkasan sekaligus lalu kosongkan → satu recap per turn. */
+  drain(): string[]
+  /** Buang semua ringkasan tanpa dipakai (v7.41: turn induk di-abort). */
+  clear(): void
+}
+
+/**
+ * State collector rekap. TIDak menyimpan referensi ke TUI/ctx — murni, sehingga
+ * test bisa menyuap event buatan dan memeriksa hasilnya tanpa tty.
+ */
+export function createChildRecapTracker(enabled: boolean): ChildRecapTracker {
+  const delegateCallIds = new Set<string>()
+  const pending: string[] = []
+  let isEnabled = enabled
+  let isInRecapTurn = false
+  return {
+    noteStarted(toolCallId, name) {
+      if (name === "delegate_task") delegateCallIds.add(toolCallId)
+    },
+    noteCompleted(toolCallId, summary) {
+      // Anti-loop: selama turn recap berjalan, abaikan tool.completed apa pun.
+      if (isInRecapTurn) return false
+      if (!delegateCallIds.has(toolCallId)) return false
+      // Terminal: id dibuang walau recap sedang nonaktif (jangan bocor).
+      delegateCallIds.delete(toolCallId)
+      if (!isEnabled || pending.length >= CHILD_RECAP_MAX_ENTRIES) return false
+      // Teks berasal dari model = input tak terpercaya: buang sekuens kontrol
+      // berbahaya (non-SGR, C0/C1, bidi) lewat sanitizer kanonik, lalu potong
+      // panjangnya supaya prompt rekap tak membengkak / menyisipkan kontrol.
+      const clean = sanitizeAnsiLine(summary ?? "").slice(0, CHILD_RECAP_SUMMARY_MAX_CHARS)
+      pending.push(clean)
+      return true
+    },
+    noteTerminal(toolCallId) {
+      delegateCallIds.delete(toolCallId)
+    },
+    setEnabled(v) {
+      isEnabled = v
+    },
+    setInRecapTurn(v) {
+      isInRecapTurn = v
+    },
+    get enabled() {
+      return isEnabled
+    },
+    get inRecapTurn() {
+      return isInRecapTurn
+    },
+    get pendingCount() {
+      return pending.length
+    },
+    drain() {
+      return pending.splice(0, pending.length)
+    },
+    clear() {
+      // v7.41 (audit): anak yang di-abort mengirim STRING error lewat
+      // `tool.completed`, bukan throw. Bila dibiarkan, entry itu terbawa ke
+      // turn bersih berikutnya dan dikutip seolah hasil asli. Buang di sini.
+      pending.length = 0
+      delegateCallIds.clear()
+    },
+  }
+}
+
+/** Satu prompt rekap (i18n) dari sekumpulan ringkasan hasil drain(). */
+export function buildChildRecapPrompt(summaries: readonly string[]): string {
+  return t("tui.childRecap", {
+    n: String(summaries.length),
+    summary: summaries.join(" | "),
+  })
+}
+
+// ── v7.41 (audit turn-stability #1–#4) ───────────────────────────────────────
+// Helper murni di bawah memisahkan KEPUTUSAN dari efek samping supaya auditable
+// tanpa harness TTY. Semua state yang bisa bocor antar turn sengaja dikunci di
+// satu tempat (turn state guard), bukan disebar di closure.
+
+/**
+ * #1/#3: UI dianggap idle untuk aksi otomatis hanya bila TIDAK ada turn aktif,
+ * TIDAK ada popup, DAN App tidak busy. `busy` penting untuk jendela @-mention:
+ * `expandMentions` di-await SEBELUM `abort = ctrl`, sehingga `app.busy=true`
+ * sementara `abort===null` — tanpa ini bg job bisa membuka runTurn kedua.
+ * Fail-closed: bila ragu, anggap tidak idle.
+ */
+export function isTurnIdleForBackground(opts: {
+  abortActive: boolean
+  suspended: boolean
+  busy: boolean
+}): boolean {
+  return !opts.abortActive && !opts.suspended && !opts.busy
+}
+
+/**
+ * #4 (batch 3): `TuiApp.isBusy()` bersifat private; panggil lewat cast
+ * struktural. Fail-closed: method absen / melempar → anggap sibuk.
+ */
+export function isAppBusy(app: unknown): boolean {
+  try {
+    const target = app as { isBusy?: (() => boolean) | undefined } | null
+    if (!target || typeof target.isBusy !== "function") return true
+    return target.isBusy() === true
+  } catch {
+    return true
+  }
+}
+
+/** Job bg yang selesai saat turn aktif, ditunda resumed-nya sampai idle. */
+export interface DeferredBgJob {
+  id: string
+  code: number | null
+}
+
+/** #3 (batch 3): antrean job tertunda, bounded agar tak tumbuh tanpa batas. */
+export function createDeferredBgJobs(cap = 16) {
+  const jobs: DeferredBgJob[] = []
+  return {
+    defer(job: DeferredBgJob): boolean {
+      if (jobs.length >= cap) return false
+      jobs.push(job)
+      return true
+    },
+    drain(): DeferredBgJob[] {
+      return jobs.splice(0, jobs.length)
+    },
+    get count(): number {
+      return jobs.length
+    },
+  }
+}
+
+/**
+ * #3: antrean notifikasi job background. Saat turn aktif, notifikasi DITUNDA
+ * (bukan dibuang): `pushInfo` memaksa commit transkrip dan memecah jawaban
+ * streaming di tengah code fence. Dikeluarkan lagi di batas turn (idle).
+ */
+export function createBgNoticeQueue() {
+  const pending: string[] = []
+  return {
+    /** Idle → langsung tampil; sibuk → ditunda, kembalikan `undefined`. */
+    offer(text: string, idle: boolean): string | undefined {
+      if (idle) return text
+      pending.push(text)
+      return undefined
+    },
+    drain(): string[] {
+      return pending.splice(0, pending.length)
+    },
+    get pendingCount(): number {
+      return pending.length
+    },
+  }
+}
+
+export interface TurnStateGuard {
+  /**
+   * Awal runTurnOnce: ambil status "turn ini recap" SEKALIGUS reset flag.
+   * Dipanggil SEBELUM early-return budget supaya tak ada jalur keluar yang
+   * meninggalkan `abortRequested` menggantung atau recap flag bocor (#2).
+   */
+  beginTurn(): { isChildRecapTurn: boolean }
+  markAbortRequested(): void
+  markChildRecapPromptPending(): void
+  readonly abortRequested: boolean
+  readonly childRecapPromptPending: boolean
+}
+
+/** #2: satu pemilik untuk flag lintas-turn yang dulu tersebar di closure. */
+export function createTurnStateGuard(): TurnStateGuard {
+  let abortRequested = false
+  let childRecapPromptPending = false
+  return {
+    beginTurn() {
+      const isChildRecapTurn = childRecapPromptPending
+      // Audit #2: reset di SATU titik, sebelum early-return budget. Kalau tidak,
+      // abort + budget short-circuit mengunci steering selamanya, dan recap flag
+      // yang sudah digeser dari antrean menandai turn user sah berikutnya.
+      childRecapPromptPending = false
+      abortRequested = false
+      return { isChildRecapTurn }
+    },
+    markAbortRequested() {
+      abortRequested = true
+    },
+    markChildRecapPromptPending() {
+      childRecapPromptPending = true
+    },
+    get abortRequested() {
+      return abortRequested
+    },
+    get childRecapPromptPending() {
+      return childRecapPromptPending
+    },
+  }
+}
+
+/**
+ * #4: `TuiApp.disarmAbortQuit()` masih `private` di app.ts (di luar ownership
+ * file ini), jadi dipanggil lewat cast struktural + optional chaining. Ini
+ * memakai logika disarm ASLI (mengosongkan `awaitingSecondEsc` + `lastAbortAt`),
+ * bukan meniru state di sini. Fail-closed: stub/fixture tanpa method tak crash.
+ */
+export function disarmAbortQuitIfAvailable(app: unknown): void {
+  try {
+    const target = app as { disarmAbortQuit?: (() => void) | undefined } | null
+    target?.disarmAbortQuit?.()
+  } catch {}
+}
+
+/**
+ * Batch 2 #2: jumlah tool = panjang array `visible` yang dimutasi in-place oleh
+ * setToolWorkMode. Diekspos murni supaya sifat "live" bisa diuji tanpa TTY.
+ */
+export function liveToolsCount(tools: readonly unknown[]): number {
+  return tools.length
+}
+
 export async function runTui(ctx: CliSession): Promise<void> {
   const {
     cfg,
@@ -221,12 +490,21 @@ export async function runTui(ctx: CliSession): Promise<void> {
   // jalur antrean (steering fallback) harus menolak baris. Tanpa ini, Enter
   // yang masuk di celah antara unwind abort dan submit berikutnya mengisi
   // `queuedPrompts` lagi lalu dijalankan `runTurn` sebagai turn hantu (M2).
-  let abortRequested = false
+  // v7.41 (audit #2): flag ini + flag recap punya SATU pemilik (TurnStateGuard)
+  // yang di-reset di awal runTurnOnce, termasuk sebelum early-return budget.
+  const turnState = createTurnStateGuard()
   // Antrean FALLBACK untuk informasi tambahan: hanya dipakai bila kernel
   // menolak steering (turn sudah selesai lebih dulu — race antara submit dan
   // akhir turn). Pesannya lalu dikirim sebagai turn penuh berikutnya supaya
   // tidak hilang. Jalur utama tetap `Session.steer` di `host.enqueue`.
-  const queuedPrompts: string[] = []
+  // v7.41 (audit F1): `needsEcho` menandai baris user yang gema transkripnya
+  // DITUNDA sampai benar-benar dikonsumsi runTurn. Baris yang dibuang saat
+  // abort tak pernah digema → tak ada prompt hantu di transkrip.
+  const queuedPrompts: { text: string; needsEcho: boolean }[] = []
+  // Baris yang berhasil di-steer digema SEGERA (posisi kronologis benar), tapi
+  // dicatat untuk notifikasi pembatalan bila turn di-abort sebelum kernel
+  // menerapkannya. Dibersihkan di awal tiap turn.
+  const steeredEchoes: string[] = []
   /** Job background hidup (badge footer). Dihitung dari registry tool bash. */
   const countLiveBackgroundJobs = (): number =>
     listBackgroundJobs().reduce((n, j) => (j.done ? n : n + 1), 0)
@@ -374,10 +652,14 @@ export async function runTui(ctx: CliSession): Promise<void> {
     },
     usage,
     skills: allLoadedSkills,
-    // CMD-07: toolsCount & providerHint dibaca live agar perubahan WorkMode
-    // (DISCUSS ↔ BUILD) atau pergantian model tercermin di /status.
+    // CMD-07: `sessionTools` BUKAN snapshot boot — itu array `visible` milik
+    // setupToolLayer yang dimutasi IN-PLACE oleh setToolWorkMode/setPermission
+    // Mode (lihat setup.ts onWorkMode → workModeControl.setWorkMode). Karena
+    // identitas array-nya sama, getter ini membaca jumlah tool live setelah
+    // Shift+Tab DISCUSS ↔ BUILD. Jangan diganti `slice()`/snapshot: itu yang
+    // akan membuat /status basi seperti yang dulu dituduhkan audit.
     get toolsCount() {
-      return sessionTools.length
+      return liveToolsCount(sessionTools)
     },
     // P1.2: dua dimensi selalu terbaca live di /status — bukan snapshot boot.
     // [mode-architecture] /status memakai nilai PRODUK (BUILD/AUTO/ASK).
@@ -691,6 +973,16 @@ export async function runTui(ctx: CliSession): Promise<void> {
   async function runTurnOnce(prompt: string): Promise<void> {
     const spent = usage.getSession(modelRef.current)
     const preStatus = budgetStatus(budget, spent.cost, budgetStrict ?? false, spent.totalTokens)
+
+    // v7.41 (audit #2): GUARD TUNGGAL — dieksekusi SEBELUM early-return budget.
+    // Tanpa ini, abort + budget short-circuit meninggalkan abortRequested=true
+    // (steering mati selamanya) dan childRecapPromptPending=true (turn user sah
+    // berikutnya salah terflag sebagai turn recap).
+    const { isChildRecapTurn } = turnState.beginTurn()
+    // v7.41 (audit F1): catatan gema steered milik turn lama tak boleh ikut
+    // dihitung sebagai "dibuang" saat turn ini di-abort.
+    steeredEchoes.length = 0
+
     if (preStatus === "over" && spent.cost != null && budget != null) {
       transcript.pushError(
         t("tui.budgetOver", { spent: formatUsd(spent.cost), budget: formatUsd(budget) }),
@@ -710,51 +1002,113 @@ export async function runTui(ctx: CliSession): Promise<void> {
     }
     const ctrl = new AbortController()
     abort = ctrl
-    // Turn BARU (termasuk auto-resume job background) memulai niat baru:
-    // hapus jejak abort lama di SINI, bukan di submit(). Menaruhnya di submit
-    // membuat turn yang dipicu onBackgroundJobFinished mewarisi
-    // abortRequested=true dan menolak seluruh steering. Guard antrean tetap
-    // bekerja di celah abort→turn-baru karena flag belum dihapus sampai titik ini.
-    abortRequested = false
+    // v7.41: turn yang mengonsumsi prompt rekap ditandai supaya tool.completed
+    // di dalamnya tak mengumpulkan rekap lanjutan (anti-loop). Jendela "Esc lagi
+    // = quit" juga dimatikan (audit #4): recap dipicu otomatis, bukan lewat
+    // doSubmit yang biasanya melakukan disarm itu.
+    if (isChildRecapTurn) {
+      childRecap.setInRecapTurn(true)
+      disarmAbortQuitIfAvailable(app)
+    }
+    // Outer try/finally (audit #1): `abort` BARU dilepas setelah SELURUH
+    // runTurnOnce — termasuk persistCurrent & batas fire — selesai. Selama
+    // jendela itu abort non-null sehingga onBackgroundJobFinished tak bisa
+    // membuka runTurn kedua yang menguras antrean/flag yang sama.
     try {
-      await runPromptWithVerify(finalPrompt, ctrl.signal)
-      // v7.30: kwitansi abort/antrean/budget = status UI, bukan giliran bicara.
-      if (ctrl.signal.aborted) app.showToast(t("tui.stopped"))
-    } catch (error) {
-      // v7.31: abort user melempar `AgentError(aborted)` dari decideTurnResume.
-      // Tanpa penanganan di sini, rejection sampai ke doSubmit.catch yang
-      // menulis error permanen ke transkrip — dan toast "stopped" di atas tak
-      // pernah tercapai. Abort = status UI, bukan giliran bicara.
-      if (ctrl.signal.aborted || (error as { kind?: string })?.kind === "aborted") {
-        app.showToast(t("tui.stopped"))
-      } else {
-        throw error
+      try {
+        await runPromptWithVerify(finalPrompt, ctrl.signal)
+        // v7.30: kwitansi abort/antrean/budget = status UI, bukan giliran bicara.
+        if (ctrl.signal.aborted) app.showToast(t("tui.stopped"))
+      } catch (error) {
+        // v7.31: abort user melempar `AgentError(aborted)` dari decideTurnResume.
+        // Tanpa penanganan di sini, rejection sampai ke doSubmit.catch yang
+        // menulis error permanen ke transkrip — dan toast "stopped" di atas tak
+        // pernah tercapai. Abort = status UI, bukan giliran bicara.
+        if (ctrl.signal.aborted || (error as { kind?: string })?.kind === "aborted") {
+          app.showToast(t("tui.stopped"))
+        } else {
+          throw error
+        }
+      } finally {
+        // v7.41: turn rekap berakhir — lepas kunci anti-loop sebelum batas fire.
+        childRecap.setInRecapTurn(false)
+        // Abort membatalkan NIAT user: pesan yang sempat diantrikan tak boleh
+        // dikirim otomatis sesudahnya. Dibuang dengan pemberitahuan eksplisit
+        // (bukan hilang diam-diam). v7.41 (audit F1): hitung juga baris steered
+        // yang digema tapi tak jadi diproses kernel karena abort.
+        if (ctrl.signal.aborted) {
+          const droppedQueued = queuedPrompts
+            .splice(0, queuedPrompts.length)
+            .filter((q) => q.needsEcho).length
+          const droppedSteered = steeredEchoes.splice(0).length
+          const dropped = droppedQueued + droppedSteered
+          if (dropped > 0) app.showToast(t("tui.queueDropped", { n: String(dropped) }))
+          // v7.41 (audit): anak di-abort mengirim STRING error via tool.completed.
+          // Ringkasan yang sudah terkumpul di turn ini WAJIB dibuang, kalau tidak
+          // turn bersih berikutnya mengutipnya seolah hasil asli. Ini TIDAK
+          // menyentuh recap sah yang fire di batas turn (turn tak di-abort).
+          childRecap.clear()
+        }
+      }
+
+      const u = usage.get(modelRef.current)
+      await persistCurrent(u)
+      // P2.2: histori yang tak durable = error transkrip eksplisit (bukan diam).
+      if (ctx.isWriterStale()) transcript.pushError(`[writer] ${ctx.writerStaleNote()}`)
+      usage.reset()
+      const sess = usage.getSession(modelRef.current)
+      if (
+        budget != null &&
+        sess.cost != null &&
+        sess.cost > budget * 0.8 &&
+        sess.cost <= budget &&
+        !warned80
+      ) {
+        warned80 = true
+        app.showToast(t("tui.budget80", { spent: formatUsd(sess.cost), budget: formatUsd(budget) }))
+      }
+
+      // v7.41: BATAS FIRE — badan turn sudah tuntas, UI idle, antrean user kosong.
+      // `abort` masih menunjuk ctrl di sini (dilepas outer finally), jadi yang
+      // dicek bukan "abort !== null" melainkan "apakah turn LAIN sudah mengambil
+      // alih" — bila ya, rekap ditunda (fail-closed), tak dibakar setengah hati.
+      if (
+        shouldFireChildRecap({
+          enabled: childRecap.enabled,
+          pendingCount: childRecap.pendingCount,
+          queuedCount: queuedPrompts.length,
+          suspended: app.isSuspended(),
+          abortActive: abort !== ctrl,
+          aborted: ctrl.signal.aborted,
+          inRecapTurn: childRecap.inRecapTurn,
+        })
+      ) {
+        const summaries = childRecap.drain()
+        queuedPrompts.push({ text: buildChildRecapPrompt(summaries), needsEcho: false })
+        turnState.markChildRecapPromptPending()
       }
     } finally {
+      // Audit #1: satu-satunya titik pelepasan abort. Tetap jalan saat throw,
+      // tapi TIDAK lebih awal dari persist/recap.
       abort = null
-      // Abort membatalkan NIAT user: pesan yang sempat diantrikan tak boleh
-      // dikirim otomatis sesudahnya. Dibuang dengan pemberitahuan eksplisit
-      // (bukan hilang diam-diam).
-      if (ctrl.signal.aborted && queuedPrompts.length > 0) {
-        const dropped = queuedPrompts.splice(0, queuedPrompts.length).length
-        app.showToast(t("tui.queueDropped", { n: String(dropped) }))
+      // Audit #3: notifikasi job yang ditunda saat turn sibuk kini aman
+      // dikeluarkan — streaming sudah selesai, tak ada fence untuk dipecah.
+      const deferred = bgNotices.drain()
+      if (deferred.length) transcript.pushInfo(deferred)
+      // Batch 3 #3: job yang selesai saat turn aktif TIDAK ditandai resumed di
+      // handler. Di sini antrean dikuras ke `queuedPrompts` — BUKAN `runTurn`
+      // langsung — supaya loop yang sedang berjalan yang mengambilnya (anti
+      // race). `needsEcho:false`: ini prompt internal, bukan pesan user.
+      const jobs = deferredBgJobs.drain()
+      if (jobs.length) disarmAbortQuitIfAvailable(app)
+      for (const job of jobs) {
+        if (resumedJobs.has(job.id)) continue
+        resumedJobs.add(job.id)
+        queuedPrompts.push({
+          text: t("tui.bgFinishedAuto", { id: job.id, code: job.code ?? "?" }),
+          needsEcho: false,
+        })
       }
-    }
-    const u = usage.get(modelRef.current)
-    await persistCurrent(u)
-    // P2.2: histori yang tak durable = error transkrip eksplisit (bukan diam).
-    if (ctx.isWriterStale()) transcript.pushError(`[writer] ${ctx.writerStaleNote()}`)
-    usage.reset()
-    const sess = usage.getSession(modelRef.current)
-    if (
-      budget != null &&
-      sess.cost != null &&
-      sess.cost > budget * 0.8 &&
-      sess.cost <= budget &&
-      !warned80
-    ) {
-      warned80 = true
-      app.showToast(t("tui.budget80", { spent: formatUsd(sess.cost), budget: formatUsd(budget) }))
     }
   }
 
@@ -768,7 +1122,12 @@ export async function runTui(ctx: CliSession): Promise<void> {
     let next: string | undefined = prompt
     while (next !== undefined) {
       await runTurnOnce(next)
-      next = queuedPrompts.shift()
+      const item = queuedPrompts.shift()
+      // v7.41 (audit F1): gema baris user TEPAT saat baris diambil untuk
+      // dijalankan. Bila dibuang saat abort, ia tak pernah sampai ke sini dan
+      // karenanya tak pernah tampil sebagai prompt hantu di transkrip.
+      if (item?.needsEcho) transcript.pushUser(item.text)
+      next = item?.text
     }
   }
 
@@ -1184,7 +1543,7 @@ export async function runTui(ctx: CliSession): Promise<void> {
     enqueue: (raw) => {
       const line = raw.trim()
       if (!line) return false
-      if (abortRequested) {
+      if (turnState.abortRequested) {
         // Jangan diam: user perlu tahu barisnya tak jadi turn hantu.
         // v7.30: kwitansi antrean = status UI (toast), bukan baris percakapan.
         app.showToast(t("tui.queueAborted"))
@@ -1195,20 +1554,27 @@ export async function runTui(ctx: CliSession): Promise<void> {
         app.showToast(t("tui.busyCmd", { cmd: name }))
         return false
       }
-      transcript.pushUser(line)
       // `?.` menjaga fixture/komposisi lama yang belum punya seam ini (fail-safe:
       // jatuh ke antrean, bukan crash di tengah turn).
       if (ctx.session.steer?.(line)) {
+        // v7.41 (audit F1): steer diterima → kernel akan menaruhnya di store
+        // pada batas step. Gema sekarang (urutan kronologis benar) dan catat
+        // untuk notifikasi pembatalan bila turn di-abort sebelum itu terjadi.
+        transcript.pushUser(line)
+        if (steeredEchoes.length < 8) steeredEchoes.push(line)
         app.showToast(t("tui.steered"))
         return true
       }
-      queuedPrompts.push(line)
+      // v7.41 (audit F1): gema DITUNDA sampai runTurn benar-benar mengonsumsi
+      // baris ini. Kalau dibuang saat abort, ia tak pernah digema → tak ada
+      // prompt hantu yang seolah dikirim ke model.
+      queuedPrompts.push({ text: line, needsEcho: true })
       app.showToast(t("tui.queued", { n: String(queuedPrompts.length) }))
       return true
     },
     copySelection: (text) => writeClipboardOsc52(text),
     abort: () => {
-      abortRequested = true
+      turnState.markAbortRequested()
       abort?.abort()
     },
     cycleWorkMode: (dir) => {
@@ -1246,21 +1612,69 @@ export async function runTui(ctx: CliSession): Promise<void> {
   // bounded: satu resume per id, tak menumpuk walau banyak job selesai.
   const resumedJobs = new Set<string>()
   const autoResumeEnabled = process.env.MINICODE_AUTORESUME_BG !== "0"
+  // Audit #3: notifikasi job yang datang saat turn aktif DITUNDA, bukan langsung
+  // pushInfo — pushInfo memaksa commit transkrip dan memecah jawaban streaming
+  // di tengah code fence. Dikeluarkan lagi di batas turn (runTurnOnce).
+  const bgNotices = createBgNoticeQueue()
+  const deferredBgJobs = createDeferredBgJobs()
   const unsubscribeJobFinished = onBackgroundJobFinished((id, code) => {
     try {
       if (resumedJobs.has(id)) return
-      resumedJobs.add(id)
+      // Audit #1/#3 + batch 3 #2: satu guard idle untuk notifikasi DAN auto-
+      // resume. `abort` non-null sampai seluruh runTurnOnce selesai; `app.busy`
+      // menutup jendela @-mention (expandMentions di-await sebelum abort=ctrl).
+      const idle = isTurnIdleForBackground({
+        abortActive: abort !== null,
+        suspended: app.isSuspended(),
+        busy: isAppBusy(app),
+      })
       if (autoResumeEnabled) {
-        transcript.pushInfo([c.muted(t("tui.bgFinished", { id, code: code ?? "?" }))])
+        const immediate = bgNotices.offer(
+          c.muted(t("tui.bgFinished", { id, code: code ?? "?" })),
+          idle,
+        )
+        if (immediate !== undefined) transcript.pushInfo([immediate])
       }
       app.repaint()
+      // Batch 3 #3: JANGAN tandai resumed di sini. Kalau turn sedang aktif,
+      // job ditunda dan ditandai nanti di batas turn — kalau tidak, job hilang
+      // permanen: sudah "resumed" tapi tak pernah benar-benar dijalankan.
+      if (!idle) {
+        if (autoResumeEnabled) deferredBgJobs.defer({ id, code })
+        return
+      }
       if (!autoResumeEnabled) return
-      // Abort-aware & modal-aware: jangan menyela turn berjalan atau membuka
-      // turn baru saat popup masih aktif.
-      if (abort !== null || app.isSuspended()) return
+      // Audit #4: auto-resume memanggil runTurn langsung (bukan doSubmit), jadi
+      // jendela "Esc lagi = quit" wajib dimatikan di sini secara eksplisit.
+      disarmAbortQuitIfAvailable(app)
+      resumedJobs.add(id)
       void runTurn(t("tui.bgFinishedAuto", { id, code: code ?? "?" })).catch(() => {})
     } catch {}
   })
+  // v7.41: Kumpulkan bukti anak delegate_task yang selesai. Handler domain-event
+  // HANYA mengisi tracker; penembakan recap terjadi di batas turn (runTurnOnce)
+  // supaya tak menyela user. Opt-out MINICODE_AUTORESUME_CHILD=0 → fail-closed.
+  // `ctx.onDomainEvent` dijaga opsional: fixture tes parsial tanpa method ini
+  // tetap jalan (tak ada event → tak ada recap), bukan crash.
+  const childRecapEnabled = isChildRecapEnabled()
+  const childRecap = createChildRecapTracker(childRecapEnabled)
+  const unsubscribeChildRecap = ctx.onDomainEvent
+    ? ctx.onDomainEvent((event) => {
+        try {
+          if (event.type === "tool.started") {
+            childRecap.noteStarted(event.toolCallId, event.identity?.name ?? "")
+          } else if (event.type === "tool.completed") {
+            childRecap.noteCompleted(event.toolCallId, event.summary ?? "")
+          } else if (
+            event.type === "tool.failed" ||
+            event.type === "tool.denied" ||
+            event.type === "tool.cancelled"
+          ) {
+            childRecap.noteTerminal(event.toolCallId)
+          }
+        } catch {}
+      })
+    : () => {}
   try {
     setApprovalSink({
       pushBlock: (lines) => transcript.pushInfo(lines),
@@ -1286,6 +1700,7 @@ export async function runTui(ctx: CliSession): Promise<void> {
   } finally {
     setApprovalSink(null)
     unsubscribeJobFinished()
+    unsubscribeChildRecap()
     for (const unsub of liveContextUnsubs.splice(0)) {
       try {
         unsub()

@@ -225,41 +225,57 @@ export function verifyApprovalBinding(binding: ApprovalBinding | undefined): Bin
  */
 export class ApprovalBindingStore {
   readonly root: string
-  /** Antre per (tool, argsHash) — cocokkan callId bila ada, FIFO jika tidak. */
+  /**
+   * [AUDIT-FIX #1] Antre per callId — identitas stabil yang TIDAK berubah
+   * walau args dimutasi. Dulu kunci utamanya `(tool, argsHash)`: bila `ask`/
+   * broker yang di-inject mengubah `call.args` antara prompt dan eksekusi
+   * (daemon mengoper `args: call.args` by reference di gatedPrompt), hash di
+   * barrier jadi beda dari hash saat capture ⇒ `take` miss ⇒
+   * `verifyApprovalBinding(undefined)` = "no-binding" ⇒ dibiarkan lewat,
+   * sehingga tool jalan dengan args yang TIDAK disetujui user. Sekarang take
+   * dicari berdasarkan callId; kesamaan argsHash dengan args eksekusi diveri-
+   * fikasi EKSPLISIT di barrier (session.ts) dan beda ⇒ deny (fail-closed).
+   */
   readonly #pending = new Map<string, ApprovalBinding[]>()
 
   constructor(root: string) {
     this.root = root
   }
 
-  static key(tool: string, argsHash: string): string {
-    return `${tool}\u0000${argsHash}`
+  /**
+   * Kunci utama = callId. Fallback komposit `(tool, argsHash)` HANYA untuk
+   * binding legacy tanpa callId, supaya pemanggil/test lama tanpa id tetap
+   * bisa consume-once FIFO. Jangan memakai argsHash sebagai kunci utama:
+   * itulah akar fail-open yang diperbaiki di sini.
+   */
+  static key(callId: string | undefined, tool: string, argsHash: string): string {
+    return callId ? `id\u0000${callId}` : `legacy\u0000${tool}\u0000${argsHash}`
   }
 
   /** Catat persetujuan yang sudah diberikan user (SETELAH prompt selesai). */
   grant(binding: ApprovalBinding): void {
-    const k = ApprovalBindingStore.key(binding.tool, binding.argsHash)
+    const k = ApprovalBindingStore.key(binding.callId, binding.tool, binding.argsHash)
     const arr = this.#pending.get(k)
     if (arr) arr.push(binding)
     else this.#pending.set(k, [binding])
   }
 
-  /** Ambil satu binding untuk (tool, argsHash, callId?) — consume-once. */
+  /**
+   * Ambil satu binding untuk call ini — consume-once.
+   *
+   * `argsHash` tetap diterima demi kompatibilitas tanda tangan dan dipakai
+   * fallback legacy; kesamaan hash dengan args eksekusi sengaja DIVERIFIKASI
+   * PEMANGGIL di barrier, bukan di sini — supaya args yang berubah terbaca
+   * sebagai "stale" (deny), bukan sekadar "tak ketemu" (yang dulu malah
+   * dianggap lolos).
+   */
   take(tool: string, argsHash: string, callId?: string): ApprovalBinding | undefined {
-    const k = ApprovalBindingStore.key(tool, argsHash)
+    const k = ApprovalBindingStore.key(callId, tool, argsHash)
     const arr = this.#pending.get(k)
     if (!arr || arr.length === 0) return undefined
-    let idx = 0
-    if (callId) {
-      const exactIdx = arr.findIndex((b) => b.callId === callId)
-      if (exactIdx !== -1) idx = exactIdx
-      else {
-        const legacyIdx = arr.findIndex((b) => b.callId === undefined)
-        if (legacyIdx === -1) return undefined
-        idx = legacyIdx
-      }
-    }
-    const [picked] = arr.splice(idx, 1)
+    // Kunci utamanya callId, jadi semua entri dalam antre memiliki id yang
+    // sama; ambil FIFO. Fallback legacy tanpa id juga FIFO seperti semula.
+    const [picked] = arr.splice(0, 1)
     if (arr.length === 0) this.#pending.delete(k)
     return picked
   }

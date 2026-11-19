@@ -324,6 +324,8 @@ export const en = {
   "tui.bgFinished": "background job {id} finished (exit {code})",
   "tui.bgFinishedAuto":
     "background job {id} finished with exit code {code}. Continue the work you were doing before without waiting for me: collect the job output with bash_output if relevant, verify the result, then finish the remaining tasks.",
+  "tui.childRecap":
+    "{n} sub-agent(s) finished: {summary}. Evaluate their findings and report briefly to the user — do not delegate again for this recap.",
   "tui.langLine": "lang: {v}",
   "tui.compactLine": "tool output: {v}",
   "tui.modelSet": "model: {v}",

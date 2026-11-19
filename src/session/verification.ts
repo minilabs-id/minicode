@@ -880,7 +880,15 @@ export async function executeCanonicalInvocation(
       cwd: evidenceRoot,
       ...(scope.childOf ? { childOf: scope.childOf } : {}),
       args: input,
-      ...(idempotencyKey ? { idempotencyKey, idempotencyScope: "session" as const } : {}),
+      // v7.41 (audit #1/#2): kirim KUNCI MENTAH ke writer. `persistEffectIntent`
+      // menormalisasi (prefix + scrub) sekali di dalamnya — mengirim kunci yang
+      // sudah dibangun di sini membuat `outcome.note` ber-prefix GANDA,
+      // sehingga `findIdempotentInvocation` (yang mencari kunci hasil build
+      // sekali) TAK pernah menemukan intent pending. Celah itu persis jalur
+      // receipt-loss: efek committed + receipt tak durable → retry buta.
+      // Receipt di bawah tetap memakai `idempotencyKey` (sudah final) agar
+      // note-nya konsisten dengan lookup.
+      ...(baseKey ? { idempotencyKey: baseKey, idempotencyScope: "session" as const } : {}),
     })
     if (!intent.durable) {
       throw new EvidenceIncompleteError(

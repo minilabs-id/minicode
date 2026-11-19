@@ -764,7 +764,21 @@ export async function createMinicodeSession(
       // Ambil (konsumsi) bukti persetujuan milik call ini — sekali saja.
       // Diambil SEBELUM await supaya tak ada binding tersisa kalau barrier
       // memblokir call (tak ada deny lalu tak ada jejak).
-      const binding = approvalBindings.take(call.name, canonicalArgsHash(call.args), call.id)
+      const currentArgsHash = canonicalArgsHash(call.args)
+      const binding = approvalBindings.take(call.name, currentArgsHash, call.id)
+      // [AUDIT-FIX #1] Fail-closed terhadap mutasi args antara prompt dan
+      // eksekusi. Binding kini diambil berdasarkan callId (identitas stabil),
+      // jadi tetap ketemu walau args berubah — beda dengan kunci lama yang
+      // pakai argsHash dan membuat `take` miss ⇒ "no-binding" ⇒ lolos. Args
+      // yang AKAN dieksekusi wajib sama dengan args yang disetujui; bila beda,
+      // ini persetujuan BASI dan ditolak dengan alasan khusus. Jalur tanpa
+      // binding (auto/allowlist/headless-injected-ask) tetap lewat: `binding`
+      // undefined ⇒ Tak ada yang dibandingkan, persis seperti sebelum-nya.
+      if (binding && binding.argsHash !== currentArgsHash) {
+        return recordStaleDeny(
+          "approval stale: args changed since approval — request fresh approval",
+        )
+      }
       // Verifikasi awal SEBELUM preflightIntent menulis record `pending` ke
       // jurnal agar persetujuan basi / pergeseran mode tidak menodai jurnal.
       const preVerdict = verifyApprovalBinding(binding)

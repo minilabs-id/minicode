@@ -1686,9 +1686,11 @@ export class Transcript {
     if (event.type === "finding.detected") {
       const id = event.findingId
       if (!id || this.presentedFindings.has(id)) return
-      // `summary` di sini adalah string (finding), tapi union UiPresentationEvent
-      // punya `summary: UiTurnSummary` di tipe lain → bantu TS narrowing.
-      const text = sanitizeAnsiLine((event.summary as unknown as string) ?? "")
+      // v7.41 re-audit: bridge (presentation-bridge.ts:261) menaruh isi finding
+      // di `text`, bukan `summary` (summary di union bertipe UiTurnSummary).
+      // Dulu kode ini baca `event.summary as string` → selalu "" → baris finding
+      // tak pernah dirender (fitur v7.40 jadi no-op). Baca `text` yang benar.
+      const text = sanitizeAnsiLine(event.text ?? "")
       if (!text) return
       this.presentedFindings.add(id)
       // "diagnostic" = baris observasi, bukan percakapan (lihat TranscriptMeta).

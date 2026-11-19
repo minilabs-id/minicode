@@ -636,6 +636,92 @@ export function resolveWorkModeForIdentity(
   }
 }
 
+/**
+ * v7.41 (audit #1) — kunci idempotency produksi.
+ *
+ * KUNCI = tool + hash args + NOMOR GENERASI. Generasi naik SATU kali per
+ * `runPromptWithVerify` (satu prompt user), bukan per retry: retry provider
+ * memanggil ulang `runPromptWithVerifyImpl` di dalam SATU loop yang sama, jadi
+ * `generation` tetap → tool call yang sama (tool+args identik) memakai kunci yang
+ * SAMA → dedup durabel menolak eksekusi kedua. Prompt user berikutnya menaikkan
+ * generasi → kunci BERBEDA → tulis identik yang memang baru tetap diizinkan.
+ *
+ * Kenapa tidak memakai toolCallId kernel: `ctx` yang dipegang tool TIDAK
+ * mengandung id itu (lihat vendor/minicore/src/core/tool.ts), dan provider bisa
+ * mengganti id saat turn di-generate ulang. `generation` yang dikendalikan
+ * composition root adalah sumber yang deterministik dan berada di dalam
+ * kepemilikan lapisan ini.
+ *
+ * Tradeoff yang disengaja: dua call identik dalam SATU generasi (satu turn) akan
+ * berbagi kunci → yang kedua ditolak (fail-closed). Ini lebih aman daripada
+ * membiarkan efek non-idempoten ter-apply dua kali saat recovery.
+ */
+export function productionIdempotencyKey(tool: string, args: unknown, generation: number): string {
+  return `${tool}:${hashArgs(args ?? {})}:gen${generation}`
+}
+
+/**
+ * v7.41 (audit #2 / F2) — gerbang publish DomainEvent yang diurutkan oleh
+ * `eventSeq`. Event durable hanya boleh live SETELAH append terkonfirmasi
+ * (`confirmDurable`); event non-durable boleh langsung, TAPI ditahan di belakang
+ * durable yang masih tertahan supaya subscriber Seq-keyed tak pernah menerima
+ * seq kecil SESUDAH seq besar (konsumen membuang seq kecil itu sebagai duplikat).
+ *
+ * Diekstrak ke helper murni supaya kontrak urutannya bisa diuji hermetik tanpa
+ * sesi/SQLite/provider.
+ */
+export function createOrderedDomainPublisher(
+  publish: (event: DomainEvent) => void,
+  isDurable: (event: DomainEvent) => boolean,
+): {
+  enqueue: (event: DomainEvent) => void
+  confirmDurable: (eventSeq: number) => void
+  /** Buang event yang append-nya GAGAL — jangan pernah dipublish sebagai live. */
+  drop: (events: readonly DomainEvent[]) => void
+  drain: () => void
+  pending: () => readonly DomainEvent[]
+} {
+  const queue: DomainEvent[] = []
+  let durableFloor = -1
+  let publishedSeq = -1
+  const drain = (): void => {
+    while (queue.length > 0) {
+      const head = queue[0]!
+      // Durable yang belum terkonfirmasi ditahan — bersama semua event di
+      // belakangnya — agar urutan seq di subscriber tetap monoton naik.
+      if (isDurable(head) && head.eventSeq > durableFloor) break
+      queue.shift()
+      if (head.eventSeq > publishedSeq) {
+        publishedSeq = head.eventSeq
+        publish(head)
+      }
+    }
+  }
+  return {
+    enqueue(event) {
+      queue.push(event)
+      drain()
+    },
+    confirmDurable(eventSeq) {
+      if (eventSeq > durableFloor) durableFloor = eventSeq
+      drain()
+    },
+    drop(events) {
+      // Identitas objek: event yang sama dipush ke queue saat enqueue dan
+      // dikirim ke append. Append gagal ⇒ event itu tak pernah durable ⇒
+      // harus dibuang, bukan ditahan sampai confirmDurable berikutnya (yang
+      // akan mempublikasikannya secara palsu sebagai sudah-durable).
+      const doomed = new Set(events)
+      for (let i = queue.length - 1; i >= 0; i--) {
+        if (doomed.has(queue[i]!)) queue.splice(i, 1)
+      }
+      drain()
+    },
+    drain,
+    pending: () => queue.slice(),
+  }
+}
+
 export async function createCliSession(opts: CliSessionOptions): Promise<CliSession> {
   const {
     cwd,
@@ -1484,9 +1570,15 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   let presentationWriteTail: Promise<void> = Promise.resolve()
   let presentationFlushTimer: ReturnType<typeof setTimeout> | undefined
   const pendingPresentationEvents: DomainEvent[] = []
-  // [P13.6] Watermark seq live terakhir yang terkonfirmasi durable. Publish
-  // hanya maju; batch yang gagal append tidak pernah majukan (fail-closed).
-  let durableLiveSeq = -1
+  // v7.41 (audit #2 / F2): satu gerbang publish terurut untuk SEMUA event.
+  // Durable dilepas hanya setelah append (confirmDurable); non-durable ikut
+  // antrean tapi langsung lewat bila tak ada durable yang tertahan di depannya.
+  // Sebelum fix, non-durable diterbitkan langsung sementara durable lebih awal
+  // masih menunggu append → subscriber Seq-keyed menerima seq besar lebih dulu.
+  const orderedDomain = createOrderedDomainPublisher(
+    (event) => publishDomainEvent(event),
+    (event) => DURABILITY[event.type]?.durable === true,
+  )
   // [P13.6] Satu titik tulis durable presentasi. Produksi = append asli
   // (pagar epoch sama); test menyuntik penghalang/kegagalan deterministik
   // lewat opts.presentationAppend (analog seam checkpoint jurnal).
@@ -1505,21 +1597,16 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       .then(async () => {
         const stats = await appendPresentation(batch)
         void stats
-        // [P13.6] LIVE = DURABLE-CONFIRMED: terbitkan event durable hanya
-        // SETELAH append sukses. Watermark menjaga urutan + membuat duplikat
-        // (seq sudah pernah live) tidak dikirim ulang. Batas yang disengaja:
-        // sesi hosted hanya menerima seq segar-adaptif (adapter meneruskan
-        // dari kepala durable saat resume), sehingga collision (baris seq
-        // sudah ada) tak mungkin menyusup ke sini — collision hanya mungkin
-        // lintas-proses dan lintas-proses tak lewat flush ini.
-        for (const event of batch) {
-          if (event.eventSeq > durableLiveSeq) {
-            durableLiveSeq = event.eventSeq
-            publishDomainEvent(event)
-          }
-        }
+        // [P13.6] LIVE = DURABLE-CONFIRMED: lepas durable hanya setelah append
+        // sukses. Gerbang terurut menjaga non-durable tetap di posisi seq-nya.
+        for (const event of batch) orderedDomain.confirmDurable(event.eventSeq)
       })
       .catch((error) => {
+        // v7.41 (audit #2 / F2): append gagal ⇒ batch ini TIDAK pernah durable.
+        // Buang dari antrean publish supaya tak ikut terlepas saat batch
+        // berikutnya sukses (dulu event gagal tertahan lalu dipublish sebagai
+        // sudah-durable → konsumen replay melihat sejarah berbeda).
+        orderedDomain.drop(batch)
         if (error instanceof StaleWriterError) {
           markWriterStale(`presentation flush refused (expected epoch ${error.expectedEpoch})`)
           return
@@ -1532,6 +1619,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   const queuePresentationEvent = (event: DomainEvent): void => {
     if (!DURABILITY[event.type]?.durable) return
     pendingPresentationEvents.push(event)
+    orderedDomain.enqueue(event)
     if (presentationFlushTimer === undefined) {
       presentationFlushTimer = setTimeout(flushPresentationEvents, 0)
     }
@@ -1797,6 +1885,11 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       } catch {}
     },
   })
+  // v7.41 (audit #1): generasi recovery. Naik sekali per prompt (di
+  // runPromptWithVerify), TETAP selama retry dalam loop recovery yang sama.
+  // Dibaca oleh closure idempotencyKeyFor di bawah — lihat
+  // productionIdempotencyKey untuk penalaran lengkapnya.
+  let recoveryGeneration = 0
   const {
     sessionTools,
     evidenceMode,
@@ -1811,6 +1904,12 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
         sessionId,
         threadId: DEFAULT_THREAD_ID,
         cwd: cwd ?? process.cwd(),
+        // v7.41 (audit #1): sebelum perbaikan scope produksi tak punya
+        // idempotencyKeyFor → executeCanonicalInvocation jatuh ke `runOnce()`
+        // dan seluruh dedup durabel MATI di produksi (hanya dipanggil test).
+        // Sekarang setiap tool covered memakai kunci yang stabil per recovery
+        // window: retry efek yang sudah committed ditolak, bukan dijalankan ulang.
+        idempotencyKeyFor: (tool, args) => productionIdempotencyKey(tool, args, recoveryGeneration),
       },
       // F-03 (P5 §C2): background bash job diikat ke sid kanonik sesi ini —
       // instance yang diikat sid tidak pernah dipasok lewat argumen tool.
@@ -2087,10 +2186,14 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       // append durable sukses (lihat flushPresentationEvents). Feed live harus
       // subset dari toko durable: kalau append gagal/crash sebelum flush, event
       // itu tidak boleh pernah tampak live (konsumen bisa meng-ack-nya, dan
-      // offset durable akan melampaui sejarah yang sebenarnya ada). Event
-      // non-durable (delta) tetap langsung — feed daemon memfilternya dan UI
-      // butuh delta real-time.
-      if (!DURABILITY[e.type]?.durable) publishDomainEvent(e)
+      // offset durable akan melampaui sejarah yang sebenarnya ada).
+      // v7.41 (audit #2 / F2): event non-durable (delta) TETAP ingin segera
+      // sampai ke UI (jalur UI = publishPresentationEvent di bawah, sinkron dan
+      // tak diubah). Untuk SUBSCRIBER domain yang Seq-keyed, delta juga ikut
+      // antrean terurut (createOrderedDomainPublisher): ia memapuskannya SEGERA
+      // bila tak ada durable yang lebih awal masih tertahan, kalau ada ia
+      // ditahan bersama supaya urutan seq tak terbalik. Order > latensi feed.
+      if (!DURABILITY[e.type]?.durable) orderedDomain.enqueue(e)
       publishPresentationEvent(e)
     })
   } catch {
@@ -2708,6 +2811,12 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     if (activeAgentSessionId !== null && activeAgentSessionId !== sessionId) {
       throw new ConcurrentAgentSessionError(activeAgentSessionId, sessionId)
     }
+    // v7.41 (audit #1): naikkan generasi DI LUAR loop retry. Retry transien
+    // memanggil ulang runPromptWithVerifyImpl dengan generasi yang sama, sehingga
+    // tool call yang dijalankan ulang memakai kunci idempotency yang sama dan
+    // ditolak oleh dedup bila efeknya sudah committed. Prompt baru = generasi
+    // baru = tulis identik yang memang berbeda tetap diizinkan.
+    recoveryGeneration++
     const previous = activeAgentSessionId
     activeAgentSessionId = sessionId
     const deadline = createRunDeadline()
@@ -3225,6 +3334,15 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   // flush ke SQLite (durable) supaya `--resume` tak amnesia. Fire-and-forget:
   // listener bus tak boleh melempar/blocking, dan persist gagal (mis. stale
   // writer) = best-effort. Penting untuk REPL+resume lintas proses.
+  // v7.41 (audit #4): kernel memancarkan `turn:interrupted` dari DALAM run(),
+  // lebih dulu daripada persist eksplisit pemanggil (TUI/exec/acp/impl gagal).
+  // DULU keduanya memanggil saveSession bersamaan → salah satu kalah generation
+  // guard → markWriterStale PALSU pada Ctrl+C biasa. Kini SEMUA pemanggil
+  // (bus hook + eksplisit) berbagi satu janji in-flight di `persistCurrent`,
+  // jadi tak pernah ada dua saveSession bersamaan. Bus hook tetap dipancarkan
+  // segera: entry point TANPA persist eksplisit (daemon autoRunPrompt) tetap
+  // mendapat safety net. saved epoch tidak berubah antar save berurutan, jadi
+  // pemanggilan ulang setelah yang pertama selesai tetap aman.
   session.events.on("turn:interrupted", () => {
     void persistCurrent(usage.get(modelRef.current)).catch(() => {})
   })
@@ -3295,7 +3413,21 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   // Tidak ada request jaringan di sini — hanya baca berkas.
   void primePricing()
 
-  async function persistCurrent(usageData: unknown) {
+  // v7.41 (audit #4): satu janji persist in-flight untuk SEMUA pemanggil.
+  // `turn:interrupted` (dalam run()) dan persist eksplisit (setelah run())
+  // berbagi janji yang sama bila bersamaan — mencegah dua saveSession aktif
+  // yang memicu markWriterStale palsu. Turn bergantian (running gate), jadi
+  // tak ada persist turn BERBEDA yang tertukar janji.
+  let inFlightPersist: Promise<void> | null = null
+  function persistCurrent(usageData: unknown): Promise<void> {
+    if (inFlightPersist) return inFlightPersist
+    const task = persistCurrentImpl(usageData)
+    inFlightPersist = task
+    return task.finally(() => {
+      if (inFlightPersist === task) inFlightPersist = null
+    })
+  }
+  async function persistCurrentImpl(usageData: unknown) {
     try {
       flushPresentationEvents()
       await presentationWriteTail

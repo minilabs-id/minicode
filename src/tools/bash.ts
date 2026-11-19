@@ -86,6 +86,8 @@ interface BackgroundJob {
   chunks: string[]
   exitCode: number | null
   done: boolean
+  /** v7.41 (audit bg F5): waktu selesai — dipakai reaping, bukan startedAt. */
+  finishedAt?: number
   /** v7.31: timer eskalasi kill dari bash_kill — dibersihkan saat job close. */
   killTimer?: ReturnType<typeof setTimeout>
   /**
@@ -147,7 +149,11 @@ function liveOwnedIds(callerSid: string | null): string[] {
 function reapFinishedJobs(): void {
   const now = Date.now()
   for (const [id, j] of jobs) {
-    if (j.done && now - j.startedAt > LIMITS.BASH_BACKGROUND_MAX_LIFETIME_MS) jobs.delete(id)
+    // v7.41: ukur dari SELESAI, bukan mulai — job 1 jam yang baru selesai tak
+    // boleh langsung hilang saat job berikutnya dimulai (bash_output butuh
+    // mengambil output akhirnya). `finishedAt` absen (job lama) → startedAt.
+    const since = j.finishedAt ?? j.startedAt
+    if (j.done && now - since > LIMITS.BASH_BACKGROUND_MAX_LIFETIME_MS) jobs.delete(id)
   }
 }
 
@@ -237,6 +243,7 @@ function startBackground(
   const emitOnce = (code: number | null): void => {
     if (emitted) return
     emitted = true
+    job.finishedAt = Date.now()
     emitBackgroundJobFinished(id, code)
   }
   proc.on("error", (e) => {
@@ -516,6 +523,10 @@ function makeBashOutputTool(ownerSid: string | null): Tool {
     },
     async execute({ id }, ctx: ToolContext) {
       ctx.signal.throwIfAborted()
+      // v7.41: reap juga saat bash_output dipanggil — job done yang tak pernah
+      // disusul job baru (F5) tetap dibersihkan, tapi output akhirnya masih bisa
+      // diambil sampai batas lifetime terlewat.
+      reapFinishedJobs()
       // F-03: kepemilikan diperiksa SEBELUM output/status apa pun dibocorkan;
       // pesan untuk job sesi lain = persis "tidak dikenal", tanpa daftar id asing.
       const job = ownedJob(String(id), ownerSid)
@@ -529,7 +540,18 @@ function makeBashOutputTool(ownerSid: string | null): Tool {
       job.cursor = job.chunks.length
       const status = job.done ? `finished (exit ${job.exitCode ?? "?"})` : "running"
       if (fresh.length === 0) return `[${job.id}] ${status} — no new output yet`
-      return capMarked(`[${job.id}] ${status}\n${fresh.join("")}`, LIMITS.BASH_OUTPUT_MAX_CHARS)
+      // v7.41 (audit background F1): dulu `capMarked` diterapkan pada header +
+      // fresh sekaligus → marker palsu saat total >20k walau fresh utuh, dan
+      // flag `job.buffer.truncated` (sumber kebenaran pemotongan) diabaikan.
+      // Sekarang: cap isi FRESH dulu, lalu tembahkan header, dan pakai marker
+      // yang SAMA dengan jalur foreground (CappedBuffer.text).
+      const freshText = fresh.join("")
+      const cap = LIMITS.BASH_OUTPUT_MAX_CHARS
+      const truncated = job.buffer.truncated || freshText.length > cap
+      const shown = truncated ? freshText.slice(0, cap) : freshText
+      return `[${job.id}] ${status}\n${scrubSecrets(shown)}${
+        truncated ? "\n… [output truncated]" : ""
+      }`
     },
   }
 }

@@ -260,9 +260,12 @@ setSubAgentSessionFactory(async (spec) => {
       : {}),
   })
   if (journal) {
-    const childPresentation = (
-      await import("../src/presentation/adapter.ts")
-    ).createPresentationAdapter(session.events, { sessionId: journal.sessionId })
+    const { createPresentationAdapter, disposeOnTerminal } = await import(
+      "../src/presentation/adapter.ts"
+    )
+    const childPresentation = createPresentationAdapter(session.events, {
+      sessionId: journal.sessionId,
+    })
     const { appendPresentationEvents } = await import("../src/session/persistence.ts")
     let childWrite = Promise.resolve()
     childPresentation.onEvent((event) => {
@@ -270,7 +273,10 @@ setSubAgentSessionFactory(async (spec) => {
         .then(() => appendPresentationEvents(journal.sessionId, spec.cwd, [event]).then(() => {}))
         .catch(() => {})
     })
-    session.events.on("turn:completed", () => {
+    // Anak abort/timeout berakhir di `turn:interrupted` (kernel), bukan
+    // `turn:completed`. Tanpa ini adapter + rantai tulis jurnal bocor setelah
+    // anak mati. Helper idempoten: terminal mana pun yang tiba duluan menang.
+    disposeOnTerminal(session.events, () => {
       void childWrite.finally(() => childPresentation.dispose())
     })
     childJournalHandle = attachMutationJournal(session, {
