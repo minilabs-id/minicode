@@ -4,7 +4,8 @@
 
 ### Fixed — Stabilitas CI
 
-- **Test PTY undo/redo tidak lagi mengirim tombol ke proses yang sedang handoff**: branch sesi dibuat sebelum proses lama keluar, sehingga `prompt salah` sempat terlukis di frame lama. Test kini menunggu notisi undo dari proses **baru** (`MINICODE_REWIND_NOTICE`) sebelum mengirim `\x15/redo`, dengan jeda kecil memisahkan Ctrl+U dari `/redo`. Tanpa ini CI/Publish gagal ~1/3 run akibat tombol termakan proses mati (`test/pty.test.ts`). Perubahan hanya pada test — tidak ada perilaku produk yang diubah.
+- **Test PTY undo/redo tidak lagi mengirim tombol ke proses yang sedang handoff**: branch sesi dibuat sebelum proses lama keluar, sehingga `prompt salah` sempat terlukis di frame lama. Test kini menunggu notisi undo dari proses **baru** (`MINICODE_REWIND_NOTICE`) sebelum mengirim `\x15/redo`, dengan jeda kecil memisahkan Ctrl+U dari `/redo`. Tanpa ini CI/Publish gagal ~1/3 run akibat tombol termakan proses mati (`test/pty.test.ts`).
+- **Dua flake CI lain distabilisasi**: (a) `audit-fix-startup-progress.test.ts` tak lagi menghapus listener `exit` `backgroundJobExitCleanup` milik `createCliSession` — penghapusan itu membuat test deep-mode mengira hook belum terpasang padahal flag idempoten masih aktif; (b) `/shell E2E (PTY)` diberi jendela reacquire 30s (dulu 20s) karena spawn + re-attach PTY nyata melampaui batas di bawah beban suite penuh. Asersi tidak diubah; tidak ada perilaku produk yang berubah.
 
 ## [0.32.0] - 2026-11-20
 

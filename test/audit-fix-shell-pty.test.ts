@@ -180,7 +180,10 @@ test.skipIf(!runsPty || !shellInputReliable)(
         tui,
         ALT_ENTER,
         enterBefore,
-        20_000,
+        // v0.32.1: reacquire meny spawn + re-attach PTY sungguhan; di bawah
+        // beban suite penuh CI, 20s pernah terlalu ketat (flake sekali, bukan
+        // regresi — marker echo & ALT_ENTER tetap wajib muncul).
+        30_000,
         "alt-screen masuk lagi setelah exit (reacquireTerminal)",
       )
 
@@ -190,7 +193,8 @@ test.skipIf(!runsPty || !shellInputReliable)(
       expect(afterRelease(rawAfterExit)).toContain("minicode")
     })
   },
-  60_000,
+  // Total naik mengikuti jendela reacquire 30s di atas; asersi tidak diubah.
+  90_000,
 )
 
 // ── Test partial untuk platform yang inputnya tak bisa diverifikasi ──

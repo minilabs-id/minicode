@@ -15,7 +15,7 @@ import { expect, test } from "bun:test"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { createCliSession } from "../cli/setup.ts"
+import { backgroundJobExitCleanup, createCliSession } from "../cli/setup.ts"
 import { createStartupProgress, STARTUP_PHASE_NAMES } from "../cli/tui.ts"
 import { isolateHomeForTests } from "./helpers/hermetic-home.ts"
 
@@ -95,7 +95,14 @@ test("createCliSession: opts.onPhase menerima nama fase (seam callback)", async 
     }
     expect(names).toEqual(["provider-layer"])
   } finally {
-    const added = process.listeners("exit").filter((l) => !before.includes(l))
+    // v0.32.1: JANGAN hapus `backgroundJobExitCleanup` — ia dipasang
+    // sekali oleh createCliSession lewat flag idempoten di cli/setup.ts.
+    // Menghapusnya di sini membuat test deep-mode later melihat listener
+    // absen sementara flag masih true → install() jadi no-op → assertion
+    // gagal di suite penuh (CI). Hapus HANYA listener milik test ini.
+    const added = process
+      .listeners("exit")
+      .filter((l) => !before.includes(l) && l !== backgroundJobExitCleanup)
     for (const l of added) process.removeListener("exit", l)
     try {
       rmSync(dir, { recursive: true, force: true })
