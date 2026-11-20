@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.32.1] - 2026-11-20
+
+### Fixed — Stabilitas CI
+
+- **Test PTY undo/redo tidak lagi mengirim tombol ke proses yang sedang handoff**: branch sesi dibuat sebelum proses lama keluar, sehingga `prompt salah` sempat terlukis di frame lama. Test kini menunggu notisi undo dari proses **baru** (`MINICODE_REWIND_NOTICE`) sebelum mengirim `\x15/redo`, dengan jeda kecil memisahkan Ctrl+U dari `/redo`. Tanpa ini CI/Publish gagal ~1/3 run akibat tombol termakan proses mati (`test/pty.test.ts`). Perubahan hanya pada test — tidak ada perilaku produk yang diubah.
+
 ## [0.32.0] - 2026-11-20
 
 ### Added — Startup persen & blok penutup sesi
