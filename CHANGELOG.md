@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.32.0] - 2026-11-20
+
+### Added — Startup persen & blok penutup sesi
+
+- **Progress startup satu baris, angka nyata**: tanpa logo, `start 11%` … `start 100%` ditimpa dengan `\r`; sumbernya 9 fase `createCliSession` (`onPhase`), bukan timer palsu. Auto-update memakai format sama dengan prefix `update`. Resume-history tanpa tambahan kalimat. `MINICODE_STARTUP_PROGRESS=0` mematikan (`cli/index.ts`, `cli/tui.ts`).
+- **Blok penutup permanen di scrollback**: setelah alt-screen ditutup, logo asli (`renderLogoRows()`), `Minicode`, `Session : minicode<DDMMYYYYHHMMSS>` (jam tutup, bulan angka), hitungan `turn/tool/file/other`, `tok · biaya · durasi`, dan `version`. Data dari `usage`/`session`/journal — tak tersedia jadi `0` / `$—`, bukan angka rekaan. Transkrip tetap append-only. `MINICODE_SESSION_SUMMARY=0` mematikan (`src/ui/tui/session-summary.ts`, `cli/tui.ts`).
+- **Narasi progres & auto-recap sub-agent** (v7.41): ringkasan per segmen narasi, batch satu recap per turn dengan anti-loop, dan hardening lifecycle turn.
+
+### Changed — Audit total tools, storage & UI
+
+- **Remediasi menyeluruh** (v7.32–v7.40): guard ReDoS, preflight RCE filter git, batas `runGit` bersama, perbaikan todo phantom, atomisitas `lsp_rename`, lease/journal/idempotency fail-closed, penegakan `argsHash` approval, perbaikan baris `[FINDING]`, `childLink` paralel, serta perbaikan lease writer saat start/crash dan truncasi/reaping bash.
+- **Margin seragam & rekap tool** (v7.42): prompt, jawaban, dan baris tool memakai margin kiri yang sama; rekap tanpa `+`; angka lebih terang dari label kategori.
+- v7.43 (splash intro/closing frame) dibatalkan sebelum commit — tidak masuk rilis ini.
+
+### Verifikasi
+
+Gate penuh hijau pada satu kandidat: `tsc` 0 error · `lint` 828 file / 0 error · `bun test` 6535 pass / 33 skip / 0 fail · `gate:coverage` 89,92% funcs / 90,87% lines, 19/19 modul kritis · `gate:pack` 23 pass / 0 fail (4762 KB).
+
 ## [0.31.1] - 2026-11-18
 
 ### Fixed — Status run terminal tidak lagi hilang
