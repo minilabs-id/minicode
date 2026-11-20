@@ -9,6 +9,7 @@ import {
   type MinicodeConfig,
   normalizeConfig,
   type ProviderEntry,
+  parseJsonFile,
   writeConfigAtomic,
 } from "../src/config.ts"
 import { effortOptionsForModel } from "../src/providers/effort.ts"
@@ -64,7 +65,7 @@ export async function runModelManager(opts: {
     for (const path of paths) {
       let cfg: MinicodeConfig
       try {
-        cfg = normalizeConfig(JSON.parse(await readFile(path, "utf8")))
+        cfg = normalizeConfig(parseJsonFile(await readFile(path, "utf8")))
       } catch {
         continue
       }

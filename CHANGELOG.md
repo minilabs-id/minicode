@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.32.2] - 2026-11-20
+
+### Fixed — BOM UTF-8 pada config.json
+
+- **Setup wizard gagal menyimpan API key saat `config.json` memuat BOM**: `updateConfigAtomic` mem-`JSON.parse` teks apa adanya, sehingga BOM (EF BB BF) dari editor/PowerShell Windows memicu `Unrecognized token '\uFEFF'` → config dianggap corrupt, dibackup ke `.corrupt.*`, dan model detection gagal. Helper `parseJsonFile` kini membuang BOM di awal sebelum parse, dipakai di semua jalur baca config/state (`src/config.ts`) dan model-manager (`cli/model-manager.ts`). File yang ditulis Minicode tetap tanpa BOM, jadi config lama otomatis sembuh saat first write. Test regresi: `test/audit-fix-config-bom.test.ts`.
+
 ## [0.32.1] - 2026-11-20
 
 ### Fixed — Stabilitas CI

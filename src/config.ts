@@ -8,6 +8,20 @@ import {
   parseContextWindowInput,
 } from "./policy/context-window-presets.ts"
 
+/**
+ * Parser JSON file config/state — membuang BOM UTF-8 di awal sebelum parse.
+ *
+ * Kenapa: editor Windows (Notepad) dan Windows PowerShell 5.1 `Set-Content`
+ * menulis BOM (EF BB BF) secara default. `JSON.parse` menolaknya sebagai
+ * `Unrecognized token '\uFEFF'`, sehingga `updateConfigAtomic` mengira config
+ * CORRUPT — dibackup ke `.corrupt.*` dan setup wizard gagal menyimpan API key
+ * (laporan pemilik 2026-11-20). Config yang ditulis Minicode sendiri TANPA BOM,
+ * tapi file dari luar sah dibaca. BOM dibuang HANYA di awal, bukan di tengah.
+ */
+export function parseJsonFile(raw: string): unknown {
+  return JSON.parse(raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw)
+}
+
 // In-process lock per path untuk mencegah lost-update saat Pool(3) sub-agent
 // menulis config yang sama secara paralel. Untuk lintas proses, atomicWriteText
 // sudah cegah torn write, tapi tanpa CAS tetap last-wins; lock ini menutup
@@ -287,7 +301,7 @@ export async function loadLocalConfigOnly(cwd = process.cwd()): Promise<Minicode
   try {
     const localPath = resolve(cwd, LOCAL)
     const raw = await readFile(localPath, "utf8")
-    return normalizeConfig(JSON.parse(raw))
+    return normalizeConfig(parseJsonFile(raw))
   } catch (e) {
     // SyntaxError selalu ribut; error baca non-ENOENT (EACCES/…) ribut juga —
     // reset diam-diam membuat override lokal "hilang" tanpa jejak.
@@ -320,7 +334,7 @@ export async function loadConfig(
   let localCfg: MinicodeConfig = { providers: [] }
   try {
     const raw = await readFile(globalConfigPath(), "utf8")
-    globalCfg = normalizeConfig(JSON.parse(raw))
+    globalCfg = normalizeConfig(parseJsonFile(raw))
   } catch (e) {
     // ENOENT (belum ada file) = mulai kosong, diam. Error LAIN (EACCES,
     // EISDIR, …) dulu ditelan menjadi "no providers" sehingga user menambah
@@ -384,7 +398,7 @@ const statePath = () => join(homeDir(), ".minicode", "state.json")
 export async function loadLastModel(): Promise<string | undefined> {
   try {
     const raw = await readFile(statePath(), "utf8")
-    const m = (JSON.parse(raw) as { lastModel?: unknown }).lastModel
+    const m = (parseJsonFile(raw) as { lastModel?: unknown }).lastModel
     return typeof m === "string" && m ? m : undefined
   } catch {
     return undefined
@@ -397,7 +411,7 @@ async function updateStateAtomic(mutate: (cur: Record<string, unknown>) => void)
     await mkdir(join(homeDir(), ".minicode"), { recursive: true, mode: 0o700 }).catch(() => {})
     let cur: Record<string, unknown> = {}
     try {
-      cur = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>
+      cur = parseJsonFile(await readFile(path, "utf8")) as Record<string, unknown>
     } catch {}
     mutate(cur)
     await atomicWriteText(path, JSON.stringify(cur))
@@ -414,7 +428,7 @@ export async function saveLastModel(id: string): Promise<void> {
 export async function loadLang(): Promise<"en" | "id" | undefined> {
   try {
     const raw = await readFile(statePath(), "utf8")
-    const l = (JSON.parse(raw) as { lang?: unknown }).lang
+    const l = (parseJsonFile(raw) as { lang?: unknown }).lang
     return l === "en" || l === "id" ? l : undefined
   } catch {
     return undefined
@@ -439,7 +453,7 @@ export async function updateConfigAtomic(
     let raw = ""
     try {
       raw = await readFile(path, "utf8")
-      cfg = normalizeConfig(JSON.parse(raw))
+      cfg = normalizeConfig(parseJsonFile(raw))
     } catch (e) {
       if (e instanceof SyntaxError) {
         const backup = `${path}.corrupt.${Date.now()}`
