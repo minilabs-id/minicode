@@ -251,11 +251,23 @@ describe("PTY: boot & kontrak layar", () => {
         expect(branch, "branch sesi undo harus dibuat").toBeTruthy()
         expect(loadSession(branch!, tui.cwd)?.messages).toEqual([])
         expect(loadSession(source, tui.cwd)?.messages).toEqual(messages)
+        // v0.32.0: handoff = proses LAMA keluar, proses BARU masuk. Branch
+        // dibuat SEBELUM handoff selesai, dan draft "prompt salah" sempat
+        // terlukis di frame proses lama. Mengirim `\x15/redo` pada jendela itu
+        // membuat tombol termakan proses yang sedang mati → redo tak jalan
+        // (flake 1/3 di CI & lokal). Notisi undo HANYA dicetak proses BARU
+        // (lewat MINICODE_REWIND_NOTICE), jadi tunggu ITU sebagai tanda
+        // proses baru benar-benar menerima input sebelum kirim tombol.
+        await tui.waitFor((raw) => raw.includes("Undo turn 1"), 60000)
         await tui.waitFor(
           (raw) => parseScreenBuffer(raw, 100, 30).some((line) => line.includes("prompt salah")),
           10000,
         )
-        tui.send("\x15/redo\r")
+        // Jeda kecil memisahkan Ctrl+U dari `/redo` supaya decoder tidak
+        // menggabungkan keduanya dalam satu batch saat handoff baru selesai.
+        tui.send("\x15")
+        await new Promise((r) => setTimeout(r, 50))
+        tui.send("/redo\r")
         await tui.waitFor((raw) => raw.includes("Redo: workspace restored"), 60000)
         expect(loadSession(source, tui.cwd)?.messages).toEqual(messages)
         tui.send("/exit\r")
