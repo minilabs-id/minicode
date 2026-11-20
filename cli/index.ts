@@ -20,10 +20,8 @@ import { GATE_ENABLED, resolveSchedulerGate } from "../src/task/production-sched
 import { writeTrace } from "../src/telemetry/trace.ts"
 import { setSubAgentSessionFactory } from "../src/tools/task.ts"
 import { formatError } from "../src/ui/assistant/simple.ts"
-import { type MsgKey, t } from "../src/ui/i18n/locale.ts"
 import { formatUsd } from "../src/ui/render/money.ts"
 import { c } from "../src/ui/render/theme.ts"
-import { motionReduced } from "../src/ui/runtime/motion.ts"
 import {
   allowLocalConfig,
   displayWorkMode,
@@ -526,45 +524,44 @@ if (ignoredFlags.length > 0) {
 }
 const enterRepl = interactive || (!prompt && process.stdin.isTTY)
 // REPL interaktif: cek update FRESH tiap dibuka → install + restart bila ada
-// versi baru (tak pernah kembali bila restart). Tampilkan spinner 1.8 dtk
-// agar tidak terlihat hang — budget tetap, hanya UX.
-// Spinner transient HANYA lewat ownership tunggal (src/ui/runtime/spinner) —
-// tulis mentah ke stderr lewat arbitrase statusline.ts: pesan [warn] lain
-// di-commit sebagai baris permanen, dan frame spinner tak menghapus baris layar
-// interaktif saat wizard setup pertama aktif (statusline.beginInteractiveScreen
-// menahan paintWrite).
-const { createLoadingBar } = await import("../src/ui/runtime/loading-bar.ts")
-type LoadingBar = NonNullable<ReturnType<typeof createLoadingBar>>
-let startupBar: LoadingBar | null = null
+// versi baru (tak pernah kembali bila restart). Budget cek 1.8 dtk tetap —
+// hanya UX-nya yang berubah.
+// v7.44: auto-update memakai format yang SAMA dengan progress sesi —
+// `update 33%\r` … `update 100%\n`, hanya angka yang berubah, tanpa label
+// "checking/installing" dan tanpa LoadingBar (area sekitar tetap bersih).
+// Notice asli (hasil install/gagal) TETAP ditulis, didahului `\r\x1b[2K`
+// supaya tak menimpa angka progres yang sedang aktif.
 if (enterRepl) {
-  startupBar = createLoadingBar("", { delayMs: 120 })
+  let updateStarted = false
+  const writeUpdate = (pct: number) => {
+    process.stderr.write(`update ${pct}%\r`)
+    updateStarted = true
+  }
   const ctrl = new AbortController()
   const to = setTimeout(() => ctrl.abort(), 1800)
-  // Fase update: 0–12% (cek) → 35% (install) → 95% (restart). Tidak pernah
-  // menembus target fase — 100% hanya ketika REPL benar-benar siap.
   try {
     const { maybeAutoUpdate } = await import("./auto-update.ts")
     await maybeAutoUpdate(readVersion(), ctrl.signal, {
-      onLongOp: () => startupBar?.stop(),
+      // Tidak ada painter transient lagi — tidak perlu stop.
+      onLongOp: () => {},
       getInstalledVersion: readVersion,
       onPhase: (phase) => {
-        if (phase === "check") startupBar?.update(t("loading.checking"), 6)
-        else if (phase === "install") startupBar?.update(t("loading.installing"), 35)
-        else if (phase === "restart") startupBar?.update(t("loading.restarting"), 95)
+        if (phase === "check") writeUpdate(33)
+        else if (phase === "install") writeUpdate(66)
+        else if (phase === "restart") writeUpdate(95)
       },
       onNotice: (line) => {
-        // Bar sedang dihentikan selama install/restart — pesan proses tetap
-        // dikirim ke stderr (append-only, tersembunyi di balik bar).
+        // Tutup garis progres dulu bila ada, supaya notice tak menimpa angka.
+        if (updateStarted) process.stderr.write("\r\x1b[2K")
         process.stderr.write(line)
+        updateStarted = false
       },
     })
   } catch {}
   clearTimeout(to)
-  // Jalur tanpa update (kasus paling umum): hentikan bar update agar tidak
-  // bertabrakan dengan bar setup di bawah (satu painter transient pada satu
-  // waktu — kind sama, tanpa warning, tapi dua klaim hidup bersamaan).
-  startupBar?.stop()
-  startupBar = null
+  // Tutup garis update HANYA bila fase update benar-benar pernah berjalan;
+  // jalur tanpa update (kasus paling umum) tetap nol byte.
+  if (updateStarted) process.stderr.write("update 100%\n")
 }
 if (!prompt && !enterRepl) {
   process.stderr.write('usage: minicode "prompt"  |  minicode (interactive mode)\n')
@@ -599,28 +596,14 @@ try {
 // `\r\x1b[2K` menghapus baris prompt wizard, sehingga user baru hanya melihat
 // "Menyiapkan sesi…" tanpa cara menyelesaikan setup (laporan: minicode dari
 // home selalu macet).
-let setupBar: LoadingBar | null = null
-const setupBarPhases: Record<string, { pct: number; label: MsgKey }> = {
-  "provider-layer": { pct: 55, label: "loading.provider" },
-  "rag-layer": { pct: 75, label: "loading.rag" },
-  // Load-histori resume (paling lambat saat repo berhistori banyak) — sekarang
-  // ter-instrumentasi via startupPhase di cli/setup.ts sehingga bar TIDAK mandeg
-  // diam di 75% selama loadSession/history/projection/select/workspace. Nilai pct
-  // hampiran berurutan; di-tune setelah MINICODE_DEBUG_STARTUP=1 diukur di repo besar.
-  "resume-session": { pct: 78, label: "loading.session" },
-  "resume-history": { pct: 82, label: "loading.session" },
-  "resume-projection": { pct: 84, label: "loading.session" },
-  "resume-select": { pct: 86, label: "loading.session" },
-  "resume-workspace": { pct: 88, label: "loading.session" },
-  "tool-layer": { pct: 90, label: "loading.session" },
-  "kernel-session": { pct: 98, label: "loading.session" },
-}
-if (enterRepl) {
-  setupBar = createLoadingBar(t("loading.session"), { delayMs: 120 })
-}
+// v7.44: progress startup = SATU baris angka (`start 57%`), bukan LoadingBar
+// berlabel. Baik fase auto-update (di atas) maupun fase sesi memakai format
+// angka yang sama; `createStartupProgress` dari cli/tui.ts menangani sesi.
+const startupProgress = (await import("./tui.ts")).createStartupProgress({
+  resume: Boolean(resumeId || sessionFlag),
+})
 // finally: createCliSession yang melempar (provider/MCP gagal) tak boleh
-// membocorkan painter — tanpa ini bar menulis ke stderr selamanya dan
-// proses tak pernah exit (terlihat hang).
+// membocorkan painter — tutup angka progres walau sesi gagal dibuat.
 let ctx: Awaited<ReturnType<typeof createCliSession>>
 try {
   ctx = await createCliSession({
@@ -656,11 +639,8 @@ try {
     timeoutMs,
     rateLimiter,
     sandboxNotice: requestedSandbox ? sandbox.notice : undefined,
-    onPhase: (name) => {
-      if (!enterRepl) return
-      const phase = setupBarPhases[name]
-      if (phase !== undefined) setupBar?.update(t(phase.label), phase.pct)
-    },
+    // v7.44: angka saja, area sekitar bersih — tidak ada label fase/kalimat.
+    onPhase: startupProgress.onPhase,
   })
 } catch (e) {
   // Tanpa provider = setup gagal sebelum sesi ada. Pesan + exit(1) sama
@@ -682,23 +662,16 @@ try {
   }
   throw e
 } finally {
-  setupBar?.stop()
+  // Tutup angka progres walau createCliSession melempar (provider/MCP gagal) —
+  // tanpa ini baris `start N%` menggantung tanpa newline.
+  startupProgress.finish()
 }
 
 if (enterRepl) {
   // Satu-satunya tampilan interaktif = TUI fullscreen (REPL linier dihapus).
   // One-shot/exec tak tersentuh (cabang else di bawah).
-  if (setupBar) {
-    setupBar.update(t("loading.finalize"), 100)
-    // Beri jeda satu frame agar cap 100% benar-benar terlihat sebelum baris
-    // dibersihkan; tanpa ini update+stop di tick yang sama membuat bar tak
-    // pernah tampak mencapai 100%. Dilewati pada non-TTY/motion-reduced.
-    if (process.stderr.isTTY && !motionReduced()) {
-      await new Promise((r) => setTimeout(r, 80))
-    }
-    setupBar.stop()
-    setupBar = null
-  }
+  // v7.44: `start 100%\n` sudah ditulis startupProgress.finish() di finally —
+  // tidak ada jeda 80ms & LoadingBar "finalize" lagi.
   // [AGENT-CONTROL-1] Sebelum perbaikan, baris [recovery] hanya keluar dari
   // catch one-shot di bawah — jalur TUI/interaktif tak pernah memilikinya.
   // Akibatnya, setelah sebuah turn gagal berikut delegasi committed, turn

@@ -1,4 +1,4 @@
-# Kontrak Terminal MiniCode (TUI fullscreen — v7.42, unreleased)
+# Kontrak Terminal MiniCode (TUI fullscreen — v7.44, unreleased)
 
 > **Status & presedensi (dibaca dulu).** Entri v7.22 di bawah ini adalah
 > **catatan sejarah** dan sebagian besar sudah **ditimpa oleh v7.29+** (lihat
@@ -12,6 +12,28 @@
 > **Aturan presedensi:** versi tertinggi menang; bila kontradiksi, entri dengan
 > nomor versi terbesar yang berlaku. Entri lama tetap dipertahankan sebagai
 > sejarah, bukan gambaran tampilan saat ini.
+
+Perubahan v7.44 (unreleased — startup persen & closing block):
+
+1. **Progress startup minimalis.** Tidak ada logo saat start. Satu baris yang
+   diperbarui dengan `\r`: `start 57%`, hanya angka yang berubah, area sekitar
+   tetap bersih. Sumber = `onPhase` (9 fase `createCliSession`), bukan timer
+   palsu; `start 100%\n` ditulis sekali oleh `finish()`. Auto-update memakai
+   format yang sama dengan prefix `update` (`update 33%` → `66%` → `95%` →
+   `100%\n`), menggantikan `LoadingBar` berlabel. `MINICODE_STARTUP_PROGRESS=0`
+   mematikan progress sesi (perilaku lama); resume-history tanpa tambahan
+   kalimat.
+2. **Blok penutup di scrollback.** Setelah alt-screen ditutup, satu blok rata
+   kiri permanen: logo asli (`renderLogoRows()`, 5 baris), `Minicode`,
+   `Session : minicode<DDMMYYYYHHMMSS>` (jam saat tutup, bulan angka),
+   hitungan `turn/tool/file/other`, `tok · biaya · durasi`, dan `version`.
+   Data dari `usage`/`session`/journal — tak ada yang dikarang (cost null →
+   `$—`). Transkrip TETAP utuh (append-only). `MINICODE_SESSION_SUMMARY=0`
+   mematikan. v7.43 (splash intro/closing frame) dibatalkan sebelum commit.
+
+Peta proteksi: `test/audit-fix-session-summary.test.ts`,
+`test/audit-fix-startup-progress.test.ts`, `test/tui-app.test.ts`,
+`test/cli-session.test.ts`.
 
 Perubahan v7.42 (unreleased — margin seragam & rekap tool):
 

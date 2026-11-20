@@ -216,7 +216,11 @@ describe("model-manager: alur interactive", () => {
       (await readConfig(localConfigPath())).providers as { id: string; reasoningEffort?: string }[]
     ).find((x) => x.id === "cap")
     expect(localCap?.reasoningEffort).toBeUndefined()
-  })
+    // v7.44: alur fake-TTY Tab→effort→Enter cuma ~4,5s terisolasi (juga
+    // dengan --coverage), tapi drift timer di bawah beban 6568 test
+    // ter-instrumentasi bisa menembus timeout global 30s gate:coverage.
+    // Timeout eksplisit menaikkan toleransi flake; asersi tak diubah.
+  }, 120_000)
 
   test("Esc di picker effort = batal effort saja (model tak jadi dipilih)", async () => {
     tty = installFakeTty({ rows: 24 })

@@ -18,6 +18,7 @@
 //   (kernel `Session.steer`, dibaca model di batas step berikutnya). Bila turn
 //   sudah selesai lebih dulu, baris diantrikan sebagai turn berikutnya; Esc =
 //   abort yang juga membuang antrean fallback. Perintah slash butuh idle.
+import { readFileSync } from "node:fs"
 import { expandMentions } from "../src/app/mentions.ts"
 import { budgetStatus } from "../src/policy/usage.ts"
 import {
@@ -27,6 +28,7 @@ import {
   provenanceMark,
   verificationMark,
 } from "../src/presentation/projection.ts"
+import { collectSessionModifiedFiles } from "../src/session/verification.ts"
 import { renderSkill } from "../src/skills/loader.ts"
 import { listBackgroundJobs, onBackgroundJobFinished } from "../src/tools/bash.ts"
 import {
@@ -38,6 +40,7 @@ import {
 import type { UiBus } from "../src/ui/contract.ts"
 import { t } from "../src/ui/i18n/locale.ts"
 import { loadHistory } from "../src/ui/input/input.ts"
+import { renderLogoRows } from "../src/ui/render/logo.ts"
 import { formatUsd } from "../src/ui/render/money.ts"
 import { sanitizeAnsiLine } from "../src/ui/render/sanitize.ts"
 import { c, glyphs } from "../src/ui/render/theme.ts"
@@ -48,6 +51,13 @@ import { runOutputWindow } from "../src/ui/screens/output-window.ts"
 // tersentuh. Absen = instance default (fixture tes partial).
 import { defaultUiState, type UiSessionState } from "../src/ui/session-state.ts"
 import { TuiApp, type TuiHost } from "../src/ui/tui/app.ts"
+import {
+  buildClosingBlock,
+  buildProgressLine,
+  buildSessionStamp,
+  progressPercent,
+  type SessionSummaryInfo,
+} from "../src/ui/tui/session-summary.ts"
 import { Transcript } from "../src/ui/tui/transcript.ts"
 import { displayWorkMode, parseToggleArg, parseWorkModeValue } from "./args.ts"
 import {
@@ -428,7 +438,187 @@ export function liveToolsCount(tools: readonly unknown[]): number {
   return tools.length
 }
 
-export async function runTui(ctx: CliSession): Promise<void> {
+// ── v7.44 (audit) — progres startup + blok penutup sesi ──────────────────────
+// Dua jejak teks ini SENGAJA lewat callback yang disuntikkan, bukan write
+// mentah di setup.ts: `onPhase` dipanggil untuk SEMUA entry point (exec,
+// daemon, ACP), sedangkan kontrak hanya mengizinkan jejak di launch interaktif
+// (`minicode` [enter]). Tanpa callback = perilaku lama, nol byte baru.
+
+/** Urutan 9 fase dari `startupPhase` di cli/setup.ts — sumber persen progres. */
+export const STARTUP_PHASE_NAMES = [
+  "provider-layer",
+  "rag-layer",
+  "resume-session",
+  "resume-history",
+  "resume-projection",
+  "resume-select",
+  "resume-workspace",
+  "tool-layer",
+  "kernel-session",
+] as const
+
+export interface StartupProgress {
+  readonly enabled: boolean
+  /** Dipasang sebagai `opts.onPhase` pada `createCliSession` jalur interaktif. */
+  readonly onPhase: (phase: string) => void
+  /** Tulis 100% + newline sekali, lalu lepas handle. Aman dipanggil berulang. */
+  readonly finish: () => void
+}
+
+// Handle terakhir dipakai `runTui` untuk menutup bar bila pemanggil lupa
+// memanggil `finish()` (createCliSession resolve → runTui mulai). Satu proses
+// interaktif = satu sesi, jadi ini bukan singleton lintas-sesi.
+let activeStartupProgress: StartupProgress | null = null
+
+/**
+ * Pabrik callback progres. Satu update = SATU write ke stderr:
+ * `start 11%\r`, lalu `start 22%\r`, … — hanya angka yang berubah, area
+ * sekitarnya tetap bersih (tanpa logo/kalimat/frame). `\r` di AKHIR baris
+ * mengembalikan kursor ke kolom 0 supaya update berikutnya menimpa baris yang
+ * sama ( kontrak TERMINAL_CONTRACT: satu baris, angka saja yang berubah).
+ *
+ * `MINICODE_STARTUP_PROGRESS=0` mematikan total — nol byte, bukan baris
+ * kosong. Prefix `update` dipilih bila operator sedang resume/update.
+ */
+export function createStartupProgress(opts?: {
+  readonly prefix?: "start" | "update"
+  readonly resume?: boolean
+  readonly write?: (s: string) => void
+  readonly env?: NodeJS.ProcessEnv
+}): StartupProgress {
+  const env = opts?.env ?? process.env
+  if (env.MINICODE_STARTUP_PROGRESS === "0") {
+    return { enabled: false, onPhase: () => {}, finish: () => {} }
+  }
+  const prefix = opts?.prefix ?? (opts?.resume === true ? "update" : "start")
+  // stderr, bukan stdout: stdout dipakai TUI/alat dan harus tetap murni.
+  const write = opts?.write ?? ((s: string) => process.stderr.write(s))
+  let finished = false
+  const progress: StartupProgress = {
+    enabled: true,
+    onPhase(phase) {
+      if (finished) return
+      const idx = STARTUP_PHASE_NAMES.indexOf(phase as (typeof STARTUP_PHASE_NAMES)[number])
+      if (idx < 0) return
+      // Fase terakhir tak ditulis di sini: 100% + newline adalah milik
+      // finish() (satu write, penutup baris). Tanpa ini angka 100% muncul
+      // dua kali berturut-turut.
+      if (idx === STARTUP_PHASE_NAMES.length - 1) return
+      const pct = progressPercent(idx + 1, STARTUP_PHASE_NAMES.length)
+      write(`${buildProgressLine(prefix, pct)}\r`)
+    },
+    finish() {
+      if (finished) return
+      finished = true
+      if (activeStartupProgress === progress) activeStartupProgress = null
+      write(`${buildProgressLine(prefix, 100)}\n`)
+    },
+  }
+  activeStartupProgress = progress
+  return progress
+}
+
+// Kategori ringkas tool — SALINAN sengaja dari `src/ui/tui/transcript.ts`
+// (helper di sana tidak diekspor). Memakai daftar yang sama mencegah angka
+// "other" di blok penutup berbeda dari ringkasan yang dilihat user di TUI.
+const SUMMARY_COMMAND_TOOLS = new Set([
+  "bash",
+  "bash_output",
+  "bash_kill",
+  "git_status",
+  "git_diff",
+  "git_log",
+  "git_commit",
+  "git_push",
+])
+const SUMMARY_EDIT_TOOLS = new Set([
+  "write_file",
+  "edit",
+  "apply_patch",
+  "delete_file",
+  "move_file",
+  "lsp_rename",
+])
+const SUMMARY_READ_TOOLS = new Set(["read_file", "read_image", "grep", "glob", "ls", "stat"])
+const SUMMARY_SUBAGENT_TOOLS = new Set(["delegate_task"])
+const SUMMARY_THOUGHT_TOOLS = new Set(["reasoning"])
+
+function summaryToolCategory(name: string): string {
+  if (SUMMARY_COMMAND_TOOLS.has(name) || name.startsWith("git_")) return "command"
+  if (SUMMARY_EDIT_TOOLS.has(name)) return "edit"
+  if (SUMMARY_READ_TOOLS.has(name)) return "read"
+  if (SUMMARY_SUBAGENT_TOOLS.has(name)) return "subagent"
+  if (SUMMARY_THOUGHT_TOOLS.has(name)) return "thought"
+  return "other"
+}
+
+/** Versi dibaca dari package.json — satu sumber, jangan di-hardcode. */
+function readTuiVersion(): string {
+  try {
+    const pkgPath = new URL("../package.json", import.meta.url)
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { version?: string }
+    return pkg.version ?? "?"
+  } catch {
+    return "?"
+  }
+}
+
+/**
+ * Kumpulkan statistik secara read-only & fail-jujur: data yang tak tersedia
+ * jadi 0 / `$—`, bukan angka rekaan. Ditulis SETelah alt-screen ditutup dan
+ * `close()` selesai supaya blok persisten & bisa disalin dari scrollback.
+ */
+async function writeSessionSummary(
+  ctx: CliSession,
+  startedAt: number,
+  write: (s: string) => void,
+): Promise<void> {
+  if (process.env.MINICODE_SESSION_SUMMARY === "0") return
+  let turns = 0
+  let tools = 0
+  let other = 0
+  let files = 0
+  let tokens = 0
+  let cost: number | null = null
+  try {
+    turns = (ctx.session.state as { turnCount?: number } | undefined)?.turnCount ?? 0
+  } catch {}
+  try {
+    const activities = ctx.getPresentationSnapshot?.().activities ?? []
+    tools = activities.length
+    for (const a of activities) {
+      if (summaryToolCategory(a.name) === "other") other++
+    }
+  } catch {}
+  try {
+    files = (await collectSessionModifiedFiles(ctx.sessionId, ctx.cwd ?? process.cwd())).length
+  } catch {}
+  try {
+    const u = ctx.usage.getSession()
+    tokens = u.totalTokens ?? 0
+    cost = u.cost ?? null
+  } catch {}
+  const info: SessionSummaryInfo = {
+    stamp: buildSessionStamp(new Date()),
+    turns,
+    tools,
+    files,
+    other,
+    tokens,
+    cost,
+    duration: Date.now() - startedAt,
+    version: readTuiVersion(),
+  }
+  write(`${buildClosingBlock(renderLogoRows(), info).join("\n")}\n`)
+}
+
+export async function runTui(ctx: CliSession, progress?: StartupProgress): Promise<void> {
+  // createCliSession sudah resolve sebelum runTui dipanggil → tutup bar di sini
+  // (juga menutup bila pemanggil lupa memanggil `finish()` secara eksplisit).
+  const pendingProgress = progress ?? activeStartupProgress
+  pendingProgress?.finish()
+  const startedAt = Date.now()
+  let tuiStarted = false
   const {
     cfg,
     cwd,
@@ -1686,6 +1876,7 @@ export async function runTui(ctx: CliSession): Promise<void> {
       clearRegion: () => app.clearRegion(),
     })
     const res = await app.run()
+    tuiStarted = res.started
     if (!res.started) {
       // Kegagalan startup adalah diagnostik, bukan keluaran program. App
       // sudah menolak membuka layar dan tidak ada fallback linear yang sah.
@@ -1707,6 +1898,19 @@ export async function runTui(ctx: CliSession): Promise<void> {
       } catch {}
     }
     transcript.dispose()
-    await close()
+    // Blok penutup ditulis PALING AKHIR: app.run() sudah menutup alt-screen
+    // lewat cleanupRun(), jadi teks ini jadi scrollback permanen, bukan frame
+    // yang hilang saat layar di-restore.
+    try {
+      await close()
+    } finally {
+      if (tuiStarted) {
+        // Blok penutup adalah kosmetik scrollback: kegagalan mengumpulkan
+        // statisitk TIDAK boleh mengubah status keluar sesi.
+        try {
+          await writeSessionSummary(ctx, startedAt, (s) => process.stdout.write(s))
+        } catch {}
+      }
+    }
   }
 }

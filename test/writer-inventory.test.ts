@@ -141,7 +141,12 @@ const INVENTORY: Record<string, { max: number; owner: string }> = {
   // diagnostic, now redundant with the P3.3 `[select sid=…]` provenance line
   // (T7 selector consolidation). Declared, not absorbed.
   "cli/setup.ts": { max: 45, owner: "diagnostic" },
-  "cli/tui.ts": { max: 9, owner: "screen" },
+  // [v7.44] 9 -> 11 for exactly TWO new writers: (a) the one-line startup
+  // progress (`start N%\r`) and (b) the closing summary block written to
+  // stdout AFTER the alt-screen closes (persistent, copyable scrollback).
+  // Both replace the old LoadingBar writers, which were removed in the same
+  // change; declared here rather than absorbed silently.
+  "cli/tui.ts": { max: 11, owner: "screen" },
   // [P2.2] 3 -> 4 for exactly ONE writer: the stale-writer durability
   // diagnostic after a headless run persisted. The ACP success envelope is
   // exactly-once per run, so a non-durable history cannot ride a second

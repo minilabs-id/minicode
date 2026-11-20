@@ -205,7 +205,11 @@ test("B2 step event menyetel ulang watchdog: anak sehat tak di-abort", async () 
   const dir = tmpRoot()
   const prevTodo = todoSession.id
   todoSession.id = "adaptive-b2"
-  const restoreWatchdog = fastWatchdog(10, 30)
+  // v7.44: jendela 30ms + heartbeat 10ms terlalu ketat di bawah beban
+  // 6568 test ter-instrumentasi (timer drift → abort palsu). Cap 80ms tetap
+  // JAUH di bawah durasi anak 200ms, jadi bila reset watchdog rusak test
+  // ini GAGAL — asersi tidak dilonggarkan, hanya toleransi jitter dinaikkan.
+  const restoreWatchdog = fastWatchdog(10, 80)
   let aborted = false
   try {
     setSubAgentSessionFactory(async () => {
@@ -227,8 +231,8 @@ test("B2 step event menyetel ulang watchdog: anak sehat tak di-abort", async () 
         run: async () => {
           const beat = setInterval(() => {
             for (const h of handlers.get("step:started") ?? []) h(undefined as never)
-          }, 10)
-          await new Promise((r) => setTimeout(r, 150))
+          }, 5)
+          await new Promise((r) => setTimeout(r, 200))
           clearInterval(beat)
           return { finalText: "ok", usage: { steps: 3 } }
         },
