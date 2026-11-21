@@ -179,7 +179,7 @@ describe("TUI-005: hint abort pertama saat busy", () => {
     // Esc pertama: abort + hint muncul di layar.
     await tty!.send(KEY.esc, 90)
     await new Promise((r) => setTimeout(r, 80))
-    expect(tty!.screen().join("\n")).toContain("press Esc again")
+    expect(tty!.screen().join("\n")).toContain("Esc again = quit")
     // Esc kedua: quit (jalan keluar terjaga — hint tak mengubah semantik).
     await tty!.send(KEY.esc, 90)
     await runP

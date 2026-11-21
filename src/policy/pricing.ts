@@ -16,6 +16,7 @@ import { LIMITS } from "../constants.ts"
 import { atomicWriteText } from "../lib/atomic-write.ts"
 import { homeDir } from "../lib/db-path.ts"
 import { isPrivateHostWithDns } from "../lib/net.ts"
+import { fetchPinnedUrl } from "../lib/public-http.ts"
 
 export interface ModelPrice {
   /** USD per 1 juta token. */
@@ -278,23 +279,18 @@ export interface SyncResult {
  * HANYA dipanggil dari perintah eksplisit — bukan dari jalur run biasa.
  */
 export async function syncPricing(url: string = MODELS_DEV_URL): Promise<SyncResult> {
-  try {
-    const hostname = new URL(url).hostname
-    if (await isPrivateHostWithDns(hostname)) throw new Error(`private host rejected: ${hostname}`)
-  } catch (e) {
-    if (e instanceof Error && e.message.includes("private host")) throw e
-  }
-  const res = await fetch(url, {
+  // v0.33 (audit LOW-MEDIUM): pakai fetch yang DI-PIN ke IP tervalidasi —
+  // bukan cek DNS fail-open + fetch global yang bisa kena DNS rebinding.
+  const res = await fetchPinnedUrl(new URL(url), {
     signal: AbortSignal.timeout(LIMITS.PRICING_FETCH_TIMEOUT_MS * 4),
     headers: { accept: "application/json" },
-    redirect: "manual",
   })
   if (res.status >= 300 && res.status < 400) {
     const loc = res.headers.get("location")
     if (loc) {
       try {
         const nextHost = new URL(loc, url).hostname
-        if (await isPrivateHostWithDns(nextHost))
+        if (await isPrivateHostWithDns(nextHost, { strict: true, noCache: true }))
           throw new Error(`private host rejected: ${nextHost}`)
       } catch (e) {
         if (e instanceof Error && e.message.includes("private host")) throw e

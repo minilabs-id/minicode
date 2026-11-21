@@ -8,19 +8,25 @@ import {
   type DecoderState,
   toGraphemes,
 } from "../input/prompt-engine.ts"
-import { hintLine } from "../render/hint.ts"
+import type { HintItem } from "../render/hint.ts"
 import { listRow, tailFilterWindow } from "../render/list.ts"
 import { cleanUntrusted, sanitizeAnsiLine } from "../render/sanitize.ts"
 import { c, glyphs, stripAnsi } from "../render/theme.ts"
 import { displayWidth, truncateToWidth } from "../render/width.ts"
 import { type AltScreen, openAltScreen } from "../runtime/screen.ts"
-import { boxLeftPad, canRenderModal, dialogBox, popupBoxWidth } from "./dialog.ts"
+import { boxLeftPad, canRenderModal, dialogBox } from "./dialog.ts"
 import { createIdleTimer } from "./lifecycle.ts"
+import { windowSpec, windowWidth } from "./window.ts"
 
 export interface PickerItem {
   name: string
   provider: string
   value: string
+  /**
+   * Penanda kategori — HANYA dipakai untuk memilih ikon 1-kolom. Tanpa ini
+   * label tak diubah sama sekali (nama item dari config tetap utuh).
+   */
+  category?: "session"
 }
 
 export interface PickerOptions {
@@ -29,7 +35,10 @@ export interface PickerOptions {
   onPick: (value: string) => void
   onCancel: () => void
   filterable?: boolean
-  /** Tampilkan judul di kotak (khusus wizard yang butuh indikator step). */
+  /**
+   * Kompatibilitas API: tetap diterima, tapi TIDAK lagi menyembunyikan judul.
+   * v0.33 — semua jendela wajib punya judul agar hierarki terbaca konsisten.
+   */
   showTitle?: boolean
   /** Screen induk (nested popup memakai handle yang sama — anti-tearing). */
   screen?: AltScreen
@@ -75,11 +84,19 @@ export async function runPicker(opts: PickerOptions): Promise<void> {
     let scroll = 0
     let filter = ""
     const isFilterable = opts.filterable ?? false
-    const showTitle = opts.showTitle === true
+    // Judul SELALU ada. `showTitle` tetap diterima untuk kompatibilitas, tapi
+    // tak boleh mengosongkan judul: kalau pemanggil lupa mengisinya, pakai
+    // kata "select"/"pilih" agar chrome jendela tetap lengkap (fail-closed).
+    const title = opts.title.trim() ? opts.title : t("hint.select")
     const ownScreen = !opts.screen
     const screen: AltScreen = opts.screen ?? openAltScreen()
+    // Footer seragam dari windowFooter (nav/pilih/tutup). Aksi khusus picker
+    // filterable cukup jadi extraHints — bukan hint ad-hoc di dalam body.
+    const extraHints: readonly HintItem[] = isFilterable
+      ? [{ key: glyphs.caret, label: t("hint.edit") }]
+      : []
     // Lebar dinamis terhadap terminal saat render/resize (tetap stabil saat filter).
-    const boxWidth = () => popupBoxWidth(screen.cols || 80)
+    const boxWidth = () => windowWidth(screen.cols || 80)
 
     const filteredItems = (): PickerItem[] => {
       if (!isFilterable || !filter) return opts.items
@@ -97,14 +114,10 @@ export async function runPicker(opts: PickerOptions): Promise<void> {
     // dicetak — keduanya membungkus dan merusak tampilan.
     const visibleRows = () => {
       const rows = process.stdout.rows || 24
-      // Modal: border + (judul bila diminta) + baris pencarian (bila ada) +
-      // satu baris hint aksi di dasar.
-      const titleRows = showTitle ? 1 : 0
-      if (useModal) {
-        const chrome = (isFilterable ? 4 : 3) + titleRows
-        return Math.max(1, Math.min(rows - chrome, 12))
-      }
-      const chrome = (isFilterable ? 4 : 3) + titleRows
+      // Jalur overlay inline sudah dihapus: satu-satunya tampilan adalah modal.
+      // Judul selalu ada (format seragam) → chrome = border + judul + baris
+      // pencarian (bila ada) + footer hint.
+      const chrome = (isFilterable ? 4 : 3) + 1
       return Math.max(1, Math.min(rows - chrome, 12))
     }
     // Lebar konten = lebar kotak (dibekukan saat mount) dikurangi chrome dialog
@@ -113,18 +126,9 @@ export async function runPicker(opts: PickerOptions): Promise<void> {
 
     // Isi untuk dialog popup (hint dipasung di `spec.footer` agar tak pernah
     // ikut terpotong clipping dialogBox saat terminal menyusut).
-    const bodyLines = (): { lines: string[]; footer: string; filterShown: string } => {
+    const bodyLines = (): { lines: string[]; filterShown: string } => {
       const items = filteredItems()
       const v = visibleRows()
-      // Hint akurat per mode: Esc pertama mengosongkan filter (bukan menutup).
-      const footer = hintLine([
-        { key: glyphs.upDown, label: t("hint.move") },
-        { key: "Enter", label: t("hint.select") },
-        {
-          key: "Esc",
-          label: filter ? t("hint.clear") : t("hint.cancel"),
-        },
-      ])
       if (sel >= items.length) sel = Math.max(0, items.length - 1)
       if (sel < 0) sel = 0
       if (sel < scroll) scroll = sel
@@ -144,36 +148,41 @@ export async function runPicker(opts: PickerOptions): Promise<void> {
       }
       if (items.length === 0) {
         lines.push(cut(dim(`  ${t("pick.noMatch", { q: sanitizeAnsiLine(filter) })}`)))
-        return { lines, footer, filterShown }
+        return { lines, filterShown }
       }
       for (let i = 0; i < rows.length; i++) {
         const it = rows[i]!
         const picked = i === sel - scroll
         // Label provider::model ringkas; teks tetap disanitasi sebelum truncate.
         const safeProvider = sanitizeAnsiLine(it.provider)
+        // Ikon kategori HANYA bila pemanggil menandainya (mis. item /sessions).
+        // Glyph 1 kolom + fallback ASCII dari theme, label sudah disanitasi —
+        // tanpa penanda ini naming item tak berubah (kontrak test lama).
+        const icon = it.category === "session" ? `${glyphs.sessionIcon} ` : ""
         const rawLabel = safeProvider
-          ? `${safeProvider}::${sanitizeAnsiLine(it.name)}`
-          : sanitizeAnsiLine(it.name)
+          ? `${icon}${safeProvider}::${sanitizeAnsiLine(it.name)}`
+          : `${icon}${sanitizeAnsiLine(it.name)}`
         // Marker `…` agar pemotongan tidak diam-diam (kontrak OUTPUT_UX §10).
         const truncated = truncateToWidth(rawLabel, Math.max(4, w - 4), glyphs.ellipsis)
         lines.push(filter ? highlightMatch(truncated, filter, picked) : listRow(truncated, picked))
       }
-      return { lines, footer, filterShown }
+      return { lines, filterShown }
     }
 
     const render = () => {
-      const { lines, footer, filterShown } = bodyLines()
-      const w = boxWidth()
+      const { lines, filterShown } = bodyLines()
       // Popup komposit: HANYA region kotak yang dilukis (tanpa clear) di atas
       // konten pemilik layar (transkrip App / alt-buffer wizard).
+      // Satu aturan jendela (v0.33): judul+footer+lebar/tinggi dari windowSpec —
+      // picker tak lagi menghitung minWidth/maxWidth/maxHeight sendiri.
       const box = dialogBox(
-        {
-          title: showTitle ? opts.title : "",
+        windowSpec({
+          title,
           body: lines,
-          footer,
-          minWidth: w,
-          maxWidth: w,
-        },
+          cols: screen.cols || 80,
+          rows: screen.rows || 24,
+          extraHints,
+        }),
         screen.cols,
         screen.rows,
       )

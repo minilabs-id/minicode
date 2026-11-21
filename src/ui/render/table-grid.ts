@@ -247,7 +247,10 @@ function renderBorderedGrid(
     displayWidth(line) > colWidth ? truncateToWidth(line, colWidth, cellEllipsis) : line
   // Sel yang seluruhnya satu token tanpa spasi (identifier, path, hash, URL
   // pendek) tidak punya titik patah yang wajar untuk dibaca user.
-  const hasNoBreakOpportunity = (plain: string): boolean => !/[\s\-_/.]/.test(plain.trim())
+  // `_`, `.`, `:` di dalam identifier (mis. `TERMINAL_CONTRACT.md:16`) SENGAJA
+  // bukan titik putus: membelah di situ menghasilkan `TERMINAL_CONTRACT.` +
+  // `md:16` yang lebih sulit dibaca daripada satu baris ber-ellipsis.
+  const hasNoBreakOpportunity = (plain: string): boolean => !/[\s\-/]/.test(plain.trim())
   const cellLines = (value: unknown, col: number): string[] => {
     const colWidth = widths[col]!
     const align = aligns[col] ?? "left"
@@ -413,8 +416,11 @@ export function renderMarkdownTable(
       rows: table.rows,
       aligns: table.aligns,
     },
-    // Renderer flat: tabel markdown tanpa kotak/garis, cuma kolom rata.
-    { width, styleHeader: true, formatCell, box: false, fairMinimums: true },
+    // v0.33: tabel jawaban model pakai kotak penuh + wrap. Dulu `box:false`
+    // membuat hanya garis atas yang tampil dan `wrap` mati sehingga sel
+    // panjang dipotong ellipsis — keluhan pemilik. Kotak memberi batas tiap
+    // baris/kolom; wrap menjaga info panjang tidak hilang.
+    { width, styleHeader: true, formatCell, box: true, wrap: true, fairMinimums: true },
   )
 }
 

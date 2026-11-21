@@ -380,6 +380,24 @@ test("B1 delegate fallback cap == konstanta mode (ekuivalen M7 modeStepCap)", as
   }
 })
 
+test("B1b v0.33: scope eksplisit → budget adaptif; fallback tanpa scope tetap 5/15", async () => {
+  const restore = providerEnv()
+  try {
+    todoSession.id = "p91-b1b"
+    const file = await delegate(tmpRoot(), { prompt: "x", mode: "explore", scope: "file" })
+    expect(file.maxSteps).toBe(12)
+    const repo = await delegate(tmpRoot(), { prompt: "x", mode: "explore", scope: "repo" })
+    expect(repo.maxSteps).toBe(36)
+    const planRepo = await delegate(tmpRoot(), { prompt: "x", mode: "plan", scope: "repo" })
+    expect(planRepo.maxSteps).toBe(50)
+    // Kontrak lama tak berubah bila caller tak mengirim scope.
+    const fallback = await delegate(tmpRoot(), { prompt: "x" })
+    expect(fallback.maxSteps).toBe(LIMITS.SUB_AGENT_BUDGET_EXPLORE)
+  } finally {
+    restore()
+  }
+})
+
 test("B2 delegate cap eksplisit TIDAK diklamp mode (≠ M7), clamp hard-cap 50", async () => {
   const restore = providerEnv()
   try {

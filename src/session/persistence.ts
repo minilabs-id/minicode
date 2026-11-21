@@ -726,8 +726,11 @@ export async function saveSession(
         if (
           got.seq !== i ||
           got.role !== want[0] ||
-          got.content !== want[1] ||
-          got.toolCalls !== want[2] ||
+          // v0.33 (audit): baris legacy bisa punya content/toolCalls NULL.
+          // Tanpa coalesce, prefix selalu dianggap berubah → RefusedHistoryRewrite
+          // berulang tiap saveSession. Samakan dengan field lain di bawah.
+          (got.content ?? "") !== (want[1] ?? "") ||
+          (got.toolCalls ?? "") !== (want[2] ?? "") ||
           (got.toolCallId ?? null) !== want[3] ||
           (got.name ?? null) !== want[4] ||
           (got.reasoning ?? null) !== want[5] ||

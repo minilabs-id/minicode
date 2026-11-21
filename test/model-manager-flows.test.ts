@@ -15,7 +15,7 @@ import { join } from "node:path"
 import { runModelManager } from "../cli/model-manager.ts"
 import { stripAnsi, supportsUtf8 } from "../src/ui/render/theme.ts"
 import { displayWidth } from "../src/ui/render/width.ts"
-import { popupBoxWidth } from "../src/ui/screens/dialog.ts"
+import { windowWidth } from "../src/ui/screens/window.ts"
 import { type FakeTty, installFakeTty, KEY } from "./helpers/tui-harness.ts"
 
 // Sudut kotak mengikuti kapabilitas/kill-switch (dialog.ts boxChars()).
@@ -96,12 +96,12 @@ describe("model-manager: non-TTY", () => {
 
 describe("model-manager: alur interactive", () => {
   test("lebar kotak BEKU saat navigasi/filter/effort (tak melompat)", async () => {
-    // I20 v7.14: lebar diskalakan dari layar lewat popupBoxWidth dan dibekukan
+    // v0.33: lebar mengikuti satu aturan windowWidth untuk semua jendela.
     // saat mount. Di 100 kolom nilainya 60 (dulu angka tetap 64).
     tty = installFakeTty({ columns: 100, rows: 24 })
     const p = runModelManager({ cwd: workspace, currentModel: "prov::m1" })
     await tty.ready()
-    const expected = popupBoxWidth(100)
+    const expected = windowWidth(100)
     const boxW = () => {
       const top = tty!.screen().find((l) => l.includes(boxTl())) ?? ""
       return displayWidth(top.trimStart())

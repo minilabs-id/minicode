@@ -93,10 +93,20 @@ export function normalizeErrorHeadline(errorText: string): string {
       .split(/\r?\n/)
       .map((line) => line.trim())
       .find((line) => line.length > 0) ?? "error"
-  return firstLine
-    .replace(/\bduration_ms=\d+/g, "duration_ms=#")
-    .replace(/\s+/g, " ")
-    .slice(0, 240)
+  return (
+    firstLine
+      .replace(/\bduration_ms=\d+/g, "duration_ms=#")
+      // v0.33 (audit): angka/path volatil lain juga dinormalkan supaya error yang
+      // identik tapi beda durasi/PID/baris tak dianggap aksi berbeda (false-negative
+      // REPEATED_ACTION_ERROR → retry sampai batas langkah).
+      .replace(/\b\d+(?:\.\d+)?\s*(?:ms|detik|dtk|seconds?|secs?)\b/gi, "#dur")
+      .replace(/\b\d{4,}\b/g, "#n")
+      .replace(/0x[0-9a-f]+/gi, "#hex")
+      .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, "#uuid")
+      .replace(/:\d+:\d+/g, ":#line:col")
+      .replace(/\s+/g, " ")
+      .slice(0, 240)
+  )
 }
 
 export function computeActionErrorFingerprint(

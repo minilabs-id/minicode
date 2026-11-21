@@ -68,12 +68,12 @@ describe("t()", () => {
     expect(t("form.required")).toBe("required")
     setSessionLocale("id")
     expect(t("form.required")).toBe("wajib diisi")
-    expect(t("app.newBelow", { n: 3 })).toBe("↓ 3 baris baru di bawah · PgDn ke ekor")
+    expect(t("app.newBelow", { n: 3 })).toBe("↓ 3 baru · PgDn")
     setSessionLocale("en")
-    expect(t("app.newBelow", { n: 3 })).toBe("↓ 3 new lines below · PgDn to bottom")
+    expect(t("app.newBelow", { n: 3 })).toBe("↓ 3 new · PgDn")
   })
   test("param tak dikenal dibiarkan (bukan crash)", () => {
-    expect(t("app.newBelow", {})).toBe("↓ {n} new lines below · PgDn to bottom")
+    expect(t("app.newBelow", {})).toBe("↓ {n} new · PgDn")
   })
   test("dict id lengkap (kunci = en)", () => {
     expect(Object.keys(id).sort()).toEqual(Object.keys(en).sort())
@@ -114,6 +114,11 @@ describe("t()", () => {
       "ts.toolCategory.subagent",
       "ts.toolCategory.thought",
       "ts.toolCategory.other",
+      // Alasan kegagalan agent adalah token teknis (abort/timeout/error) —
+      // sengaja identik di en/id supaya ringkasan stabil saat locale berubah.
+      "ts.agentReason.aborted",
+      "ts.agentReason.timeout",
+      "ts.agentReason.error",
     ])
     const same = (Object.keys(en) as (keyof typeof en)[]).filter(
       (k) => id[k] === en[k] && !NEUTRAL.has(k),

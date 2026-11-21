@@ -406,28 +406,19 @@ test("10. a mixed payload that creates a task propagates its new id end to end",
 // ===========================================================================
 // 11. ALL-ID-LESS REGRESSION (4A.5 behaviour, under lifecycle conditions)
 // ===========================================================================
-test("11. all-id-less reorder of a canonical list is rejected and changes nothing", async () => {
+test("11. all-id-less reorder of a canonical list is repaired to the same ids", async () => {
   const dir = await ownedDir()
   seed(dir, ["A", "B", "C"])
   const before = idMap(dir)
-  const rowsBefore = open(dir)
-    .listTasks(S)
-    .map((t) => `${t.id}:${t.revision}`)
 
-  await expect(
-    write(dir, [
-      { content: "C", status: "pending" },
-      { content: "A", status: "pending" },
-      { content: "B", status: "pending" },
-    ]),
-  ).rejects.toThrow()
+  await write(dir, [
+    { content: "C", status: "pending" },
+    { content: "A", status: "pending" },
+    { content: "B", status: "pending" },
+  ])
 
-  expect(idMap(dir)).toEqual(before)
-  expect(
-    open(dir)
-      .listTasks(S)
-      .map((t) => `${t.id}:${t.revision}`),
-  ).toEqual(rowsBefore)
+  // v0.33: konten sama persis → petakan ke id kanonik, bukan buat duplikat.
+  expect(new Set(Object.values(idMap(dir)))).toEqual(new Set(Object.values(before)))
   expect(open(dir).listTasks(S)).toHaveLength(3)
   expect(open(dir).nextId(S)).toBe("t4")
   // And no plan is published for it.

@@ -148,6 +148,33 @@ describe("Transcript", () => {
     expect(out).not.toContain("##")
     expect(out).not.toContain("`kode`")
   })
+  test("v0.33: dua baris kosong sebelum bab ###, sub-poin bullet tetap rapat", () => {
+    const { bus, t } = setup()
+    bus.emit("provider:text", {
+      text: [
+        "Pembuka.",
+        "### 1) Pertama",
+        "- **Bukti:** alpha",
+        "",
+        "- **Dampak:** beta",
+        "  - sub satu",
+        "  - sub dua",
+        "### 2) Kedua",
+        "- **Bukti:** gamma",
+      ].join("\n"),
+    })
+    bus.emit("turn:completed", {})
+    const rows = t.view(80, 24, 0)
+    const idx = rows.findIndex((r) => r.includes("2) Kedua"))
+    expect(idx).toBeGreaterThan(0)
+    expect(rows[idx - 1]).toBe("")
+    expect(rows[idx - 2]).toBe("")
+    // Dua bullet sibling tidak dipisah baris kosong.
+    const bukti = rows.findIndex((r) => r.includes("Bukti: alpha"))
+    const dampak = rows.findIndex((r) => r.includes("Dampak: beta"))
+    expect(dampak).toBe(bukti + 1)
+  })
+
   test("jawaban model merapatkan blank line luar tanpa mengubah blank line code", () => {
     const { bus, t } = setup()
     bus.emit("provider:text", {
@@ -201,9 +228,10 @@ describe("Transcript", () => {
     t.pushInfo(["a", "b", "c", "d"])
     // v7.28 anchor atas: `scrollBack = 0` = kepala, konten di Atas dan sisa
     // tinggi viewport diisi baris kosong DI BAWAH (bukan di atas seperti dulu).
-    expect(t.view(40, 6, 0)).toEqual(["a", "b", "c", "d", "", ""])
+    // v0.33: semua baris transkrip — termasuk info — pakai margin kiri 3.
+    expect(t.view(40, 6, 0)).toEqual(["   a", "   b", "   c", "   d", "", ""])
     // scrollBack naik menggulir KE BAWAH menuju ekor: 2 → baris "c","d".
-    expect(t.view(40, 2, 2)).toEqual(["c", "d"])
+    expect(t.view(40, 2, 2)).toEqual(["   c", "   d"])
   })
   test("cap 5000 membuang tertua dan menambahkan marker", () => {
     const { t } = setup()
@@ -214,7 +242,7 @@ describe("Transcript", () => {
     // kepala (scrollBack = 0), bukan di ekor. Di ekor (scrollBack = maks) ada
     // baris terbaru — kedua ujung tetap diverifikasi.
     expect(t.view(100, 1, 0)[0]).toContain("10 early lines")
-    expect(t.view(100, 1, 5000)[0]).toBe("l5009")
+    expect(t.view(100, 1, 5000)[0]).toBe("   l5009")
   })
   test("total() monotonik kebal evict (basis indikator F-08)", () => {
     // size() menyusut saat cap membuang tertua → newCount negatif/hilang.
@@ -232,8 +260,9 @@ describe("Transcript", () => {
     const rows = t.viewport(40, 8, 0).rows
     const alpha = rows.find((row) => row.text.includes("alpha"))!
     const prompt = rows.find((row) => row.text.includes("minicode"))!
-    const alphaStart = t.pointAt(alpha, 0)!
-    const alphaEnd = t.pointAt(alpha, 5)!
+    // v0.33: 3 kolom pertama adalah margin (chrome), bukan teks sumber.
+    const alphaStart = t.pointAt(alpha, 3)!
+    const alphaEnd = t.pointAt(alpha, 8)!
     expect(t.selectionText(alphaStart, alphaEnd)).toBe("alpha")
     const promptStart = t.pointAt(prompt, 11)!
     expect(t.selectionText(promptStart, promptStart)).toBe("")
@@ -241,9 +270,11 @@ describe("Transcript", () => {
   test("selection wrapped tetap satu logical source tanpa newline artefaktual", () => {
     const { t } = setup()
     t.pushInfo(["abcdefghijklmnopqrst"])
-    const rows = t.viewport(10, 4, 0).rows.filter((row) => row.selectable)
-    const start = t.pointAt(rows[0]!, 1)!
-    const end = t.pointAt(rows[1]!, 10)!
+    // Lebar viewport naik 10 → 13 agar lebar AREA TEKS tetap 10 setelah
+    // margin 3; kolom seleksi juga digeser 3 (chrome margin).
+    const rows = t.viewport(13, 4, 0).rows.filter((row) => row.selectable)
+    const start = t.pointAt(rows[0]!, 4)!
+    const end = t.pointAt(rows[1]!, 13)!
     expect(t.selectionText(start, end)).toBe("bcdefghijklmnopqrst")
   })
   test("baris wrapped tetap copy tanpa prefix chrome", () => {
@@ -294,12 +325,8 @@ describe("Transcript", () => {
       expect(live).not.toContain("mikirmodelrahasia")
       bus.emit("turn:completed", {})
       expect(t.view(40, 3, 0).join("\n")).not.toContain("thinking")
-      expect(
-        defaultUiState
-          .collapsedSectionsSnapshot()
-          .some((s) => s.text.includes("mikirmodelrahasia")),
-      ).toBe(true)
-      defaultUiState.clearCollapsedSections()
+      // v0.33: riwayat thinking pindah ke sidebar, bukan /expand.
+      expect(t.sidebarThinking(20, 80).join("\n")).toContain("mikirmodelrahasia")
     } finally {
       setReasoningVisible(prevReasoning)
     }
@@ -464,7 +491,7 @@ describe("Transcript UI audit regressions (Fase 3.2-3.4)", () => {
       // v7.29: prompt kini history — gema `minicode > …` (ASCII) tampil di
       // transkrip dengan tepat SATU jeda sebelum dan sesudahnya.
       // v7.42: echo user mengikuti margin kiri seragam (3 kolom).
-      expect(rows).toEqual(["jawaban", "", "   minicode > pertanyaan dua", ""])
+      expect(rows).toEqual(["   jawaban", "", "   minicode > pertanyaan dua", ""])
       // Kill-switch ASCII tetap berlaku: panah '›' tak boleh muncul.
       expect(rows.some((l) => l.includes("›"))).toBe(false)
     } finally {
@@ -562,10 +589,10 @@ describe("Transcript UI audit regressions (Fase 3.2-3.4)", () => {
     const selectable = rows.filter((r) => r.selectable)
     expect(selectable.length).toBe(2)
     const headerRow = selectable[0]!
-    // Renderer flat: tabel tanpa kotak, konten mulai di kolom 0.
-    expect(headerRow.displayStart).toBe(0)
+    // v0.33: tabel ber-kotak & ber-margin 3; margin adalah chrome, bukan teks.
+    expect(headerRow.displayStart).toBe(3)
     expect(headerRow.plainBody).toBeDefined()
-    expect(headerRow.plainBody!).not.toMatch(/^[│|]/)
+    expect(headerRow.plainBody!).not.toMatch(/^\s/)
 
     const pStart = t.pointAt(headerRow, headerRow.displayStart)!
     const pMid = t.pointAt(

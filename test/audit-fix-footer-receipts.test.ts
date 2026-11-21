@@ -86,7 +86,8 @@ describe("v7.30: kwitansi perintah di footer, bukan transkrip", () => {
     const visible = tty
       .screen()
       .map((line, index) => ({ line, row: index + 1 }))
-      .filter((item) => item.line.startsWith("baris-"))
+      // v0.33: baris transkrip pakai margin kiri 3.
+      .filter((item) => item.line.trimStart().startsWith("baris-"))
     const start = visible[0]!.row
     const picked = visible[Math.min(2, visible.length - 1)]!
     const endX = picked.line.length + 1
@@ -213,7 +214,7 @@ describe("v7.30: kwitansi perintah di footer, bukan transkrip", () => {
       const msg = t("tui.steered")
       await tty.waitForScreen((f) => (f[f.length - 1] ?? "").includes(msg))
       expect(h.steered).toEqual(["tambahan"])
-      expect(footerRow()).toContain("steered into the running turn")
+      expect(footerRow()).toContain("steered into turn")
       // Entri user asli BOLEH di transkrip; kwitansinya TIDAK.
       expect(transcriptText()).not.toContain(msg)
       h.release()

@@ -446,12 +446,17 @@ test("decodeKey: mouse press/drag/release dan wheel ternormalisasi", () => {
     action: "move",
     button: null,
   })
-  expect(decodeKeys(new TextEncoder().encode("\x1b[<64;12;34M")).map((k) => k.key.type)).toEqual([
-    "wheelup",
-  ])
-  expect(decodeKeys(new TextEncoder().encode("\x1b[<65;12;34M")).map((k) => k.key.type)).toEqual([
-    "wheeldown",
-  ])
+  // v0.33: wheel menyimpan koordinat supaya App tahu pane mana yang digulir.
+  expect(decodeKeys(new TextEncoder().encode("\x1b[<64;12;34M"))[0]?.key).toMatchObject({
+    type: "wheelup",
+    x: 12,
+    y: 34,
+  })
+  expect(decodeKeys(new TextEncoder().encode("\x1b[<65;12;34M"))[0]?.key).toMatchObject({
+    type: "wheeldown",
+    x: 12,
+    y: 34,
+  })
   expect(decodeKeys(new TextEncoder().encode("\x1b[<66;12;34M")).map((k) => k.key.type)).toEqual([
     "ignore",
   ])

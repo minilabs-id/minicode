@@ -23,9 +23,10 @@ import { listRow } from "../render/list.ts"
 import { sanitizeAnsiLine } from "../render/sanitize.ts"
 import { c, glyphs, stripAnsi } from "../render/theme.ts"
 import { displayWidth, truncateToWidth } from "../render/width.ts"
-import { boxLeftPad, canRenderModal, dialogBox, popupBoxWidth } from "../screens/dialog.ts"
+import { boxLeftPad, canRenderModal, dialogBox } from "../screens/dialog.ts"
 import { IDLE_CANCEL_MS, IDLE_WARN_MS } from "../screens/form.ts"
 import { createIdleTimer } from "../screens/lifecycle.ts"
+import { windowSpec, windowWidth } from "../screens/window.ts"
 import { type ApprovalSink, getApprovalSink } from "../tui/transcript.ts"
 
 /** Subset struktural tool call yang dibutuhkan view — tanpa tipe kernel. */
@@ -291,9 +292,10 @@ function paintModal(
     return
   }
   const safeRows = Math.max(5, rows)
-  // Lebar popup SERAGAM (AUD-007): dulu selebar layar, melanggar I20.
-  const boxW = popupBoxWidth(cols)
-  const innerW = Math.max(10, Math.min(boxW - 4, Math.max(20, cols) - 6))
+  // v0.33:approval memakai ATURAN ukuran yang sama dengan semua jendela lain —
+  // dulu popupBoxWidth() bikin lebar approval beda dari picker/manager.
+  const boxW = windowWidth(cols)
+  const innerW = Math.max(10, boxW - 4)
   let modalExtra = extra
   let lineCursorOffset = 0
   if (cursor?.kind === "line") {
@@ -307,18 +309,17 @@ function paintModal(
       : cursor?.kind === "line"
         ? spec.body.length
         : undefined
-  const box = dialogBox(
-    {
-      title: spec.title,
-      body: [...spec.body, ...modalExtra],
-      footer: spec.footer,
-      minWidth: boxW,
-      maxWidth: boxW,
-      ...(focusRow != null ? { focusRow } : {}),
-    },
-    Math.max(20, cols),
-    safeRows,
-  )
+  const frame = windowSpec({
+    title: spec.title,
+    body: [...spec.body, ...modalExtra],
+    cols,
+    rows: safeRows,
+    ...(focusRow != null ? { focusRow } : {}),
+  })
+  // Approval punya hint khusus (submit vs pilih) —footer ditimpa, geometri
+  // (lebar/tinggi/judul) tetap dari aturan bersama.
+  frame.footer = spec.footer
+  const box = dialogBox(frame, Math.max(20, cols), safeRows)
   sink.paintRegion(box.lines, box.topRow)
   if (!cursor) return
   const focus = cursor.kind === "choice" ? focusRow! : spec.body.length

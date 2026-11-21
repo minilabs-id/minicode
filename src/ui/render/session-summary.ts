@@ -13,7 +13,7 @@ import { renderLogoRows } from "./logo.ts"
 import { formatUsd } from "./money.ts"
 import { sanitizeAnsiLine, stripSgr } from "./sanitize.ts"
 import { c } from "./theme.ts"
-import { displayWidth } from "./width.ts"
+import { displayWidth, truncateToWidth } from "./width.ts"
 
 const WORDMARK = "minicode"
 
@@ -71,7 +71,10 @@ export function renderSessionSummary(s: SessionSummary): string {
   // sessionId/model = input tak-terpercaya (config/network): buang SEMUA ANSI
   // (termasuk SGR) sebelum dibungkus style — nilai mentah hanya boleh muncul
   // sebagai teks polos, styling ditambahkan pemanggil (aturan repo).
-  const clean = (v: string): string => stripSgr(sanitizeAnsiLine(v))
+  // v0.33: nilai dari config/jaringan dibatasi lebar kolom — model id panjang
+  // dulu membungkus dan merusak kolom rapi kop ringkasan.
+  const clean = (v: string, max = 48): string =>
+    truncateToWidth(stripSgr(sanitizeAnsiLine(v)), max, "…")
   return `${[
     "",
     ...paintLogo(),

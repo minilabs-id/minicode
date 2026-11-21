@@ -171,6 +171,20 @@ describe("grid renderer", () => {
     }
   })
 
+  test("box+wrap: identifier tak dipecah di tengah token", () => {
+    // v0.33: `TERMINAL_CONTRACT.md:16` dulu terbelah jadi `TERMINAL_CONTRACT.`
+    // + `md:16` karena `_`/`.`/`:` dianggap titik putus. Kini sel satu-token
+    // diperlakukan atomik: satu baris ber-ellipsis lebih mudah dibaca.
+    const output = stripAnsi(
+      renderGridTable(
+        { headers: ["Bukti"], rows: [["TERMINAL_CONTRACT.md:16"]] },
+        { width: 22, box: true, wrap: true },
+      ),
+    )
+    expect(output).toContain("…")
+    expect(output).not.toContain("md:16")
+  })
+
   test("wrap: sel panjang dilanjutkan ke baris berikutnya, bukan truncate", () => {
     const output = stripAnsi(
       renderGridTable(
@@ -306,15 +320,13 @@ describe("TUI table transcript", () => {
     )
     expect(wideTable.length).toBe(2)
     expect(narrowTable.length).toBe(2)
-    // Tabel kini flat (box:false): tak ada karakter `|`/`│`, kolom dipisah
-    // spasi dan garis pemisah `─`. Jadi geometri diukur dari lebar kolom, bukan
-    // dari bubble pipe. Sel panjang dipotong dengan ellipsis, bukan dibungkus.
-    const narrowData = narrowTable.find((line) => line.includes("value-long"))!
-    expect(narrowData).toContain("value-long")
-    expect(narrowData).toContain("…")
-    // Render ulang mengikuti lebar paint: versi lebar memuat nilai penuh.
-    expect(wide.some((line) => line.includes("value-long-long-long"))).toBe(true)
-    expect(narrow.some((line) => line.includes("value-long-long-long"))).toBe(false)
+    // v0.33: tabel memakai kotak penuh (box:true) + wrap — bukan flat dan
+    // bukan ellipsis. Garis `│` membatasi tiap kolom/baris; teks panjang
+    // dibungkus sehingga TIDAK ada informasi yang hilang di layar sempit.
+    expect(narrow.some((line) => line.includes("│"))).toBe(true)
+    const compact = (lines: string[]): string => lines.join("").replace(/[^A-Za-z0-9-]/g, "")
+    expect(compact(narrow)).toContain("value-long-long-long")
+    expect(compact(wide)).toContain("value-long-long-long")
     for (const line of narrow.filter(Boolean)) expect(displayWidth(line)).toBeLessThanOrEqual(30)
     expect(transcript.view(80, 8, 0).map(stripAnsi)).toEqual(wide)
   })

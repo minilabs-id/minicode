@@ -45,8 +45,8 @@ export type PromptKey =
   | { type: "down" }
   | { type: "pageup"; modifier?: number }
   | { type: "pagedown"; modifier?: number }
-  | { type: "wheelup" }
-  | { type: "wheeldown" }
+  | { type: "wheelup"; x?: number; y?: number }
+  | { type: "wheeldown"; x?: number; y?: number }
   | {
       type: "mouse"
       action: "press" | "release" | "drag" | "move"
@@ -941,8 +941,10 @@ function mouseKeyForReport(button: number, action: MouseAction, x: number, y: nu
   const modifiers = button & 0x1c
   if ((button & 0xc0) === 0x40) {
     const vertical = button & 0x1f
-    if (vertical === 0) return { type: "wheelup" }
-    if (vertical === 1) return { type: "wheeldown" }
+    // v0.33: koordinat DISERTAIkan supaya App bisa menggulir pane yang sedang
+    // disorot mouse (chat / thinking / aktivitas), bukan selalu chat.
+    if (vertical === 0) return { type: "wheelup", x, y }
+    if (vertical === 1) return { type: "wheeldown", x, y }
     return { type: "ignore" }
   }
   const rawButton = button & 0x03

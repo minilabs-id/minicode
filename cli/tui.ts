@@ -28,6 +28,7 @@ import {
   provenanceMark,
   verificationMark,
 } from "../src/presentation/projection.ts"
+import { loadJournal } from "../src/session/journal.ts"
 import { collectSessionModifiedFiles } from "../src/session/verification.ts"
 import { renderSkill } from "../src/skills/loader.ts"
 import { listBackgroundJobs, onBackgroundJobFinished } from "../src/tools/bash.ts"
@@ -77,7 +78,9 @@ const WORK_MODE_CYCLE = ["DISCUSS", "EXECUTE"] as const
 // Aksi view yang benar-benar punya efek di renderer flat. compact/minimize/fold
 // dihapus: mengubah flag-flag itu tak mengubah satu sel pun di layar (hanya
 // menghasilkan kwitansi palsu), jadi jangan ditawarkan lagi di picker /view.
-const VIEW_ACTIONS = ["thinking", "expand"] as const
+// v0.33: `/expand` dihapus — seluruh riwayat thinking & aktivitas kini ada
+// di sidebar dan bisa digulir dengan mouse.
+const VIEW_ACTIONS = ["thinking"] as const
 const DRIVER_COMMANDS = ["/view", "/mode", "/lang", "/clear", "/copy", "/undo", "/redo"]
 
 function fmtCtx(n: number): string | undefined {
@@ -572,6 +575,7 @@ async function writeSessionSummary(
   ctx: CliSession,
   startedAt: number,
   write: (s: string) => void,
+  extra: { model?: string; mode?: string } = {},
 ): Promise<void> {
   if (process.env.MINICODE_SESSION_SUMMARY === "0") return
   let turns = 0
@@ -580,6 +584,10 @@ async function writeSessionSummary(
   let files = 0
   let tokens = 0
   let cost: number | null = null
+  let toolBreakdown = ""
+  let agents = 0
+  let inputTokens: number | undefined
+  let outputTokens: number | undefined
   try {
     turns = (ctx.session.state as { turnCount?: number } | undefined)?.turnCount ?? 0
   } catch {}
@@ -589,6 +597,31 @@ async function writeSessionSummary(
     for (const a of activities) {
       if (summaryToolCategory(a.name) === "other") other++
     }
+    // v0.33 (audit closing block): snapshot activities SUDAH dikosongkan saat
+    // turn ditutup → `0 tool` walau sesi memanggil tool. Jurnal adalah sumber
+    // kumulatif yang tahan ditutupnya turn.
+    const root = ctx.cwd ?? process.cwd()
+    const journal = await loadJournal(ctx.sessionId, root).catch(() => null)
+    if (journal?.status === "valid") {
+      const records = journal.records.filter(
+        (r) => r.state === "committed" && r.kind !== "finalize" && !!r.tool,
+      )
+      const byCategory = new Map<string, number>()
+      const childIds = new Set<string>()
+      for (const r of records) {
+        const cat = summaryToolCategory(r.tool)
+        if (cat === "other") other++
+        byCategory.set(cat, (byCategory.get(cat) ?? 0) + 1)
+        if (r.childSessionId) childIds.add(r.childSessionId)
+      }
+      agents = childIds.size
+      toolBreakdown = [...byCategory.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 4)
+        .map(([cat, n]) => `${n} ${cat}`)
+        .join(" · ")
+      tools = Math.max(tools, records.length)
+    }
   } catch {}
   try {
     files = (await collectSessionModifiedFiles(ctx.sessionId, ctx.cwd ?? process.cwd())).length
@@ -597,6 +630,8 @@ async function writeSessionSummary(
     const u = ctx.usage.getSession()
     tokens = u.totalTokens ?? 0
     cost = u.cost ?? null
+    inputTokens = u.inputTokens
+    outputTokens = u.outputTokens
   } catch {}
   const info: SessionSummaryInfo = {
     stamp: buildSessionStamp(new Date()),
@@ -608,8 +643,18 @@ async function writeSessionSummary(
     cost,
     duration: Date.now() - startedAt,
     version: readTuiVersion(),
+    model: extra.model,
+    mode: extra.mode,
+    ...(toolBreakdown ? { toolBreakdown } : {}),
+    ...(agents > 0 ? { agents } : {}),
+    ...(inputTokens != null ? { inputTokens } : {}),
+    ...(outputTokens != null ? { outputTokens } : {}),
   }
-  write(`${buildClosingBlock(renderLogoRows(), info).join("\n")}\n`)
+  // v0.33: setelah `?1049l`, kursor bisa kembali ke HOME (kasus conhost /
+  // Windows PowerShell 5.1) sehingga blok ini menimpa banner & prompt shell.
+  // Pindah ke baris TERAKHIR dulu (9999 di-clamp terminal), lalu baris baru.
+  const SEEK_END = "\x1b[9999;1H"
+  write(`${SEEK_END}\r\n${buildClosingBlock(renderLogoRows(), info).join("\n")}\n`)
 }
 
 export async function runTui(ctx: CliSession, progress?: StartupProgress): Promise<void> {
@@ -767,7 +812,11 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
 
   // Kebijakan proyeksi kanonik di-inject di sini (batas lapisan: src/ui
   // tidak boleh impor src/presentation).
+  // v0.33: SATU model sidebar dipakai Transcript (pengisi) & App (gulir).
+  const { SidebarModel } = await import("../src/ui/render/sidebar-model.ts")
+  const sidebarModel = new SidebarModel()
   const transcript = new Transcript(session.events as unknown as UiBus, {
+    sidebarModel,
     getSnapshot: getPresentationSnapshot,
     onPresentationEvent: ctx.onPresentationEvent,
     // [Area A · PROMPT 06] State sesi yang sama dengan printer linier.
@@ -929,7 +978,9 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
   // [DESIGN DECISION] Guarded. `runTui` is also driven by test fixtures that build
   // a partial CliSession, and a projection that is absent must degrade to "no live
   // notices" rather than take the whole TUI down on the first scheduler event.
-  schedulerObservability?.onSchedulerNotice((line) => transcript.pushInfo([`[scheduler] ${line}`]))
+  schedulerObservability?.onSchedulerNotice((line) =>
+    sidebarModel.ingestActivity(`[scheduler] ${line}`),
+  )
 
   const suggestions = (line: string): string[] => {
     if (!line.startsWith("/")) return []
@@ -1073,8 +1124,6 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
         return t("out.titleSync")
       case "init":
         return t("out.titleInit")
-      case "expand":
-        return t("out.titleExpand")
       case "scheduler":
         return t("sched.title")
       case "sessions":
@@ -1284,7 +1333,7 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
       // Audit #3: notifikasi job yang ditunda saat turn sibuk kini aman
       // dikeluarkan — streaming sudah selesai, tak ada fence untuk dipecah.
       const deferred = bgNotices.drain()
-      if (deferred.length) transcript.pushInfo(deferred)
+      for (const line of deferred) sidebarModel.ingestActivity(line)
       // Batch 3 #3: job yang selesai saat turn aktif TIDAK ditandai resumed di
       // handler. Di sini antrean dikuras ke `queuedPrompts` — BUKAN `runTurn`
       // langsung — supaya loop yang sedang berjalan yang mengambilnya (anti
@@ -1541,34 +1590,7 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
       )
       return
     }
-    if (viewAction === "expand") {
-      const sections = args ? ctx.expandContent(args) : ctx.expandAllContent()
-      const views = args ? [] : ui.collapsedSectionsSnapshot()
-      if (!sections.length && !views.length) {
-        app.showToast(
-          args ? t("tui.expandNotFound", { id: sanitizeAnsiLine(args) }) : t("tui.expandEmpty"),
-        )
-        return
-      }
-      const lines: string[] = []
-      const dash = glyphs.hLine.repeat(2)
-      for (const s of sections) {
-        if (s.meta.source === "retention") {
-          lines.push(c.muted(t("tui.expandRetention")))
-          continue
-        }
-        const label = sanitizeAnsiLine(args ?? s.ref?.toolCallId ?? t("tui.expandContent"))
-        const src = s.meta.source === "durable" ? ` [${t("tui.expandDurable")}]` : ""
-        lines.push(c.muted(`  ${dash} ${label}${src} ${dash}`))
-        for (const ln of s.text.split("\n")) lines.push(`    ${sanitizeAnsiLine(ln)}`)
-      }
-      for (const view of views) {
-        lines.push(c.muted(`  ${dash} ${sanitizeAnsiLine(view.label)} ${dash}`))
-        for (const ln of view.text.split("\n")) lines.push(`    ${sanitizeAnsiLine(ln)}`)
-      }
-      await showCommandOutput(t("out.titleExpand"), lines)
-      return
-    }
+    // `/view expand` sengaja tidak ada lagi — lihat catatan VIEW_ACTIONS.
     if (name === "undo" || name === "redo") {
       // Daftar turn adalah readout panjang → jendela command, sama seperti
       // /history. Receipt undo/redo yang pendek tetap di transkrip.
@@ -1683,6 +1705,10 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
 
   const host: TuiHost = {
     bus: session.events as unknown as TuiHost["bus"],
+    // v0.33: detail tool Live dibuka lewat output-window yang sudah ada.
+    openSidebarDetail: (title, lines) => {
+      void showCommandOutput(title, lines)
+    },
     getStatus: () => {
       const busy = abort != null
       const liveMode = livePermissionMode()
@@ -1792,7 +1818,7 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
       if (record?.branchSessionId === sessionId) initialDraft = record.prompt
     } catch {}
   }
-  const app = new TuiApp(transcript, host, { initialDraft })
+  const app = new TuiApp(transcript, host, { initialDraft, sidebarModel })
   // v7.30: notisi rewind = status sesi sesaat, bukan riwayat percakapan.
   if (rewindNotice) app.showToast(sanitizeAnsiLine(rewindNotice))
   // Approval sebagai warga TUI: blok pertanyaan + keputusan tercatat di
@@ -1908,7 +1934,10 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
         // Blok penutup adalah kosmetik scrollback: kegagalan mengumpulkan
         // statisitk TIDAK boleh mengubah status keluar sesi.
         try {
-          await writeSessionSummary(ctx, startedAt, (s) => process.stdout.write(s))
+          await writeSessionSummary(ctx, startedAt, (s) => process.stdout.write(s), {
+            model: modelRef.current || undefined,
+            mode: `${displayWorkMode(workModeControl?.getWorkMode() ?? "DISCUSS")}/${livePermissionMode().toUpperCase()}`,
+          })
         } catch {}
       }
     }

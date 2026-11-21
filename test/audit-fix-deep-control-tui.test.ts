@@ -192,11 +192,11 @@ describe("F4: hint abort tak bocor ke turn berikutnya", () => {
     await new Promise((r) => setTimeout(r, 10))
     await tty!.send(KEY.esc, 90)
     await new Promise((r) => setTimeout(r, 60))
-    expect(screenText()).toContain("press Esc again")
+    expect(screenText()).toContain("Esc again = quit")
     // Turn BARU (mis. antrean yang diproses controller) → hint harus hilang.
     bus.emit("turn:started", { turn: 2 })
     await new Promise((r) => setTimeout(r, 70))
-    expect(screenText()).not.toContain("press Esc again")
+    expect(screenText()).not.toContain("Esc again = quit")
     await releaseSlow()
     await tty!.send(KEY.ctrlD)
     await runP

@@ -9,18 +9,19 @@ import {
   toGraphemes,
 } from "../input/prompt-engine.ts"
 import { formatError } from "../render/errors.ts"
-import { hintLine } from "../render/hint.ts"
+import type { HintItem } from "../render/hint.ts"
 import { listRow, tailFilterWindow } from "../render/list.ts"
 import { type NoticeKind, paintNoticeLines } from "../render/notice.ts"
 import { cleanUntrusted, sanitizeAnsiLine } from "../render/sanitize.ts"
 import { c, glyphs, stripAnsi } from "../render/theme.ts"
 import { displayWidth, truncateToWidth, wrapByWidth } from "../render/width.ts"
 import { type AltScreen, openAltScreen } from "../runtime/screen.ts"
-import { boxLeftPad, canRenderModal, dialogBox, popupBoxWidth } from "./dialog.ts"
+import { boxLeftPad, canRenderModal, dialogBox } from "./dialog.ts"
 import { runForm } from "./form.ts"
 import { createIdleTimer } from "./lifecycle.ts"
 import { runPicker } from "./picker.ts"
 import { withTimeout } from "./watchdog.ts"
+import { windowMaxHeight, windowSpec, windowWidth } from "./window.ts"
 
 const dim = (s: string): string => c.dim(s)
 
@@ -62,9 +63,10 @@ export function filterModelRows(rows: ModelRow[], q: string): ModelRow[] {
   return rows.filter((r) => r.id.toLowerCase().includes(needle))
 }
 
-/** Lebar kotak /model: `popupBoxWidth` (AUD-006, satu sumber width+maxWidth). */
-const modalBoxWidth = (): number => popupBoxWidth(process.stdout.columns || 80)
-const MODAL_MAX_HEIGHT = 15
+// v0.33: lebar/tinggi jendela diambil dari aturan seragam `window.ts`, bukan
+// angka kaku milik /model. `windowSpec` membangun DialogSpec-nya supaya frame
+// (judul + footer + ukuran) identik dengan /provider dan jendela lain — satu
+// rumus, satu hierarki visual. Tetap dibaca saat render agar resize terasa.
 
 export async function runModelManagerView(opts: ModelManagerViewOptions): Promise<void> {
   let rows = opts.initialRows // Mode cari: ketikan apa pun langsung jadi query. Hapus = tombol Del.
@@ -89,20 +91,20 @@ export async function runModelManagerView(opts: ModelManagerViewOptions): Promis
   let noticeKind: NoticeKind = "info"
 
   return new Promise<void>((resolve) => {
-    const width = () => Math.max(8, modalBoxWidth() - 4)
+    const width = () => Math.max(8, windowWidth(process.stdout.columns || 80) - 4)
     const renderedNoticeLines = (): string[] =>
       notice ? paintNoticeLines(noticeKind, notice).flatMap((l) => wrapByWidth(l, width())) : []
     const visibleRows = () => {
-      const rows = Math.min(process.stdout.rows || 24, MODAL_MAX_HEIGHT)
-      // Chrome tetap: 2 border + 1 judul + 1 pencarian + 1 footer (dipin `dialogBox`);
-      // notice menyusutkan daftar agar kotak tetap ringkas dan hint tak hilang.
-      const fixed = 5 + renderedNoticeLines().length
-      return Math.max(1, Math.min(rows - fixed, 8))
+      // windowMaxHeight = tinggi kotak maksimum (sudah termasuk margin 4 baris).
+      // Chrome tetap 5 baris: 2 border + judul + baris cari + footer. Jatah
+      // daftar mengikuti aturan jendela; notice menyusutkan agar hint tak hilang.
+      const maxBody = windowMaxHeight(process.stdout.rows || 24) - 5
+      return Math.max(1, Math.min(maxBody - renderedNoticeLines().length, 8))
     }
 
-    // Isi MINIMAL dialog /model; footer dipin lewat `spec.footer` agar aman
-    // dari pemotongan saat notice error panjang membungkus banyak baris.
-    const bodyLinesModal = (): { lines: string[]; footer: string; filterShown: string } => {
+    // Isi MINIMAL dialog /model; footer dipin lewat `windowFooter` (windowSpec)
+    // agar aman dari pemotongan saat notice error panjang membungkus banyak baris.
+    const bodyLinesModal = (): { lines: string[]; filterShown: string } => {
       const list = viewRows()
       const v = visibleRows()
       if (sel < scroll) scroll = sel
@@ -124,39 +126,41 @@ export async function runModelManagerView(opts: ModelManagerViewOptions): Promis
           // Penanda aktif di luar budget truncasi (paritas provider-manager):
           // nama yang dipotong, status yang selamat.
           const active = row.active ? ` (${t("common.active")})` : ""
-          const nameBudget = Math.max(8, w - 4 - displayWidth(active))
-          const label = `${truncateToWidth(`${sanitizeAnsiLine(row.id)}${badge}`, nameBudget, glyphs.ellipsis)}${active}`
+          // Ikon kategori model jadi bagian baris yang terlihat (1 kolom, ASCII
+          // fallback lewat getter glyphs). Diletakkan di luar budget truncasi
+          // supaya nama yang dipotong tak pernah menelan penanda kategori —
+          // sama seperti penanda active. Sanitasi tetap pada id (tak-terpercaya).
+          const iconPart = `${glyphs.modelIcon} `
+          const nameBudget = Math.max(8, w - 4 - displayWidth(active) - displayWidth(iconPart))
+          const label = `${iconPart}${truncateToWidth(`${sanitizeAnsiLine(row.id)}${badge}`, nameBudget, glyphs.ellipsis)}${active}`
           // Kolom marker dipakai bersama (listRow): label tak bergeser saat
           // seleksi berpindah dan marker `›` tidak hilang tanpa warna.
           lines.push(listRow(label, picked))
         }
       }
       for (const line of renderedNoticeLines()) lines.push(cut(line))
-      // Hint akurat per mode: saat filter aktif, Esc keluar dari pencarian
-      // (bukan menutup) dan Del mengedit query (jangan iklankan Del delete).
-      const escLabel = filter == null ? t("hint.cancel") : t("hint.back")
-      const footer = hintLine([
-        { key: glyphs.upDown, label: t("hint.move") },
-        { key: "Enter", label: t("hint.select") },
-        { key: "Tab", label: t("hint.effort") },
-        ...(filter == null ? [{ key: "Del", label: t("hint.delete") }] : []),
-        { key: "Esc", label: escLabel },
-      ])
-      return { lines, footer, filterShown }
+      return { lines, filterShown }
     }
 
     const render = () => {
-      const { lines, footer, filterShown } = bodyLinesModal()
-      // Region kotak di atas transkrip; lebar mengikuti terminal saat resize.
+      const { lines, filterShown } = bodyLinesModal()
+      // Navigasi (↑↓ / Enter / Esc) disuplai windowFooter; hanya aksi khusus
+      // /model yang dikirim sebagai extraHints. Saat filter aktif Del dipakai
+      // untuk mengedit query, jadi jangan diiklankan sebagai hapus model.
+      const extraHints: HintItem[] = [
+        { key: "Tab", label: t("hint.effort") },
+        ...(filter == null ? [{ key: "Del", label: t("hint.delete") }] : []),
+      ]
+      // Region kotak di atas transkrip; lebar/tinggi mengikuti terminal saat
+      // resize lewat aturan seragam windowSpec.
       const box = dialogBox(
-        {
+        windowSpec({
           title: t("out.titleModels"),
           body: lines,
-          footer,
-          minWidth: modalBoxWidth(),
-          maxWidth: modalBoxWidth(),
-          maxHeight: MODAL_MAX_HEIGHT,
-        },
+          cols: screen.cols,
+          rows: screen.rows,
+          extraHints,
+        }),
         screen.cols,
         screen.rows,
       )

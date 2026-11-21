@@ -284,7 +284,9 @@ export async function restoreTree(
   }
   if (now === tree) return { applied, skipped: [] } // sudah identik
 
-  const allChanges = await diffTrees(cwd, tree, now, opts?.strict)
+  // Restore adalah operasi KRITIS: kegagalan baca diff harus melempar, bukan
+  // jadi `[]` yang dibaca sebagai "sudah identik" (undo sukses tanpa restore).
+  const allChanges = await diffTrees(cwd, tree, now, true)
   const changes = opts
     ? allChanges.filter(
         (change) =>
@@ -360,11 +362,20 @@ export async function restoreTree(
   }
 
   if (opts && skipped.length) throw new Error(`restore failed: ${skipped.join(", ")}`)
+  // v0.33 (audit MEDIUM-HIGH): gagal hapal (EBUSY/EPERM di Windows) dulu tetap
+  // dicatat "(removed)" → receipt bohong, file selamat dari undo. Sekarang
+  // kegagalan masuk `skipped` dan dilaporkan ke pemanggil/UI.
   for (const p of toDelete) {
-    const removal = rm(resolve(root, p), { force: true, recursive: false })
-    if (opts) await removal
-    else await removal.catch(() => {})
-    applied.push(`${p} (removed)`)
+    try {
+      await rm(resolve(root, p), { force: true, recursive: false })
+      applied.push(`${p} (removed)`)
+    } catch (error) {
+      const reason =
+        error instanceof Error
+          ? ((error as NodeJS.ErrnoException).code ?? error.message)
+          : String(error)
+      skipped.push(`${p} (remove failed: ${reason})`)
+    }
   }
 
   return { applied, skipped }

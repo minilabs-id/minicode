@@ -80,16 +80,29 @@ describe("area thinking (TUI)", () => {
     expect(view.some((l) => l.includes("l0"))).toBe(false)
   })
 
+  test("v0.33: setelah commit, sidebar thinking tetap membaca isi /expand", () => {
+    const { t, reason, emit } = setup({ activityPanel: true })
+    reason("alpha\nbeta\ngamma")
+    emit({ type: "turn.completed", seq: 1, turnId: 1 })
+    // commitThinking mengosongkan buffer live — sidebar HARUS mengambil dari
+    // collapsedSectionsSnapshot("thinking") supaya tidak jadi kosong.
+    const sidebar = t.sidebarThinking(10, 40).join("\n")
+    expect(sidebar).toContain("alpha")
+    expect(sidebar).toContain("beta")
+    expect(sidebar).toContain("gamma")
+  })
+
   test("mode area: turn selesai → ringkas 1 baris + detail di /expand", () => {
-    const { t, uiState, reason, emit } = setup({ activityPanel: true })
+    const { t, reason, emit } = setup({ activityPanel: true })
     reason("alpha\nbeta\ngamma")
     emit({ type: "turn.completed", seq: 1, turnId: 1 })
     const all = lines(t, 20).join("\n")
     expect(all).toContain("+ thinking")
     expect(all).toContain("3 lines")
-    // Detail penuh tetap tersedia untuk /expand.
-    const secs = uiState.collapsedSectionsSnapshot()
-    expect(secs.some((s) => s.text.includes("alpha") && s.text.includes("gamma"))).toBe(true)
+    // v0.33: /expand dihapus — detail penuh kini di riwayat sidebar thinking.
+    const history = t.sidebarThinking(20, 40).join("\n")
+    expect(history).toContain("alpha")
+    expect(history).toContain("gamma")
   })
 
   test("mode area: setelah turn selesai tidak ada duplikasi blok", () => {

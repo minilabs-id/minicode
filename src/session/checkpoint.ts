@@ -522,8 +522,17 @@ async function applySnapshots(snapshots: FileSnapshot[], cwd: string): Promise<s
     }
     if (snap.content === null) {
       if (existsSync(absPath)) {
-        await rm(absPath, { force: true }).catch(() => {})
-        applied.push(`${snap.path} (removed)`)
+        // v0.33: jangan klaim "(removed)" bila `rm` gagal (EBUSY/EPERM).
+        try {
+          await rm(absPath, { force: true })
+          applied.push(`${snap.path} (removed)`)
+        } catch (error) {
+          const reason =
+            error instanceof Error
+              ? ((error as NodeJS.ErrnoException).code ?? error.message)
+              : String(error)
+          applied.push(`${snap.path} (skipped: remove failed: ${reason})`)
+        }
       }
     } else {
       await atomicWriteText(absPath, snap.content)

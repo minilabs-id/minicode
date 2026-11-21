@@ -176,11 +176,11 @@ describe("P5 transcript projection", () => {
       status: "completed",
     })
     const out = transcript.view(120, 20, 0).join("\n")
-    // Induk tetap satu baris ringkasan delegasi…
-    expect(out).toContain("delegate_task")
-    // …dan anak tampil sebagai baris run sendiri dengan NAMA, bukan run_<8>.
-    expect(out).toContain("↳ explore-auth read_file a.ts")
+    // v0.33: semua aktivitas child disatukan jadi SATU baris agregat.
+    expect(out).toContain("✦ 1 sub agent · 1 tool · 0 failed")
+    expect(out).not.toContain("↳")
     expect(out).not.toContain("run_abcdef01")
+    expect(out).not.toContain("explore-auth")
   })
 
   // Self-title: judul baru menimpa label di snapshot LIVE. Tiga anak paralel
@@ -259,7 +259,9 @@ describe("P5 transcript projection", () => {
     setSnapshot({ activities: [parent, child], turns: [] })
     emitPresentation({ type: "tool.completed", seq: 3, turnId: 1, toolCallId: child.toolCallId })
     const out = transcript.view(120, 20, 0).join("\n")
-    expect(out).toContain("↳ sub_fedcba98 grep a.ts")
+    // Identitas run tidak dibocorkan ke layar — cukup hitungan agregat.
+    expect(out).toContain("✦ 1 sub agent · 1 tool · 0 failed")
+    expect(out).not.toContain("sub_fedcba98")
   })
 
   test("F-AGENT-1: tiga anak paralel = tiga baris run terpisah, bukan hitungan", () => {
@@ -311,11 +313,11 @@ describe("P5 transcript projection", () => {
     setSnapshot({ activities: [child], turns: [] })
     emitPresentation({ type: "tool.completed", seq: 2, turnId: 1, toolCallId: child.toolCallId })
     const out = transcript.view(120, 10, 0).join("\n")
-    expect(out).toContain("↳ explore")
+    // Label tak lagi dirender (agregat), jadi CSI non-SGR & bidi tak boleh bocor.
+    expect(out).toContain("✦ 1 sub agent · 1 tool · 0 failed")
     expect(out).not.toContain("\x1b[2J")
     expect(out).not.toContain("\u202E")
-    // SGR (warna) sengaja dipertahankan sanitizer; yang dibuang = CSI non-SGR.
-    expect(out).toContain("\x1b[1;31m")
+    expect(out).not.toContain("evil")
   })
 
   test("turn summary tidak dirender di renderer flat (ckpt/ringkasan hilang)", () => {

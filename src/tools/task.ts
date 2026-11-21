@@ -3,6 +3,7 @@ import { dirname } from "node:path"
 import type { ModelProvider, Tool } from "#minicore"
 import { createOpenAICompatProvider } from "#minicore/providers/openai-compat.ts"
 import { Pool } from "../agents/pool.ts"
+import { RECOVERY_RETRY_EVENT_KIND } from "../app/session.ts"
 import { loadConfig } from "../config.ts"
 import { LIMITS } from "../constants.ts"
 import { resolveLocalDbPath } from "../lib/db-path.ts"
@@ -10,7 +11,7 @@ import { evaluateConsequence, isAceEnabled } from "../policy/consequence-engine.
 import { resolveContextWindow } from "../policy/context-window.ts"
 import type { NoProgressOptions } from "../policy/no-progress.ts"
 import type { RateLimiter } from "../policy/ratelimit.ts"
-import { nextStepLimit } from "../policy/step-escalation.ts"
+import { budgetForScope, nextSubAgentStepLimit } from "../policy/subagent-budget.ts"
 import { resolveSubAgentTimeout } from "../policy/subagent-timeout.ts"
 import type { WorkMode } from "../policy/work-mode.ts"
 import { buildProviderListAsync } from "../providers/build.ts"
@@ -82,7 +83,35 @@ interface SubAgentHistoryEntry {
   maxStepsExceeded?: { cap: number; observedSteps: number }
 }
 
+/** Reset cooldown untuk test — jangan dipakai produksi. */
+export function __resetProviderCooldownForTest(): void {
+  providerCooldownUntil = 0
+}
+
 const subAgentHistory = new Map<string, SubAgentHistoryEntry>()
+
+/**
+ * v0.33: cooldown best-effort setelah anak gagal karena PROVIDER (bukan logika
+ * anak). Observasi nyata: 3 delegasi berturut-turut tiap ~60 dtk semuanya abort
+ * karena TipRouter "temporarily unavailable" — kuota terbuang tanpa temuan.
+ * Cache ini BUKAN otoritas: hanya menolak delegasi berikutnya selama jendela
+ * singkat supaya induk tak fan-out buta; fail-soft & bounded (satu angka).
+ */
+let providerCooldownUntil = 0
+const PROVIDER_COOLDOWN_MS = 60_000
+
+/** Pesan provider yang menandakan gangguan sementara, bukan kesalahan prompt. */
+export function isProviderOutage(msg: string): boolean {
+  const s = msg.toLowerCase()
+  return (
+    s.includes("temporarily unavailable") ||
+    s.includes("connection stalled") ||
+    s.includes("provider error") ||
+    s.includes("econnreset") ||
+    s.includes("quota_exceeded") ||
+    s.includes("402:")
+  )
+}
 
 /** "Bentuk" delegasi: mode + sidik jari prompt. Dipakai untuk mengelompokkan
  * delegasi yang sama tanpa menyimpan prompt penuh (bisa berisi data sensitif).
@@ -493,7 +522,14 @@ export const delegateTaskTool: Tool = {
       },
       maxSteps: {
         type: "number",
-        description: "max steps for the sub-agent (default explore=5 plan=15)",
+        description:
+          "max steps for the sub-agent. Prefer `scope` and let runtime choose — an explicit value disables adaptive escalation.",
+      },
+      scope: {
+        type: "string",
+        enum: ["file", "dir", "subtree", "repo"],
+        description:
+          "breadth of the delegated work; runtime derives a step budget (file 6 · dir 10 · subtree 16 · repo 24, plan ×1.5). Omit to infer from prompt.",
       },
       timeoutMs: {
         type: "number",
@@ -509,7 +545,13 @@ export const delegateTaskTool: Tool = {
     required: ["prompt"],
     additionalProperties: false,
   },
-  async execute({ prompt, mode, maxSteps, timeoutMs, name }, ctx) {
+  async execute({ prompt, mode, maxSteps, timeoutMs, name, scope }, ctx) {
+    // v0.33: jangan fan-out buta saat provider sedang mati. Tolak CEPAT dengan
+    // alasan jujur — bukan error anak — supaya kuota tak terbuang 3× berturut.
+    if (Date.now() < providerCooldownUntil) {
+      const sisa = Math.ceil((providerCooldownUntil - Date.now()) / 1000)
+      return `[sub-agent skipped] provider sedang terganggu; coba lagi dalam ~${sisa}s (tidak ada anak di-spawn)`
+    }
     // Tangkap id call induk SEGERA, sebelum await pertama. Kernel menemani
     // `execution:started` delegate_task dengan pemanggilan execute ini dalam
     // satu tick sinkron — jadi walau executor menjalankan 3 delegasi paralel,
@@ -602,16 +644,31 @@ export const delegateTaskTool: Tool = {
     let raised: number | undefined
     try {
       const msEx = priorEntry?.maxStepsExceeded
-      raised = msEx ? nextStepLimit(msEx.cap, msEx.observedSteps) : undefined
+      // v0.33: tangga KHUSUS sub-agent ([8,12,20,32,50]) — bukan tangga sesi
+      // utama [200,...] yang bikin anak loncat 5 → 50 dalam satu retry.
+      // Di ceiling, nextSubAgentStepLimit() returns undefined — jangan jatuh ke
+      // fallback 5 (reset). Pertahankan cap lama supaya delegasi berikutnya
+      // tetap di batas maksimum, bukan mentok lagi dari nol.
+      raised = msEx
+        ? (nextSubAgentStepLimit(msEx.cap, msEx.observedSteps) ??
+          Math.min(msEx.cap, LIMITS.SUB_AGENT_MAX_STEPS))
+        : undefined
     } catch {
       raised = undefined
     }
+    // Urutan: niat eksplisit > eskalasi setelah gagal > budget dari scope >
+    // fallback kontrak lama. Fallback TETAP 5/15 supaya test/ADR tak berubah.
+    // Fallback kontrak lama (5/15) TETAP dipakai bila caller tak mengirim scope
+    // — test/ADR p9 mengunci angka ini. Scope eksplisit yang mengaktifkan budget
+    // adaptif; prompt tetap boleh dipakai model untuk memilih scope.
+    const derivedBudget = scope
+      ? budgetForScope(scope, m === "plan" ? "plan" : "explore")
+      : undefined
     const cap =
       explicitCap ??
       (raised === undefined
-        ? m === "explore"
-          ? LIMITS.SUB_AGENT_BUDGET_EXPLORE
-          : LIMITS.SUB_AGENT_BUDGET_PLAN
+        ? (derivedBudget ??
+          (m === "explore" ? LIMITS.SUB_AGENT_BUDGET_EXPLORE : LIMITS.SUB_AGENT_BUDGET_PLAN))
         : Math.min(raised, LIMITS.SUB_AGENT_MAX_STEPS))
 
     const { allTools } = await import("./index.ts")
@@ -1023,6 +1080,10 @@ export const delegateTaskTool: Tool = {
           try {
             tagForwarded(e)
             captureForwardText(e)
+            // v0.33: telemetri retry anak TIDAK boleh menimpa SATU baris status
+            // retry milik induk. Anak punya jurnal sendiri; di sini cukup
+            // dicatat sebagai teks forward untuk partial, bukan ggak event UI.
+            if ((e as { kind?: string }).kind === RECOVERY_RETRY_EVENT_KIND) return
             ctx.emit(e)
           } catch {}
         })
@@ -1232,9 +1293,21 @@ export const delegateTaskTool: Tool = {
           // v7.35: pakai temuan terstruktur bila ada. Kalimat pembuka model
           // ("I'll start by reading…") bukan bukti, jangan jadi satu-satunya
           // yang dikirim ke induk saat child timeout/dibatalkan.
-          const partial = (reportFindings.length ? reportFindings.join(" ; ") : partialText)
-            .trim()
-            .slice(0, LIMITS.MAX_PARTIAL_CHARS)
+          // v0.33: kalimat pembuka ("I'll audit the daemon area…") BUKAN temuan.
+          // Tandai eksplisit sebagai belum terverifikasi supaya induk tak
+          // mengira ia punya bukti dari anak yang baru saja abort.
+          const rawPartial = reportFindings.length ? reportFindings.join(" ; ") : partialText
+          const trimmedPartial = rawPartial.trim().slice(0, LIMITS.MAX_PARTIAL_CHARS)
+          const looksLikeOpening = /^(i'?ll|i will|let me|starting|i'll start)/i.test(
+            trimmedPartial,
+          )
+          const partial =
+            reportFindings.length === 0 && looksLikeOpening && trimmedPartial.length > 0
+              ? `belum terverifikasi: ${trimmedPartial}`
+              : trimmedPartial
+          // Gangguan provider = bukan kesalahan prompt anak. Catat cooldown
+          // supaya delegasi berikutnya dalam turn yang sama tak membuang kuota.
+          if (isProviderOutage(msg)) providerCooldownUntil = Date.now() + PROVIDER_COOLDOWN_MS
           if (childStatus === "max_steps_exceeded") {
             // Beda dari error biasa: ini BUKAN "anak selesai", melainkan pagu
             // langkah tercapai. Tampilkan N/M supaya parent segera melihat apakah

@@ -22,6 +22,18 @@ test("runVerify: failure returns not ok", async () => {
   expect(r.ok).toBe(false)
 })
 
+test("runVerify: infraFailure terklasifikasi transient", async () => {
+  const { classifyVerifyFailure } = await import("../src/policy/verifier.ts")
+  expect(classifyVerifyFailure({ ok: false, infraFailure: true }).transient).toBe(true)
+})
+
+test("runVerify: output besar (>1MiB) tidak bikin false failure", async () => {
+  const rt = JSON.stringify(process.execPath)
+  const r = await runVerify(`${rt} -e "process.stdout.write('x'.repeat(1_200_000))"`, process.cwd())
+  expect(r.ok).toBe(true)
+  expect(r.infraFailure).toBeUndefined()
+})
+
 test("runVerify: respects timeout", async () => {
   const rt = JSON.stringify(process.execPath)
   const r = await runVerify(`${rt} -e "setTimeout(()=>{}, 5000)"`, process.cwd(), 300)

@@ -58,7 +58,7 @@ describe("activity fold (minimizeActivity)", () => {
   })
 
   test("on: SATU baris ringkas per turn + detail /expand; tool gagal tetap tampil", () => {
-    const { transcript, uiState, emit } = build(true, "failed")
+    const { transcript, emit } = build(true, "failed")
     emit({ type: "tool.completed", seq: 1, turnId: 1, toolCallId: "c1", status: "completed" })
     emit({ type: "tool.completed", seq: 2, turnId: 1, toolCallId: "c2", status: "failed" })
     // v7.36: status/jumlah + daftar tool tampil LIVE di bawah narasi. Saat
@@ -69,7 +69,9 @@ describe("activity fold (minimizeActivity)", () => {
     expect(during).toContain("bash")
     expect(during).toContain("1 command")
     expect(during).toContain("1 read")
-    expect(during).toContain("read_file")
+    // v0.33: baris `Tool: read_file` sudah dihapus dari chat — rekap `1 read`
+    // adalah indeksnya; detail nama tool ada di sidebar.
+    expect(during).not.toContain("read_file")
 
     emit({ type: "turn.completed", seq: 3, turnId: 1 })
     const view = transcript.view(40, 10, 0).join("\n")
@@ -83,11 +85,10 @@ describe("activity fold (minimizeActivity)", () => {
     expect(view).not.toContain("ok ·")
     expect(view).not.toContain("read_file") // detail hanya di /expand
     expect(view).toContain("bash") // baris tool nyata tetap visible
-    // Detail per-tool (termasuk sukses yang disembunyikan) tetap ada di /expand.
-    const detail = uiState.collapsedSectionsSnapshot().find((s) => s.label === "activity")
-    expect(detail).toBeDefined()
-    expect(detail?.text).toContain("read_file")
-    expect(detail?.text).toContain("bash")
+    // v0.33: /expand dihapus — semua aktivitas ada di log sidebar bawah.
+    const detail = transcript.sidebarActivity(20, 40).join("\n")
+    expect(detail).toContain("read")
+    expect(detail).toContain("bash")
   })
 
   test("off: baris ledger per-tool tetap tampil (transparan)", () => {

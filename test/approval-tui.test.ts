@@ -4,8 +4,8 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { promptAsk, promptAskText } from "../src/ui/approval/prompt.ts"
 import { glyphs, stripAnsi } from "../src/ui/render/theme.ts"
 import { displayWidth } from "../src/ui/render/width.ts"
-import { popupBoxWidth } from "../src/ui/screens/dialog.ts"
 import { IDLE_CANCEL_MS, IDLE_WARN_MS } from "../src/ui/screens/form.ts"
+import { windowWidth } from "../src/ui/screens/window.ts"
 import { getApprovalSink, setApprovalSink } from "../src/ui/tui/transcript.ts"
 import { installFakeTty, KEY } from "./helpers/tui-harness.ts"
 
@@ -354,12 +354,12 @@ describe("ask_user modal: hint & echo", () => {
     })
     const p = promptAsk({ name: "bash", args: { command: "ls" }, canAlways: true })
     await tty.ready()
-    expect(paintedWidths.at(-1)).toBe(popupBoxWidth(100))
+    expect(paintedWidths.at(-1)).toBe(windowWidth(100))
 
     // Resize menyempit -> modal repainted pada lebar baru.
     tty.resize(50, 16)
     await tty.send("", 40)
-    expect(paintedWidths.at(-1)).toBe(popupBoxWidth(50))
+    expect(paintedWidths.at(-1)).toBe(windowWidth(50))
 
     // Layar menciut di bawah 10 baris -> tampilkan peringatan dan tahan Enter buta.
     tty.resize(50, 8)

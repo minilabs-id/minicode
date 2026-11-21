@@ -122,9 +122,7 @@ describe("TUI: informasi tambahan saat turn berjalan", () => {
       // Turn masih berjalan: ketik tambahan lalu Enter → steering.
       await tty!.send("pakai jalur B")
       await tty!.send(KEY.enter)
-      await tty!.waitForScreen((f) =>
-        f.some((line) => line.includes("steered into the running turn")),
-      )
+      await tty!.waitForScreen((f) => f.some((line) => line.includes("steered into turn")))
       expect(h.steered).toEqual(["pakai jalur B"])
       // Tidak ada turn kedua yang balapan dengan yang sedang jalan.
       expect(h.submitted).toEqual(["prompt-pertama"])
@@ -161,7 +159,7 @@ describe("TUI: informasi tambahan saat turn berjalan", () => {
       await startBusy(h, "jalan")
       await tty!.send("/clear")
       await tty!.send(KEY.enter)
-      await tty!.waitForScreen((f) => f.some((line) => line.includes("not available while a turn")))
+      await tty!.waitForScreen((f) => f.some((line) => line.includes("busy · Esc to stop")))
       expect(h.steered).toEqual([])
       expect(h.submitted).toEqual(["jalan"])
       h.release()
@@ -182,7 +180,7 @@ describe("TUI: informasi tambahan saat turn berjalan", () => {
       // Esc saat busy = abort; niat user yang dibatalkan tak boleh dieksekusi.
       await tty!.send(KEY.esc, 90)
       h.release()
-      await tty!.waitForScreen((f) => f.some((line) => line.includes("dropped because the turn")))
+      await tty!.waitForScreen((f) => f.some((line) => line.includes("queued dropped")))
       expect(h.submitted).toEqual(["jalan"])
     } finally {
       await tty!.send(KEY.ctrlD)
@@ -203,7 +201,7 @@ describe("TUI: informasi tambahan saat turn berjalan", () => {
       await tty!.send(KEY.esc, 90)
       await tty!.send("setelah abort")
       await tty!.send(KEY.enter)
-      await tty!.waitForScreen((f) => f.some((line) => line.includes("not queued")))
+      await tty!.waitForScreen((f) => f.some((line) => line.includes("Enter to start")))
       expect(h.steered).toEqual([])
       h.release()
       await new Promise((r) => setTimeout(r, 30))
@@ -243,9 +241,7 @@ describe("TUI: abortRequested & footer live mode (audit deep-mode)", () => {
 
       await tty!.send("lanjutan setelah resume")
       await tty!.send(KEY.enter)
-      await tty!.waitForScreen((f) =>
-        f.some((line) => line.includes("steered into the running turn")),
-      )
+      await tty!.waitForScreen((f) => f.some((line) => line.includes("steered into turn")))
       expect(h.steered).toContain("lanjutan setelah resume")
       h.release()
     } finally {

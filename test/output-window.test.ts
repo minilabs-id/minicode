@@ -36,13 +36,25 @@ describe("runOutputWindow", () => {
     const lines = Array.from({ length: 20 }, (_, i) => `line-${i}`)
     const p = runOutputWindow({ title: "History", lines })
     await tty.ready()
-    await tty.waitForScreen((f) => f.some((l) => l.includes("History (1-6/20)")))
-    for (let i = 0; i < 6; i++) await tty.send(KEY.down)
-    await tty.waitForScreen((f) => f.some((l) => l.includes("line-6")))
+    // v0.33: aturan tinggi jendela seragam mengubah jumlah baris isi yang
+    // muat — yang dijaga adalah counter BERGERAK, bukan angka tetapnya.
+    const counter = (frame: string[]): string =>
+      frame.find((l) => l.includes("History ("))?.trim() ?? ""
+    await tty.waitForScreen((f) => f.some((l) => l.includes("History (1-")))
+    const awal = counter(tty.screen())
+    for (let i = 0; i < 10; i++) await tty.send(KEY.down)
+    await tty.waitForScreen((f) =>
+      f.some((l) => l.includes("History (")) ? counter(f) !== awal : false,
+    )
     await tty.send("\x1b[<65;1;1M")
-    await tty.waitForScreen((f) => f.some((l) => l.includes("History (10-15/20)")))
+    await tty.waitForScreen((f) =>
+      f.some((l) => l.includes("History (")) ? counter(f) !== awal : false,
+    )
+    const setelahWheel = counter(tty.screen())
     await tty.send("k")
-    await tty.waitForScreen((f) => f.some((l) => l.includes("History (9-14/20)")))
+    await tty.waitForScreen((f) =>
+      f.some((l) => l.includes("History (")) ? counter(f) !== setelahWheel : false,
+    )
     await tty.send(KEY.esc, 90)
     expect(await p).toBe(true)
   })

@@ -1,7 +1,7 @@
 // Geometri popup (kontrak I20 revisi v7.14): lebar kotak BEKU selama satu
 // mount (identik di semua frame: navigasi, filter, select, error — tak
 // bernapas), tetapi NILAINYA diskalakan dari lebar layar lewat
-// `popupBoxWidth()`, bukan angka tetap 64. Gagal-di-kode-lama (a) lebar
+// `windowWidth()` (satu aturan untuk semua jendela), bukan angka tetap 64. Gagal-di-kode-lama (a) lebar
 // dinamis mengikuti konten membuat kotak melompat, (b) angka tetap 64 membuat
 // di terminal sempit label terpotong dan di terminal lebar kotak terasa sempit.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
@@ -14,9 +14,9 @@ import { resetLocaleState, setSessionLocale } from "../src/ui/i18n/locale.ts"
 import { supportsUtf8 } from "../src/ui/render/theme.ts"
 import { displayWidth } from "../src/ui/render/width.ts"
 import { resetAltScreenDepth } from "../src/ui/runtime/screen.ts"
-import { popupBoxWidth } from "../src/ui/screens/dialog.ts"
 import { runForm } from "../src/ui/screens/form.ts"
 import { runPicker } from "../src/ui/screens/picker.ts"
+import { windowWidth } from "../src/ui/screens/window.ts"
 import { installFakeTty, KEY } from "./helpers/tui-harness.ts"
 
 let tty: ReturnType<typeof installFakeTty> | null = null
@@ -79,11 +79,11 @@ describe("geometri popup beku per mount", () => {
       onCancel: () => {},
     })
     await tty!.ready()
-    expect(boxW()).toBe(popupBoxWidth(100))
+    expect(boxW()).toBe(windowWidth(100))
     await tty!.send("query-yang-sangat-panjang-sekali")
-    expect(boxW()).toBe(popupBoxWidth(100))
+    expect(boxW()).toBe(windowWidth(100))
     await tty!.send(KEY.backspace, 30)
-    expect(boxW()).toBe(popupBoxWidth(100))
+    expect(boxW()).toBe(windowWidth(100))
     // Esc dua-tahap: tekan-1 clear filter, tekan-2 keluar.
     await tty!.send(KEY.esc, 90)
     await tty!.send(KEY.esc, 90)
@@ -103,13 +103,13 @@ describe("geometri popup beku per mount", () => {
       screen,
     )
     await tty!.ready()
-    expect(boxW()).toBe(popupBoxWidth(100))
+    expect(boxW()).toBe(windowWidth(100))
     // Error inline muncul — geometri diam.
     await tty!.send(KEY.enter)
     await tty!.waitForOutput((o) => o.includes("required"))
-    expect(boxW()).toBe(popupBoxWidth(100))
+    expect(boxW()).toBe(windowWidth(100))
     await tty!.send("x")
-    expect(boxW()).toBe(popupBoxWidth(100))
+    expect(boxW()).toBe(windowWidth(100))
     await tty!.send(KEY.esc, 90)
     await tty!.send(KEY.esc, 90)
     await p
@@ -132,13 +132,13 @@ describe("geometri popup beku per mount", () => {
       )
       const p = runModelManager({ cwd: ws })
       await tty!.ready()
-      expect(boxW()).toBe(popupBoxWidth(100))
+      expect(boxW()).toBe(windowWidth(100))
       await tty!.send(KEY.down)
-      expect(boxW()).toBe(popupBoxWidth(100))
+      expect(boxW()).toBe(windowWidth(100))
       await tty!.send("prov")
-      expect(boxW()).toBe(popupBoxWidth(100))
+      expect(boxW()).toBe(windowWidth(100))
       await tty!.send(KEY.esc, 90)
-      expect(boxW()).toBe(popupBoxWidth(100))
+      expect(boxW()).toBe(windowWidth(100))
       await tty!.send(KEY.esc, 30)
       await p
     } finally {
@@ -153,11 +153,11 @@ describe("geometri popup beku per mount", () => {
     const p = runSetupWizard()
     await tty!.ready(3000)
     // Step 1: picker gateway.
-    expect(boxW()).toBe(popupBoxWidth(100))
+    expect(boxW()).toBe(windowWidth(100))
     await tty!.send(KEY.enter)
     await tty!.waitForOutput((o) => o.includes("Base URL"))
     // Step 2: form URL — kotak sama 64.
-    expect(boxW()).toBe(popupBoxWidth(100))
+    expect(boxW()).toBe(windowWidth(100))
     await tty!.send(KEY.esc, 90)
     await tty!.send(KEY.esc, 90)
     await p

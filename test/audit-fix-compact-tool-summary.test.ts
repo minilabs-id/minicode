@@ -108,8 +108,8 @@ describe("compact tool summary per turn", () => {
     expect(summaries[1]).toContain("1 read")
   })
 
-  test("detail /expand tetap tersedia walau transkrip hanya satu baris", () => {
-    const { uiState, emit } = setup()
+  test("detail tetap tersedia di sidebar walau transkrip hanya satu baris", () => {
+    const { transcript, emit } = setup()
     emit({ type: "turn.started", seq: 1, turnId: 1 })
     emit({
       type: "tool.completed",
@@ -131,10 +131,10 @@ describe("compact tool summary per turn", () => {
     })
     emit({ type: "turn.completed", seq: 4, turnId: 1 })
 
-    const detail = uiState.collapsedSectionsSnapshot().find((s) => s.label === "activity")
-    expect(detail).toBeDefined()
-    expect(detail?.text).toContain("write_file a.ts")
-    expect(detail?.text).toContain("read_file b.ts")
+    // v0.33: /expand dihapus — detail lengkap pindah ke sidebar aktivitas.
+    const detail = transcript.sidebarActivity(20, 80).join("\n")
+    expect(detail).toContain("write a.ts")
+    expect(detail).toContain("read b.ts")
   })
 
   test("turn tanpa tool tidak menghasilkan baris ringkas", () => {

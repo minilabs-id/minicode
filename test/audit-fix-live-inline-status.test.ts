@@ -166,26 +166,28 @@ describe("v7.37 — ringkasan aktivitas DIPOTONG per segmen narasi", () => {
     expect(text.match(/\b1 command\b/g)?.length).toBe(1)
   })
 
-  test("daftar nama tool hanya saat per-tool ditahan (minimizeActivity)", () => {
-    const normal = setup(false)
-    normal.tool("c1")
-    expect(normal.t.view(80, 16, 0).join("\n")).not.toContain("Tool:")
-
-    const folded = setup(true)
-    folded.tool("c1")
-    const view = folded.t.view(80, 16, 0).join("\n")
-    expect(view).toContain("Tool:")
-    expect(view).toContain("read_file")
+  test("chat tak pernah memuat baris `Tool:` — indeks kategori menggantikannya", () => {
+    // v0.33: baris `Tool: read_file` dihapus dari chat (keputusan pemilik).
+    // Berlaku baik saat per-tool ditahan maupun tidak.
+    for (const folded of [false, true]) {
+      const h = setup(folded)
+      h.tool("c1")
+      const view = h.t.view(80, 16, 0).join("\n")
+      expect(view).not.toContain("Tool:")
+      expect(view).toContain("1 read")
+    }
   })
 
-  test("nama tool tak terpercaya disanitasi sebelum masuk baris live", () => {
-    // SGR (warna) sengaja dipertahankan `sanitizeAnsi` untuk theme — yang
-    // WAJIB hilang adalah sekuens non-SGR berbahaya seperti ED/clear-screen.
+  test("nama tool tak terpercaya disanitasi sebelum masuk log Activity", () => {
+    // Detail nama tool kini ada di sidebar Activity — bukan di chat. Sekuens
+    // non-SGR berbahaya (ED/clear-screen) wajib hilang di sana juga.
     const h = setup(true, [{ id: "c1", name: "read\x1b[2J_file" }])
     h.tool("c1")
-    const out = h.t.view(80, 16, 0).join("\n")
-    expect(out).not.toContain("\x1b[2J")
-    expect(out).toContain("read_file")
+    const side = h.t.sidebarActivity(20, 80).join("\n")
+    const chat = h.t.view(80, 16, 0).join("\n")
+    expect(side).not.toContain("\x1b[2J")
+    expect(chat).not.toContain("\x1b[2J")
+    expect(side).toContain("read")
   })
 
   test("invariant tak tersentuh: baris ringkas bukan baris frame tambahan", () => {

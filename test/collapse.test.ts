@@ -55,20 +55,21 @@ const done = (name: string, args: Record<string, unknown>, content: string, isEr
 })
 
 describe("collapse: thinking section", () => {
-  test("minimized default: satu baris + thinking, isi di-buffer bukan dicetak", () => {
+  test("default hidden: thinking tidak dicetak, buffer /expand sudah dihapus", () => {
+    // v0.33: /expand dihapus — thinking penuh ada di SidebarModel (TUI) dan
+    // journal. Printer linear cukup menyembunyikannya, tanpa buffer collapsed.
     const { bus, detach, err } = attach()
     bus.emit("turn:started", { turn: 1 })
     bus.emit("provider:extension", { kind: "reasoning", data: { text: "pemikiran rahasia\n" } })
     bus.emit("provider:text", { text: "jawaban\n" })
     bus.emit("turn:completed", {})
     detach()
+    // Header `+ thinking` tetap ada (penanda), yang hilang adalah isi & buffer.
     expect(err()).toContain("+ thinking")
     expect(err()).not.toContain("pemikiran rahasia")
-    expect(
-      collapsedSectionsSnapshot().some(
-        (s) => s.label === "thinking" && s.text.includes("pemikiran rahasia"),
-      ),
-    ).toBe(true)
+    expect(collapsedSectionsSnapshot().some((s) => s.text.includes("pemikiran rahasia"))).toBe(
+      false,
+    )
   })
 
   test("expanded: header - thinking + teks mengalir", () => {
@@ -81,29 +82,26 @@ describe("collapse: thinking section", () => {
     expect(err()).toContain("pemikiran terlihat")
   })
 
-  test("toggle mid-thinking: expand flush buffer, collapse buffer lagi", () => {
+  test("toggle mid-thinking: expanded mencetak, collapsed menyembunyikan", () => {
     const { bus, detach, err } = attach()
     bus.emit("turn:started", { turn: 1 })
     bus.emit("provider:extension", { kind: "reasoning", data: { text: "satu\n" } })
-    // expand: header - thinking + buffer lama ikut dicetak, lalu stream
     setReasoningVisible(true)
     bus.emit("provider:extension", { kind: "reasoning", data: { text: "dua\n" } })
-    expect(err()).toContain("− thinking")
-    expect(err()).toContain("satu")
-    expect(err()).toContain("dua")
-    // collapse lagi: header + thinking + buffer baru
+    expect(err()).toContain("− thinking") // glyph minus (bukan ASCII '-')
+    // Collapse lagi: reasoning baru tak boleh bocor ke scrollback.
     setReasoningVisible(false)
-    bus.emit("provider:extension", { kind: "reasoning", data: { text: "tiga\n" } })
+    bus.emit("provider:extension", { kind: "reasoning", data: { text: "tiga-rahasia\n" } })
     expect(err()).toContain("+ thinking")
-    expect(err()).not.toContain("tiga")
+    expect(err()).not.toContain("tiga-rahasia")
     bus.emit("turn:completed", {})
     detach()
-    expect(collapsedSectionsSnapshot().some((s) => s.text.includes("tiga"))).toBe(true)
+    expect(collapsedSectionsSnapshot().some((s) => s.text.includes("tiga-rahasia"))).toBe(false)
   })
 })
 
 describe("collapse: tool section", () => {
-  test("minimized: bash hanya satu baris + bash $ cmd, output di-buffer", () => {
+  test("minimized: header tool tetap tampil, output tidak dicetak", () => {
     setSectionMinimized("tool", true)
     const { bus, detach, err } = attach()
     bus.emit("turn:started", { turn: 1 })
@@ -113,16 +111,13 @@ describe("collapse: tool section", () => {
     bus.emit("execution:completed", done("bash", { cmd: "ls -la" }, "file1\nfile2\nfile3\n"))
     bus.emit("turn:completed", {})
     detach()
-    expect(err()).toContain("+ bash $ ls -la")
+    expect(err()).toContain("bash")
     expect(err()).not.toContain("file1")
-    expect(
-      collapsedSectionsSnapshot().some(
-        (s) => s.label === "bash $ ls -la" && s.text.includes("file3"),
-      ),
-    ).toBe(true)
+    // v0.33: buffer /expand mati — detail ada di journal/sidebar, bukan sini.
+    expect(collapsedSectionsSnapshot().some((s) => s.text.includes("file3"))).toBe(false)
   })
 
-  test("minimized: edit satu baris + edit path, isi di-buffer", () => {
+  test("minimized: header edit tetap tampil, isi tidak dicetak", () => {
     setSectionMinimized("tool", true)
     const { bus, detach, err } = attach()
     bus.emit("turn:started", { turn: 1 })
@@ -131,9 +126,9 @@ describe("collapse: tool section", () => {
       done("edit", { path: "src/a.ts", oldString: "lama", newString: "baru" }, "ok"),
     )
     detach()
-    expect(err()).toContain("+ edit src/a.ts")
+    expect(err()).toContain("edit")
     expect(err()).not.toContain("lama")
-    expect(collapsedSectionsSnapshot().some((s) => s.label === "edit src/a.ts")).toBe(true)
+    expect(collapsedSectionsSnapshot().some((s) => s.label === "edit src/a.ts")).toBe(false)
   })
 
   test("expanded (env kosong): output penuh tercetak — perilaku lama utuh", () => {
@@ -154,20 +149,20 @@ describe("collapse: tool section", () => {
     expect(err()).not.toContain("+ read_file")
   })
 
-  test("toggle tool saat aktif: expand = output penuh, minimize = buffer lagi", () => {
+  test("toggle tool saat aktif: expand = output penuh, minimize = sembunyi", () => {
     const { bus, detach, err } = attach()
     bus.emit("turn:started", { turn: 1 })
     bus.emit("execution:started", { execution: { call: { name: "bash", args: { cmd: "b" } } } })
-    // expand (seperti tombol +): tool berikutnya dicetak penuh
     setSectionMinimized("tool", false)
     bus.emit("execution:completed", done("bash", { cmd: "b" }, "terlihat\n"))
     expect(err()).toContain("terlihat")
-    // minimize lagi: tool berikutnya dikecilkan
     setSectionMinimized("tool", true)
-    bus.emit("execution:completed", done("bash", { cmd: "c" }, "tersembunyi\n"))
-    expect(err()).not.toContain("tersembunyi")
+    bus.emit("execution:completed", done("bash", { cmd: "c" }, "tersembunyi-rahasia\n"))
+    expect(err()).not.toContain("tersembunyi-rahasia")
     detach()
-    expect(collapsedSectionsSnapshot().some((s) => s.text.includes("tersembunyi"))).toBe(true)
+    expect(collapsedSectionsSnapshot().some((s) => s.text.includes("tersembunyi-rahasia"))).toBe(
+      false,
+    )
   })
 })
 
@@ -176,24 +171,19 @@ describe("collapse: answer section", () => {
     setSectionMinimized("answer", true)
   }
 
-  test("minimized: jawaban di-buffer, satu baris + answer (N chars) di akhir", () => {
+  test("minimized: ringkasan ukuran jawaban tanpa petunjuk /expand", () => {
     minimizeAnswer()
     const { bus, detach, err, all } = attach()
     bus.emit("turn:started", { turn: 1 })
     bus.emit("provider:text", { text: "jawaban lengkap\nbaris dua\n" })
-    // Selama streaming: tidak ada teks jawaban di scrollback.
     expect(all()).not.toContain("jawaban lengkap")
     bus.emit("turn:completed", {})
     detach()
     expect(err()).toContain("+ answer (")
     expect(err()).toContain("chars)")
-    // Baris minimize wajib memberi tahu cara membuka — tanpa ini jawaban
-    // yang dikecilkan terlihat "bisu" (tak ada off-switch yang bisa ditemukan).
-    expect(err()).toContain("/view expand to read")
-    const buf = collapsedSectionsSnapshot()
-    const ans = buf.find((s) => s.label === "answer")
-    expect(ans?.stream).toBe("stdout")
-    expect(ans?.text).toContain("jawaban lengkap")
+    // v0.33: /expand dihapus — petunjuk lama tak boleh muncul lagi.
+    expect(err()).not.toContain("/view expand to read")
+    expect(collapsedSectionsSnapshot().some((s) => s.label === "answer")).toBe(false)
   })
 
   test("expanded (env kosong): jawaban mengalir seperti dulu", () => {
@@ -264,12 +254,13 @@ describe("collapse: buffer & reset", () => {
     expect(collapsedSectionsSnapshot().length).toBe(0)
   })
 
-  test("turn:started membersihkan buffer turn sebelumnya", () => {
+  test("turn:started tidak meninggalkan buffer collapsed dari turn sebelumnya", () => {
     setSectionMinimized("tool", true)
     const { bus, detach } = attach()
     bus.emit("turn:started", { turn: 1 })
-    bus.emit("execution:completed", done("bash", { cmd: "a" }, "isi\n"))
-    expect(collapsedSectionsSnapshot().length).toBe(1)
+    bus.emit("execution:completed", done("bash", { cmd: "a" }, "isi-rahasia\n"))
+    // v0.33: printer linear tak lagi menulis collapsed buffer.
+    expect(collapsedSectionsSnapshot().length).toBe(0)
     bus.emit("turn:started", { turn: 2 })
     expect(collapsedSectionsSnapshot().length).toBe(0)
     detach()

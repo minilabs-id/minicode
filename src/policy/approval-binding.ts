@@ -33,6 +33,9 @@ export const MAX_CONTENT_FINGERPRINT_BYTES = 2 * 1024 * 1024
 export const MISSING_TARGET = "missing"
 /** Sidik jari "path ada tapi bukan file biasa" (mis. direktori). */
 export const NOT_A_FILE = "not-a-file"
+/** v0.33 (audit): file ADA tapi tak bisa dibaca (EACCES/EBUSY/EPERM) — jangan
+ *  disamakan dengan MISSING_TARGET atau pesan staleness jadi menyesatkan. */
+export const UNREADABLE_TARGET = "unreadable"
 
 /** Sidik jari satu target file. */
 export interface ApprovalTarget {
@@ -111,8 +114,9 @@ export function fingerprintTarget(path: string): string {
       return `size:${fst.size}:mtime:${fst.mtimeMs}:ctime:${fst.ctimeMs}:ino:${fst.ino}`
     }
     return createHash("sha256").update(readFileSync(fd)).digest("hex")
-  } catch {
-    return MISSING_TARGET
+  } catch (error) {
+    const code = error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined
+    return code === "ENOENT" ? MISSING_TARGET : UNREADABLE_TARGET
   } finally {
     if (fd !== undefined) {
       try {

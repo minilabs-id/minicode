@@ -30,6 +30,7 @@ import { formatUsd } from "../src/ui/render/money.ts"
 import { sanitizeAnsiLine } from "../src/ui/render/sanitize.ts"
 import { c } from "../src/ui/render/theme.ts"
 import { padToWidth } from "../src/ui/render/width.ts"
+import { buildSessionStamp } from "../src/ui/tui/session-summary.ts"
 
 // SEMUA output = PLAIN TEXT tanpa ANSI.
 // Readline + ANSI di Windows = karakter escape bocor jadi teks literal.
@@ -487,12 +488,21 @@ async function handleSchedulerCommand(args: string, ctx: CommandContext): Promis
   emit()
 }
 
+/** Nama sesi manusia untuk tampilan operator; id 8-hex tetap sebagai fallback. */
+function displaySessionName(id: string, cwd?: string): string {
+  try {
+    const row = listSessions(cwd).find((s) => s.id === id)
+    if (row) return buildSessionStamp(new Date(row.created_at))
+  } catch {}
+  return sanitizeAnsiLine(id)
+}
+
 function schedulerStatusLines(ctx: CommandContext, ctl: SchedulerControl, out: string[]): void {
   const { handle, observability } = ctl
   const snap = observability.status(handle)
   out.push(`\n${t("sched.title")}`)
   out.push(`  ${t("sched.state")}: ${describeOperatorState(snap.state)}`)
-  out.push(`  ${t("sched.session")}: ${ctx.sessionId}`)
+  out.push(`  ${t("sched.session")}: ${displaySessionName(ctx.sessionId, ctx.cwd)}`)
   out.push(`  ${t("sched.authority")}: ${handle.isActive() ? t("sched.held") : t("sched.none")}`)
   out.push(
     `  ${t("sched.counts")}: ${t("sched.cEvaluated")}=${snap.counts.evaluations} ` +
@@ -884,6 +894,17 @@ export async function handleBuiltinCommand(
         )
         return { handled: true }
       }
+      // v0.33: yang dibaca user di daftar sesi adalah NAMA MANUSIA
+      // `minicode<DDMMYYYYHHMMSS>`, bukan id 8-hex internal. ID tetap
+      // ditampilkan kecil di belakang supaya `/sessions <id>` masih jalan
+      // (fail-closed: kalau tanggal tak terbaca, jatuh ke id).
+      const humanName = (id: string, createdAt: number): string => {
+        try {
+          return buildSessionStamp(new Date(createdAt))
+        } catch {
+          return sanitizeAnsiLine(id)
+        }
+      }
       const rows = listSessions(ctx.cwd).slice(0, 25)
       if (rows.length === 0) {
         console.log(`\n${t("cmd.noSessions")}`)
@@ -902,7 +923,7 @@ export async function handleBuiltinCommand(
             // Jendela command: judul konsisten dengan /model, /provider, dll.
             showTitle: true,
             items: rows.map((r) => ({
-              name: `${sanitizeAnsiLine(r.id)} · ${new Date(r.created_at).toLocaleString()} · ${r.cwd ? sanitizeAnsiLine(shortDir(r.cwd)) : "(cwd)"}`,
+              name: `${humanName(r.id, r.created_at)} · ${sanitizeAnsiLine(r.id)} · ${new Date(r.created_at).toLocaleString()} · ${r.cwd ? sanitizeAnsiLine(shortDir(r.cwd)) : "(cwd)"}`,
               provider: "",
               value: r.id,
             })),
@@ -920,7 +941,7 @@ export async function handleBuiltinCommand(
         // angka `[i]` hanya menawarkan affordance yang tidak bisa dipakai.
         rows.forEach((r) => {
           console.log(
-            `  - ${sanitizeAnsiLine(r.id).padEnd(14)} ${new Date(r.created_at).toLocaleString().padEnd(24)} ${sanitizeAnsiLine(r.cwd || "(cwd)")}`,
+            `  - ${humanName(r.id, r.created_at).padEnd(22)} ${sanitizeAnsiLine(r.id).padEnd(10)} ${new Date(r.created_at).toLocaleString().padEnd(24)} ${sanitizeAnsiLine(r.cwd || "(cwd)")}`,
           )
         })
         console.log(t("sess.listHint"))

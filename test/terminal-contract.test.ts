@@ -161,13 +161,11 @@ describe("terminal contract: tidak ada tulis setelah detach/endTurn", () => {
     expect(tty!.all()).toBe("")
   }, 4000)
 
-  test("quiet TUI: paint ditekan, state tetap jalan (/copy + /expand hidup)", async () => {
+  test("quiet TUI: paint ditekan, state tetap jalan (narasi & copy hidup)", async () => {
     // Kontrak I3: saat TUI memiliki layar, printer linier tidak boleh menulis
-    // apa pun — tapi rememberTurn (copy) dan collapsed view (expand) harus
-    // tetap terisi. Gagal-di-kode-lama: attach tanpa quiet mengotori alt-screen
-    // di sela repaint App.
+    // apa pun — tapi teks turn (copy) tetap terekam. v0.33: buffer /expand
+    // sudah dihapus; riwayat detail ada di SidebarModel, bukan collapse.ts.
     const { getLastTurnText } = await import("../src/ui/assistant/simple.ts")
-    const { collapsedSectionsSnapshot } = await import("../src/ui/render/collapse.ts")
     setCompactMode(true)
     setSectionMinimized("tool", true)
     tty = installFakeTty({ columns: 80, rows: 24 })
@@ -186,7 +184,6 @@ describe("terminal contract: tidak ada tulis setelah detach/endTurn", () => {
     expect(tty!.all()).toBe("")
     expect(tty!.allErr()).toBe("")
     expect(getLastTurnText()).toContain("jawaban model")
-    expect(collapsedSectionsSnapshot().length).toBeGreaterThan(0)
   }, 4000)
 })
 

@@ -6,8 +6,8 @@ import { resetLocaleState, setSessionLocale } from "../src/ui/i18n/locale.ts"
 import { glyphs } from "../src/ui/render/theme.ts"
 import { displayWidth } from "../src/ui/render/width.ts"
 import { openAltScreen, resetAltScreenDepth } from "../src/ui/runtime/screen.ts"
-import { popupBoxWidth } from "../src/ui/screens/dialog.ts"
 import { runForm } from "../src/ui/screens/form.ts"
+import { windowWidth } from "../src/ui/screens/window.ts"
 import { installFakeTty, KEY } from "./helpers/tui-harness.ts"
 
 let tty: ReturnType<typeof installFakeTty> | null = null
@@ -156,11 +156,11 @@ describe("runForm", () => {
   test("kursor CJK/emoji dihitung per kolom, bukan grapheme", async () => {
     // Gagal-di-kode-lama: "あx" → kolom short 1 per glyph lebar.
     // Kolom absolut = centering-pad + border+spasi(2) + prefix(5) + "K: "(3)
-    //                  + "あx"(3) + 1. Padding dihitung dari popupBoxWidth agar
+    //                  + "あx"(3) + 1. Padding dihitung dari windowWidth agar
     // test tak patah lagi saat lebar popup berubah (I20 v7.14).
     // Bandingkan CUP TERAKHIR (perantara "24" wajar saat "あ" saja).
     const s = screen()
-    const pad = Math.floor((70 - popupBoxWidth(70)) / 2)
+    const pad = Math.floor((70 - windowWidth(70)) / 2)
     const colA = pad + 10 // "あ" saja
     const colAB = pad + 11 // "あx"
     const p = runForm({ title: "W", fields: [{ id: "k", label: "K", kind: "text" }] }, s)
@@ -188,9 +188,9 @@ describe("runForm", () => {
     )
     await tty!.ready()
     // Kursor parkir di ujung kanan border: centering-pad + lebar kotak + 1.
-    // Dihitung dari popupBoxWidth agar test tak patah saat lebar berubah (I20).
-    const pad = Math.floor((70 - popupBoxWidth(70)) / 2)
-    expect(tty!.all()).toContain(`;${pad + popupBoxWidth(70) + 1}H`)
+    // Dihitung dari windowWidth agar test tak patah saat lebar berubah (I20).
+    const pad = Math.floor((70 - windowWidth(70)) / 2)
+    expect(tty!.all()).toContain(`;${pad + windowWidth(70) + 1}H`)
     await tty!.send(KEY.esc, 90)
     await p
     s.close()
@@ -344,14 +344,14 @@ describe("runForm: temuan audit 2026-11-12", () => {
     const wideW = displayWidth(
       (tty!.screen().find((l) => l.includes("─") || l.includes("-")) ?? "").trim(),
     )
-    expect(wideW).toBe(popupBoxWidth(100))
+    expect(wideW).toBe(windowWidth(100))
 
     tty!.resize(50, 16)
     await tty!.send("abc")
     const narrowW = displayWidth(
       (tty!.screen().find((l) => l.includes("─") || l.includes("-")) ?? "").trim(),
     )
-    expect(narrowW).toBe(popupBoxWidth(50))
+    expect(narrowW).toBe(windowWidth(50))
     for (const row of tty!.screen()) expect(displayWidth(row)).toBeLessThanOrEqual(50)
 
     await tty!.send(KEY.esc, 90)

@@ -86,8 +86,13 @@ export const MICROCOMPACT_SENTINEL_PREFIX = "[hasil tool lama dipangkas"
  * mengulangnya menduplikasi efek samping. `unknown` diperlakukan sama dengan
  * `mutation` (fail-closed) — tool yang lupa didaftarkan tidak boleh dianggap
  * aman untuk diulang.
+ *
+ * Diekspor murni (tanpa I/O) supaya konsumen lain bisa mengklasifikasikan tool
+ * dengan aturan yang SAMA tanpa menyalin logika. Catatan batas lapisan:
+ * `src/ui/**` dilarang mengimpor modul non-ui ini (ui-boundary.test.ts), jadi
+ * renderer transkrip memakai cermin lokal untuk klasifikasi tampilannya.
  */
-function replayIsUnsafe(toolName: string | undefined): boolean {
+export function replayIsUnsafe(toolName: string | undefined): boolean {
   if (toolName === undefined) return true
   return classifyContractTool(toolName) !== "none"
 }

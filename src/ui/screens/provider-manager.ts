@@ -10,24 +10,24 @@ import {
   type DecoderState,
 } from "../input/prompt-engine.ts"
 import { formatError } from "../render/errors.ts"
-import { hintLine } from "../render/hint.ts"
 import { listRow } from "../render/list.ts"
 import { type NoticeKind, paintNoticeLines } from "../render/notice.ts"
 import { sanitizeAnsiLine } from "../render/sanitize.ts"
 import { c, glyphs } from "../render/theme.ts"
 import { displayWidth, truncateToWidth, wrapByWidth } from "../render/width.ts"
 import { type AltScreen, openAltScreen } from "../runtime/screen.ts"
-import { canRenderModal, dialogBox, popupBoxWidth } from "./dialog.ts"
+import { canRenderModal, dialogBox } from "./dialog.ts"
 import { runForm, validateRequired, validateUrl } from "./form.ts"
 import { createIdleTimer } from "./lifecycle.ts"
 import { runPicker } from "./picker.ts"
 import { withTimeout } from "./watchdog.ts"
+import { windowMaxHeight, windowSpec, windowWidth } from "./window.ts"
 
 const dim = (s: string): string => c.dim(s)
 
-/** Lebar tetap popup provider setelah daftar diringkas ke nama provider. */
-/** Lebar kotak /providers: `popupBoxWidth` — paritas picker/model/form (AUD-006). */
-const providerBoxWidth = (): number => popupBoxWidth(process.stdout.columns || 80)
+// v0.33: pakai aturan jendela seragam `window.ts` (sama seperti /model).
+// Dulu lebar/tinggi dihitung sendiri di sini sehingga /provider bisa beda
+// frame dari jendela lain; kini `windowSpec` jadi satu sumber ukuran + footer.
 
 export interface ProviderRow {
   id: string
@@ -94,21 +94,21 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
   }
 
   return new Promise<void>((resolve) => {
-    const width = () => Math.max(8, providerBoxWidth() - 4)
+    const width = () => Math.max(8, windowWidth(process.stdout.columns || 80) - 4)
     const renderedNoticeLines = (): string[] =>
       notice ? paintNoticeLines(noticeKind, notice).flatMap((l) => wrapByWidth(l, width())) : []
     // Ukuran mengikuti terminal sungguhan; satu baris border atas/bawah dan
     // kemungkinan notice tetap masuk ke perhitungan tinggi.
     const visibleRows = () => {
-      const rows = process.stdout.rows || 24
-      // Chrome tetap: 2 border + 1 judul + 1 footer (dipin `dialogBox`);
-      // notice (transient) menyusutkan daftar agar kotak tetap ringkas.
-      const fixed = 4 + renderedNoticeLines().length
-      return Math.max(1, Math.min(rows - fixed, 14))
+      // windowMaxHeight = tinggi kotak maksimum (sudah termasuk margin 4 baris).
+      // Chrome tetap 4 baris: 2 border + judul + footer. Jatah daftar mengikuti
+      // aturan jendela; notice (transient) menyusutkan agar kotak tetap ringkas.
+      const maxBody = windowMaxHeight(process.stdout.rows || 24) - 4
+      return Math.max(1, Math.min(maxBody - renderedNoticeLines().length, 14))
     }
 
     // Isi popup ringkas: nama provider + jumlah model redup dan status aktif.
-    const bodyLines = (): { lines: string[]; footer: string } => {
+    const bodyLines = (): { lines: string[] } => {
       const v = visibleRows()
       if (sel < scroll) scroll = sel
       if (sel >= scroll + v) scroll = sel - v + 1
@@ -127,34 +127,38 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
             : ""
           const countTag = it.models > 0 && w >= 28 ? ` (${it.models})` : ""
           const suffix = `${countTag}${aktif}`
-          const nameBudget = Math.max(8, w - 4 - displayWidth(suffix))
-          const label = `${truncateToWidth(sanitizeAnsiLine(it.id), nameBudget, glyphs.ellipsis)}${suffix}`
+          // Ikon kategori provider jadi bagian baris yang terlihat (1 kolom,
+          // fallback ASCII lewat getter glyphs). Diletakkan di luar budget
+          // truncasi seperti suffix agar identitas baris tak pernah hilang;
+          // sanitasi tetap pada id yang berasal dari config (tak-terpercaya).
+          const iconPart = `${glyphs.providerIcon} `
+          const nameBudget = Math.max(8, w - 4 - displayWidth(suffix) - displayWidth(iconPart))
+          const label = `${iconPart}${truncateToWidth(sanitizeAnsiLine(it.id), nameBudget, glyphs.ellipsis)}${suffix}`
           lines.push(listRow(label, picked))
         }
       }
       // Struk transient (jalur modal — notice dapat di-clip tanpa memotong footer).
       for (const line of renderedNoticeLines()) lines.push(cut(line))
-      const footer = hintLine([
-        { key: "Enter", label: t("hint.select") },
-        { key: "a", label: t("hint.add") },
-        { key: "e", label: t("hint.edit") },
-        { key: "d", label: t("hint.delete") },
-        { key: "Esc", label: t("hint.cancel") },
-      ])
-      return { lines, footer }
+      return { lines }
     }
 
     const render = () => {
-      const { lines, footer } = bodyLines()
+      const { lines } = bodyLines()
+      // Navigasi disuplai windowFooter; aksi a/d/e jadi extraHints. Urutan
+      // tombol aksi mengikuti alur CRUD yang sudah ada (tambah, ubah, hapus).
       // Popup komposit: HANYA region kotak (tanpa clear) di atas konten.
       const box = dialogBox(
-        {
+        windowSpec({
           title: t("out.titleProviders"),
           body: lines,
-          footer,
-          minWidth: providerBoxWidth(),
-          maxWidth: providerBoxWidth(),
-        },
+          cols: screen.cols,
+          rows: screen.rows,
+          extraHints: [
+            { key: "a", label: t("hint.add") },
+            { key: "e", label: t("hint.edit") },
+            { key: "d", label: t("hint.delete") },
+          ],
+        }),
         screen.cols,
         screen.rows,
       )

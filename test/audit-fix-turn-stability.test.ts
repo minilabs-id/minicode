@@ -304,9 +304,7 @@ test("integrasi F1: baris antre yang dibuang saat abort tak pernah digema", asyn
     await tty.waitForScreen((f) => f.some((line) => line.includes("abort sent")))
     h.releaseTurn()
     // Toast queueDropped muncul di inner finally, tepat setelah gate dilepas.
-    await tty.waitForScreen((f) =>
-      f.some((line) => line.includes("dropped because the turn was stopped")),
-    )
+    await tty.waitForScreen((f) => f.some((line) => line.includes("queued dropped")))
     await waitFor(() => h.persistCount === 1, "persist turn 1 mulai")
     h.releasePersist()
     await waitFor(() => h.resets === 1, "turn 1 selesai")

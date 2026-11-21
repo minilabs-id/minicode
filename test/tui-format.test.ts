@@ -259,7 +259,9 @@ describe("markdown: fence & inline", () => {
   test("list bernomor & bersarang tetap mempertahankan tingkatnya dan jeda poin utama", () => {
     const src = "1. satu\n2. dua\n   - sub a\n   - sub b"
     const rawLines = stripAnsi(decorateMarkdown(src)).split("\n")
-    expect(rawLines).toContain("")
+    // v0.33: sibling bernomor dan sub-poinnya MERAPAT (tak ada blank di antara),
+    // supaya hierarki terbaca dari indentasi, bukan dari jarak vertikal.
+    expect(rawLines).not.toContain("")
     const items = rawLines.filter(Boolean)
     expect(items[0]).toBe("   1. satu")
     expect(items[1]).toBe("   2. dua")

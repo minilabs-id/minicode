@@ -5,13 +5,14 @@
 // salin cepat (`c`) untuk /help full, /status, /context, /history, /expand, dll.
 import { t } from "../i18n/locale.ts"
 import { createDecoderState, createKeyStreamPump, type DecodedKey } from "../input/prompt-engine.ts"
-import { hintLine } from "../render/hint.ts"
+import type { HintItem } from "../render/hint.ts"
 import { sanitizeAnsiLine } from "../render/sanitize.ts"
 import { c, glyphs, stripAnsi } from "../render/theme.ts"
 import { wrapByWidth } from "../render/width.ts"
 import { type AltScreen, openAltScreen } from "../runtime/screen.ts"
-import { canRenderModal, dialogBox } from "./dialog.ts"
+import { canRenderModal, type DialogSpec, dialogBox } from "./dialog.ts"
 import { createIdleTimer } from "./lifecycle.ts"
+import { windowMaxHeight, windowSpec, windowWidth } from "./window.ts"
 
 export interface OutputWindowOptions {
   title: string
@@ -53,12 +54,46 @@ function wrapCommandLines(source: readonly string[], width: number): string[] {
   return out
 }
 
-/** Lebar jendela output command: lega untuk tabel/help, tetap rapi di layar. */
+/**
+ * LEGACY — jangan dipakai untuk frame lagi. Dipertahankan sebagai shim ekspor
+ * agar pemanggil lama tidak crash; jendela sekarang memakai `windowWidth`
+ * lewat `outputWindowSpec` (satu aturan ukuran untuk semua popup).
+ */
 export function outputWindowWidth(cols: number): number {
   const safe = Math.max(10, Math.floor(cols) || 80)
-  // Lebar lega untuk tabel/help, tetapi selalu menyisakan margin 4 kolom
-  // (chrome border+padding dialogBox) — terminal sempit tak boleh overflow.
   return Math.min(Math.max(56, safe - 8), 96, Math.max(14, safe - 4))
+}
+
+/** Baris chrome `dialogBox`: border atas/bawah + judul + footer. */
+const WINDOW_CHROME_ROWS = 4
+
+export interface OutputWindowSpecOptions {
+  title: string
+  body: string[]
+  cols: number
+  rows: number
+  extraHints?: readonly HintItem[]
+}
+
+/**
+ * Frame output mengikuti aturan jendela seragam (lebar & footer dari
+ * `windowSpec`). `windowMaxHeight` dipakai sebagai anggaran baris ISI yang
+ * bisa digulir; chrome ditambahkan kembali supaya jumlah baris tampil tidak
+ * menyusut dibanding perilaku lama (isi = rows - 4). Menjaga output tetap
+ * terbaca adalah bagian dari kontrak jendela ini.
+ */
+export function outputWindowSpec(opts: OutputWindowSpecOptions): DialogSpec {
+  const frame = windowSpec({
+    title: opts.title,
+    body: opts.body,
+    cols: opts.cols,
+    rows: opts.rows,
+    ...(opts.extraHints ? { extraHints: opts.extraHints } : {}),
+  })
+  return {
+    ...frame,
+    maxHeight: (frame.maxHeight ?? 0) + WINDOW_CHROME_ROWS,
+  }
 }
 
 /**
@@ -83,7 +118,6 @@ export async function runOutputWindow(opts: OutputWindowOptions): Promise<boolea
   while (source.length && !source[0]?.trim()) source.shift()
   while (source.length && !source[source.length - 1]?.trim()) source.pop()
 
-  let boxWidth = outputWindowWidth(process.stdout.columns || 80)
   let lastCols = 0
   let wrapped: string[] = []
   let scroll = 0
@@ -104,8 +138,8 @@ export async function runOutputWindow(opts: OutputWindowOptions): Promise<boolea
     if (cols === lastCols && (wrapped.length > 0 || source.length === 0)) return
     const prevTotal = wrapped.length
     lastCols = cols
-    boxWidth = outputWindowWidth(cols)
-    const innerW = Math.max(8, boxWidth - 4)
+    // Lebar isi mengikuti frame seragam — bukan outputWindowWidth legacy.
+    const innerW = Math.max(8, windowWidth(cols) - 4)
     wrapped = wrapCommandLines(source, innerW)
     if (prevTotal > 0 && wrapped.length !== prevTotal) {
       // Pertahankan posisi scroll proporsional saat terminal diubah ukurannya.
@@ -114,7 +148,8 @@ export async function runOutputWindow(opts: OutputWindowOptions): Promise<boolea
     }
   }
 
-  const bodyBudget = (): number => Math.max(1, (process.stdout.rows || 24) - 4)
+  // Anggaran baris isi = aturan tinggi jendela seragam (windowMaxHeight).
+  const bodyBudget = (): number => Math.max(1, windowMaxHeight(process.stdout.rows || 24))
   const maxScroll = (): number => Math.max(0, wrapped.length - bodyBudget())
 
   const render = (): void => {
@@ -126,28 +161,38 @@ export async function runOutputWindow(opts: OutputWindowOptions): Promise<boolea
     const scrollable = wrapped.length > budget
     const startIdx = scroll + 1
     const endIdx = Math.min(wrapped.length, scroll + budget)
-    const titleText = scrollable
+    const rawTitle = scrollable
       ? `${opts.title} (${startIdx}-${endIdx}/${wrapped.length})`
       : opts.title
-    const hints = hintLine([
+    // Ikon kategori 1 kolom HANYA di judul: baris isi adalah teks output
+    // tak-terpercaya (tabel /help, status, potongan kode) — menghiasinya akan
+    // menggeser kolom & mengubah makna. Fallback ASCII ditanggung `glyphs`.
+    const titleText = `${glyphs.sessionIcon} ${rawTitle}`
+    // windowFooter sudah memuat navigasi + Esc batal; yang khas jendela ini
+    // cukup dikirim sebagai extraHints (paritas hint lama tanpa duplikasi).
+    const extraHints: HintItem[] = [
       ...(scrollable ? [{ key: glyphs.upDown, label: t("hint.scroll") }] : []),
       ...(opts.onCopy ? [{ key: "c", label: t("hint.copy") }] : []),
-      { key: "Esc", label: t("hint.cancel") },
-    ])
-    const footerLine = copyNotice
-      ? copyNotice === t("tui.selectionCopied")
-        ? c.success(copyNotice)
-        : c.warning(copyNotice)
-      : hints
+    ]
     const body = wrapped.slice(scroll, scroll + budget)
+    // Konfirmasi salin jadi baris isi, BUKAN footer: footer wajib tetap
+    // windowFooter supaya frame identik dengan jendela lain. Baris terakhir
+    // dikorbankan agar total isi tidak melebihi anggaran (tanpa clip "more").
+    const bodyWithNotice =
+      copyNotice == null
+        ? body
+        : [
+            ...body.slice(0, Math.max(0, budget - 1)),
+            copyNotice === t("tui.selectionCopied") ? c.success(copyNotice) : c.warning(copyNotice),
+          ]
     const box = dialogBox(
-      {
+      outputWindowSpec({
         title: titleText,
-        body,
-        footer: footerLine,
-        minWidth: boxWidth,
-        maxWidth: boxWidth,
-      },
+        body: bodyWithNotice,
+        cols,
+        rows,
+        extraHints,
+      }),
       cols,
       rows,
     )

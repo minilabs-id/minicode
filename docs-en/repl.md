@@ -31,7 +31,7 @@ outside the dictionary fail the test.
 | `/init` | Create `AGENTS.md` for this project |
 | `/copy [n]` | Copy the last `n` turns (default `1`, maximum `10`) via OSC 52 |
 | `/clear` | Clear the transcript (the viewport goes empty) |
-| `/view [action]` | With no argument = view action popup. `compact` cycles compact/full tool output; `thinking` shows/hides reasoning; `expand [id]` opens the content of tool/thinking hidden by the compact ledger (one-shot, drains it all); `minimize` folds tools + answers; `fold` toggles the activity panel |
+| `/view [action]` | With no argument = view action popup. `compact` cycles compact/full tool output; `thinking` shows/hides reasoning; `expand` removed — full history lives in the right sidebar (mouse wheel / Alt+PgUp); `minimize` folds tools + answers; `fold` toggles the activity panel |
 | `/exit` | Quit (the only exit; `/quit` alias). After exiting, a session summary header is printed: the `minicode` wordmark + Session/Model/Usage (tokens, cost, duration) |
 | `/scheduler [status\|run\|stop]` | Production scheduler control. **Off by default** in every session (needs the `--enable-scheduler` flag); without the flag the command answers "not enabled". It stays visible in `/help` so an operator who enabled the flag can find it. |
 

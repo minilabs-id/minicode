@@ -15,7 +15,9 @@ export interface FenceMatch {
  * Parse satu baris fence markdown (``` atau ~~~) → info pembuka, atau null.
  */
 export function parseFence(line: string): FenceMatch | null {
-  const m = /^\s*(```+|~~~+)([A-Za-z0-9_+.-]*)(?:\s+[^\r\n]*)?\s*$/.exec(line)
+  // v0.33: tag bahasa boleh memuat `#` (`c#`, `f#`) — dulu fence itu tak
+  // dikenali sama sekali sehingga isi kodenya ikut di-render markdown.
+  const m = /^\s*(```+|~~~+)([^\s`]+)?(?:\s+[^\r\n]*)?\s*$/.exec(line)
   if (!m) return null
   return { char: m[1]![0]!, len: m[1]!.length, lang: m[2] ?? "" }
 }
@@ -121,6 +123,10 @@ export type FlowLineKind = "none" | "heading" | "list" | "blockquote" | "fenceCl
 export interface MarkdownFlowState {
   prevKind: FlowLineKind
   topListIndent: number | null
+  /** Indent bullet TERAKHIR (bukan hanya indent teratas) — dipakai supaya
+   *  dua bullet sibling merapat, tetapi lompat dari sub-poin ke induk tetap
+   *  dapat satu baris napas. */
+  lastListIndent: number | null
   prevWasBlank: boolean
   hasContent: boolean
 }
@@ -149,6 +155,7 @@ export class MarkdownFlowStepper {
   private state: MarkdownFlowState = {
     prevKind: "none",
     topListIndent: null,
+    lastListIndent: null,
     prevWasBlank: false,
     hasContent: false,
   }
@@ -166,6 +173,11 @@ export class MarkdownFlowStepper {
   /** Catat baris kosong; return true bila boleh dicetak (mencegah blank berulang/awal). */
   onBlank(): boolean {
     if (!this.state.hasContent || this.state.prevWasBlank) return false
+    // v0.33: di dalam blok daftar, baris kosong antar bullet/sub-poin DITELAN.
+    // Model sering menulis `\n\n` antar sub-poin; kalau dicetak, sub-poin jadi
+    // seluas poin utama dan hierarkinya hilang. Pemisah poin utama ditambahkan
+    // oleh `onLine`, bukan oleh blank mentah dari sumber.
+    if (this.state.topListIndent !== null) return false
     this.state.prevWasBlank = true
     return true
   }
@@ -217,10 +229,11 @@ export class MarkdownFlowStepper {
           // Masuk ke blok daftar dari paragraf/elemen lain → pisahkan dengan 1 jeda.
           needSpacer = true
         } else if (curr.indentCols <= this.state.topListIndent) {
-          // Poin utama / level terluar berikutnya dalam daftar (atau keluar dari
-          // sub-poin kembali ke poin utama) → pisahkan antar-poin. Sub-item bersarang
-          // (`indentCols > topListIndent`) tetap merapat di bawah induknya.
-          needSpacer = true
+          // v0.33: dua bullet SIBLING pada level sama merapat (tak ada blank).
+          // Spacer hanya dipakai saat KELUAR dari sub-poin yang lebih dalam
+          // kembali ke induknya — itu transisi hierarki yang perlu napas.
+          const prev = this.state.lastListIndent
+          needSpacer = prev === null || prev > curr.indentCols
         }
       } else {
         // `curr.kind === "prose"`: bila baru keluar dari daftar ke paragraf level
@@ -236,12 +249,16 @@ export class MarkdownFlowStepper {
         this.state.topListIndent === null
           ? curr.indentCols
           : Math.min(this.state.topListIndent, curr.indentCols)
-    } else if (
-      curr.kind === "heading" ||
-      this.state.topListIndent === null ||
-      curr.indentCols <= this.state.topListIndent
-    ) {
-      this.state.topListIndent = null
+      this.state.lastListIndent = curr.indentCols
+    } else {
+      this.state.lastListIndent = null
+      if (
+        curr.kind === "heading" ||
+        this.state.topListIndent === null ||
+        curr.indentCols <= this.state.topListIndent
+      ) {
+        this.state.topListIndent = null
+      }
     }
 
     this.state.hasContent = true
@@ -282,7 +299,19 @@ export function formatAssistantSpacing(text: string): string {
       if (flow.onBlank()) out.push("")
       continue
     }
-    if (flow.onLine(line)) out.push("")
+    const needSpacer = flow.onLine(line)
+    // Hanya bab/poin utama (#..###) yang dapat dua baris; `####` ke bawah
+    // tetap satu agar sub-bab tak seluas bab induknya.
+    if (/^#{1,3}\s/.test(line) && out.length > 0) {
+      // v0.33: antar BAB/poin utama (`### 6)`, `### 7)`, …) beri DUA baris
+      // kosong supaya terlihat sebagai pemisah bab. Sub-poin bullet tetap rapat
+      // (blank di dalam daftar ditelan oleh `onBlank`).
+      let blanks = 0
+      for (let i = out.length - 1; i >= 0 && out[i] === ""; i--) blanks++
+      for (let i = blanks; i < 2; i++) out.push("")
+    } else if (needSpacer) {
+      out.push("")
+    }
     out.push(line)
   }
 

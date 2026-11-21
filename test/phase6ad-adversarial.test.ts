@@ -452,13 +452,14 @@ describe("6AD cancellation - stop() prevents further autonomous work", () => {
 // â”€â”€ M16: event routing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 describe("6AD event routing - scheduler events are not conversation", () => {
-  test("M16: the transcript sink is wired, and it is the system-kind push", async () => {
+  test("M16: scheduler notice sink is the sidebar Activity log, not a user turn", async () => {
     const tui = await Bun.file(join(import.meta.dir, "..", "cli", "tui.ts")).text()
-    // The sink must be attached to `pushInfo` (kind: "system"), NOT to the
-    // user-message path. A mutant that reroutes to `pushUser` is caught here.
-    expect(tui).toMatch(/onSchedulerNotice\([\s\S]{0,120}pushInfo\(/)
-    expect(tui).not.toMatch(/onSchedulerNotice\([\s\S]{0,120}pushUser\(/)
-    expect(tui).not.toMatch(/onSchedulerNotice\([\s\S]{0,120}stream\(/)
+    // v0.33: notifikasi scheduler dipindah ke log Activity sidebar supaya chat
+    // tetap naratif. Yang dilarang tetap sama: jalur pesan user.
+    expect(tui).toMatch(/onSchedulerNotice\([\s\S]{0,160}sidebarModel\.ingestActivity\(/)
+    expect(tui).not.toMatch(/onSchedulerNotice\([\s\S]{0,160}pushUser\(/)
+    expect(tui).not.toMatch(/onSchedulerNotice\([\s\S]{0,160}stream\(/)
+    expect(tui).not.toMatch(/onSchedulerNotice\([\s\S]{0,160}prompt\(/)
   })
 
   test("M16: a scheduler line is a system notice, never a user turn", async () => {
@@ -587,7 +588,7 @@ describe("6AD session invalidation through the production handle", () => {
 // â”€â”€ M16: the sink must be the SYSTEM path, tightly â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 describe("6AD event routing is source-checked", () => {
-  test("M16: the notice sink is pushInfo, and never a user-message path", async () => {
+  test("M16: the notice sink is sidebar Activity, never a user-message path", async () => {
     const tui = await Bun.file(join(import.meta.dir, "..", "cli", "tui.ts")).text()
     // [DESIGN DECISION] Slice the source AROUND the sink rather than matching the
     // call with a regex. The first version used a lazy group that stopped at the
@@ -598,15 +599,13 @@ describe("6AD event routing is source-checked", () => {
     const at = tui.indexOf("onSchedulerNotice(")
     expect(at).toBeGreaterThan(-1)
     const body = tui.slice(at, at + 400)
-    expect(body).toContain("pushInfo")
-    // [FACT] Case-INSENSITIVE on purpose. The first version compared lowercase
-    // `pushUser` against a mutant that writes `sessionPushUser` - different case,
-    // so M16 survived a check that looked like it covered it.
+    // v0.33: sink = sidebar Activity log, BUKAN transkrip chat.
+    expect(body).toContain("ingestActivity")
+    expect(body).not.toContain("pushInfo")
+    // [FACT] Case-INSENSITIVE on purpose — tangkap mutan jalur pesan user.
     for (const userPath of ["pushuser", "pusherror", "runpromptwithverify", "session.prompt"]) {
       expect(body).not.toContain(userPath)
     }
-    // The transcript kind is the actual guarantee, so assert it exists.
-    expect(tui).toContain('kind: "system"')
   })
 })
 describe("6AD context isolation - the parent session is untouched", () => {

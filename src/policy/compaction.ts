@@ -962,7 +962,11 @@ export async function compactWithLlm(
   if (!opts.provider && opts.apiKey) {
     try {
       const hostname = new URL(baseUrl).hostname
-      if (await isPrivateHostWithDns(hostname))
+      // v0.33 (audit LOW-MEDIUM): strict + noCache → DNS timeout FAIL-CLOSED.
+      // Catatan: provider OpenAI-compat memakai global fetch (tak ada opsi
+      // custom fetch), jadi IP-pin penuh butuh perubahan vendor — dicatat sebagai
+      // risiko residu, bukan di diam-diam.
+      if (await isPrivateHostWithDns(hostname, { strict: true, noCache: true }))
         throw new Error(`private host rejected: ${hostname}`)
     } catch (e) {
       if (e instanceof Error && e.message.includes("private host")) throw e

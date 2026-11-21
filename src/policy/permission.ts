@@ -25,6 +25,8 @@ import {
   isTrashRestore,
 } from "./jail.ts"
 import { scrubSecrets } from "./scrub.ts"
+// v0.33: tokenizer sadar-platform (POSIX: `\`/`'`; win32: `^`, `'` literal).
+import { isDangerousShellVerb, splitShellSegments } from "./shell-tokenize.ts"
 // [Fase 2 / TOOL-01, v7.33 / audit F2] Diimpor dari registry kontrak tool.
 // Semua klasifikasi (read/gated/jail/internal/no-prompt/plan) kini SATU sumber
 // di tool-contract.ts — permission.ts hanya mengonsumsi derivasinya.
@@ -484,41 +486,7 @@ function stripNeutralRedirections(cmd: string): string {
  * keamanan yang sama (setiap tahap tetap harus cocok pola + lolos bash-guard)
  * tanpa memaksa model menulis shell satu tahap.
  */
-export function splitShellSegments(cmd: string): string[] {
-  const parts: string[] = []
-  let cur = ""
-  let quote: '"' | "'" | null = null
-  const push = () => {
-    const seg = cur.trim()
-    if (seg) parts.push(seg)
-    cur = ""
-  }
-  for (let i = 0; i < cmd.length; i++) {
-    const ch = cmd[i] as string
-    if (quote) {
-      cur += ch
-      if (ch === quote) quote = null
-      continue
-    }
-    if (ch === '"' || ch === "'") {
-      quote = ch
-      cur += ch
-      continue
-    }
-    if ((ch === "&" || ch === "|") && cmd[i + 1] === ch) {
-      push()
-      i++
-      continue
-    }
-    if (ch === ";" || ch === "|" || ch === "&" || ch === "\n") {
-      push()
-      continue
-    }
-    cur += ch
-  }
-  push()
-  return parts
-}
+export { splitShellSegments }
 
 type BashListDecision = { ok: true } | { ok: false; reason: string; command: string }
 
@@ -575,6 +543,12 @@ function decideBashCommand(cmd: string, list: readonly string[], root: string): 
     if (/[<>]/.test(stripped)) return { ok: false, reason: "redirection unsafe", command: cmd }
   }
   const segments = splitShellSegments(stripped)
+  // Defense-in-depth: même kalau pola allowlist terlalu longgar, verba mutasi
+  // berbahaya tak pernah lolos di mode "paling ketat" (audit 2026-11-21).
+  for (const seg of segments) {
+    if (isDangerousShellVerb(seg))
+      return { ok: false, reason: "mutating verb not allowed", command: cmd }
+  }
   for (const seg of segments) {
     // `cd` di dalam workspace sah (model memakainya untuk monorepo); target di
     // luar root ditolak supaya segmen berikutnya tidak berjalan di luar jail.
@@ -876,7 +850,9 @@ export function createPermissionHandler(
     } catch {}
   }
   function deny(call: ToolCall, reason: string): "deny" {
-    noteDeny(call, reason)
+    // [AUDIT-FIX] Perkaya HANYA alasan yang punya alternatif aman + counter
+    // repeated. Keputusan check() tetap "deny" polos — ini diagnostik saja.
+    noteDeny(call, adaptiveReason(call, reason))
     return "deny"
   }
   function takeDenyReason(call: ToolCall): string | undefined {
@@ -889,6 +865,59 @@ export function createPermissionHandler(
     } catch {
       return undefined
     }
+  }
+
+  // [AUDIT-FIX / adaptive denial] Alasan deny adalah satu-satunya pengajaran
+  // yang dilihat model (`permission denied: <reason>` di kernel). Teks lama
+  // "no matching pattern" terlalu panjang untuk batas 160 karakter kernel —
+  // ujung saran alternatifnya terpotong — dan tak punya counter, jadi model
+  // mengulang `for %f`, `node -e`, `more` empat kali berturut-turut.
+  //
+  // Kunci counter = KELAS perintah (verba pertama), bukan argumen mentah:
+  // variasi `for %f in (...)` tetap satu kelas, tapi `for` vs `node` beda.
+  // Hanya DUA kelas yang diperkaya: allowlist miss & inline interpreter —
+  // keduanya punya alternatif aman yang concrete. Alasan lain (destructive rm,
+  // jail, dll.) sengaja dibiarkan apa adanya supaya kontraknya tak berubah.
+  const adaptiveDenials = new Map<string, number>()
+  function denialKey(prefix: string, cmd: string): string {
+    const verb = cmd.trim().split(/\s+/)[0] ?? ""
+    return `${prefix}:${
+      verb
+        .toLowerCase()
+        .replace(/[^a-z0-9_.-]/g, "")
+        .slice(0, 16) || "unknown"
+    }`
+  }
+  function bumpDenial(key: string): number {
+    const n = (adaptiveDenials.get(key) ?? 0) + 1
+    // Sama seperti denyReasons: map dibatasi agar abort di tengah tak bocor memori.
+    if (adaptiveDenials.size > 500)
+      adaptiveDenials.delete(adaptiveDenials.keys().next().value as string)
+    adaptiveDenials.set(key, n)
+    return n
+  }
+  function shortDeniedCommand(raw: string): string {
+    return scrubSecrets(raw).replace(/\s+/g, " ").trim().slice(0, 40)
+  }
+  function adaptiveReason(call: ToolCall, reason: string): string {
+    if (call.name !== "bash") return reason
+    if (reason.startsWith("allowlist: no matching pattern")) {
+      // Ambil SEGMEN yang ditolak dari alasan call-site (bisa beda dari cmd
+      // penuh saat perintah majemuk) supaya saran menyebut perintah yang benar.
+      const quoted = reason.match(/for "([^"]*)"/)?.[1] ?? ""
+      const cmd = shortDeniedCommand(quoted)
+      const n = bumpDenial(denialKey("allowlist", quoted))
+      return n === 1
+        ? `allowlist: no matching pattern for "${cmd}" — read_file/write_file/edit or dir /b / Get-Content; --allow-all`
+        : `allowlist: no matching pattern #${n} for "${cmd}" — STOP retry; read_file/write_file/edit or dir /b / Get-Content; --allow-all`
+    }
+    if (reason.includes("inline interpreter code")) {
+      const n = bumpDenial("bash:inline-interpreter")
+      return n === 1
+        ? "bash-guard: inline interpreter code — write a script file then run node file.js, or use read_file; -e/-c never allowed"
+        : `bash-guard: inline interpreter code (#${n}) — STOP retrying -e/-c; write a file and run node file.js or use read_file`
+    }
+    return reason
   }
   // Guard dan shell WAJIB me-resolve operand relatif dari direktori yang SAMA.
   // bash.ts spawn dengan cwd = sessionRoot + args.cwd, sedangkan dulu guard
@@ -1017,9 +1046,11 @@ export function createPermissionHandler(
           // [AUDIT-FIX #3] command mentah bisa memuat kredensial (mis. token di
           // argumen). Alasan deny ini sampai ke model DAN log — scrub dulu,
           // sebelum dipotong, agar secret tak terekho bebas ke permukaan itu.
+          // [AUDIT-FIX / adaptive] Teks lengkap + counter dirakit adaptiveReason;
+          // di sini cukup penanda + segmen yang ditolak.
           return deny(
             call,
-            `allowlist: no matching pattern for "${scrubSecrets(decision.command).slice(0, 80)}" — file work: use read_file/write_file/edit; full shell: rerun with --allow-all / --sandbox docker / MINICODE_BASH_ALLOWLIST`,
+            `allowlist: no matching pattern for "${scrubSecrets(decision.command).slice(0, 80)}"`,
           )
         return deny(call, `allowlist: ${decision.reason}`)
       }
@@ -1113,9 +1144,10 @@ export function createPermissionHandler(
             if (decision.reason === "no matching pattern")
               // [AUDIT-FIX #3] Sama seperti cabang allowlist: secret di command
               // tak boleh bocor lewat alasan deny ke model/log (fail-closed).
+              // [AUDIT-FIX / adaptive] Penanda + segmen; saran dirakit di deny().
               return deny(
                 call,
-                `allowlist: no matching pattern for "${scrubSecrets(decision.command).slice(0, 80)}" — file work: use read_file/write_file/edit; full shell: rerun with --allow-all / --sandbox docker / MINICODE_BASH_ALLOWLIST`,
+                `allowlist: no matching pattern for "${scrubSecrets(decision.command).slice(0, 80)}"`,
               )
             return deny(call, `allowlist: ${decision.reason}`)
           }

@@ -381,6 +381,41 @@ export function applyCompletionPolicy(
   )
 }
 
+/**
+ * [AUDIT-FIX / stale todo] Petakan deklarasi penuh tanpa taskId ke task kanonik
+ * yang SUDAH ada, memakai `content` sebagai kunci yang stabil.
+ *
+ * WHY: turn lanjutan/resume sering mengirim ulang SELURUH daftar (mis. 7 item)
+ * tanpa taskId karena model tidak sempat memanggil todo_read. Guard 4A.5
+ * memblokirnya, model lalu melanjutkan tanpa rencana. Selama teks itemnya
+ * persis sama dengan judul task yang tersimpan, identitasnya bisa dipulihkan
+ * TANPA mengarang id — TaskStore tetap satu-satunya sumber id.
+ *
+ * FAIL-CLOSED: jumlah item HARUS sama dan setiap `content` HARUS cocok persis
+ * dengan `title` task kanonik yang belum terpakai. Satu item asing atau jumlah
+ * yang beda mengembalikan null → pemanggil menolak seluruh penulisan. Tidak ada
+ * yang pernah dibuang: bila tak semua bisa dipetakan, tak ada yang diubah.
+ */
+export function repairIdlessFullDeclaration(
+  declared: readonly TodoItem[],
+  existing: readonly Task[],
+): TodoItem[] | null {
+  if (declared.length === 0 || existing.length !== declared.length) return null
+  if (declared.some((t) => typeof t.taskId === "string" && t.taskId !== "")) return null
+  // Urutan kanonik dipakai sebagai pemecah ikatan saat ada judul kembar, supaya
+  // pemetaan deterministik dan tiap task dipakai paling banyak sekali.
+  const pool = [...existing].sort((a, b) => a.order - b.order || a.id.localeCompare(b.id))
+  const used = new Set<string>()
+  const repaired: TodoItem[] = []
+  for (const item of declared) {
+    const match = pool.find((t) => !used.has(t.id) && t.title === item.content)
+    if (!match) return null
+    used.add(match.id)
+    repaired.push({ ...item, taskId: match.id })
+  }
+  return repaired
+}
+
 export function normalizeTodos(
   input: unknown,
   evidence?: CompletionEvidence,
@@ -741,7 +776,7 @@ export const todoWriteTool: Tool = {
   name: "todo_write",
   // v7.33 (wire contract): tag PLAN (todo = rencana, bukan file/memori).
   description:
-    "PLAN: Write/replace the entire todo list (send the full list, never a delta). Use for 3+ steps: keep exactly one item in_progress. BEFORE re-sending a list that already exists, CALL todo_read and echo every existing item's taskId — an all-id-less full declaration is REJECTED once canonical tasks exist (ids are never invented). Claiming completed while verification is failing/stale is REFUSED — it returns blocked with the reason; fix the check or re-verify first.",
+    "PLAN: Write/replace the entire todo list (send the full list, never a delta). Use for 3+ steps: keep exactly one item in_progress. A full list with no taskId is auto-repaired ONLY when every item's content exactly matches an existing task (count included); any mismatch is REJECTED — call todo_read and echo every item's taskId (ids are never invented; omit taskId only for genuinely new items). Claiming completed while verification is failing/stale is REFUSED — it returns blocked with the reason; fix the check or re-verify first.",
   parameters: {
     type: "object",
     properties: {
@@ -806,36 +841,40 @@ export const todoWriteTool: Tool = {
         validIdx += 1
       }
     }
-    const list = normalizeTodos(todos, evidence)
+    let list = normalizeTodos(todos, evidence)
 
-    // PHASE 4A.5 — reject an identity-blind full declaration once canonical
-    // identity already exists for this session (NEW ARCHITECTURE).
+    // PHASE 4A.5 + [AUDIT-FIX / stale todo] — identitas untuk deklarasi penuh.
     //
-    // `todo_write` is a FULL DECLARATION, so re-sending the same work without
-    // ids is indistinguishable from creating it again. That is precisely the
-    // duplication debc295 documents. Once canonical tasks exist, an all-id-less
-    // payload carries too little information to address them, so it is rejected
-    // rather than guessed at — identity is never manufactured to make an
-    // ambiguous payload "work".
+    // `todo_write` adalah FULL DECLARATION. Setelah task kanonik ada, payload
+    // tanpa taskId dulu ditolak mentah-mentah; pada sesi audit model mengirim
+    // ulang 7 item persis seperti sebelumnya, kena TASK_IDENTITY_REQUIRED, lalu
+    // melanjutkan tanpa rencana. Sekarang ada satu jalur perbaikan yang aman:
+    // bila JUMLAH dan setiap `content` cocok persis dengan task yang ada, id
+    // dipetakan dari TaskStore (bukan dikarang) dan update diterapkan.
     //
-    // PLACEMENT. This sits BEFORE `saveTodos`, so a rejected write is a complete
-    // no-op: no JSON replacement, no TaskStore mutation, no id allocation, no
-    // plan (the throw makes the tool result an error, which the adapter already
-    // treats as "do not publish"). Rejecting after the JSON write would leave the
-    // legacy file describing a state TaskStore never accepted.
+    // FAIL-CLOSED tetap: item yang bertabrakan/asing atau jumlah yang beda
+    // mengembalikan null → seluruh penulisan ditolak, tak ada yang dibuang.
     //
-    // EMPTY PAYLOAD already threw in `normalizeTodos` above (Test I in
-    // phase4a5-idless-rejection proves `todos: []` rejects before 4A.5 and
-    // leaves canonical TaskStore rows untouched).
+    // PLACEMENT. Ini tetap SEBELUM `saveTodos`: penolakan adalah no-op penuh
+    // (tanpa JSON, TaskStore, alokasi id, atau plan). Saat repair berhasil,
+    // `list` sudah ber-identity sehingga sync kanonik di bawah berjalan normal.
     if (list.length > 0 && !hasCanonicalIdentity(list) && hasCanonicalTasks(cwd, sessionId)) {
-      const count = new TaskStore(cwd).listTasks(sessionId).length
-      throw new TaskError(
-        "TASK_IDENTITY_REQUIRED",
-        `this task already has ${count} canonical task(s), so this full declaration must identify them. ` +
-          `Call todo_read and re-send every item with its taskId (e.g. {"taskId":"t1", ...}); ` +
-          `omit taskId only on items that are genuinely new. ` +
-          `Nothing was written: the todo list and canonical tasks are unchanged.`,
-      )
+      const tasks = new TaskStore(cwd).listTasks(sessionId)
+      const repaired = repairIdlessFullDeclaration(list, tasks)
+      if (repaired) {
+        // Hanya menambahkan taskId, bukan mengubah urutan/status/konten — jadi
+        // indeks `rawDeclaredCompleted` yang dihitung lebih awal tetap selaras.
+        list = repaired
+      } else {
+        throw new TaskError(
+          "TASK_IDENTITY_REQUIRED",
+          `this task already has ${tasks.length} canonical task(s), so this full declaration must identify them. ` +
+            `An id-less list is only repaired when every item's content exactly matches an existing task; ` +
+            `call todo_read and re-send every item with its taskId (e.g. {"taskId":"t1", ...}); ` +
+            `omit taskId only on items that are genuinely new. ` +
+            `Nothing was written: the todo list and canonical tasks are unchanged.`,
+        )
+      }
     }
 
     // [P0-1] Rekam tampilan SEBELUM menulis. Bila sinkronisasi kanonik rollback,

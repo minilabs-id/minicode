@@ -28,7 +28,7 @@ locale OS > en. `/lang` tanpa argumen = tampilkan aktif. Semua string lewat kamu
 | `/init` | Buat `AGENTS.md` proyek ini |
 | `/copy [n]` | Salin `n` turn terakhir (default `1`, maksimal `10`) via OSC 52 |
 | `/clear` | Kosongkan transkrip (viewport kembali kosong) |
-| `/view [action]` | Tanpa argumen = popup aksi tampilan. `compact` = putar output tool ringkas/penuh; `thinking` = tampil/sembunyikan reasoning; `expand [id]` = buka isi tool/thinking yang disembunyikan ledger compact (sekali ambil habis); `minimize` = lipat tool+jawaban; `fold` = panel aktivitas |
+| `/view [action]` | Tanpa argumen = popup aksi tampilan. `compact` = putar output tool ringkas/penuh; `thinking` = tampil/sembunyikan reasoning; `expand` dihapus — riwayat lengkap di sidebar (gulir mouse / Alt+PgUp); `minimize` = lipat tool+jawaban; `fold` = panel aktivitas |
 | `/exit` | Keluar (satu-satunya jalan keluar; `/quit` alias). Setelah keluar, tercetak kop ringkasan sesi: wordmark `minicode` + Session/Model/Usage (token, biaya, durasi) |
 | `/scheduler [status\|run\|stop]` | Kendali Scheduler produksi. **Nonaktif secara bawaan** di setiap sesi (perlu flag `--enable-scheduler`); tanpa flag, perintahnya menjawab "not enabled". Tetap tampil di `/help` supaya operator yang mengaktifkan flag bisa menemukannya. |
 

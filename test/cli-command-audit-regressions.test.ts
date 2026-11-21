@@ -196,45 +196,35 @@ describe("handleBuiltinCommand: /init & /sessions", () => {
 })
 
 describe("TUI slash commands (CMD-02..CMD-09)", () => {
-  // VIEW_ACTIONS kini HANYA ["thinking","expand"]. compact/fold/minimize
-  // dihapus total (flag-nya tak dibaca renderer flat), jadi picker wajib
-  // berisi dua item — bukan lima seperti sebelum rewrite.
-  test.each(["thinking", "expand"] as const)(
-    "/view picker hanya menawarkan 2 aksi valid dan mendispatch %s tanpa membocorkan input",
-    async (action) => {
-      const session = makeFakeTuiSession(makeTmp("minicode-view-picker-"))
-      tty = installFakeTty({ columns: 100, rows: 24 })
-      const runP = runTui(session)
-      try {
-        await tty.ready()
-        await tty.waitForOutput((o) => o.includes("00.00.00"))
-        await tty.send("/view")
-        await tty.send(KEY.enter)
-        const frame = await tty.waitForScreen((f) => f.some((l) => l.includes("thinking —")))
-        const screen = frame.join("\n")
-        for (const name of ["thinking", "expand"]) {
-          expect(screen).toContain(`${name} —`)
-        }
-        // Kontrol mati TIDAK boleh muncul lagi di picker (dulu 5 item).
-        for (const name of ["compact", "minimize", "fold"]) {
-          expect(screen).not.toContain(`${name} —`)
-        }
-        expect(tty.promptListeners()).toBe(1)
-        const index = ["thinking", "expand"].indexOf(action)
-        for (let i = 0; i < index; i++) await tty.send(KEY.down)
-        await tty.send(KEY.enter)
-        const receipt =
-          action === "thinking"
-            ? t("tui.thinkingSet", { v: t("state.expanded") })
-            : t("tui.expandEmpty")
-        // v7.30: kwitansi /view tinggal di footer (toast), bukan baris transkrip.
-        await tty.waitForScreen((f) => (f[f.length - 1] ?? "").includes(receipt))
-        expect(tty.promptListeners()).toBe(1)
-      } finally {
-        await closeTuiClean(tty, runP)
+  // v0.33: VIEW_ACTIONS HANYA ["thinking"] — expand dihapus (riwayat penuh
+  // ada di sidebar). compact/fold/minimize juga tak ada. Picker wajib berisi
+  // SATU item, bukan lima seperti sebelum rewrite.
+  test("/view picker hanya menawarkan aksi thinking yang valid", async () => {
+    const session = makeFakeTuiSession(makeTmp("minicode-view-picker-"))
+    tty = installFakeTty({ columns: 100, rows: 24 })
+    const runP = runTui(session)
+    try {
+      await tty.ready()
+      await tty.waitForOutput((o) => o.includes("00.00.00"))
+      await tty.send("/view")
+      await tty.send(KEY.enter)
+      const frame = await tty.waitForScreen((f) => f.some((l) => l.includes("thinking —")))
+      const screen = frame.join("\n")
+      expect(screen).toContain("thinking —")
+      // Aksi mati TIDAK boleh muncul lagi di picker.
+      for (const name of ["expand", "compact", "minimize", "fold"]) {
+        expect(screen).not.toContain(`${name} —`)
       }
-    },
-  )
+      expect(tty.promptListeners()).toBe(1)
+      await tty.send(KEY.enter)
+      const receipt = t("tui.thinkingSet", { v: t("state.expanded") })
+      // v7.30: kwitansi /view tinggal di footer (toast), bukan baris transkrip.
+      await tty.waitForScreen((f) => (f[f.length - 1] ?? "").includes(receipt))
+      expect(tty.promptListeners()).toBe(1)
+    } finally {
+      await closeTuiClean(tty, runP)
+    }
+  })
 
   test("perintah lepas dari /view tetap unknown; compact/fold/minimize benar-benar dihapus", async () => {
     tty = installFakeTty({ columns: 100, rows: 24 })
@@ -392,7 +382,7 @@ describe("TUI slash commands (CMD-02..CMD-09)", () => {
     }
   })
 
-  test("/view expand membedakan daftar kosong vs id tidak ditemukan", async () => {
+  test("/view expand sudah dihapus — bukan lagi sub-aksi yang valid", async () => {
     const dir = makeTmp("minicode-tui-expand-")
     tty = installFakeTty({ columns: 90, rows: 24 })
     let runP: Promise<void> | null = runTui(makeFakeTuiSession(dir))
@@ -400,16 +390,12 @@ describe("TUI slash commands (CMD-02..CMD-09)", () => {
       await tty.ready()
       await tty.waitForOutput((o) => o.includes("00.00.00"))
 
+      // v0.33: /expand dihapus; riwayat penuh ada di sidebar. Perintah ini
+      // kini ditolak dengan petunjuk aksi /view yang tersisa.
       await tty.send("/view expand")
       await tty.send(KEY.enter)
-      // v7.30: hasil /view expand = toast di footer, bukan baris transkrip.
-      await tty.waitForScreen((f) => (f[f.length - 1] ?? "").includes(t("tui.expandEmpty")))
-
-      await tty.send("/view expand tidak-ada-id")
-      await tty.send(KEY.enter)
-      await tty.waitForScreen((f) =>
-        (f[f.length - 1] ?? "").includes(t("tui.expandNotFound", { id: "tidak-ada-id" })),
-      )
+      await tty.waitForScreen((f) => (f[f.length - 1] ?? "").includes(t("tui.viewUse")))
+      expect(tty!.screen().join("\n")).not.toContain(t("tui.expandEmpty"))
 
       await tty.send("/exit")
       await tty.send(KEY.enter)

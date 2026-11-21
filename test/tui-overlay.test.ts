@@ -12,8 +12,8 @@ import { attachSimpleLogger } from "../src/ui/assistant/simple.ts"
 import { ESC, stripAnsi } from "../src/ui/render/theme.ts"
 import { displayWidth } from "../src/ui/render/width.ts"
 import { resetAltScreenDepth } from "../src/ui/runtime/screen.ts"
-import { popupBoxWidth } from "../src/ui/screens/dialog.ts"
 import { runPicker } from "../src/ui/screens/picker.ts"
+import { windowWidth } from "../src/ui/screens/window.ts"
 import { UiSessionState } from "../src/ui/session-state.ts"
 import { createFakeBus, type FakeTty, installFakeTty, KEY } from "./helpers/tui-harness.ts"
 
@@ -179,10 +179,10 @@ describe("picker popup: region di atas layar, hormat ukuran terminal", () => {
     await tty.ready()
     const boxWidthOf = () =>
       displayWidth((tty!.screen().find((l) => l.includes("─") || l.includes("-")) ?? "").trim())
-    expect(boxWidthOf()).toBe(popupBoxWidth(100))
+    expect(boxWidthOf()).toBe(windowWidth(100))
     tty.resize(50, 16)
     await tty.send("", 40)
-    expect(boxWidthOf()).toBe(popupBoxWidth(50))
+    expect(boxWidthOf()).toBe(windowWidth(50))
     await tty.send(KEY.esc, 30)
     await p
   })

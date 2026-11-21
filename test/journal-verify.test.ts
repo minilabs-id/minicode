@@ -203,7 +203,9 @@ test("verify: hanya 15 kelas mutasi yang menulis saat event aktual", async () =>
     }
     // v7.40: 41 tool → jurnal async butuh >5s di bawah beban suite penuh;
     // polling 20s (bukan sleep) menjaga determinisme tanpa melemahkan asersi.
-    const recs = await waitLines("cl1", dir, 12, 20_000)
+    // Harus menunggu 15 baris (jumlah tool mutasi yang diharapkan di bawah),
+    // bukan 12 — kalau tidak, asersi bisa membaca sebelum semua jurnal masuk.
+    const recs = await waitLines("cl1", dir, 15, 20_000)
     const tools = new Set(recs.map((r) => r.tool))
     expect([...tools].sort()).toEqual(
       [

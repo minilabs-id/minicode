@@ -128,7 +128,8 @@ describe("transient arbitration", () => {
     expect(tty.allErr()).not.toContain("Menyiapkan sesi")
     // Isi layar tetap utuh di stdout pada periode yang sama.
     expect(stripAnsi(tty.all())).toContain("DeepSeek")
-    expect(stripAnsi(tty.all())).not.toContain("Select gateway")
+    // v0.33: semua jendela kini punya judul —picker tak lagi menyembunyikannya.
+    expect(stripAnsi(tty.all())).toContain("Select gateway")
     await tty.send(KEY.enter, 40)
     await p
     expect(picked.value).toBe("https://api.deepseek.com")

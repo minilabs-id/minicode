@@ -44,9 +44,11 @@ test("komunikasi: blok Communication memuat direktif narasi utama", async () => 
     // Konfirmasi singkat sebelum task non-trivial (bukan dokumen rencana).
     expect(comm).toMatch(/restate the goal and approach/i)
     expect(comm).toMatch(/not a plan/i)
-    // Pengumuman sebelum tool call non-rutin, tanpa mengumumkan tiap read.
-    expect(comm).toMatch(/non-routine tool calls/i)
+    // v0.33: SATU aturan batch (dulu 3 aturan bertumpang tindih dengan
+    // "Be concise" → model diam di content).
+    expect(comm).toMatch(/Before a BATCH of tools/i)
     expect(comm).toMatch(/don't announce every read/i)
+    expect(comm).toMatch(/No silent chains of tool calls/i)
     // Ringkasan delegasi + penandaan ketidaksesuaian antar agen / dg repo.
     expect(comm).toMatch(/name the sub-agents and why/i)
     expect(comm).toMatch(/summarize their findings/i)
@@ -56,8 +58,17 @@ test("komunikasi: blok Communication memuat direktif narasi utama", async () => 
     expect(comm).toMatch(/done, but \.\.\./i)
     // Tidak minta izin untuk langkah biasa.
     expect(comm).toMatch(/blocked on a real decision/i)
-    // Narasi mengikuti aturan bahasa yang sama dengan balasan.
-    expect(comm).toMatch(/Narrate in the user's language/i)
+    // Narasi mengikuti aturan bahasa yang sama dengan balasan (anchor di ekor blok inti).
+    expect(comm).toMatch(/Every visible sentence stays in the user's language/i)
+    // v0.33: narasi WAJIB di kanal terlihat + aktif sebelum/sesudah tool.
+    expect(comm).toMatch(/NORMAL VISIBLE assistant text/i)
+    expect(comm).toMatch(/NEVER put user-facing narration inside reasoning/i)
+    expect(comm).toMatch(/tool status and activity separately/i)
+    const lang = sectionOf(sys, "# Language")
+    expect(lang).toMatch(/EVERY user-visible sentence/i)
+    expect(lang).toMatch(/NOT a language cue/i)
+    expect(lang).toMatch(/never copy it into visible text/i)
+    expect(lang).not.toMatch(/may reason in whatever language/i)
   } finally {
     await cleanup(dir)
   }
@@ -98,9 +109,15 @@ test("komunikasi: baris delegasi di How to work mendorong sub-agent awal & paral
   try {
     const sys = await buildSystemPrompt({ cwd: dir })
     const howto = sectionOf(sys, "# How to work")
-    expect(howto).toMatch(/sub-agents EARLY/i)
-    expect(howto).toMatch(/≤5 findings each/i)
-    expect(howto).toMatch(/instead of doing everything serially/i)
+    // v0.33: sadar-budget (5 temuan / 5 step / 300 dtk) + aturan stop saat
+    // delegasi gagal, bukan sekadar "EARLY" tanpa batas.
+    expect(howto).toMatch(/delegate only genuinely parallel, scoped research\/audit work/i)
+    // v0.33: prompt TIDAK boleh memuat angka step (dulu ≤5 → maxSteps eksplisit
+    // → eskalasi mati). Model mengirim `scope`, runtime yang mengatur budget.
+    expect(howto).not.toMatch(/≤\s*5\s*steps/i)
+    expect(howto).toMatch(/explicit `scope`/i)
+    expect(howto).toMatch(/Do NOT set `maxSteps`/i)
+    expect(howto).toMatch(/NEVER re-delegate the same scope/i)
     // fail-safe: aturan wewenang/work-mode tetap disebut, tak dihapus.
     expect(howto).toMatch(/authorization and work-mode rules/i)
   } finally {

@@ -187,7 +187,10 @@ export const EXECUTION_PATHS: Readonly<Record<string, RegisteredPath>> = {
   },
   "src/policy/pricing.ts": {
     cls: "external-integration",
-    entry: "syncPricing (fetch models.dev)",
+    entry: "syncPricing (fetchPinnedUrl models.dev)",
+    // v0.33: fetch global diganti fetchPinnedUrl (SSRF/IP-pin) — efek
+    // jaringan tetap sama, tapi penanda generik `fetch(` tak lagi cocok.
+    proof: "fetchPinnedUrl(",
     note: "Cache harga. Tanpa efek ke workspace.",
   },
   "src/policy/tokenizer-registry.ts": {

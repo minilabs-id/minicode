@@ -268,6 +268,59 @@ export const cappedRecovery = {
   },
 }
 
+/**
+ * Telemetri retry yang dikirim lewat bus kernel (`provider:extension` kind
+ * `minicode:retry`) supaya TUI bisa menampilkan SATU baris status yang
+ * diperbarui di tempat. Angka `attempt`/`quota` berasal dari kebijakan
+ * pemulihan yang sudah ada (bukan penghitung baru), jadi yang tampil benar-
+ * benar percobaan yang sedang dijalankan — bukan "progres" rekaan.
+ */
+export interface RecoveryRetryTelemetry {
+  /** Percobaan ke-n (1-based) pada putaran provider saat ini. */
+  readonly attempt: number
+  /** Kuota percobaan dari anggaran bersama (`RECOVERY_ATTEMPT_QUOTA`). */
+  readonly quota: number
+  /** Kategori ProviderError yang memicu retry (bila ada). */
+  readonly category?: string
+  /** Durasi stall (ms) yang TERCANTUM di pesan error guard; 0 = bukan stall. */
+  readonly stalledMs: number
+  /** Jeda jitter nyata yang dipilih kebijakan sebelum percobaan berikutnya. */
+  readonly delayMs: number
+}
+
+/** Kind event bus untuk telemetri retry — kontrak struktural dengan UiBus. */
+export const RECOVERY_RETRY_EVENT_KIND = "minicode:retry"
+
+/**
+ * Kuota yang BENAR-BENAR dipakai untuk kategori ini.
+ *
+ * KENAPA tidak selalu `RECOVERY_ATTEMPT_QUOTA`: `cappedRecovery` memakai
+ * anggaran bersama (6) hanya untuk server/network; kategori lain yang masih
+ * di-retry jatuh ke kebijakan kernel (`maxProviderRetries` = 3, sama dengan
+ * `RATE_LIMIT_RETRY_ATTEMPTS`). Menampilkan "x/6" untuk retry 429 akan
+ * berbohong, dan itulah yang dicegah fungsi ini.
+ */
+export function recoveryQuotaFor(category: string | undefined): number {
+  return category === "server" || category === "network"
+    ? RECOVERY_ATTEMPT_QUOTA
+    : RATE_LIMIT_RETRY_ATTEMPTS
+}
+
+/**
+ * Ambil durasi idle dari pesan guard (`provider sent nothing for 60000ms …`).
+ *
+ * KENAPA di-parse dari pesan asli, bukan dari konfigurasi: angka di layar
+ * harus sama dengan yang benar-benar dipakai koneksi itu. Kalau guard
+ * diubah (mis. per-model timeout), pesan errornya ikut berubah dan label
+ * UI otomatis jujur tanpa drift konstanta. Null = bukan kegagalan stall.
+ */
+export function stalledMsFromMessage(message: string): number | undefined {
+  const match = /sent nothing for (\d+)ms/i.exec(message)
+  if (!match) return undefined
+  const ms = Number(match[1])
+  return Number.isFinite(ms) && ms > 0 ? ms : undefined
+}
+
 export type PermissionControl = {
   setMode(
     m: "auto" | "readonly" | "plan" | "allow-all" | "ask" | "allowlist" | "unrestricted",
@@ -437,8 +490,6 @@ export async function createMinicodeSession(
     Omit<SessionConfig, "permissions" | "estimator" | "recovery" | "system" | "executor">
   > & {
     systemExtra?: string
-    /** Bahasa chat model ("id"/"en"); undefined = tanpa direktif (test/bench). */
-    lang?: "en" | "id"
     cwd?: string
     /** Live model identity used for per-model token calibration. */
     getContextModel?: () => string | undefined
@@ -590,7 +641,8 @@ export async function createMinicodeSession(
     cwd: defaultCwd,
     extra: opts.systemExtra ?? "",
     signal: (opts as unknown as { signal?: AbortSignal }).signal,
-    lang: opts.lang,
+    // v0.33: cadangkan ruang untuk hint live agar total system ≤ 8000 char.
+    reserveForLiveHints: 1200,
     allowLocalConfig: opts.allowLocalConfig,
   })
   const {
@@ -1275,6 +1327,37 @@ export async function createMinicodeSession(
     },
   }
   const liveToolSchemas = () => visibleWireToolSchemas(registeredTools, hiddenWireTools)
+  // [retry-visibility] Bungkus kebijakan pemulihan PER SESI dengan telemetri.
+  // `cappedRecovery` sengaja tetap murni (dipakai langsung oleh test dan
+  // pemanggil library), sehingga event dipancarkan dari sini — setelah `core`
+  // ada — lewat sink yang diisi di bawah. Retry yang TIDAK jadi (throw /
+  // compact) sengaja tak memancarkan apa pun: jangan mengklaim kemajuan yang
+  // tidak nyata.
+  let retrySink: ((info: RecoveryRetryTelemetry) => void) | undefined
+  const recoveryWithTelemetry: typeof cappedRecovery = {
+    onError(error, attempt) {
+      const action = cappedRecovery.onError(error, attempt)
+      if (action.type === "retry") {
+        try {
+          retrySink?.({
+            attempt,
+            quota: recoveryQuotaFor(error.category),
+            category: error.category,
+            stalledMs: stalledMsFromMessage(error.message) ?? 0,
+            delayMs: action.delayMs,
+          })
+        } catch {
+          // Observability TAK BOLEH menggagalkan turn: bus yang rusak harus
+          // dibungkam seperti listener kernel lain (fail-open di sini aman
+          // karena tidak ada keputusan keamanan yang bergantung pada ini).
+        }
+      }
+      return action
+    },
+    onLength(compacted) {
+      return cappedRecovery.onLength(compacted)
+    },
+  }
   const core = createCoreSession({
     ...rest,
     contextWindowTokens: contextWindowForModel(currentContextModel()),
@@ -1293,7 +1376,7 @@ export async function createMinicodeSession(
     permissions: withEffectBarrier,
     permissionMode: livePermissionMode,
     estimator: calibratedEstimator,
-    recovery: cappedRecovery,
+    recovery: recoveryWithTelemetry,
     executor: parallelExecutor({
       getAuthorizationVersion: () => authorizationVersion,
       concurrency: safeConcurrency ?? LIMITS.EXECUTOR_CONCURRENCY,
@@ -1303,6 +1386,16 @@ export async function createMinicodeSession(
     ...(turnCount !== undefined ? { turnCount } : {}),
     ...(stepCount !== undefined ? { stepCount } : {}),
   })
+  // Sink dipasang SETELAH core ada: policy di atas dipanggil kernel saat
+  // `stream()`, jadi event harus lewat bus yang SAMA dengan yang disubscribe
+  // TUI (cli/tui.ts melempar `session.events` sebagai UiBus apa adanya).
+  retrySink = (info) => {
+    core.events.emit({
+      type: "provider:extension",
+      kind: RECOVERY_RETRY_EVENT_KIND,
+      data: info,
+    })
+  }
   core.events.on("context:compacted", () => {
     lastProviderInputTokens = undefined
   })

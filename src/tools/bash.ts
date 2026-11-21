@@ -276,7 +276,7 @@ function makeBashTool(ownerSid: string | null): Tool {
     // tool; yang HARUS tetap ada adalah aturan "jangan retry buta" (penting
     // untuk command ber-efek samping) dan petunjuk Windows (dipindah ke `cmd`).
     description:
-      "SHELL: Run a shell command (30s timeout, 20k output cap, exit prefixed). background:true for long jobs — collect via bash_output, stop via bash_kill. Prefer git_status/git_diff/git_log and read_file/edit over raw shell. On allowlist denial do NOT retry blindly; use the dedicated tool or ask the operator to rerun with --allow-all/--sandbox docker.",
+      "SHELL: Run a shell command (30s timeout, 20k output cap, exit prefixed). background:true for long jobs — collect via bash_output, stop via bash_kill. Prefer git_status/git_diff/git_log and read_file/edit over raw shell; on Windows use dir /b or Get-Content, not for %f / more. On allowlist denial do NOT retry blindly: switch to read_file/edit or ask the operator to rerun with --allow-all/--sandbox docker.",
     parameters: {
       type: "object",
       properties: {

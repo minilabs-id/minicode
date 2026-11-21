@@ -121,11 +121,16 @@ export function decorateMarkdown(text: string): string {
       continue
     }
 
-    // v7.29: heading memakai accent+bold (OpenCode: heading plain, tetapi di
-    // renderer flat kita butuh penanda visual; tetap tanpa box/garis).
+    // v0.33: heading mengikuti TUI — tanda `#` DIBUANG dan isi memakai
+    // renderInline, supaya tidak ada artefak markdown mentah di jawaban.
+    // Dua baris kosong sebelum bab juga disamakan dengan formatAssistantSpacing.
     if (/^#{1,6}\s/.test(line)) {
-      if (out.length > 0 && out[out.length - 1] !== "") out.push("")
-      out.push(`${margin}${c.accentBold(line)}`)
+      if (/^#{1,3}\s/.test(line) && out.length > 0) {
+        let blanks = 0
+        for (let i = out.length - 1; i >= 0 && out[i] === ""; i--) blanks++
+        for (let i = blanks; i < 2; i++) out.push("")
+      }
+      out.push(`${margin}${c.bold(renderInline(line.replace(/^#{1,6}\s+/, "")))}`)
       continue
     }
 

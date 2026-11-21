@@ -11,6 +11,7 @@ import { ProviderError } from "#minicore/core/errors.ts"
 import { createSession } from "#minicore/core/index.ts"
 import type { Message } from "#minicore/core/types.ts"
 import { allowAll, FakeProvider } from "#minicore/test/fakes.ts"
+import { permissionModeHint, workModeHint } from "../src/app/session.ts"
 import { capMcpText } from "../src/mcp/client.ts"
 import { compactWithLlm } from "../src/policy/compaction.ts"
 import { buildSystemPrompt } from "../src/policy/context.ts"
@@ -369,19 +370,26 @@ test("audit: bahasa balasan mengikuti pengguna dan independen dari locale UI", a
   const dir = tmpRoot()
   try {
     const noneSys = await buildSystemPrompt({ cwd: dir })
-    for (const lang of ["id", "en"] as const) {
-      const sys = await buildSystemPrompt({ cwd: dir, lang })
-      expect(sys).toBe(noneSys)
-    }
-    expect(noneSys).toContain("Respond in the language used by the user")
-    expect(noneSys).toContain("user's explicit response-language preference")
-    expect(noneSys).toContain("adapt when they switch languages")
+    // v0.33: satu aturan bahasa yang kuat + anchor, bukan 6 versi + escape hatch.
+    expect(noneSys).toContain("Use the user's language for EVERY user-visible sentence")
     expect(noneSys).toContain("continue in the established conversation language")
-    expect(noneSys).toContain("not quoted text, code, logs, tool output, or repository content")
-    expect(noneSys).toContain("Do not use the operating system, Windows regional settings")
-    expect(noneSys).toContain("progress updates, questions, and final answers")
+    expect(noneSys).toContain("they are NOT a language cue")
+    expect(noneSys).toContain("never copy it into visible text")
+    expect(noneSys).toContain("Every visible sentence stays in the user's language")
+    expect(noneSys).not.toContain("You may reason in whatever language is most effective")
     expect(noneSys).not.toContain("Selalu balas dalam bahasa Indonesia")
     expect(noneSys).not.toContain("Respond in English")
+  } finally {
+    await cleanup(dir)
+  }
+})
+
+test("audit: system final (base + hint live) tetap ≤ 8000 char", async () => {
+  const dir = tmpRoot()
+  try {
+    const base = await buildSystemPrompt({ cwd: dir, reserveForLiveHints: 1200 })
+    const hints = workModeHint("DISCUSS") + permissionModeHint("auto", "DISCUSS")
+    expect(base.length + hints.length).toBeLessThanOrEqual(8000)
   } finally {
     await cleanup(dir)
   }

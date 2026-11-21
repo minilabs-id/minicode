@@ -1,66 +1,23 @@
-// Regresi F3 — buffer thinking yang memotong head harus menandainya.
-// Latar: thinkingBuf.slice(-200_000) membuang kepala diam-diam sehingga
-// operator percaya seluruh thinking tersedia di /expand (temuan audit F3).
-// Marker mengikuti terminologi repo ("… (N more…)", ", capped 1MB").
-// Test ini HARUS gagal di kode lama (tanpa marker).
-import { describe, expect, test } from "bun:test"
-import { attachSimpleLogger } from "../src/ui/assistant/simple.ts"
-import { clearCollapsedSections, collapsedSectionsSnapshot } from "../src/ui/render/collapse.ts"
-import { setReasoningVisible } from "../src/ui/render/reasoning.ts"
+// v0.33 (audit F3) — riwayat thinking yang dipotong HARUS ditandai.
+// Latar lama: buffer slice(-200k) membuang kepala diam-diam. Sekarang
+// SidebarModel yang menyimpan histori dan menambah marker jujur saat cap.
+import { expect, test } from "bun:test"
+import { setSessionLocale } from "../src/ui/i18n/locale.ts"
+import { SidebarModel } from "../src/ui/render/sidebar-model.ts"
 
-function makeBus(): {
-  on(type: string, h: (e: never) => void): () => void
-  emit(type: string, ev: never): void
-} {
-  const map = new Map<string, ((e: never) => void)[]>()
-  return {
-    on(type: string, h: (e: never) => void): () => void {
-      const list = map.get(type) ?? []
-      list.push(h)
-      map.set(type, list)
-      return () => {}
-    },
-    emit(type: string, ev: never): void {
-      for (const h of map.get(type) ?? []) h(ev)
-    },
-  }
-}
+test("thinking >200KB: marker head terpotong muncul di snapshot", () => {
+  setSessionLocale("en")
+  const m = new SidebarModel()
+  m.ingestThinking("t".repeat(250_000))
+  const lines = m.snapshot(80).thinking.join("\n")
+  // wrapByWidth menambah newline tiap 80 kolom — allowance 10rb char.
+  expect(lines.length).toBeLessThanOrEqual(210_000)
+  expect(lines).toContain("older items trimmed")
+})
 
-describe("F3: marker truncasi thinking", () => {
-  test("thinking >200KB: /expand membawa marker head terpotong", () => {
-    clearCollapsedSections()
-    // Minimized eksplisit (default thinking kini expanded) → path buffer/truncasi.
-    setReasoningVisible(false)
-    const bus = makeBus()
-    const detach = attachSimpleLogger(bus, {})
-    bus.emit("turn:started", { turn: 0 } as never)
-    bus.emit("provider:extension", {
-      kind: "reasoning",
-      data: { text: "t".repeat(250_000) },
-    } as never)
-    bus.emit("turn:completed", {} as never)
-    detach()
-    const secs = collapsedSectionsSnapshot()
-    const thinking = secs.find((s) => s.label === "thinking" || s.text.includes("t".repeat(100)))
-    expect(thinking).toBeTruthy()
-    expect(thinking!.text.length).toBeLessThanOrEqual(200_000 + 200)
-    expect(thinking!.text).toContain("truncated")
-    clearCollapsedSections()
-  })
-
-  test("thinking kecil: tanpa marker (tak ada yang dibuang)", () => {
-    clearCollapsedSections()
-    setReasoningVisible(false)
-    const bus = makeBus()
-    const detach = attachSimpleLogger(bus, {})
-    bus.emit("turn:started", { turn: 0 } as never)
-    bus.emit("provider:extension", { kind: "reasoning", data: { text: "pendek" } } as never)
-    bus.emit("turn:completed", {} as never)
-    detach()
-    const secs = collapsedSectionsSnapshot()
-    const thinking = secs.find((s) => s.text.includes("pendek"))
-    expect(thinking).toBeTruthy()
-    expect(thinking!.text).not.toContain("truncated")
-    clearCollapsedSections()
-  })
+test("thinking kecil: tanpa marker", () => {
+  setSessionLocale("en")
+  const m = new SidebarModel()
+  m.ingestThinking("pendek")
+  expect(m.snapshot(80).thinking.join("\n")).not.toContain("trimmed")
 })

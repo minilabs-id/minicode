@@ -227,6 +227,11 @@ describe("TuiApp", () => {
     expect(tty!.all()).toContain("\x1b[?1049h")
     expect(tty!.all()).toContain("\x1b[?1002h")
     expect(tty!.all()).toContain("\x1b[?1006h")
+    // v0.33: mode mouse basi dari proses yang di-kill WAJIB dimatikan dulu
+    // sebelum mode sesi dinyalakan — kalau tidak, SGR klik/scroll bocor
+    // sebagai deretan angka ke shell setelah TUI keluar.
+    const stream = tty!.all()
+    expect(stream.indexOf("\x1b[?1006l")).toBeLessThan(stream.indexOf("\x1b[?1006h"))
     expect(tty!.allErr()).toBe("")
     await tty!.send(KEY.ctrlD)
     const res = await runP
@@ -237,6 +242,35 @@ describe("TuiApp", () => {
     expect(tty!.all()).toContain("\x1b[?1002l")
     expect(tty!.all()).toContain("\x1b[?1000l")
   })
+  test("v0.33: terminal lebar memuat sidebar dua kotak, frame tetap tepat rows", async () => {
+    const { app } = setup({ columns: 120, rows: 30 })
+    const runP = app.run()
+    await tty!.ready()
+    await tty!.waitForOutput((o) => o.includes("00.00.00"))
+    const frame = tty!.screen()
+    expect(frame).toHaveLength(30)
+    // Dua judul kotak + pemisah harus hadir di kolom kanan.
+    const text = frame.join("\n")
+    expect(text).toContain("Thinking")
+    expect(text).toContain("Activity")
+    // Footer tetap full-width (terakhir baris frame).
+    expect(frame[frame.length - 1]).toContain("Discuss")
+    await tty!.send(KEY.ctrlD)
+    await runP
+  })
+
+  test("v0.33: terminal sempit memakai layout satu kolom (tanpa sidebar)", async () => {
+    const { app } = setup({ columns: 80, rows: 20 })
+    const runP = app.run()
+    await tty!.ready()
+    await tty!.waitForOutput((o) => o.includes("00.00.00"))
+    const text = tty!.screen().join("\n")
+    expect(text).not.toContain("Thinking")
+    expect(text).not.toContain("Activity")
+    await tty!.send(KEY.ctrlD)
+    await runP
+  })
+
   test("initial paint exception memulihkan layar, raw mode, listeners, dan timer", async () => {
     const failure = new Error("status awal gagal")
     const { app, bus } = setup({
@@ -716,12 +750,14 @@ describe("TuiApp", () => {
     const runP = app.run()
     await tty!.ready()
     await tty!.waitForOutput((o) => o.includes("00.00.00"))
-    const TOTAL = 34
+    // v0.33: viewH menyusut 1 karena gap transkrip↔composer. TOTAL naik supaya
+    // premise "page lama (viewH-1) tak cukup" tetap terpenuhi.
+    const TOTAL = 40
     transcript.pushInfo(
       Array.from({ length: TOTAL }, (_, i) => `baris-${String(i).padStart(2, "0")}`),
     )
     await tty!.send("x") // ketikan → followTail, ekor tampil
-    await tty!.waitForScreen((frame) => frame.some((l) => l.includes("baris-33")))
+    await tty!.waitForScreen((frame) => frame.some((l) => l.includes("baris-39")))
     // viewH = jumlah baris transkrip terlihat saat ekor (viewport penuh).
     const viewH = (screenText().match(/baris-\d+/g) ?? []).length
     expect(viewH).toBeGreaterThan(1)
@@ -736,7 +772,7 @@ describe("TuiApp", () => {
     expect(screenText()).toContain("baris-00")
     for (let i = 0; i < steps; i++) await tty!.send(KEY.pgDown)
     // Tepat sejumlah langkah penuh ekor HARUS tampil — bukan satu langkah lagi.
-    expect(screenText()).toContain("baris-33")
+    expect(screenText()).toContain("baris-39")
     await tty!.send(KEY.ctrlD)
     await runP
   })
@@ -749,11 +785,12 @@ describe("TuiApp", () => {
     await tty!.send("x")
     await tty!.waitForScreen((frame) => frame.some((line) => line.includes("baris-29")))
     await tty!.send(KEY.mouseWheelUpSgr)
-    expect(screenText()).not.toContain("baris-29")
+    // v0.33: wheel di-coalescing 16 ms — tunggu repaint sebelum cek.
+    await tty!.waitForScreen((frame) => !frame.some((line) => line.includes("baris-29")))
     // v7.42: baris prompt kini diawali margin 3 kolom.
     expect(screenText()).toContain("   minicode › x")
     await tty!.send(KEY.mouseWheelDownSgr)
-    expect(screenText()).toContain("baris-29")
+    await tty!.waitForScreen((frame) => frame.some((line) => line.includes("baris-29")))
     await tty!.send(KEY.backspace)
     await tty!.send(KEY.ctrlD)
     await runP
@@ -802,7 +839,8 @@ describe("TuiApp", () => {
     const screen = tty!.screen()
     const visible = screen
       .map((line, index) => ({ line, row: index + 1 }))
-      .filter((item) => item.line.startsWith("baris-"))
+      // v0.33: semua baris transkrip (termasuk pushInfo) pakai margin 3.
+      .filter((item) => item.line.trimStart().startsWith("baris-"))
     expect(visible.length).toBeGreaterThan(1)
     const start = visible[0]!.row
     const end = visible[Math.min(2, visible.length - 1)]!.row
@@ -812,7 +850,8 @@ describe("TuiApp", () => {
     await tty!.send(`\x1b[<0;${endX};${end}m`)
     expect(tty!.all()).toContain("\x1b[7m")
     await tty!.send(KEY.ctrlC)
-    expect(copied[0]).toBe("baris-21\nbaris-22\nbaris-23")
+    // v0.33: gap transkrip↔composer menggeser viewport 1 baris.
+    expect(copied[0]).toBe("baris-22\nbaris-23\nbaris-24")
     // v7.30: kwitansi salin di footer (toast), BUKAN baris transkrip permanen.
     const rows = tty!.screen()
     expect(rows[rows.length - 1]).toContain("selection copied")
@@ -834,7 +873,8 @@ describe("TuiApp", () => {
     const visible = tty!
       .screen()
       .map((line, index) => ({ line, row: index + 1 }))
-      .filter((item) => item.line.startsWith("busy-"))
+      // v0.33: margin 3 berlaku juga untuk baris info saat turn busy.
+      .filter((item) => item.line.trimStart().startsWith("busy-"))
     const start = visible[0]!.row
     const end = visible[1]!.row
     const endX = visible[1]!.line.length + 1
@@ -1285,6 +1325,39 @@ describe("TuiApp", () => {
     await tty!.send(KEY.ctrlD)
     await runP
   })
+
+  test("v0.33: stream tanpa keypress mengikuti ekor (layar tak tertinggal)", async () => {
+    const { app, bus, transcript } = setup({ rows: 12 })
+    const runP = app.run()
+    await tty!.ready()
+    await tty!.waitForOutput((o) => o.includes("00.00.00"))
+    // Isi transkrip sampai overflow, lalu ketik untuk pin ke ekor.
+    transcript.pushInfo(Array.from({ length: 30 }, (_, i) => `lama-${i}`))
+    await tty!.send("x")
+    await new Promise((r) => setTimeout(r, 120))
+    await tty!.waitForScreen((frame) => frame.some((line) => line.includes("lama-29")))
+    // Stream baru TANPA keypress: viewport harus ikut ke bawah sendiri.
+    bus.emit("provider:text", { text: "baru-paling-akhir" })
+    bus.emit("turn:completed", {})
+    await new Promise((r) => setTimeout(r, 120))
+    // Tanpa keypress apa pun: teks terbaru HARUS sudah masuk viewport.
+    expect(tty!.screen().join("\n")).toContain("baru-paling-akhir")
+    await tty!.send(KEY.backspace) // Ctrl+D hanya keluar saat baris kosong (I19)
+    await tty!.send(KEY.ctrlD)
+    await runP
+  })
+
+  test("v0.33: gema prompt langsung terlihat tanpa keypress lanjutan", async () => {
+    const { app } = setup({ rows: 12 })
+    const runP = app.run()
+    await tty!.ready()
+    await tty!.waitForOutput((o) => o.includes("00.00.00"))
+    await tty!.send("halo-uniq\r")
+    await tty!.waitForScreen((frame) => frame.some((line) => line.includes("halo-uniq")), 2000)
+    await tty!.send(KEY.ctrlD)
+    await runP
+  })
+
   test("scroll ke atas + stream = indikator, ketikan kembali ke ekor", async () => {
     const { app, bus, transcript, screenText } = setup({ rows: 12 })
     const runP = app.run()
@@ -1298,11 +1371,11 @@ describe("TuiApp", () => {
     expect(screenText()).not.toContain("lama-19")
     bus.emit("provider:text", { text: "baru-0" })
     bus.emit("turn:completed", {})
-    await tty!.waitForScreen((frame) => frame.some((line) => line.includes("below")))
+    await tty!.waitForScreen((frame) => frame.some((line) => line.includes("new · PgDn")))
     expect(screenText()).toContain("PgDn")
     // Ketikan baru kembali ke ekor + indikator hilang.
     await tty!.send("y")
-    expect(screenText()).not.toContain("below")
+    expect(screenText()).not.toContain("new · PgDn")
     expect(screenText()).toContain("baru-0")
     await tty!.send(KEY.backspace)
     await tty!.send(KEY.backspace)

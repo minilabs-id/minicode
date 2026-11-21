@@ -187,6 +187,14 @@ function extractTarget(args: unknown): string | undefined {
   const cmd = a.cmd ?? a.command
   if (typeof cmd === "string" && cmd) return `$ ${cmd}`
   if (typeof a.file === "string" && a.file) return a.file
+  // v0.33: grep/glob dipanggil tanpa `path` (hanya `pattern`/`query`/`glob`).
+  // Tanpa ini baris anak tampil sebagai `grep` polos — pengguna tak tahu
+  // sedang mencari apa. Semua nilai diperlakukan sebagai teks tak terpercaya
+  // dan dipangkas di pemanggil (truncateToWidth + sanitizeAnsiLine).
+  for (const key of ["pattern", "query", "glob", "filePath"] as const) {
+    const v = a[key]
+    if (typeof v === "string" && v) return `${key}=${v}`
+  }
   return undefined
 }
 

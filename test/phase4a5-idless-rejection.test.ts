@@ -1,11 +1,12 @@
-// Phase 4A.5 regression protection: ALL-ID-LESS CANONICAL PAYLOAD REJECTION.
+// Phase 4A.5 regression protection — dimutakhirkan v0.33.
 //
-// THIS IS NEW ARCHITECTURE.
-//
-// THE RULE. `todo_write` is a FULL DECLARATION. Once canonical TaskStore identity
-// exists for a session, a declaration carrying no taskId at all cannot address
-// those tasks, so it is REJECTED rather than interpreted as "create them again".
-// That is the duplication debc295 documents.
+// THE RULE (baru). `todo_write` tetap FULL DECLARATION, dan payload id-lessinya
+// TIDAK boleh membuat duplikat. Bedanya dengan kontrak lama: bila SETIAP item
+// cocok persis dengan judul task kanonik yang sudah ada (jumlah sama), deklarasi
+// itu di-REPAIR ke taskId yang benar alih-alih ditolak. Ini perbaikan untuk
+// sesi lanjut yang mengirim ulang rencana 7 item tanpa taskId (model tidak
+// pernah diajar `todo_read`). Content yang TIDAK dikenal tetap ditolak dengan
+// TASK_IDENTITY_REQUIRED — jadi tidak ada task rekaan.
 //
 // The authority for "canonical identity already exists" is TASKSTORE, never the
 // legacy JSON file: a JSON file exists for every session that has ever written a
@@ -129,29 +130,30 @@ test("B. all-id-less with canonical identity present is rejected", async () => {
 // ---------------------------------------------------------------------------
 // C. reorder all-id-less -> REJECT, zero duplicates
 // ---------------------------------------------------------------------------
-test("C. the C/A/B all-id-less reorder is rejected and duplicates nothing", async () => {
+test("C. the C/A/B all-id-less reorder is repaired to existing ids, no duplicates", async () => {
   const dir = await ownedDir()
   seed(dir)
-  await expect(write(dir, REORDER_IDLESS)).rejects.toThrow()
-  // Exactly the original three rows. No t4, t5, t6.
+  const out = await write(dir, REORDER_IDLESS)
+  // Tiga id lama dipakai ulang (urutan mengikuti deklarasi), bukan t4/t5/t6.
+  expect(out).toContain("canonical-tasks")
   const after = rows(dir)
-  expect(after.map((t) => t.id)).toEqual(["t1", "t2", "t3"])
-  expect(after.map((t) => t.title)).toEqual(["A", "B", "C"])
-  expect(after.map((t) => t.revision)).toEqual([1, 1, 1])
+  expect(after.map((t) => t.id)).toEqual(["t3", "t1", "t2"])
+  expect(after.map((t) => t.title)).toEqual(["C", "A", "B"])
+  expect(new Set(after.map((t) => t.id))).toEqual(new Set(["t1", "t2", "t3"]))
+  expect(new TaskStore(dir).nextId(S)).toBe("t4")
 })
 
 // ---------------------------------------------------------------------------
 // D. retry -> still REJECT, still no duplicates
 // ---------------------------------------------------------------------------
-test("D. retrying the rejected payload is rejected again and mutates nothing", async () => {
+test("D. retrying the repaired payload is idempotent — still no duplicates", async () => {
   const dir = await ownedDir()
   seed(dir)
-  const before = rows(dir).map((t) => `${t.id}:${t.title}:${t.revision}`)
-  for (let attempt = 0; attempt < 3; attempt++) {
-    await expect(write(dir, REORDER_IDLESS)).rejects.toThrow()
-  }
-  expect(rows(dir).map((t) => `${t.id}:${t.title}:${t.revision}`)).toEqual(before)
+  for (let attempt = 0; attempt < 3; attempt++) await write(dir, REORDER_IDLESS)
+  // Tiga baris, tiga id sama; revisi naik karena update, bukan page_creation.
   expect(rows(dir)).toHaveLength(3)
+  expect(new Set(rows(dir).map((t) => t.id))).toEqual(new Set(["t1", "t2", "t3"]))
+  expect(new TaskStore(dir).nextId(S)).toBe("t4")
 })
 
 // ---------------------------------------------------------------------------
@@ -230,10 +232,11 @@ test("I. an empty declaration is rejected by normalizeTodos, before the 4A.5 gua
   expect(e.message).toMatch(/empty/i)
   // Canonical tasks are untouched: an empty declaration deletes nothing.
   expect(rows(dir).map((t) => t.id)).toEqual(["t1", "t2", "t3"])
-  // And the guard cannot be laundered through an empty write either: the NEXT
-  // all-id-less write is still rejected, because canonical rows survived.
-  await expect(write(dir, REORDER_IDLESS)).rejects.toThrow()
+  // Empty write tak mengubah kanonik: deklarasi id-less berikutnya tetap
+  // di-repair ke id lama (bukan error, bukan duplikat).
+  await write(dir, REORDER_IDLESS)
   expect(rows(dir)).toHaveLength(3)
+  expect(new TaskStore(dir).nextId(S)).toBe("t4")
 })
 
 // ---------------------------------------------------------------------------
@@ -246,13 +249,14 @@ test("J/K. rejection happens before ANY mutation: no rows, no ids, no JSON write
   await write(dir, [{ taskId: "t1", content: "A", status: "pending" }])
   const jsonBefore = await readFile(todoFile(dir), "utf8")
 
-  await expect(write(dir, REORDER_IDLESS)).rejects.toThrow()
+  await write(dir, REORDER_IDLESS)
 
-  // No TaskStore mutation and no new allocation.
-  expect(rows(dir).map((t) => t.id)).toEqual(["t1", "t2", "t3"])
-  // The legacy file was NOT replaced by the rejected payload.
-  expect(await readFile(todoFile(dir), "utf8")).toBe(jsonBefore)
-  // The next id is still t4: nothing was consumed.
+  // Perbaikan memakai id lama: tak ada baris/allocasi baru, JSON diperbarui
+  // dengan tiga taskId yang SAMA (urutan mengikuti deklarasi).
+  expect(new Set(rows(dir).map((t) => t.id))).toEqual(new Set(["t1", "t2", "t3"]))
+  const jsonAfter = await readFile(todoFile(dir), "utf8")
+  expect(jsonAfter).not.toBe(jsonBefore)
+  expect(jsonAfter).toContain("t3")
   expect(new TaskStore(dir).nextId(S)).toBe("t4")
 })
 
@@ -290,16 +294,19 @@ test("M. the rule is per MCP context: A rejects, B adopts (Fase 8)", async () =>
 
   const saved = applyMcpContext(ctxA, dir)
   try {
-    // A: rejected.
-    await expect(write(dir, REORDER_IDLESS, ctxA)).rejects.toThrow()
-    expect(rows(dir, ctxA)).toHaveLength(3)
+    // A: deklarasi id-less yang cocok persis di-repair ke t1/t2/t3 (tak ada
+    // task baru dan namespace B tak tersentuh).
+    await write(dir, REORDER_IDLESS, ctxA)
+    expect(new Set(rows(dir, ctxA).map((t) => t.id))).toEqual(new Set(["t1", "t2", "t3"]))
     // B: [Fase 8 / 8.3] id-less first write untuk B kini DIADOPSI (bukan legacy
     // JSON-only) sehingga tasks B tak lagi 0 rows; namespace A tak tersentuh.
     const outB = await write(dir, [{ content: "legacy in B", status: "pending" }], ctxB)
     expect(outB).toContain("canonical-tasks")
     expect(rows(dir, ctxB).map((t) => t.title)).toEqual(["legacy in B"])
-    expect(rows(dir, ctxA).map((t) => t.id)).toEqual(["t1", "t2", "t3"])
-    expect(existsSync(todoFile(dir, `${ctxA.replace(/:/g, "-")}.json`))).toBe(false)
+    // Repair memakai tiga id lama (urutan mengikuti deklarasi C/A/B).
+    expect(new Set(rows(dir, ctxA).map((t) => t.id))).toEqual(new Set(["t1", "t2", "t3"]))
+    // Context B tetap punya task sendiri; namespace A tak ikut berubah.
+    expect(rows(dir, ctxB)).toHaveLength(1)
   } finally {
     todoSession.id = saved.prevId
     todoSession.cwd = saved.prevCwd
@@ -316,8 +323,8 @@ test("N. after a resume the same session still rejects, with no new ids", async 
   const before = rows(dir).map((t) => t.id)
   todoSession.id = S
   todoSession.cwd = dir
-  await expect(write(dir, REORDER_IDLESS, S)).rejects.toThrow()
-  expect(rows(dir).map((t) => t.id)).toEqual(before)
+  await write(dir, REORDER_IDLESS, S)
+  expect(new Set(rows(dir).map((t) => t.id))).toEqual(new Set(before))
   expect(new TaskStore(dir).nextId(S)).toBe("t4")
 })
 
@@ -327,7 +334,11 @@ test("N. after a resume the same session still rejects, with no new ids", async 
 test("O. the rejection is a dedicated code with actionable, model-visible text", async () => {
   const dir = await ownedDir()
   seed(dir)
-  const e = (await write(dir, REORDER_IDLESS).catch((x) => x)) as { code?: string; message: string }
+  // Konten yang TIDAK ada di kanonik tetap ditolak — ini yang dijaga kontrak.
+  const e = (await write(dir, [{ content: "ghost task", status: "pending" }]).catch((x) => x)) as {
+    code?: string
+    message: string
+  }
   // A dedicated code, not an overload of TASK_INVALID_ID.
   expect(e.code).toBe("TASK_IDENTITY_REQUIRED")
   // Actionable: names the remedy and the tool that provides it.

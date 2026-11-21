@@ -469,6 +469,25 @@ export const glyphs = {
     // Fallback * untuk terminal tanpa UTF-8.
     return supportsUtf8() ? "✦" : "*"
   },
+  get agentIcon() {
+    // v0.33: penanda kategori subagent di rekap turn. Sengaja 1 kolom &
+    // monokrom — emoji 🤖 lebarnya 2 kolom & beda antar-font (menggeser
+    // geometri tabel/seleksi). Getter (bukan const) agar mengikuti
+    // MINICODE_ASCII secara runtime, sesuai kontrak glyph di modul ini.
+    return supportsUtf8() ? "✦" : "*"
+  },
+  /** Penanda kategori model di jendela /model — 1 kolom, fallback ASCII. */
+  get modelIcon() {
+    return supportsUtf8() ? "✦" : "*"
+  },
+  /** Penanda kategori provider di jendela /provider — 1 kolom. */
+  get providerIcon() {
+    return supportsUtf8() ? "●" : "o"
+  },
+  /** Penanda kategori sesi di picker /sessions — 1 kolom. */
+  get sessionIcon() {
+    return supportsUtf8() ? "▸" : ">"
+  },
   // Badge bash allow-list (footer): titik monokrom, bukan emoji gembok —
   // emoji berwarna dan lebarnya beda antar-font (kolom footer bergeser).
   // ●/○ satu kolom dan tetap terbaca saat diwarnai; fallback teks ASCII.

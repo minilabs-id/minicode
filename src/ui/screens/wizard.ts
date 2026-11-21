@@ -5,16 +5,17 @@
 import { formatError } from "../assistant/simple.ts"
 import { t } from "../i18n/locale.ts"
 import { createDecoderState, createKeyStreamPump } from "../input/prompt-engine.ts"
-import { hintLine } from "../render/hint.ts"
+import type { HintItem } from "../render/hint.ts"
 import { sanitizeAnsiLine } from "../render/sanitize.ts"
 import { c } from "../render/theme.ts"
 import { wrapByWidth } from "../render/width.ts"
 import { openAltScreen } from "../runtime/screen.ts"
-import { canRenderModal, dialogBox, popupBoxWidth } from "./dialog.ts"
+import { canRenderModal, type DialogSpec, dialogBox } from "./dialog.ts"
 import { IDLE_CANCEL_MS, IDLE_WARN_MS, runForm, validateUrl } from "./form.ts"
 import { createIdleTimer } from "./lifecycle.ts"
 import { runPicker } from "./picker.ts"
 import { withTimeout } from "./watchdog.ts"
+import { windowSpec, windowWidth } from "./window.ts"
 
 /**
  * Batas tunggu simpan-provider (audit 2026-11-12, MEDIUM-7).
@@ -35,6 +36,31 @@ export interface SetupWizardViewOptions {
   presets: readonly WizardPreset[]
   /** Simpan provider; kembalikan pesan sukses, atau lempar untuk gagal. */
   onSubmit(baseUrl: string, apiKey: string): Promise<string>
+}
+
+export interface WizardWindowOptions {
+  body: string[]
+  cols: number
+  rows: number
+  /** Aksi khusus langkah (mis. Enter = tutup pada dialog gagal). */
+  extraHints?: readonly HintItem[]
+}
+
+/**
+ * Satu frame untuk kotak wizard yang digambar langsung (deteksi, selesai,
+ * gagal). Memakai `windowSpec` — bukan helper lebar popup lama — supaya lebar,
+ * tinggi, dan footer identik dengan jendela lain di ukuran terminal yang sama.
+ * Judul selalu `wiz.title`: ini kotak status wizard, bukan langkah 1–3 yang
+ * judulnya dibawa picker/form. Diekspor sebagai seam test frame seragam.
+ */
+export function wizardWindowSpec(opts: WizardWindowOptions): DialogSpec {
+  return windowSpec({
+    title: t("wiz.title"),
+    body: opts.body,
+    cols: opts.cols,
+    rows: opts.rows,
+    ...(opts.extraHints ? { extraHints: opts.extraHints } : {}),
+  })
 }
 
 /** Tunggu tombol tutup (Enter/Esc/Ctrl+C/Ctrl+D) pada dialog error wizard. */
@@ -218,15 +244,14 @@ export async function runSetupWizardView(opts: SetupWizardViewOptions): Promise<
       }
     }
 
-    const statusWidth = popupBoxWidth(screen.cols || 80)
     // Progres sebagai baris dalam kotak (bukan spinner liar di bawah popup).
+    // Frame seragam: lebar/tinggi/footer dari windowSpec, judul tetap wiz.title.
     const box = dialogBox(
-      {
-        title: t("wiz.title"),
+      wizardWindowSpec({
         body: [c.muted(t("wiz.detecting"))],
-        minWidth: statusWidth,
-        maxWidth: statusWidth,
-      },
+        cols: screen.cols || 80,
+        rows: screen.rows || 24,
+      }),
       screen.cols,
       screen.rows,
     )
@@ -236,14 +261,14 @@ export async function runSetupWizardView(opts: SetupWizardViewOptions): Promise<
       const message = await withTimeout(() => opts.onSubmit(targetUrl, apiKey), 60_000)
       // Pesan dari jaringan (nama model/gateway) — sanitasi sebelum tampil.
       screen.clearRegion()
-      const doneWidth = popupBoxWidth(screen.cols || 80)
+      // Kotak sukses memakai frame yang SAMA dengan kotak deteksi — salient
+      // untuk transisi status tanpa "lompat lebar" saat pesan tiba.
       const doneBox = dialogBox(
-        {
-          title: t("wiz.title"),
+        wizardWindowSpec({
           body: [sanitizeAnsiLine(message), "", t("wiz.done")],
-          minWidth: doneWidth,
-          maxWidth: doneWidth,
-        },
+          cols: screen.cols || 80,
+          rows: screen.rows || 24,
+        }),
         screen.cols,
         screen.rows,
       )
@@ -255,22 +280,21 @@ export async function runSetupWizardView(opts: SetupWizardViewOptions): Promise<
       screen.clearRegion()
       const errRaw = t("wiz.detectFail", { msg: formatError(e) })
       const renderErr = () => {
-        const w = popupBoxWidth(screen.cols || 80)
-        const innerW = Math.max(10, Math.min(w - 4, (screen.cols || 80) - 6))
+        // Bungkus memakai lebar isi frame seragam (chrome dialogBox = 4 kolom),
+        // bukan lebar popup lama — kalau tidak, pesan error meluap saat resize.
+        const innerW = Math.max(10, windowWidth(screen.cols || 80) - 4)
         const wrapped = errRaw
           .split("\n")
           .flatMap((line) => (line.trim() ? wrapByWidth(c.error(line), innerW) : [""]))
+        // Esc cancel sudah jadi bagian windowFooter; yang khas langkah ini
+        // hanyalah Enter = tutup, dilewatkan sebagai extraHints.
         const errBox = dialogBox(
-          {
-            title: t("wiz.title"),
+          wizardWindowSpec({
             body: wrapped,
-            footer: hintLine([
-              { key: "Enter", label: t("hint.close") },
-              { key: "Esc", label: t("hint.cancel") },
-            ]),
-            minWidth: w,
-            maxWidth: w,
-          },
+            cols: screen.cols || 80,
+            rows: screen.rows || 24,
+            extraHints: [{ key: "Enter", label: t("hint.close") }],
+          }),
           screen.cols,
           screen.rows,
         )

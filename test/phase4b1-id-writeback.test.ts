@@ -310,27 +310,26 @@ test("8. the markdown plan snapshot is a legacy artifact without canonical ids",
 })
 
 // ---------------------------------------------------------------------------
-// 9. ordering preserved: the 4A.5 guard still rejects BEFORE any write
+// 9. ordering preserved: id-less reorder di-repair ke id lama, tanpa duplikat
 // ---------------------------------------------------------------------------
-test("9. the 4A.5 guard still fires before the FIRST write, so nothing is persisted", async () => {
+test("9. id-less reorder is repaired in place, without creating new ids", async () => {
   const dir = await ownedDir()
   seed(dir, ["A", "B", "C"])
   const before = await readFile(join(dir, ".minicode", "todos", `${S}.json`), "utf8").catch(
     () => "",
   )
-  await expect(
-    todoWriteTool.execute(
-      {
-        todos: [
-          { content: "C", status: "pending" },
-          { content: "A", status: "pending" },
-          { content: "B", status: "pending" },
-        ],
-      } as never,
-      opCtx(dir),
-    ),
-  ).rejects.toThrow()
+  await todoWriteTool.execute(
+    {
+      todos: [
+        { content: "C", status: "pending" },
+        { content: "A", status: "pending" },
+        { content: "B", status: "pending" },
+      ],
+    } as never,
+    opCtx(dir),
+  )
   const after = await readFile(join(dir, ".minicode", "todos", `${S}.json`), "utf8").catch(() => "")
-  expect(after).toBe(before)
-  expect(rows(dir).map((t) => t.id)).toEqual(["t1", "t2", "t3"])
+  // JSON ditulis ulang dengan taskId yang sama (urutan mengikuti deklarasi).
+  expect(after).not.toBe(before)
+  expect(new Set(rows(dir).map((t) => t.id))).toEqual(new Set(["t1", "t2", "t3"]))
 })

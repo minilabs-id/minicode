@@ -240,6 +240,10 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
   // State aliran markdown untuk memberi jeda bersih antar-poin, heading,
   // blockquote, tabel, dan code fence (paritas penuh dengan TUI Transcript).
   let answerFlow = new MarkdownFlowStepper()
+  // v0.33: hitung baris kosong yang sudah dipancarkan supaya bab (`###`) di
+  // printer linear dapat DUA baris kosong, sama seperti TUI. Direset tiap
+  // baris berisi — ini bukan state keamanan, murni kosmetik aliran teks.
+  let answerBlankRun = 0
   let activeProviderAttempt: number | null = null
   let attemptCopyText = ""
   let attemptAnswerBuf = ""
@@ -337,10 +341,9 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
     // konsisten dengan label "chars" dan tak menggandakan di /expand.
     const n = Array.from(stripAnsi(answerBuf)).length
     const cap = answerTruncated ? t("one.answerCap") : ""
-    // Petunjuk /expand WAJIB di baris ini: tanpa itu jawaban yang dikecilkan
-    // terlihat "bisu" (tak ada cara membuka yang bisa ditemukan user).
+    // v0.33: /expand dihapus — buffer collapsed tak lagi ditulis; cukup
+    // laporkan ukuran jawaban yang diringkas.
     wErr(c.info(t("one.answerMin", { n, cap })))
-    ui.rememberCollapsedSection("answer", answerBuf, "stdout")
     answerBuf = ""
     answerTruncated = false
   }
@@ -348,7 +351,7 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
   const flushThinking = () => {
     flushReasoningTail()
     if (thinkState === "min" && thinkingBuf) {
-      ui.rememberCollapsedSection("thinking", thinkingBuf)
+      // v0.33: thinking lengkap ada di SidebarModel (TUI); buffer /expand mati.
       thinkingBuf = ""
     }
     thinkState = "off"
@@ -375,12 +378,27 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
       return
     }
     if (line.trim() === "") {
-      if (answerFlow.onBlank()) emitAnswer("\n")
+      if (answerFlow.onBlank()) {
+        emitAnswer("\n")
+        answerBlankRun++
+      }
       return
     }
-    if (answerFlow.onLine(line)) emitAnswer("\n")
+    if (answerFlow.onLine(line)) {
+      emitAnswer("\n")
+      answerBlankRun++
+    }
+    if (/^#{1,6}\s/.test(line)) {
+      // Paritas dengan formatAssistantSpacing(): dua baris kosong sebelum
+      // setiap bab/poin utama, bukan satu.
+      while (answerBlankRun < 2) {
+        emitAnswer("\n")
+        answerBlankRun++
+      }
+    }
     emitAnswer(formatWrapped(decorateMarkdown(line), w))
     emitAnswer("\n")
+    answerBlankRun = 0
   }
   const consumePlainText = (text: string): void => {
     const combined = plainLineBuffer + text
@@ -630,6 +648,7 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
       answerBuf = ""
       answerTruncated = false
       answerFlow = new MarkdownFlowStepper()
+      answerBlankRun = 0
       activeProviderAttempt = null
       attemptCopyText = ""
       ui.clearCollapsedSections()
@@ -918,7 +937,7 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
           ? sanitizeAnsiLine(activity.summary)
           : fallbackToolLabel(name, args, target)
         wErr(c.info(`  + ${label}${suffix}\n`))
-        ui.rememberCollapsedSection(label, sanitizeAnsi(String(r.content ?? "")).trim())
+        // v0.33: detail tool pindah ke sidebar — tak ada buffer /expand lagi.
         return
       }
       if (name === "write_file" && target) {

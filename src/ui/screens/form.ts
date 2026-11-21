@@ -18,13 +18,14 @@ import {
   type DecoderState,
   toGraphemes,
 } from "../input/prompt-engine.ts"
-import { type HintItem, hintLine } from "../render/hint.ts"
+import type { HintItem } from "../render/hint.ts"
 import { sanitizeAnsiLine } from "../render/sanitize.ts"
 import { c, glyphs, stripAnsi } from "../render/theme.ts"
 import { displayWidth, truncateToWidth, wrapByWidth } from "../render/width.ts"
 import type { AltScreen } from "../runtime/screen.ts"
-import { boxLeftPad, dialogBox, popupBoxWidth } from "./dialog.ts"
+import { boxLeftPad, dialogBox } from "./dialog.ts"
 import { createIdleTimer } from "./lifecycle.ts"
+import { windowSpec, windowWidth } from "./window.ts"
 
 export interface FormField {
   id: string
@@ -81,31 +82,27 @@ interface FieldState {
 
 const dim = (s: string): string => c.dim(s)
 
-/** Lebar kotak form: `popupBoxWidth` — paritas picker/model/provider (AUD-006). */
-const formBoxWidth = (cols: number): number => popupBoxWidth(cols)
-
-/** Hint default mengikuti jenis field aktif: select/confirm butuh panah. */
-function defaultFooterHints(st: FieldState | undefined): HintItem[] {
-  // Select/confirm: panah adalah aksi utama; Tab tetap berlaku tetapi tidak
-  // diumumkan agar hint tetap satu baris di popup 48 kolom (80-col terminal).
+/**
+ * Hint tambahan spesifik-field. Nav/pilih/tutup (↑↓/Enter/Esc) sudah jadi
+ * bawaan windowFooter — jangan diduplikasi di sini. v0.33 menyatukan footer
+ * semua jendela lewat satu helper.
+ */
+function defaultExtraHints(st: FieldState | undefined): HintItem[] {
   if (st?.def.kind === "select") {
     return [
       { key: glyphs.leftRight, label: t("hint.select") },
       { key: "Enter", label: t("hint.save") },
-      { key: "Esc", label: t("hint.cancel") },
     ]
   }
   if (st?.def.kind === "confirm") {
     return [
       { key: `${glyphs.leftRight}/y/n`, label: t("hint.select") },
       { key: "Enter", label: t("hint.save") },
-      { key: "Esc", label: t("hint.cancel") },
     ]
   }
   return [
     { key: "Tab", label: t("hint.move") },
     { key: "Enter", label: t("hint.save") },
-    { key: "Esc", label: t("hint.cancel") },
   ]
 }
 
@@ -203,8 +200,10 @@ export async function runForm(spec: FormSpec, screen: AltScreen): Promise<FormRe
       idle.reset()
     }
 
-    // Lebar dinamis mengikuti terminal saat resize (tetap stabil saat error muncul/hilang).
-    const width = () => formBoxWidth(screen.cols || 80)
+    // Lebar dinamis mengikuti terminal saat resize (tetap stabil saat error
+    // muncul/hilang). v0.33: pakai aturan SERAGAM windowWidth(cols), bukan
+    // popupBoxWidth — satu rumus untuk semua jendela.
+    const width = () => windowWidth(screen.cols || 80)
     const innerW = () => Math.max(8, width() - 4)
 
     // Baris nilai field aktif (indeks dalam body) untuk parkir kursor.
@@ -279,24 +278,26 @@ export async function runForm(spec: FormSpec, screen: AltScreen): Promise<FormRe
         }
         if (st.error) body.push(cut(c.error(`  ${sanitizeAnsiLine(st.error)}`)))
       })
+      // Footer selalu dari windowFooter (nav/pilih/tutup). Aksi khusus form
+      // (Tab/Enter/select/confirm) dan peringatan idle (TUI-004: draft tak
+      // hilang tanpa jejak 10 dtk sebelum batal) masuk lewat extraHints.
+      const extraHints: HintItem[] = [
+        ...(idleWarned
+          ? [{ key: "!", label: t("form.idleWarning", { s: Math.ceil(IDLE_CANCEL_MS / 1000) }) }]
+          : []),
+        ...(spec.footerHints ?? defaultExtraHints(fields[idx])),
+      ]
       const box = dialogBox(
-        {
+        windowSpec({
           title: spec.title,
           body,
-          // Peringatan idle (TUI-004): footer berubah merah 10 dtk sebelum
-          // batal sendiri — user tahu kenapa dan bisa mencegah (tekan apa
-          // saja), draft tidak hilang tanpa jejak.
-          footer: idleWarned
-            ? c.error(t("form.idleWarning", { s: Math.ceil(IDLE_CANCEL_MS / 1000) }))
-            : hintLine(spec.footerHints ?? defaultFooterHints(fields[idx])),
-          // Lebar beku (paritas picker/manager — tak bernapas saat error
-          // muncul/hilang).
-          minWidth: width(),
-          maxWidth: width(),
+          cols: screen.cols || 80,
+          rows: screen.rows || 24,
           // Field aktif WAJIB terlihat: dialog menggeser jendela body bila
           // muat-tidaknya terpaksa memotong (audit 2026-11-12, HIGH-2).
           focusRow: activeRow >= 0 ? activeRow : undefined,
-        },
+          extraHints,
+        }),
         screen.cols,
         screen.rows,
       )

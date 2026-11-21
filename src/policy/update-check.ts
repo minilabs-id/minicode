@@ -11,6 +11,14 @@ const PKG_NAME = "minicode-ai"
 const CACHE_FILE = join(homedir(), ".minicode", "update-check.json")
 const TTL_MS = 24 * 60 * 60 * 1000
 const FETCH_TIMEOUT_MS = 2000
+/**
+ * v0.33: batas MATI per perintah npm saat install/verifikasi update.
+ * Dulu 120_000 ms × 3 perintah (verify-install, audit signatures, global
+ * install) = hingga 6 menit `spawnSync` memblokir event-loop — TUI tampak
+ * hang dan timer abort 1,8 dtk tak pernah sempat berjalan. 20 dtk cukup untuk
+ * npm lokal/CI; lebih dari itu = gagal jujur, lanjut versi lama.
+ */
+const NPM_SPAWN_TIMEOUT_MS = 20_000
 
 interface Cache {
   checkedAt: number
@@ -180,7 +188,7 @@ export type InstallRunner = (
   cmd: string,
   args: string[],
   opts?: { cwd?: string },
-) => { status: number | null }
+) => { status: number | null; stdout?: string }
 
 const NPM_REGISTRY = "https://registry.npmjs.org/"
 
@@ -189,6 +197,44 @@ export function verifyInstalledVersion(expected: string, readVersion: () => stri
     return readVersion() === expected
   } catch {
     return false
+  }
+}
+
+/**
+ * v0.33: baca versi dari PREFIX GLOBAL npm yang sebenarnya, bukan dari
+ * package.json di samping modul yang sedang berjalan. Pemilik melaporkan
+ * auto-update "versi tidak cocok" lalu rollback: `import.meta.dir` bisa
+ * menunjuk cache/transpilasi, sehingga versi lama terbaca walau `npm install -g`
+ * sudah sukses. `npm root -g` adalah sumber kebenaran prefix install.
+ * Fail-closed: kegagalan membaca → "0.0.0" (verifikasi gagal, rollback aman).
+ */
+export function readGlobalInstalledVersion(runner?: InstallRunner): string {
+  try {
+    const run: InstallRunner =
+      runner ??
+      ((cmd, args, opts) => {
+        const r = spawnSync(cmd, args, {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+          shell: process.platform === "win32",
+          timeout: NPM_SPAWN_TIMEOUT_MS,
+          ...(opts?.cwd ? { cwd: opts.cwd } : {}),
+        })
+        return {
+          status: typeof r.status === "number" ? r.status : null,
+          stdout: String(r.stdout ?? ""),
+        }
+      })
+    const res = run("npm", ["root", "-g"])
+    if (res.status !== 0 || !res.stdout) return "0.0.0"
+    const root = res.stdout.trim().split(/\r?\n/).pop() ?? ""
+    if (!root) return "0.0.0"
+    const pkg = JSON.parse(readFileSync(join(root, PKG_NAME, "package.json"), "utf8")) as {
+      version?: string
+    }
+    return pkg.version ?? "0.0.0"
+  } catch {
+    return "0.0.0"
   }
 }
 
@@ -212,15 +258,14 @@ export function installUpdate(version: string, runner?: InstallRunner): boolean 
         // dibuang — auto-update kini berjalan di belakang bar loading, jadi
         // progres raw npm malah mengotori baris bar (sebelumnya stdio
         // inherit menimpa spinner).
-        // Timeout 120 dtk: tanpa ini spawnSync memblokir event-loop selamanya
-        // saat npm lambat (AV/UAC di Windows 15–60 dtk) — timer abort 1.8 dtk
-        // dan bar ikut beku sehingga terlihat hang. Timeout = gagal jujur
-        // lalu lanjut versi lama, bukan gantung.
+        // spawnSync memblokir event-loop: tanpa batas ketat, 3 perintah npm
+        // bisa membekukan TUI ber menit (laporan hang pemilik 20 Nov). Timeout
+        // = gagal jujur, lanjut versi lama, bukan gantung.
         const r = spawnSync(cmd, args, {
           stdio: ["ignore", "pipe", "pipe"],
           shell: process.platform === "win32",
           ...(opts?.cwd ? { cwd: opts.cwd } : {}),
-          timeout: 120_000,
+          timeout: NPM_SPAWN_TIMEOUT_MS,
         })
         return { status: typeof r.status === "number" ? r.status : null }
       })

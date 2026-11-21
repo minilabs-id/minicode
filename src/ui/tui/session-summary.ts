@@ -26,6 +26,13 @@ export interface SessionSummaryInfo {
   /** Milidetik (difmt di sini) atau string siap pakai (format sudah dipilih caller). */
   readonly duration: number | string
   readonly version: string
+  /** v0.33: data opsional — hanya tampil bila tersedia (tak dipaksa). */
+  readonly model?: string
+  readonly mode?: string
+  readonly toolBreakdown?: string
+  readonly agents?: number
+  readonly inputTokens?: number
+  readonly outputTokens?: number
 }
 
 const pad2 = (n: number): string => String(n).padStart(2, "0")
@@ -92,13 +99,25 @@ function formatDuration(duration: number | string): string {
  */
 export function buildClosingBlock(logoRows: readonly string[], info: SessionSummaryInfo): string[] {
   const cost = info.cost == null ? "$—" : formatUsd(info.cost)
+  const toolLine = [
+    `${info.turns} turn`,
+    `${info.tools} tool${info.toolBreakdown ? ` (${info.toolBreakdown})` : ""}`,
+    `${info.files} file`,
+    ...(info.agents ? [`${info.agents} agent`] : []),
+    `${info.other} other`,
+  ].join("   ")
+  const tokenDetail =
+    info.inputTokens != null && info.outputTokens != null
+      ? ` (in ${formatTokens(info.inputTokens)} · out ${formatTokens(info.outputTokens)})`
+      : ""
   return [
     ...logoRows,
     "",
     "Minicode",
     `Session : ${info.stamp}`,
-    `${info.turns} turn   ${info.tools} tool   ${info.files} file   ${info.other} other`,
-    `${formatTokens(info.tokens)} tok   ${cost}   ${formatDuration(info.duration)}`,
+    ...(info.model ? [`${info.model}${info.mode ? ` · ${info.mode}` : ""}`] : []),
+    toolLine,
+    `${formatTokens(info.tokens)} tok${tokenDetail}   ${cost}   ${formatDuration(info.duration)}`,
     `version ${info.version}`,
   ]
 }

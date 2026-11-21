@@ -16,6 +16,9 @@ export interface VerifyResult {
   exitCode?: number
   /** True bila proses verifier dipotong timeout internal runner (bukan assertion gagal). */
   timedOut?: boolean
+  /** v0.33: kegagalan INFRASTRUKTUR (ENOENT, maxBuffer, spawn error), bukan
+   *  assertion test. Pemanggil tak boleh mengira ini "test gagal exit 1". */
+  infraFailure?: boolean
 }
 
 const TEST_OUTPUT_NOISE_RE =
@@ -31,6 +34,7 @@ export function classifyVerifyFailure(input: {
   ok: boolean
   output?: string
   timedOut?: boolean
+  infraFailure?: boolean
 }): { transient: boolean; permissionBlocked: boolean } {
   if (input.ok) return { transient: false, permissionBlocked: false }
   const raw = String(input.output ?? "")
@@ -39,6 +43,7 @@ export function classifyVerifyFailure(input: {
     .filter((line) => !TEST_OUTPUT_NOISE_RE.test(line))
     .join("\n")
   const transient =
+    input.infraFailure === true ||
     input.timedOut === true ||
     /\b(?:ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|ESOCKETTIMEDOUT)\b|\bsocket hang up\b|\bHTTP\s*(?:429|503)\b/i.test(
       infraLines,
@@ -76,6 +81,9 @@ export async function runVerify(
     const { stdout, stderr } = await execAsync(command, {
       cwd,
       timeout: timeoutMs,
+      // v0.33 (audit MEDIUM): default Node 1 MiB bikin perintah yang LULUS tapi
+      // output >1 MB terlihat gagal (ERR_CHILD_PROCESS_STDIO_MAXBUFFER).
+      maxBuffer: 32 * 1024 * 1024,
       encoding: "utf8",
       env: sanitizeSpawnEnv(process.env),
       ...(signal ? { signal } : {}),
@@ -97,14 +105,19 @@ export async function runVerify(
     }
     const rawOut = `${err.stdout ?? ""}${err.stderr ? `\n${err.stderr}` : ""}`.trim() || String(e)
     const output = scrubSecrets(rawOut)
-    const exitCode = typeof err.code === "number" && Number.isFinite(err.code) ? err.code : 1
+    const numericCode = typeof err.code === "number" && Number.isFinite(err.code)
+    // Kode STRING (ENOENT, ERR_CHILD_PROCESS_STDIO_MAXBUFFER, dll.) adalah
+    // kegagalan infra, BUKAN assertion yang gagal dengan exit 1. Jangan
+    // mengarang angka 1 — itu bikin self-heal "memperbaiki" kode yang hijau.
+    const infraFailure = !numericCode
     const timedOut = err.killed === true && (err.signal === "SIGTERM" || err.signal === "SIGKILL")
     return {
       ok: false,
       output: output.slice(0, 8000),
       command,
-      exitCode,
+      ...(numericCode ? { exitCode: err.code as number } : {}),
       ...(timedOut ? { timedOut: true } : {}),
+      ...(infraFailure ? { infraFailure: true } : {}),
     }
   }
 }

@@ -541,10 +541,13 @@ if (enterRepl) {
   const to = setTimeout(() => ctrl.abort(), 1800)
   try {
     const { maybeAutoUpdate } = await import("./auto-update.ts")
+    const { readGlobalInstalledVersion } = await import("../src/policy/update-check.ts")
     await maybeAutoUpdate(readVersion(), ctrl.signal, {
       // Tidak ada painter transient lagi — tidak perlu stop.
       onLongOp: () => {},
-      getInstalledVersion: readVersion,
+      // v0.33: verifikasi dari prefix npm global, bukan package.json di samping
+      // modul (bisa cache/transpilasi) — akar "versi tidak cocok" lalu rollback.
+      getInstalledVersion: readGlobalInstalledVersion,
       onPhase: (phase) => {
         if (phase === "check") writeUpdate(33)
         else if (phase === "install") writeUpdate(66)

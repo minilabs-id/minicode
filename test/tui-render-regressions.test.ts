@@ -140,10 +140,10 @@ describe("thinking: satu baris per turn, bukan per segmen", () => {
     h.emit({ type: "turn.started" })
     reasoning(h, "baris-detail-penting\nbaris-kedua")
     h.emit({ type: "turn.completed", summary: {} })
-    // Isi asli tidak dibuang ke mana-mana: tersimpan untuk /expand.
-    const stored = h.ui.collapsedSectionsSnapshot()
-    expect(stored.length).toBeGreaterThan(0)
-    expect(JSON.stringify(stored)).toContain("baris-detail-penting")
+    // v0.33: /expand dihapus — detail ada di riwayat sidebar thinking.
+    const stored = h.tr.sidebarThinking(20, 80).join("\n")
+    expect(stored).toContain("baris-detail-penting")
+    expect(stored).toContain("baris-kedua")
   })
 })
 

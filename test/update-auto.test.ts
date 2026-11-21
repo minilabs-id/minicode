@@ -3,12 +3,14 @@
 // mode machine/CI). Install runner di-inject agar tanpa efek samping.
 
 import { describe, expect, test } from "bun:test"
-import { existsSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
   installUpdate,
   isInstalledCopy,
   isNewer,
+  readGlobalInstalledVersion,
   shouldAutoUpdate,
   UPDATE_GUARD_ENV,
   verifyInstalledVersion,
@@ -207,5 +209,25 @@ describe("verifyInstalledVersion", () => {
         throw new Error("unreadable")
       }),
     ).toBe(false)
+  })
+})
+
+describe("readGlobalInstalledVersion", () => {
+  test("membaca versi dari prefix npm global (bukan modul yang sedang jalan)", () => {
+    const root = mkdtempSync(join(tmpdir(), "mc-global-ver-"))
+    try {
+      const pkgDir = join(root, "minicode-ai")
+      mkdirSync(pkgDir, { recursive: true })
+      writeFileSync(join(pkgDir, "package.json"), JSON.stringify({ version: "9.8.7" }))
+      const v = readGlobalInstalledVersion((cmd, args) => {
+        expect(cmd).toBe("npm")
+        expect(args).toEqual(["root", "-g"])
+        return { status: 0, stdout: `${root}\r\n` }
+      })
+      expect(v).toBe("9.8.7")
+      expect(readGlobalInstalledVersion(() => ({ status: 1 }))).toBe("0.0.0")
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })

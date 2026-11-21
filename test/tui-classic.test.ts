@@ -474,7 +474,8 @@ describe("runPicker", () => {
     })
     await tty.ready()
     const out = visible(tty)
-    expect(out).not.toContain("Select Model")
+    // v0.33: judul jendela selalu tampil (satu format untuk semua popup).
+    expect(out).toContain("Select Model")
     expect(out).toContain("model-0")
     expect(out).toMatch(SELECTED)
     await tty.send(KEY.esc, 20)
@@ -570,7 +571,9 @@ describe("runPicker", () => {
   })
 
   test("daftar panjang tetap bersih tanpa baris indikator sisa", async () => {
-    tty = installFakeTty({ rows: 16 })
+    // v0.33: judul+footer baku memakan 4 baris chrome — beri ruang agar 40
+    // item benar-benar muat (bukan sekadar menyembunyikan indikator).
+    tty = installFakeTty({ rows: 50 })
     const p = runPicker({ title: "t", items, onPick: () => {}, onCancel: () => {} })
     await tty.ready()
     expect(visible(tty)).not.toContain("more")

@@ -3,10 +3,10 @@
 import type { MsgKey } from "./locale.ts"
 
 export const id: Record<MsgKey, string> = {
-  "app.newBelow": "↓ {n} baris baru di bawah · PgDn ke ekor",
-  "app.abortHint": "abort terkirim — tekan Esc sekali lagi untuk keluar",
+  "app.newBelow": "↓ {n} baru · PgDn",
+  "app.abortHint": "abort terkirim · Esc lagi = keluar",
   "tui.selectionCopied": "seleksi disalin ke clipboard",
-  "tui.selectionCopyFailed": "seleksi tidak bisa disalin (OSC 52 tidak tersedia)",
+  "tui.selectionCopyFailed": "salin gagal (OSC 52)",
   "tui.selectionTooLarge": "seleksi terlalu besar untuk disalin",
   "form.idleWarning": "diam — dibatalkan dalam {s} dtk (tekan sembarang tombol untuk lanjut)",
   "appr.title": "Perlu persetujuan",
@@ -49,6 +49,14 @@ export const id: Record<MsgKey, string> = {
   "progress.step": "langkah {n}/{total}",
   "progress.stepNoTotal": "langkah {n}",
   "progress.plan": "todos {done}/{total} · sekarang: {current}",
+  // [retry-visibility] SATU baris status yang ditimpa tiap retry penyedia.
+  // Angka n/total berasal dari anggaran pemulihan nyata, bukan estimasi UI.
+  "retry.status": "coba {n}/{total} · {reason}",
+  "retry.stalled": "penyedia berhenti merespons {s} detik",
+  "retry.reason.server": "gangguan penyedia",
+  "retry.reason.network": "gangguan jaringan",
+  "retry.reason.rateLimit": "terkena batas laju",
+  "retry.reason.other": "penyedia tidak tersedia",
   // Token kategori sengaja identik dengan en: ini label teknis, bukan prosa —
   // jejak ringkas per-turn tak boleh berubah saat user ganti /lang.
   "ts.toolCategory.command": "command",
@@ -57,6 +65,16 @@ export const id: Record<MsgKey, string> = {
   "ts.toolCategory.subagent": "subagent",
   "ts.toolCategory.thought": "thought",
   "ts.toolCategory.other": "other",
+  "sidebar.thinking": "Berpikir",
+  "sidebar.activity": "Aktivitas",
+  "sidebar.live": "jalan",
+  "sidebar.livePane": "Berjalan",
+  "sidebar.historyTrimmed": "… {n} item lama terpotong",
+  "ts.agentSummary": "{agents} sub agent · {tools} tool · {failed} gagal",
+  "ts.agentReason.aborted": "abort",
+  "ts.agentReason.timeout": "timeout",
+  "ts.agentReason.denied": "ditolak",
+  "ts.agentReason.error": "error",
   "ts.statusCompleted": "selesai",
   "ts.statusFailed": "gagal",
   "ts.statusDenied": "ditolak",
@@ -257,7 +275,6 @@ export const id: Record<MsgKey, string> = {
   "out.titleHistory": "Riwayat",
   "out.titleSync": "Sinkronisasi",
   "out.titleInit": "Inisialisasi",
-  "out.titleExpand": "Buka konten",
   "out.titleModels": "Model",
   "out.titleProviders": "Penyedia",
   "out.titleCommand": "Perintah",
@@ -304,15 +321,14 @@ export const id: Record<MsgKey, string> = {
   "tui.budgetUnknown":
     "[budget] biaya tak diketahui (model tanpa harga) dengan {tokens} token terpakai — melebihi budget, prompt baru ditolak. /exit untuk keluar.",
   "tui.stopped": "(dihentikan)",
-  "tui.steered": "diselipkan ke turn yang berjalan — model membacanya pada step berikutnya",
-  "tui.queued": "diantrikan #{n} — dikirim setelah turn ini selesai",
-  "tui.queueDropped": "{n} pesan antre dibuang karena turn dihentikan",
-  "tui.queueAborted":
-    "turn dihentikan — pesan tidak diantrikan; tekan Enter lagi untuk memulai yang baru",
-  "tui.busyCmd": "{cmd} tidak tersedia saat turn berjalan (Esc menghentikan turn)",
+  "tui.steered": "diselipkan ke turn",
+  "tui.queued": "diantrikan #{n}",
+  "tui.queueDropped": "{n} antre dibuang",
+  "tui.queueAborted": "dihentikan · Enter untuk mulai",
+  "tui.busyCmd": "{cmd} sibuk · Esc untuk stop",
   "tui.budget80": "[budget] {spent} / {budget} (80% terpakai)",
-  "tui.copyNone": "(belum ada yang disalin — jalankan prompt dulu)",
-  "tui.copyOk": "tersalin {n} karakter (OSC 52 — izinkan akses clipboard di terminal bila kosong)",
+  "tui.copyNone": "belum ada yang disalin",
+  "tui.copyOk": "tersalin {n} karakter",
   "tui.copyOkMany":
     "tersalin {turns} turn ({n} karakter · OSC 52 — izinkan akses clipboard di terminal bila kosong)",
   "tui.copyInvalid": "jumlah turn tidak valid: {n} (gunakan 1–{max})",
@@ -378,7 +394,7 @@ export const id: Record<MsgKey, string> = {
   "one.turnHead": "\n── Turn {n} ──\n",
   "one.done": "\n  selesai\n",
   "one.answerOpen": "  − jawaban\n",
-  "one.answerMin": "  + jawaban ({n} karakter{cap}) — /view expand untuk baca\n",
+  "one.answerMin": "  + jawaban ({n} karakter{cap})\n",
   "one.answerCap": ", dibatasi 1MB",
   "one.providerAttemptDiscarded":
     "\n[percobaan penyedia {attempt} gagal; output parsial di atas tidak termasuk jawaban akhir]\n",

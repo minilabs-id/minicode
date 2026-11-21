@@ -131,13 +131,26 @@ test("max_steps_exceeded → cap naik di delegasi berikutnya; di ceiling berhent
     expect(seen[0]!.maxSteps).toBe(LIMITS.SUB_AGENT_BUDGET_EXPLORE) // 5 (default)
 
     await delegateTaskTool.execute({ prompt: "steps-key" }, ctxFor(dir))
-    // nextStepLimit(5, 5) = 200 → di-clamp ke hard-cap delegasi 50.
+    // v0.33: tangga KHUSUS sub-agent [8,12,20,32,50] — bertahap, bukan loncat
+    // 5 → 50 seperti saat memakai tangga sesi utama [200,400,...].
+    expect(seen[1]!.maxSteps).toBe(8)
     expect(seen[1]!.maxSteps).toBeGreaterThan(seen[0]!.maxSteps)
-    expect(seen[1]!.maxSteps).toBe(LIMITS.SUB_AGENT_MAX_STEPS)
 
     await delegateTaskTool.execute({ prompt: "steps-key" }, ctxFor(dir))
-    // Sudah di ceiling (50) → tak boleh naik lagi, tetap 50.
-    expect(seen[2]!.maxSteps).toBe(LIMITS.SUB_AGENT_MAX_STEPS)
+    expect(seen[2]!.maxSteps).toBe(12)
+
+    // Terus naik sampai hard-cap 50, lalu BERHENTI (tak naik lagi).
+    let last = seen[2]!.maxSteps
+    for (let i = 0; i < 10; i++) {
+      await delegateTaskTool.execute({ prompt: "steps-key" }, ctxFor(dir))
+      const next = seen.at(-1)!.maxSteps
+      expect(next).toBeGreaterThanOrEqual(last)
+      expect(next).toBeLessThanOrEqual(LIMITS.SUB_AGENT_MAX_STEPS)
+      last = next
+    }
+    expect(last).toBe(LIMITS.SUB_AGENT_MAX_STEPS)
+    await delegateTaskTool.execute({ prompt: "steps-key" }, ctxFor(dir))
+    expect(seen.at(-1)!.maxSteps).toBe(LIMITS.SUB_AGENT_MAX_STEPS)
   } finally {
     todoSession.id = prevTodo
     clearSubAgentSessionFactory()

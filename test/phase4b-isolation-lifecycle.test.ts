@@ -232,9 +232,9 @@ test("14. MCP: one context is stable across requests, and canonical identity wor
   const dir = await ownedDir()
   const mcp = await startMcp(dir)
   try {
-    // [Fase 8 / 8.3] First id-less write ADOPTS canonical identity (Live Test
-    // §3.1), so a SECOND identity-blind full declaration is now rejected by the
-    // 4A.5 guard — the correct durable identity contract.
+    // v0.33: tulisan kedua dengan KONTEN SAMA kini di-repair ke taskId yang
+    // sudah ada (bukan duplikat, bukan error). Nurani 4A.5 tetap: konten asing
+    // ditolak; hanya deklarasi yang cocok persis yang boleh di-mapping.
     const w1 = await mcp.call(11, "todo_write", {
       todos: [{ content: "from-mcp", status: "pending" }],
     })
@@ -242,7 +242,7 @@ test("14. MCP: one context is stable across requests, and canonical identity wor
     const w2 = await mcp.call(12, "todo_write", {
       todos: [{ content: "from-mcp", status: "pending" }],
     })
-    expect(w2.result?.isError ?? false).toBe(true)
+    expect(w2.result?.isError ?? false).toBe(false) // repair, bukan duplikat
     const files = (await readdir(todosDir(dir))).sort()
     // Exactly ONE namespace file, named by a per-instance mcp:<uuid>.
     expect(files).toHaveLength(1)
@@ -340,8 +340,8 @@ test("14d. MCP context isolation holds for the 4A.5 rule", async () => {
   seed(dir, ctxA, ["A"])
   const saved = applyMcpContext(ctxA, dir)
   try {
-    // A is canonical -> rejected.
-    await expect(write(dir, [{ content: "A", status: "pending" }], ctxA)).rejects.toThrow()
+    // A is canonical & konten cocok → di-repair ke id lama, tak ada duplikat.
+    await write(dir, [{ content: "A", status: "pending" }], ctxA)
     // B is not -> [Fase 8 / 8.3] first id-less write ADOPTS canonical identity.
     const outB = await write(dir, [{ content: "B", status: "pending" }], ctxB)
     expect(outB).toContain("canonical-tasks")

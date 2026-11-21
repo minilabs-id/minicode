@@ -27,8 +27,17 @@ import { formatError } from "../render/errors.ts"
 import { listRow } from "../render/list.ts"
 import { ASSISTANT_LEFT_MARGIN } from "../render/markdown-layout.ts"
 import { sanitizeAnsi, sanitizeAnsiLine, stripSgr } from "../render/sanitize.ts"
+import { renderSidebar } from "../render/sidebar.ts"
+import { type SidebarGeometry, sidebarGeometry } from "../render/sidebar-layout.ts"
+import type { SidebarModel } from "../render/sidebar-model.ts"
 import { c, glyphs, scrimMode, scrimSgr } from "../render/theme.ts"
-import { chunkByWidth, displayWidth, escapeLength, truncateToWidth } from "../render/width.ts"
+import {
+  chunkByWidth,
+  displayWidth,
+  escapeLength,
+  padToWidth,
+  truncateToWidth,
+} from "../render/width.ts"
 import { motionReduced } from "../runtime/motion.ts"
 import {
   type AltScreen,
@@ -79,6 +88,8 @@ export interface TuiHost {
    */
   toggleCompact(): void
   toggleReasoning(): void
+  /** Buka modal detail tool Live (diimplementasikan composition root). */
+  openSidebarDetail?(title: string, lines: string[]): void
 }
 
 export interface TuiRunResult {
@@ -86,6 +97,25 @@ export interface TuiRunResult {
   started: boolean
   frames: number
 }
+
+/**
+ * [retry-visibility] Ringkasan retry penyedia yang dikirim session.ts lewat
+ * `provider:extension` kind `minicode:retry`. Didefinisikan ulang di sini
+ * (struktural) supaya src/ui tak mengimpor src/app — batas lapisan dijaga
+ * `test/ui-boundary.test.ts`.
+ */
+interface RetryIndicatorState {
+  attempt: number
+  quota: number
+}
+
+/**
+ * v0.33: retry adalah MICRO-TOAST, bukan pengganti footer. Angka detik dihitung
+ * live dari `retrySince` setiap paint (activity clock jalan tiap ~detik saat
+ * busy), dan toast otomatis hilang setelah `retryToastUntil` atau saat turn
+ * selesai — tidak lagi nongkrong dengan angka statis.
+ */
+const RETRY_TOAST_MS = 4_000
 
 /** Tinggi maksimum blok input (baris logis di-wrap, kursor selalu terlihat). */
 const MAX_INPUT_ROWS = 5
@@ -192,7 +222,13 @@ export function dropdownWindowStart(sel: number, visible: number, total: number)
 interface FrameLayout {
   frame: string[]
   cursor: { row: number; col: number }
+  /** Lebar terminal penuh (footer & popup memakai ini). */
   cols: number
+  /** Lebar area chat (sidebar menyempitkan kolom, bukan menambah baris). */
+  chatCols: number
+  /** Tinggi viewport transkrip — satu sumber untuk scroll & indikator. */
+  viewH: number
+  sidebar: SidebarGeometry
   transcriptRows: TranscriptRow[]
   transcriptTop: number
   composerTop: number
@@ -302,6 +338,22 @@ function cursorAtVisualRowColumn(row: ComposerVisualRow, screenColZeroBased: num
 export class TuiApp {
   private state: PromptState = createState()
   private scrollBack = 0
+  /**
+   * v0.33: penanda "sedang mengikuti ekor". v7.28 mengubah anchor scroll ke
+   * kepala (`scrollBack=0`), sehingga saat konten tumbuh selama turn viewport
+   * diam di posisi lama — user harus scroll manual. `pinnedToTail` dipertahankan
+   * saat streaming, tetapi diclear segera setelah user sengaja scroll ke atas
+   * (kontrak: jangan menarik pembaca yang sedang membaca histori).
+   */
+  private pinnedToTail = true
+  /** Memo sidebar: hindari repacking reasoning/aktivitas tiap frame 30ms. */
+  private sidebarCacheKey = ""
+  private sidebarCacheLines: string[] = []
+  /** Snapshot mentah di-cache per (versi model, lebar) — P0: jangan wrap tiap frame. */
+  private sidebarSourceKey = ""
+  private sidebarSourceThinking: string[] = []
+  private sidebarSourceActivity: string[] = []
+  private sidebarSourceLive: string[] = []
   private history: string[] = []
   private histIdx = -1
   private draft = ""
@@ -334,6 +386,17 @@ export class TuiApp {
   /** Micro-toast 2 detik di slot footer saat mengganti bahasa/salin. */
   private statusToast = ""
   private toastTimer: ReturnType<typeof setTimeout> | undefined
+  /**
+   * [retry-visibility] SATU state retry, sengaja DITIMPA tiap event — bukan
+   * daftar. Badai retry (5–23 percobaan) harus tampil sebagai satu baris yang
+   * berubah angkanya, bukan satu baris transkrip per retry. Null = tak ada
+   * retry aktif; direset di awal/akhir turn supaya tak bocor ke turn berikutnya.
+   */
+  private retryInfo: RetryIndicatorState | null = null
+  private retrySince = 0
+  private retryToastUntil = 0
+  /** Indeks tool Live yang dipilih — Alt+PgUp/PgDn menggesernya. */
+  private liveSelected = 0
   private frames = 0
   /**
    * Kedalaman batch input. Selama >0 paint ditunda lalu digabung jadi SATU
@@ -396,6 +459,8 @@ export class TuiApp {
    */
   private busUnsubs: (() => void)[] = []
   private repaintTimer: ReturnType<typeof setTimeout> | undefined
+  /** Coalescing wheel: kumpulkan beberapa event jadi SATU repaint. */
+  private wheelRepaintTimer: ReturnType<typeof setTimeout> | undefined
   /** Timer debounce khusus drag-selection agar tak bentrok dengan repaint bus. */
   private selectionPaintTimer: ReturnType<typeof setTimeout> | undefined
   /** Kolom layar (0-based) yang dijaga selama navigasi panah Up/Down berturut-turut. */
@@ -410,13 +475,16 @@ export class TuiApp {
   private autoScrollCol = 0
 
   private initialDraft = ""
+  /** Satu model sidebar dengan Transcript — disuntik composition root. */
+  private readonly sidebarModel: SidebarModel
 
   constructor(
     private readonly transcript: Transcript,
     private readonly host: TuiHost,
-    opts?: { initialDraft?: string },
+    opts?: { initialDraft?: string; sidebarModel?: SidebarModel },
   ) {
     this.initialDraft = opts?.initialDraft ?? ""
+    this.sidebarModel = opts?.sidebarModel ?? transcript.sidebarModel
   }
 
   /** Jalan sampai quit. Alt-screen enter/exit SELALU berpasangan (I17). */
@@ -582,7 +650,37 @@ export class TuiApp {
         // Turn BARU harus mulai bersih: hint "Esc lagi = quit" dari abort di
         // turn sebelumnya tak boleh bocor ke turn yang tak berhubungan (audit).
         this.abortHintOn = false
+        this.retryInfo = null
+        this.retrySince = 0
+        this.retryToastUntil = 0
         this.startActivityClock()
+      })
+      // [retry-visibility] Satu-satunya sumber kebenaran angka retry adalah
+      // kebijakan pemulihan di session.ts. Event basi/inkonsisten dibuang
+      // (fail-closed) daripada menampilkan "progres" yang tidak nyata.
+      sub<{ kind?: unknown; data?: unknown }>("provider:extension", (e) => {
+        if (e?.kind !== "minicode:retry") return
+        const d = e.data as {
+          attempt?: unknown
+          quota?: unknown
+          category?: unknown
+          stalledMs?: unknown
+        } | null
+        const attempt = d?.attempt
+        const quota = d?.quota
+        if (
+          typeof attempt !== "number" ||
+          !Number.isSafeInteger(attempt) ||
+          attempt < 1 ||
+          typeof quota !== "number" ||
+          !Number.isSafeInteger(quota) ||
+          quota < 1 ||
+          attempt > quota
+        )
+          return
+        this.retryInfo = { attempt, quota }
+        this.retrySince = Date.now()
+        this.retryToastUntil = this.retrySince + RETRY_TOAST_MS
       })
       // v7.29: reasoning tidak lagi punya baris status khusus; transkrip
       // tetap menerima event reasoning lewat subscription Transcript sendiri.
@@ -610,12 +708,22 @@ export class TuiApp {
       })
       sub("execution:started", () => {})
       sub("execution:completed", () => {})
-      sub("turn:completed", () => {})
+      sub("turn:completed", () => {
+        this.retryInfo = null
+        this.retrySince = 0
+        this.retryToastUntil = 0
+      })
       sub("context:compacted")
       // v7.28: anchor atas membuat 0 = kepala. Resume history harus mulai
       // dari ekor (terbaru), sama seperti setelah ketikan/submit.
       this.followTail()
       this.scrollBase = this.transcript.total()
+      // v0.33: proses yang di-kill/SIGKILL bisa meninggalkan mode mouse
+      // (1000/1002/1006) Aktif di terminal. Karena `this.mouseMode` awalnya
+      // "off", setMouseMode("off") akan early-return dan mode basi itu tetap
+      // mengirim SGR — yang bocor sebagai deretan angka saat scroll/klik.
+      // Paksa MATI dulu, baru aktifkan mode yang diinginkan sesi ini.
+      this.setMouseMode("off", true)
       this.setMouseMode(mouseSelectionEnabled() ? "drag" : "off")
       if (this.initialDraft) {
         const draft = this.initialDraft
@@ -648,6 +756,10 @@ export class TuiApp {
     if (this.repaintTimer !== undefined) {
       clearTimeout(this.repaintTimer)
       this.repaintTimer = undefined
+    }
+    if (this.wheelRepaintTimer !== undefined) {
+      clearTimeout(this.wheelRepaintTimer)
+      this.wheelRepaintTimer = undefined
     }
     this.clearSelectionPaintTimer()
     if (this.toastTimer !== undefined) {
@@ -778,11 +890,47 @@ export class TuiApp {
 
   private handleKey(key: PromptKey): void {
     if (key.type !== "esc") this.lastIdleEscapeAt = 0
+    // Ctrl+O = buka detail tool Live yang dipilih (modal milik host).
+    if (key.type === "ctrl-o" && this.lastLayout?.sidebar.active) {
+      const recs = this.sidebarModel.liveRecords()
+      const r = recs[Math.min(this.liveSelected, recs.length - 1)]
+      if (r) {
+        const lines = [
+          `tool: ${r.name}`,
+          ...(r.target ? [`target: ${r.target}`] : []),
+          `status: running · ${Math.max(0, Math.round(r.elapsedMs / 1000))}d`,
+          ...(r.childCount != null ? [`child: ${r.childCount}`] : []),
+          ...(r.detail ? ["", "detail:", ...r.detail.split("\n")] : []),
+        ]
+        this.host.openSidebarDetail?.(`Live · ${r.name}`, lines)
+        return
+      }
+    }
     if (key.type === "mouse") {
       this.handleMouse(key)
       return
     }
     if (key.type === "wheelup" || key.type === "wheeldown") {
+      // Mouse wheel di atas pane sidebar menggulir PANE itu — PgUp/PgDn
+      // tetap milik chat (permintaan pemilik).
+      const layout = this.lastLayout
+      if (
+        layout?.sidebar.active &&
+        key.x !== undefined &&
+        key.y !== undefined &&
+        key.x > layout.chatCols + 1
+      ) {
+        const sideY = key.y - 1 - layout.transcriptTop
+        const side = layout.sidebar
+        let pane: "thinking" | "activity" | "live"
+        if (sideY < side.bottomRow) pane = "thinking"
+        else if (side.activitySplit && key.x - layout.chatCols - side.gap - 1 < side.liveWidth)
+          pane = "live"
+        else pane = "activity"
+        this.scrollSidebarPane(pane, key.type === "wheelup" ? -3 : 3, false)
+        this.scheduleWheelRepaint()
+        return
+      }
       if (
         !this.tooSmall() &&
         !this.isBusy() &&
@@ -795,7 +943,10 @@ export class TuiApp {
         return
       }
       // v7.28 anchor atas: wheelup = ke atas/lama (scrollBack mengecil).
-      this.scrollBy(key.type === "wheelup" ? -0.5 : 0.5)
+      // Wheel = 3 BARIS, bukan setengah halaman — gulir terasa meluncur,
+      // bukan meloncat. Banyak event digabung jadi satu repaint di bawah.
+      this.scrollRows(key.type === "wheelup" ? -3 : 3, false)
+      this.scheduleWheelRepaint()
       return
     }
     // Scroll SELALU tersedia (menu buka/tutup, busy/idle, layar menciut) —
@@ -807,6 +958,38 @@ export class TuiApp {
     // transkrip panjang; Home/End = lompat top/tail (di bawah).
     if (key.type === "pageup" || key.type === "pagedown") {
       const mod = key.modifier ?? 0
+      // v0.33: Alt+PgUp/PgDn = fallback keyboard untuk sidebar (terminal
+      // tanpa mouse wheel). PgUp/PgDn biasa TETAP milik chat.
+      if (mod === 3 && this.lastLayout?.sidebar.active) {
+        const n = key.type === "pageup" ? -3 : 3
+        const geom = this.lastLayout.sidebar
+        const w = Math.max(1, geom.width)
+        this.sidebarModel.scrollPane("thinking", n, w, Math.max(1, geom.topHeight - 1))
+        this.sidebarModel.scrollPane("activity", n, w, Math.max(1, geom.bottomHeight - 1))
+        if (geom.activitySplit) {
+          this.sidebarModel.scrollPane(
+            "live",
+            n,
+            geom.liveWidth,
+            Math.max(1, geom.bottomHeight - 1),
+          )
+          // Geser seleksi Live bersamaan — Alt+PgUp/PgDn jadi navigation
+          // tool (Ctrl+O membuka yang dipilih).
+          const count = this.sidebarModel.liveRecords().length
+          this.liveSelected = Math.max(
+            0,
+            Math.min(count - 1, this.liveSelected + (key.type === "pageup" ? -1 : 1)),
+          )
+        }
+        this.paintCurrent()
+        return
+      }
+      // Ctrl+PgUp/PgDn = ubah rasio tinggi kotak (tanpa menggulir isi).
+      if (mod === 5 && this.lastLayout?.sidebar.active) {
+        this.sidebarModel.adjustRatio(key.type === "pageup" ? 0.05 : -0.05)
+        this.paintCurrent()
+        return
+      }
       if (mod === 2) {
         // v7.28: PgUp = naik (negatif), PgDn = turun (positif).
         this.scrollBy(key.type === "pageup" ? -0.5 : 0.5)
@@ -1081,13 +1264,13 @@ export class TuiApp {
     this.preferredCol = null
     this.histIdx = -1
     this.editing = false
-    this.followTail()
     this.abortHintOn = false
     this.disarmAbortQuit()
     if (!line) {
       // Enter pada baris kosong tetap idle: prompt harus langsung kembali
       // (I13), bukan menghilang sampai ketikan berikutnya.
       this.editing = true
+      this.followTail()
       this.paintCurrent()
       return
     }
@@ -1103,6 +1286,9 @@ export class TuiApp {
     this.turnStartedAt = Date.now()
     this.lastAbortAt = 0
     this.startActivityClock()
+    // Gema prompt user sudah masuk transkrip — baru sekarang pin ke ekor,
+    // kalau tidak frame pertama turn sudah tertinggal ~3 baris.
+    this.followTail()
     this.paintCurrent()
     try {
       const res = await this.host.submit(line)
@@ -1117,6 +1303,11 @@ export class TuiApp {
       this.busy = false
       this.editing = true
       this.turnStartedAt = 0
+      // [retry-visibility] Turn selesai (sukses/gagal/abort) = retry indicator
+      // harus hilang. finally adalah pagar terakhir kalau event bus terlewat.
+      this.retryInfo = null
+      this.retrySince = 0
+      this.retryToastUntil = 0
       this.stopActivityClock()
       if (!this.quitRequested) this.paintCurrent()
     }
@@ -1367,6 +1558,22 @@ export class TuiApp {
 
   // ── Scroll ──
 
+  /** Gulir satu kotak sidebar; `n` = baris (+ bawah / - atas). */
+  private scrollSidebarPane(
+    pane: "thinking" | "activity" | "live",
+    n: number,
+    repaint = true,
+  ): void {
+    const geom = this.lastLayout?.sidebar
+    if (!geom?.active) return
+    // P0: pakai LEBAR AKTIF, bukan 80 — kalau tidak, hitungan wrap saat
+    // scroll beda dengan render dan offset meleset.
+    const width = Math.max(1, pane === "live" ? geom.liveWidth : geom.width)
+    const cap = Math.max(1, (pane === "thinking" ? geom.topHeight : geom.bottomHeight) - 1)
+    this.sidebarModel.scrollPane(pane, n, width, cap)
+    if (repaint) this.paintCurrent()
+  }
+
   private scrollBy(pages: number): void {
     const rows = process.stdout.rows || 24
     const cols = process.stdout.columns || 80
@@ -1382,6 +1589,7 @@ export class TuiApp {
     const max = Math.max(0, wrapped - viewH)
     if (this.scrollBack === max && pages < 0) this.scrollBase = this.transcript.total()
     this.scrollBack = Math.max(0, Math.min(max, Math.round(this.scrollBack + pages * page)))
+    this.pinnedToTail = this.scrollBack === max
     if (this.scrollBack === max) {
       this.scrollBase = this.transcript.total()
     }
@@ -1395,7 +1603,7 @@ export class TuiApp {
    * `scrollBase` sama seperti `scrollBy`. Arah ini selaras dengan scrollBy:
    * scrollBack 0 = kepala, nilai besar = ekor (v7.28 anchor atas).
    */
-  private scrollRows(n: number): void {
+  private scrollRows(n: number, repaint = true): void {
     const cols = process.stdout.columns || 80
     const rows = process.stdout.rows || 24
     const viewH = this.viewportHeight(rows, cols)
@@ -1404,10 +1612,11 @@ export class TuiApp {
     // v7.28: n > 0 = gulir ke bawah (lebih baru), n < 0 = ke atas.
     if (this.scrollBack === maxBack && n < 0) this.scrollBase = this.transcript.total()
     this.scrollBack = Math.max(0, Math.min(this.scrollBack + n, maxBack))
+    this.pinnedToTail = this.scrollBack === maxBack
     if (this.scrollBack === maxBack) {
       this.scrollBase = this.transcript.total()
     }
-    this.paintCurrent()
+    if (repaint) this.paintCurrent()
   }
 
   /**
@@ -1426,10 +1635,27 @@ export class TuiApp {
     // v7.28: Home = kepala (0), End = ekor (maks).
     if (top) {
       this.scrollBack = 0
+      this.pinnedToTail = false
     } else {
       if (this.scrollBack === maxBack) this.scrollBase = this.transcript.total()
       this.scrollBack = maxBack
       this.scrollBase = this.transcript.total()
+      this.pinnedToTail = true
+    }
+    // Home/End juga membawa kedua kotak sidebar ke tepi yang sama — chat tak
+    // kehilangan shortcut-nya, user dapat "kembali ke terbaru" satu tombol.
+    const side = this.lastLayout?.sidebar
+    if (side?.active) {
+      const w = Math.max(1, side.width)
+      this.sidebarModel.jumpToEdge("thinking", top, w, Math.max(1, side.topHeight - 1))
+      this.sidebarModel.jumpToEdge("activity", top, w, Math.max(1, side.bottomHeight - 1))
+      if (side.activitySplit)
+        this.sidebarModel.jumpToEdge(
+          "live",
+          top,
+          side.liveWidth,
+          Math.max(1, side.bottomHeight - 1),
+        )
     }
     this.paintCurrent()
   }
@@ -1440,6 +1666,7 @@ export class TuiApp {
     const viewH = this.viewportHeight(process.stdout.rows || 24, cols)
     this.scrollBack = Math.max(0, this.transcript.wrappedLength(cols) - viewH)
     this.scrollBase = this.transcript.total()
+    this.pinnedToTail = true
   }
 
   /** Kosongkan transkrip (/clear): viewport + basis scroll ikut di-reset agar
@@ -1565,8 +1792,8 @@ export class TuiApp {
 
   private currentScreen: AltScreen | null = null
 
-  private setMouseMode(mode: MouseMode): void {
-    if (this.mouseMode === mode) return
+  private setMouseMode(mode: MouseMode, force = false): void {
+    if (this.mouseMode === mode && !force) return
     const sequence = mode === "drag" ? MOUSE_DRAG_ON : mode === "wheel" ? MOUSE_WHEEL_ON : MOUSE_OFF
     try {
       if (mode === "off" || this.mouseMode === "off") process.stdout.write(sequence)
@@ -1603,6 +1830,22 @@ export class TuiApp {
     } catch (error) {
       this.stopAfterRuntimeError(error)
     }
+  }
+
+  /**
+   * Wheel bisa memancarkan banyak event per gerakan fisik. Update posisi
+   * scroll dulu (murah), lalu SATU repaint untuk semua event dalam jendela
+   * 16 ms — menghindari build-frame + diff per-cell berulang kali.
+   */
+  private scheduleWheelRepaint(): void {
+    if (this.wheelRepaintTimer !== undefined) return
+    this.wheelRepaintTimer = setTimeout(() => {
+      this.wheelRepaintTimer = undefined
+      if (!this.quitRequested && this.suspended === 0 && !this.released) this.paintCurrent()
+    }, 16)
+    try {
+      ;(this.wheelRepaintTimer as unknown as { unref?: () => void }).unref?.()
+    } catch {}
   }
 
   /**
@@ -1659,11 +1902,21 @@ export class TuiApp {
     }
   }
 
+  /** [retry-visibility] Micro-toast minimalis: `retry 1/6 · 12s`. Detik DIHITUNG
+   *  live dari event time, bukan angka statis dari pesan error. */
+  private retryIndicatorText(): string {
+    const state = this.retryInfo
+    if (!state) return ""
+    const secs = Math.max(1, Math.round((Date.now() - this.retrySince) / 1000))
+    return t("retry.status", { n: state.attempt, total: state.quota, reason: `${secs}s` })
+  }
+
   private viewportHeight(rows: number, cols: number): number {
     const busy = this.isBusy()
     const inputH = this.composerHeight(cols, busy)
     const menuH = this.menuHeight(rows, cols, busy)
-    return Math.max(1, rows - 2 - inputH - menuH)
+    // -1 = baris kosong pemisah transkrip ↔ composer (sama seperti buildLayout).
+    return Math.max(1, rows - 2 - inputH - menuH - 1)
   }
 
   private composerLayout(cols: number): ComposerLayout {
@@ -2165,9 +2418,17 @@ export class TuiApp {
     else this.stopWaitingClock()
     // v7.28: indikator "baris baru" muncul saat user TIDAK berada di ekor
     // (anchor atas → ekor = maks, bukan 0).
+    // Indikator "baris baru" mengikuti lebar CHAT, bukan lebar terminal —
+    // kalau tidak, angkanya meleset saat sidebar menyempitkan transkrip.
+    const indicatorGeom = sidebarGeometry(
+      height,
+      width,
+      this.viewportHeight(height, width),
+      this.sidebarModel.ratio,
+    )
     const maxBackForIndicator = Math.max(
       0,
-      this.transcript.wrappedLength(width) -
+      this.transcript.wrappedLength(indicatorGeom.chatCols) -
         Math.max(
           1,
           height -
@@ -2194,6 +2455,11 @@ export class TuiApp {
     // kalau hint menang, pesan toast tak pernah terlihat (pesan dijamin tampil).
     // Urutan baru: toast > hint abort > indikator "baris baru". Tinggi frame
     // tetap satu baris, jadi geometri/composer tidak berubah.
+    // v0.33: retry adalah MICRO-TOAST yang DITAMBAHKAN ke footer — bukan
+    // pengganti. Footer (model/konteks/timer/mode) tetap utuh; toast hilang
+    // sendiri setelah 4 dtk atau saat turn selesai.
+    const retryLine =
+      busy && this.retryInfo && Date.now() < this.retryToastUntil ? this.retryIndicatorText() : ""
     const indicatorLine = this.statusToast
       ? c.accent(truncateToWidth(this.statusToast, width))
       : busy && this.abortHintOn
@@ -2202,8 +2468,12 @@ export class TuiApp {
           ? c.muted(truncateToWidth(t("app.newBelow", { n: newCount }), width))
           : ""
 
-    const allMenu = this.menuRows(height, width, busy)
-    const allComposer = this.composerRows(width, snap, busy, now)
+    // Geometri sidebar dihitung dari tinggi frame penuh — tidak bergantung
+    // pada composer/menu, jadi bisa dipakai untuk mengukur keduanya.
+    const geom = sidebarGeometry(height, width, height, this.sidebarModel.ratio)
+    const chatCols = geom.chatCols
+    const allMenu = this.menuRows(height, chatCols, busy)
+    const allComposer = this.composerRows(chatCols, snap, busy, now)
     const contentBudget = Math.max(1, height - 3)
     let menu = allMenu
     let composerH = Math.min(MAX_INPUT_ROWS, Math.max(1, allComposer.length))
@@ -2217,10 +2487,22 @@ export class TuiApp {
     // sehingga tinggi frame & pemetaan mouse tetap konsisten.
     const cardRows: string[] = []
     const cardH = 0
-    const viewH = Math.max(1, height - 2 - composerH - menu.length - cardH)
-    // v7.28: dengan anchor atas, baris baru ditambahkan DI BAWAH sehingga
-    // tidak menggeser baris yang sedang terlihat — tidak perlu koreksi drift.
-    const viewport = this.transcript.viewport(width, viewH, this.scrollBack)
+    // Kurangi 1 untuk baris kosong pemisah transkrip ↔ composer (gap yang
+    // dijamin ada walau transkrip penuh).
+    const viewH = Math.max(1, height - 2 - composerH - menu.length - cardH - 1)
+    // v0.33: satu geometri untuk seluruh frame. Di terminal sempit `active=false`
+    // dan `chatCols===cols` — perilaku lama persis, sehingga test lama tetap hijau.
+    this.transcript.setSidebarActive(geom.active)
+    // v0.33: anchor atas + sticky tail. Baris baru memang ditambahkan di bawah,
+    // tetapi SELAMA user tidak sengaja scroll ke atas, viewport harus ikut ke
+    // ekor. Tanpa ini `scrollBack` absolut menjadi basi saat transkrip tumbuh
+    // (streaming/tool), layar tampak diam dan tertinggal (laporan pemilik).
+    // Pakai `viewH` yang SAMA dengan viewport di bawah agar tidak ada selisih
+    // geometri dengan `viewportHeight()`.
+    if (this.pinnedToTail && !this.selection) {
+      this.scrollBack = Math.max(0, this.transcript.wrappedLength(chatCols) - viewH)
+    }
+    const viewport = this.transcript.viewport(chatCols, viewH, this.scrollBack)
     if (
       this.selection &&
       (!this.transcript.hasSource(this.selection.anchor.id) ||
@@ -2281,11 +2563,12 @@ export class TuiApp {
       const winStart = Math.max(0, Math.min(allComposer.length - composerH, cursor.visIdx))
       composerOffset = winStart
       shownComposer = allComposer.slice(winStart, winStart + composerH)
-      cursorRow = viewH + cardH + menu.length + (cursor.visIdx - winStart) + 1
+      // +1 untuk baris kosong pemisah transkrip ↔ composer.
+      cursorRow = viewH + 1 + cardH + menu.length + (cursor.visIdx - winStart) + 1
       cursorCol = cursor.col
     } else {
       shownComposer = allComposer.slice(0, composerH)
-      cursorRow = viewH + cardH + menu.length + 1
+      cursorRow = viewH + 1 + cardH + menu.length + 1
       // v7.30: SELALU parkir caret tepat setelah prompt, termasuk saat busy
       // dengan editing=false (cabang ini). Dulu `if (!busy)` membuat cursorCol
       // tetap 1 saat submit → caret tampil SEBELUM prompt (`| minicode ›`).
@@ -2320,21 +2603,92 @@ export class TuiApp {
               ? Math.floor((now - (this.waitingStartedAt || now)) / WAITING_INTERVAL_MS)
               : 0,
         },
-        width,
+        chatCols,
       )[0] ?? ""
     const frame = [
       ...body,
+      // Napas WAJIB antara transkrip dan composer — dulu composer menempel
+      // langsung ke baris teks terakhir saat transkrip penuh.
+      "",
       ...cardRows,
       ...menu,
       ...shownComposer,
       "",
-      indicatorLine ? truncateToWidth(indicatorLine, width) : footer,
+      indicatorLine
+        ? truncateToWidth(indicatorLine, chatCols)
+        : truncateToWidth(retryLine ? `${c.warning(retryLine)}  ${footer}` : footer, chatCols),
     ]
     const rawLength = frame.length
     const crop = Math.max(0, rawLength - height)
     const topPad = Math.max(0, height - rawLength)
     while (frame.length < height) frame.unshift("")
     const out = frame.slice(-height)
+    if (geom.active) {
+      // Satu frame, satu write: sidebar adalah KOLOM KANAN baris-baris viewH.
+      // Footer & composer tetap full-width (di bawah area transkrip).
+      const sideWidth = Math.max(1, geom.width)
+      const capThinking = Math.max(1, geom.topHeight - 1)
+      const capActivity = Math.max(1, geom.bottomHeight - 1)
+      const liveWidth = geom.activitySplit ? geom.liveWidth : sideWidth
+      const sourceKey = [this.sidebarModel.version, sideWidth, liveWidth].join(":")
+      if (sourceKey !== this.sidebarSourceKey) {
+        this.sidebarSourceKey = sourceKey
+        this.sidebarSourceThinking = this.transcript.sidebarThinking(geom.topHeight, sideWidth)
+        this.sidebarSourceActivity = this.transcript.sidebarActivity(geom.bottomHeight, sideWidth)
+        this.sidebarSourceLive = [...this.sidebarModel.snapshot(liveWidth).live]
+      }
+      const allThinking = this.sidebarSourceThinking
+      const allActivity = this.sidebarSourceActivity
+      // "Mengalir seperti air": follow=true → ekor; user menggulir → pin offset.
+      this.sidebarModel.syncFollow("thinking", sideWidth, capThinking)
+      this.sidebarModel.syncFollow("activity", sideWidth, capActivity)
+      this.sidebarModel.syncFollow("live", liveWidth, Math.max(1, geom.bottomHeight - 1))
+      const cacheKey = [
+        geom.width,
+        geom.topHeight,
+        geom.bottomHeight,
+        geom.gap,
+        sourceKey,
+        this.sidebarModel.scrollOffset("thinking"),
+        this.sidebarModel.scrollOffset("activity"),
+        this.sidebarModel.scrollOffset("live"),
+        geom.activitySplit ? 1 : 0,
+        this.sidebarModel.lastTouched,
+        this.isBusy() ? 1 : 0,
+      ].join(":")
+      if (cacheKey !== this.sidebarCacheKey) {
+        this.sidebarCacheKey = cacheKey
+        this.sidebarCacheLines = renderSidebar({
+          geom,
+          viewH: height,
+          thinking: allThinking,
+          activity: allActivity,
+          thinkingOffset: this.sidebarModel.scrollOffset("thinking"),
+          activityOffset: this.sidebarModel.scrollOffset("activity"),
+          thinkingFollow: this.sidebarModel.isFollowing("thinking"),
+          activityFollow: this.sidebarModel.isFollowing("activity"),
+          live: this.sidebarSourceLive,
+          liveOffset: this.sidebarModel.scrollOffset("live"),
+          liveFollow: this.sidebarModel.isFollowing("live"),
+          activePane: this.sidebarModel.lastTouched,
+          //Idle = turn selesai: Thinking cukup ekor 3 baris sampai user menggulir.
+          thinkingCollapsed: !this.isBusy(),
+        })
+      }
+      const side = this.sidebarCacheLines
+      // Sidebar penuh tinggi:-footer & composer juga ikut tersempitkan.
+      for (let r = 0; r < out.length; r++) {
+        // Padding WAJIB: baris chat yang lebih pendek harus tetap mengisi
+        // `chatCols`, kalau tidak separator & sidebar bergeser per baris
+        // (kolom kanan bergetar saat teks berubah panjang).
+        const chat = padToWidth(truncateToWidth(out[r] ?? "", chatCols), chatCols)
+        // Satu garis tipis abu di batas chat/sidebar, dengan sisa jarak
+        // berupa spasi (total `gap` kolom) — tidak ada garis dobel.
+        const gap = Math.max(1, geom.gap)
+        out[r] =
+          `${chat}${" ".repeat(gap - 1)}${c.dim(glyphs.vLine)}${truncateToWidth(side[r] ?? "", geom.width)}`
+      }
+    }
     return {
       frame: out,
       cursor: {
@@ -2342,9 +2696,16 @@ export class TuiApp {
         col: Math.max(1, cursorCol),
       },
       cols: Math.max(10, width),
+      // v0.33: geometri dihitung SATU kali di sini. Belum dipakai untuk
+      // mengecilkan chat — langkah berikutnya menyambungkan chatCols &
+      // overlay. Menyimpannya sekarang menghilangkan drift viewH later.
+      chatCols: geom.chatCols,
+      viewH,
+      sidebar: geom,
       transcriptRows: bodyRows,
       transcriptTop: topPad - crop,
-      composerTop: topPad - crop + body.length + cardH + menu.length,
+      // +1 = baris kosong pemisah (lihat frame) — klik composer harus naik 1.
+      composerTop: topPad - crop + body.length + 1 + cardH + menu.length,
       composerLines: allComposer,
       composerOffset,
     }
