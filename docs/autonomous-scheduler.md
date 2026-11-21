@@ -414,10 +414,10 @@ scope P14 yang disetujui pemilik 2026-10-26, bukan pekerjaan tertunda:
 | Readout TUI `/openwork` | Teks milestone hanya "tampilkan/ekspor"; permukaan TUI baru butuh kontrak terminal sendiri |
 | Merge dengan lease/admission | Di luar teks milestone; merge tetap satu transaksi + ledger audit |
 | Merge lintas sesi tanpa adopsi eksplisit | Model otoritas roadmap: portfolio = projection, perubahan task lewat jalur authority |
-| Klaim release-ready | Closure P14 hanya untuk kontrak bukti-terstruktur; limitasi P13 tetap berlaku dan tree masih uncommitted |
+| Klaim release-ready | Closure P14 hanya untuk kontrak bukti-terstruktur; limitasi P13 tetap berlaku. Pin `git rev-parse HEAD` dan `git diff --stat` sebagai checkpoint, lalu jalankan ulang seluruh gate pada kandidat yang sama sebelum menyatakan hijau — angka historis bukan hasil sekarang |
 
 ## Terkait
 
 - [CLI](cli.md) — referensi lengkap flag.
 - [Arsitektur](architecture.md) — di mana scheduler berada.
-- [Open Work](autonomous-scheduler.md) — pekerjaan lintas sesi yang diteruskan scheduler.
+- [Open Work lintas sesi](#open-work-lintas-sesi) — pekerjaan lintas sesi yang diteruskan scheduler.

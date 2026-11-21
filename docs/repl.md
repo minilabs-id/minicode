@@ -15,7 +15,7 @@ locale OS > en. `/lang` tanpa argumen = tampilkan aktif. Semua string lewat kamu
 |---|---|
 | `/help` | Daftar perintah ringkas, terkelompok per kategori (Session/Model/Mode/View/Task) |
 | `/help full` | Daftar lengkap terkelompok dengan deskripsi (alias `/help all`); `/help` kosong dari non-TTY juga menampilkan ini |
-| `/help keys` | Pintasan papan tombol lengkap (alias `/help tombol`) |
+| `/help keys` | Pintasan papan tombol lengkap, termasuk pintasan sidebar (alias `/help tombol`) |
 | `/provider [sync]` | Kelola provider: popup — picker preset + form (URL/key/scope/timpa), hapus (`d`, menyebut jumlah model yang ikut hilang), ubah (`e`). `sync` = segarkan daftar model semua provider (hanya bilang restart bila benar ada model baru) |
 | `/model [cari]` | Popup semua `provider::model` (argumen = filter awal; di dalam ketik langsung cari live, Ctrl+U clear, Esc keluar filter). Del = hapus (konfirmasi). Enter = pilih + atur thinking effort (`default/low/medium/high`, tersimpan di provider, berlaku sesi berikutnya; Esc = batal total). Effort non-default tampil badge `[low|medium|high]` |
 | `/context [nilai]` | Tabel jendela konteks efektif tiap model + asal angkanya (`manual`/`endpoint`/`katalog`/`models.dev`/`flag`/`default aman`). Dengan argumen: setel untuk model aktif (`128k`, `1m`, `1024x1024`, `auto`) — langsung berlaku turn berikutnya. Detail di [Konfigurasi](config.md) |
@@ -28,8 +28,8 @@ locale OS > en. `/lang` tanpa argumen = tampilkan aktif. Semua string lewat kamu
 | `/init` | Buat `AGENTS.md` proyek ini |
 | `/copy [n]` | Salin `n` turn terakhir (default `1`, maksimal `10`) via OSC 52 |
 | `/clear` | Kosongkan transkrip (viewport kembali kosong) |
-| `/view [action]` | Tanpa argumen = popup aksi tampilan. `compact` = putar output tool ringkas/penuh; `thinking` = tampil/sembunyikan reasoning; `expand` dihapus — riwayat lengkap di sidebar (gulir mouse / Alt+PgUp); `minimize` = lipat tool+jawaban; `fold` = panel aktivitas |
-| `/exit` | Keluar (satu-satunya jalan keluar; `/quit` alias). Setelah keluar, tercetak kop ringkasan sesi: wordmark `minicode` + Session/Model/Usage (token, biaya, durasi) |
+| `/view [thinking]` | Hanya menerima `thinking`: tanpa argumen = picker satu aksi (`thinking`), `thinking` = tampil/sembunyikan reasoning. Aksi lama `compact`/`minimize`/`fold`/`expand` DITOLAK — `expand` kini jadi sidebar (panel Live) berisi riwayat lengkap (gulir mouse, Alt+PgUp/PgDn, Ctrl+O) |
+| `/exit` | Keluar (satu-satunya jalan keluar; `/quit` alias). Setelah keluar, blok penutup ke scrollback: wordmark `minicode` + Session/Model/Mode + Usage (token in/out, biaya, durasi) + rincian tool per kategori + jumlah agent. Matikan dengan `MINICODE_SESSION_SUMMARY=0` |
 | `/scheduler [status\|run\|stop]` | Kendali Scheduler produksi. **Nonaktif secara bawaan** di setiap sesi (perlu flag `--enable-scheduler`); tanpa flag, perintahnya menjawab "not enabled". Tetap tampil di `/help` supaya operator yang mengaktifkan flag bisa menemukannya. |
 
 Alias (jalan, tidak diiklankan di `/help`): `/models` → `/model`, `/providers` → `/provider`, `/usage` & `/cost` → `/status`, `/resume [id]` → `/sessions [id]`, `/quit`. Nama lama `/sync`, `/work-mode`, `/history`, `/compact`, `/thinking`, `/expand`, `/minimize`, dan `/fold` sudah pensiun (tidak ada alias) — `/help` dan pesan did-you-mean menuntun ke penggantinya.
@@ -46,10 +46,12 @@ Did-you-mean: typo `/sessoons` → `Did you mean /sessions?` (jarak ≤ 2).
 | `tab` | Toggle WorkMode (`DISCUSS` ↔ `BUILD`) |
 | `shift+tab` | Toggle PermissionMode (`AUTO` ↔ `ASK`) |
 | `↑` / `↓` | Riwayat prompt, atau navigasi item di picker/manager/form |
-| `pgup` / `pgdn` | Gulir transkrip satu halaman; dengan `shift`: setengah halaman (di picker/manager: gulir daftar) |
+| `pgup` / `pgdn` | Gulir transkrip satu halaman — **chat saja**, tidak menggulir sidebar; dengan `shift`: setengah halaman (di picker/manager: gulir daftar) |
+| `alt+pgup` / `alt+pgdn` | Gulir KEDUA panel (chat + sidebar) sekaligus dan gerakkan seleksi Live |
+| `ctrl+pgup` / `ctrl+pgdn` | Ubah rasio tinggi sidebar thinking:activity (30–80%, kelipatan 10%) |
 | `mouse drag` | Select teks transkrip; `Ctrl+C` menyalin selection app-level |
-| `mouse wheel` | Gulir transkrip; klik prompt memindahkan kursor |
-| `home` / `end` | Awal/akhir baris; saat baris kosong tanpa dropdown: lompat ke atas transkrip / kembali ke ekor (di picker/manager: lompat atas/bawah daftar) |
+| `mouse wheel` | Gulir panel di bawah kursor (chat atau sidebar); klik prompt memindahkan kursor |
+| `home` / `end` | Awal/akhir baris; saat baris kosong tanpa dropdown: bawa chat **dan** sidebar ke tepi atas/bawah (di picker/manager: lompat atas/bawah daftar) |
 | `←` / `→` | Geser kursor (di form select/confirm: ganti opsi/nilai) |
 | `ctrl+a` / `ctrl+e` | Awal / akhir baris |
 | `delete` / `backspace` | Hapus karakter (di filter: pangkas query; di /model browse: Del = hapus model dengan konfirmasi) |
@@ -57,8 +59,8 @@ Did-you-mean: typo `/sessoons` → `Did you mean /sessions?` (jarak ≤ 2).
 | `ctrl+j` | Baris baru (multiline; Enter tetap submit) |
 | `ctrl+w` | Hapus satu kata sebelum kursor |
 | `ctrl+u` | Kosongkan baris (di filter: kosongkan query) |
-| `ctrl+o` | Putar tool call compact/expanded (juga `/view compact`) |
-| `ctrl+t` | Toggle tampilan thinking expanded/minimized (juga `/view thinking`) |
+| `ctrl+o` | Buka modal detail tool Live di sidebar (saat sidebar aktif); bukan lagi toggle compact |
+| `ctrl+t` | Tanpa binding (dulu toggle thinking; kini tidak ada aksi) |
 | `esc` | Tutup dropdown/picker; dua-tahap di form (tekan-1 bersihkan field, tekan-2 batal); busy = batalkan turn; idle + composer kosong: dua Esc dalam 500 ms membuka picker `/undo` |
 | `ctrl+c` | Salin selection (TUI); tanpa selection = no-op. Abort turn pakai `Esc` (`Esc` dua kali dalam 1,5 dtk, atau `Ctrl+D` baris-kosong, saat abort macet) |
 | `ctrl+d` | Keluar saat baris kosong; saat busy baris-kosong = abort turn lalu keluar |
@@ -67,7 +69,14 @@ Did-you-mean: typo `/sessoons` → `Did you mean /sessions?` (jarak ≤ 2).
 Saat turn berjalan composer tetap hidup: draft yang sedang diketik tampil di slot
 composer (menggantikan baris status aktivitas selama draft tidak kosong), jadi
 koreksi/informasi tambahan bisa disiapkan tanpa menghentikan turn. `Tab`,
-`Shift+Tab`, `Ctrl+O`, `Ctrl+T`, dan `Ctrl+R` tetap ditahan sampai turn selesai.
+`Shift+Tab`, dan `Ctrl+R` tetap ditahan sampai turn selesai; `Ctrl+O`
+dikecualikan — modal detail Live boleh dibuka saat busy.
+
+## Sidebar (panel Live)
+
+Sidebar kanan menampilkan aktivitas tool Live (dan Log) dalam frame `paint()` yang sama — bukan scrollback — jadi tidak ikut tergulir bersama transkrip. Panel hanya aktif bila `cols ≥ 100` **dan** `rows ≥ 20`. Lebarnya 30% sampai 150 kolom, lalu bertumbuh linear ke 50% di ≥160 kolom dengan lantai chat 36 kolom. Tinggi dibagi `thinking:activity` = 60:40 dan bisa diubah 30–80% lewat `Ctrl+PgUp`/`Ctrl+PgDn`. Di ≥168 kolom panel Live terpecah menjadi `Live|Log`. Visualnya sengaja polos: satu pemisah redup, jarak 3 baris, padding 1 spasi, tanpa bingkai kotak.
+
+Interaksi: gulir mouse menggulir panel di bawah kursor; `Alt+PgUp`/`Alt+PgDn` menggulir kedua panel sekaligus dan menggerakkan seleksi Live; `PgUp`/`PgDn` tetap chat-saja; `Home`/`End` membawa chat dan sidebar ke tepi. `Ctrl+O` membuka modal detail tool Live. Perintah `/expand` dihapus karena riwayat lengkap kini tersedia langsung di sidebar — tidak ada lagi toggle expand di chat.
 
 ## Aturan konsistensi (kontrak I25)
 

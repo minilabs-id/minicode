@@ -34,21 +34,21 @@ Dev install notes:
 bun x tsc --noEmit && bun run lint && bun test && bun run gate:coverage && bun run gate:pack
 ```
 
-Coverage rises -> raise the minimum in `scripts/coverage-gate.ts` (as of 2026-10-25: **87 funcs / 86 lines** + 19 per-file floors for critical modules; funcs raised 86 -> 87 at P13.5). The coverage threshold is keyed to the FAST suite (`bun test` in CI); slow/stochastic gates must not raise the threshold.
+Coverage rises -> raise the minimum in `scripts/coverage-gate.ts` (as of 2026-10-25 the minimum is **87 funcs / 86 lines** — a threshold, not a measured result — + 19 per-file floors for critical modules; funcs raised 86 -> 87 at P13.5). The coverage threshold is keyed to the FAST suite (`bun test` in CI); slow/stochastic gates must not raise the threshold.
 
 ## Fast vs slow gate (F4.2)
 
 ```bash
-bun run gate:fast   # tsc + lint + test + coverage + pack + bash + bench:smoke + audit:harness (per commit/CI)
+bun run gate:fast   # tsc + lint + test + coverage + pack + bash + bench:smoke + audit:harness + gate:telemetry (per commit/CI)
 ```
 
 Slow/stochastic gates (docker sandbox) stay in `slow.yml` — their failure is an investigation signal, not a PR rejection. The per-commit CI (`ci.yml`) only runs the deterministic ones.
 
-### Package size budget (3,968 KiB)
+### Package size budget (5,000 KiB)
 
-`bun run gate:pack` measures the tarball size (`npm pack --dry-run`, KiB) and refuses when it **exceeds 4,096 KiB (4.0 MiB)**. The single figure lives in `scripts/pack-budget.ts` — one source for the gate and the tests, so the two cannot drift. This limit is a **regression alarm** (catching `node_modules`/`test` leaking in), not a size target to chase.
+`bun run gate:pack` measures the tarball size (`npm pack --dry-run`, KiB) and refuses when it **exceeds 5,000 KiB (4.9 MiB)**. The single figure lives in `scripts/pack-budget.ts` — one source for the gate and the tests, so the two cannot drift. This limit is a **regression alarm** (catching `node_modules`/`test` leaking in), not a size target to chase.
 
-The 4,096 KiB limit was approved by the owner on 2026-11-11 for the v0.21.0 release. Do not raise the budget without new evidence and owner approval; measure runtime and prunable non-runtime files first.
+The 5,000 KiB limit was approved by the owner on 2026-11-19 (re-baselined from 4,608 KiB after the v7.32–v7.41 total audit: actual package 4,709 KiB / 331 files, ~290 KiB margin). Do not raise the budget without new evidence and owner approval; measure runtime and prunable non-runtime files first.
 
 Other gates:
 

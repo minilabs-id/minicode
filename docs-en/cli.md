@@ -72,6 +72,8 @@ after the system prompt, tools, and history are counted.
 
 In the TUI, **Tab** cycles Work Mode (`Discuss` -> `Build`) and **Shift+Tab** toggles Permission Mode (`Auto` <-> `Ask`). `/mode auto|ask` changes approval; `/mode discuss|build` changes the operating mode. The footer shows Work Mode on the left and Permission Mode in cyan on the right, near context usage; on narrow terminals the labels are condensed.
 
+The adaptive right sidebar (Thinking + Activity/Live/Log) — its activation threshold, per-pane wheel, `Alt+PgUp/PgDn`, `Ctrl+PgUp/PgDn`, and the `Ctrl+O` Live detail modal — is documented in [TUI — Slash Commands & Keyboard](repl.md).
+
 ## When to use what
 
 | Goal | Use |
@@ -100,6 +102,7 @@ The full table is in [Environment Variables](environment.md); the most used:
 | `MINICODE_ALLOW_LOCAL_CONFIG=1` | Same as `--allow-local-config` |
 | `MINICODE_WORK_MODE` | `DISCUSS` / `PLAN` / `BUILD` — default WorkMode; precedence in [Environment Variables](environment.md) |
 | `MINICODE_TOOL_SCOPE=explore` | Read-only subset |
+| `MINICODE_SUB_AGENT_POOL_SIZE` | Parallel sub-agent execution slots (1..16, default 3); raise for fan-out of 5+ agents |
 | `MINICODE_GREP_ENGINE=js` | Force the internal walker |
 | `MINICODE_MEMORY_SCOPE` | `cwd` \| `global` \| `all` |
 | `MINICODE_AUTO_MEMORY=0` | Disable auto-saving summaries/snippets |
@@ -108,8 +111,11 @@ The full table is in [Environment Variables](environment.md); the most used:
 | `TAVILY_API_KEY` | Tavily web_search (falls back to keyless Firecrawl/Mwmbl/Marginalia when empty) |
 | `MINICODE_ALLOW_DDG=1` | Enable the DDG HTML fallback (off by default; DDG is blocked in Indonesia) |
 | `NO_COLOR` | Disable colour (wins over TTY) |
+| `MINICODE_COLOR=0` | Force monochrome (same as `NO_COLOR`); otherwise colour is on by default in a TTY |
 | `MINICODE_ASCII=1` | ASCII glyphs for consoles without UTF-8 |
 | `MINICODE_STATUSLINE=rich` | Spinner also shows session tokens + cost |
+| `MINICODE_STARTUP_PROGRESS=0` | Disable the startup progress line (on by default); a single `start N%` line overwritten with `\r` |
+| `MINICODE_SESSION_SUMMARY=0` | Disable the closing session block (on by default), written to scrollback after the alternate screen is closed |
 
 ## Config
 

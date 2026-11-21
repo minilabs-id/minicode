@@ -2,7 +2,7 @@
 
 MiniCode is an open-source terminal coding agent built on the vendored MiniCore kernel (host-editable since v0.16.0). It is zero-dependency (Bun is the only runtime). It inspects and edits a workspace, runs local tools, and connects to the AI providers and MCP/LSP servers you configure.
 
-Interactive sessions run as a fullscreen TUI; one-shot and automation runs flow to the shell scrollback or a machine-readable JSONL stream. Every tool action is visible in the ledger, file changes are jailed to the workspace, and sensitive actions are gated behind your permission. Prompts and relevant workspace context are sent to the provider you configure; MCP and LSP servers may receive data or perform external effects. MiniCode itself sends no telemetry — traces are local-only (`MINICODE_TELEMETRY=0` to disable).
+Interactive sessions run as a fullscreen TUI — since v0.33 with an adaptive right sidebar (Thinking / Activity / Live windows, a Live|Log split on wide terminals, per-pane wheel scroll, Alt+PgUp/PgDn, and Ctrl+O for tool detail); chat shows narration plus a short category recap, with the full per-tool history in the sidebar and `/expand` removed. One-shot and automation runs flow to the shell scrollback or a machine-readable JSONL stream. Every tool action is visible in the ledger, file changes are jailed to the workspace, and sensitive actions are gated behind your permission. Prompts and relevant workspace context are sent to the provider you configure; MCP and LSP servers may receive data or perform external effects. MiniCode itself sends no telemetry — traces are local-only (`MINICODE_TELEMETRY=0` to disable).
 
 ## Install
 
@@ -56,6 +56,8 @@ bun test
 bun run gate:coverage
 bun run gate:pack
 ```
+
+The five commands above are the minimum local gate; `bun run gate:fast` is the canonical full set (tsc, lint, test, coverage, pack, bash, bench:smoke, audit:harness, and gate:telemetry).
 
 The repository's agent instructions define the required gate order and architecture constraints. Do not treat historical audit reports as current gate results; use a report only for its recorded checkpoint and scope.
 

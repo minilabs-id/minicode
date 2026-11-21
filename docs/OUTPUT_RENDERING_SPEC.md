@@ -1,7 +1,7 @@
 # Output Rendering Specification
 
 **Status:** implemented renderer boundary; canonical policy active, with streaming content transport and one ACP compatibility window.
-**Tanggal:** 2026-09-25  
+**Tanggal:** 2026-09-25 · **Diperbarui:** 2026-11-21 (v0.33, `1aaca14`)  
 **Kontrak aktif:** renderer TUI/linear di `src/presentation/` dan `src/ui/`.
 
 ## 1. Prinsip boundary
@@ -37,15 +37,21 @@ Renderer tidak boleh:
 
 | Module | Tanggung jawab sekarang | Keterkaitan | Target |
 |---|---|---|---|
-| `src/ui/tui/transcript.ts` | Streaming content buffer, source map, markdown table, canonical tool ledger, evict, selection | Raw content bus + presentation snapshot/events + policy DI | View adapter; no semantic status parsing |
+| `src/ui/tui/transcript.ts` | Streaming content buffer, source map, markdown table, category recap (bukan ledger per-tool), evict, selection | Raw content bus + presentation snapshot/events + policy DI | View adapter; no semantic status parsing |
 | `src/ui/tui/app.ts` | Input, viewport, layout, screen ownership, popup lifecycle, clipboard | Controller + painter | Controller/painter boundary unchanged |
-| `src/ui/assistant/simple.ts` | Stream sanitizer, answer/tool state, collapse, table, copy, stdout/stderr | Presentation events + policy DI + streaming text | Normal/verbose projection writer |
+| `src/ui/assistant/simple.ts` | Stream sanitizer, answer/tool state, table, copy, stdout/stderr (collapse/`expand` dihapus v0.33) | Presentation events + policy DI + streaming text | Normal/verbose projection writer |
 | `src/ui/assistant/turn-status.ts` | Infer active phase dan heartbeat | Policy-derived activity label | Transient view only |
 | `src/ui/runtime/screen.ts` | Alternate screen, atomic paint, region | Terminal primitive | Tetap dipertahankan |
 | `src/ui/runtime/statusline.ts` | Arbitrasi transient stderr | Transport owner | Tetap, plus writer policy |
 | `cli/commands/exec.ts` | Canonical lifecycle JSONL, text delta, versioned summary | Presentation events + text transport | Canonical machine projection |
 | `cli/commands/acp.ts` | Canonical lifecycle ACP, sanitized text delta | Presentation events + compatibility fallback | Canonical lifecycle projection |
 | `src/ui/approval/prompt.ts` | Human prompt/decision | DI/sink + policy-compatible fallback | Same decision event |
+| `src/ui/render/sidebar.ts` | Painter sidebar kanan: pane Thinking/Activity/Live/Log, separator redup, gap 3 baris, padding 1 spasi, tanpa box border | `SidebarModel` + `sidebar-layout`, satu `paint()` frame dengan chat | View murni; bukan semantic truth |
+| `src/ui/render/sidebar-layout.ts` | Geometri sidebar: aktif `cols ≥ 100`/`rows ≥ 20`, lebar 30% ≤150 → 50% ≥160, chat floor 36, tinggi Thinking:Activity 60:40, split Live\|Log ≥168 | viewport + policy | Satu sumber geometri |
+| `src/ui/render/sidebar-model.ts` | State view sidebar: ingest reasoning inkremental, Activity log, seleksi pane Live | semantic events + projection | Inkremental O(n), trim ber-marker |
+| `src/ui/render/agent-progress.ts` | Representasi progres sub-agent di pane Live | child report + tool state | View adapter |
+| `src/ui/render/activity-format.ts` | Format baris Activity log (recap kategori, temuan) | activity semantic | Pure formatter |
+| `src/ui/screens/window.ts` | Jendela/frame view murni untuk popup & picker | props + callback | View murni; controller di `cli/` |
 
 ## 3. Kontrak input renderer
 
@@ -96,7 +102,7 @@ Node membawa semantic payload. `priority`, `collapse`, `visibility`, dan
 | Task running | satu activity/current state | duration + target | event IDs | typed lifecycle |
 | Tool completed | receipt singkat | receipt + duration | full metadata | typed completed |
 | Tool denied | warning + reason | policy path | raw category redacted | typed denied |
-| Reasoning | collapsed/dots | expanded | raw redacted chunks | structured ref/status |
+| Reasoning | pane Thinking penuh bila sidebar aktif | expanded | raw redacted chunks | structured ref/status |
 | Plan | upcoming steps | step status | internal links | typed plan |
 | Finding | finding + evidence ringkas | evidence detail | full evidence | typed finding |
 | Diagnostic | actionable only | category + next step | trace/counter | typed diagnostic |
@@ -124,11 +130,15 @@ projection melalui `TuiHost`, dengan fallback deny bila DI tidak tersedia.
 
 Frame terdiri dari:
 
-1. transcript viewport;
-2. optional inline `/` dropdown;
-3. composer/prompt atau activity row;
-4. satu spacer;
-5. status bar.
+1. transcript viewport (chat, minimum 36 kolom);
+2. optional right sidebar column — hanya bila `cols ≥ 100` dan `rows ≥ 20`;
+3. optional inline `/` dropdown;
+4. composer/prompt atau activity row;
+5. satu spacer;
+6. status bar.
+
+Sidebar adalah bagian dari **satu `paint()` frame / satu write**, bukan scrollback:
+satu separator vertikal redup, gap 3 baris, padding 1 spasi, tanpa box border.
 
 `screen.ts` tetap satu-satunya alt-screen owner. `paintRegion()` hanya untuk popup;
 popup tidak boleh membuat listener stdin kedua.
@@ -144,6 +154,11 @@ popup tidak boleh membuat listener stdin kedua.
   bukan lagi penanda `✓`/`✗` — lihat `OUTPUT_UX_RULES.md` §3).
 - Tool child: default dikelompokkan ke parent `delegate_task`; child detail tersedia
   pada verbose/debug.
+- Chat v0.33: narration + category recap (mis. `3 command · 2 read · 5 subagent`) +
+  final answer SAJA. Baris ledger per-tool, label `Tool:`, `/expand`, dan collapsed
+  buffer DIHAPUS.
+- Finding: `finding.detected` diproyeksikan ke Activity log sidebar bila sidebar
+  aktif; pada jalur linear tanpa sidebar tetap masuk transkrip.
 - Context compaction: system entry, tidak menghapus history.
 - Summary: system node dari canonical turn summary, bukan hasil hitung ulang widget.
 - Error: node dengan category/cause/hint; tidak hanya string merah.
@@ -162,6 +177,11 @@ Selection adalah view concern, tetapi sumbernya adalah `SourceRef` semantic:
 - `Esc` clear selection dulu, lalu abort/batal;
 - OSC52 menerima plain sanitized payload dan failure state eksplisit.
 
+Seleksi dan navigasi juga mencakup pane sidebar: wheel mouse menggulir pane di bawah
+kursor; `Alt+PgUp/PgDn` menggulir kedua pane sekaligus dan memindahkan seleksi Live;
+`Ctrl+O` membuka modal detail live-tool; `Home`/`End` membawa chat dan sidebar ke
+tepi; `PgUp/PgDn` tetap khusus chat.
+
 Selection tidak boleh menyalin terminal control sequence atau table padding. Terminal
 native selection bukan acceptance contract karena mouse tracking aktif.
 
@@ -172,7 +192,7 @@ Linear renderer menerima `ProjectionNode[]`/snapshot yang sama:
 - stdout: permanent output dan answer/result;
 - stderr: activity, reasoning (verbose), warning, error;
 - non-TTY: `stripSgr`, no cursor control, no alternate screen;
-- TTY: satu compact ledger per operation, parallel child group;
+- TTY: category recap per turn (bukan ledger per-tool); parallel child group tetap dikelompokkan;
 - markdown table: semantic table hanya di TTY; non-TTY mempertahankan source sanitized;
 - copy buffer: isi yang benar-benar terlihat, dengan cap dan marker.
 
@@ -232,6 +252,11 @@ arbitrator untuk transient, tetapi bukan pengganti semantic routing.
 - Resize dibaca saat paint, bukan saat event.
 - `NO_COLOR`/legacy Windows memakai glyph ASCII atau status word.
 - Narrow terminal memakai truncation/wrap yang menjaga path/target penting.
+- Sidebar kanan aktif hanya bila `cols ≥ 100` dan `rows ≥ 20`; lebar 30% pada
+  `cols ≤ 150`, naik linear ke 50% pada `cols ≥ 160`, dengan chat floor 36 kolom.
+- Tinggi pane Thinking:Activity = 60:40 (dapat diubah 30–80% via `Ctrl+PgUp`/
+  `Ctrl+PgDn`); pada `cols ≥ 168` pane Activity terbagi `Live|Log`.
+- Satu separator vertikal redup, gap 3 baris, padding 1 spasi, tanpa box border.
 - TTY table boleh aligned; machine/non-TTY tidak boleh berubah makna.
 - Copy/paste tidak bergantung pada warna.
 
@@ -245,7 +270,11 @@ dikendalikan oleh `MINICODE_ASCII` dan capability UTF-8 Windows.
 
 Interaksi tetap keyboard-first: PgUp/PgDn dan Home/End untuk transkrip, Esc
 untuk membatalkan/menutup selection, Ctrl+D untuk keluar, dan popup menahan
-fokus sampai ditutup. Tidak ada mode screen-reader terpisah karena kontrak
+fokus sampai ditutup. Wheel mouse menggulir pane di bawah kursor (chat atau
+sidebar); `Alt+PgUp/PgDn` menggulir kedua pane dan memindahkan seleksi Live;
+`Ctrl+PgUp/PgDn` mengubah proporsi tinggi Thinking:Activity; `Ctrl+O` membuka
+modal detail live-tool; `Home`/`End` menyamakan chat dan sidebar ke tepi,
+sementara `PgUp/PgDn` khusus chat. Tidak ada mode screen-reader terpisah karena kontrak
 fullscreen terminal dibekukan. Navigasi keyboard dan jalur mono memiliki test;
 screen-reader announcement, kontras fisik, dan manual assistive-technology UAT
 belum diverifikasi. Tampilan antar terminal tetap dapat berbeda.
@@ -259,6 +288,7 @@ belum diverifikasi. Tampilan antar terminal tetap dapat berbeda.
 | turn cancelled | stopped/abort state | stopped/error | `turn.cancelled` + summary | `turn.cancelled`/error |
 | file receipt | activity/source | receipt line | typed receipt | typed receipt |
 | context compacted | system entry | warning | typed system event | typed system event |
+| finding detected | Activity log sidebar (aktif) / transkrip (linear) | transkrip | `finding.detected` | `finding.detected` |
 | duration | pinned/summary | suffix | field | field |
 | parent/child | grouped | grouped | IDs/link | IDs/link |
 

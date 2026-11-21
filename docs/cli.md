@@ -53,7 +53,7 @@ Subcommand di-route di `cli/router.ts` (`stats`, `sessions`, `mcp`, `config`, `s
 | `--timeout <ms>` | Hard deadline per prompt (default 3600000 = 1 jam; `0` = Infinity; jalur `exec` tetap 15 menit). Sesi yang idle tidak menghabiskan deadline prompt berikutnya. |
 | `--cwd <path>` | Workspace root untuk tool file & jail |
 | `--allow-local-config` | Percayai `.minicode/config.json` + allowlist lokal (default: diabaikan) |
-| `--max-steps <n>` | Batas langkah tool (default 50) |
+| `--max-steps <n>` | Batas langkah tool (default 200; angka 50 adalah hard-cap langkah sub-agent, bukan default global) |
 | `--context-window <n>` | Ukuran jendela konteks (token) |
 | `--session <id>` | ID sesi (default random, disanitasi) |
 | `--work-mode <m>` | `DISCUSS` \| `BUILD` (default: `DISCUSS`). **Work Mode**: `DISCUSS` = investigasi & perencanaan read-only, `BUILD` = implementasi. Persetujuan hanya `AUTO`/`ASK` (default `AUTO`). Lihat [TUI](repl.md) untuk `/mode` |
@@ -70,7 +70,7 @@ Batas berubah otomatis saat `/model` mengganti model. MiniCode juga membatasi
 keluaran stream berdasarkan ruang tersisa setelah system prompt, tools, dan
 riwayat dihitung.
 
-Di TUI, **Tab** meng-toggle Work Mode (`Discuss` ↔ `Build`) dan **Shift+Tab** meng-toggle Permission Mode (`Auto` ↔ `Ask`). `/mode auto|ask` mengubah persetujuan; `/mode discuss|build` mengubah operating mode. Footer menampilkan Work Mode di kiri dan Permission Mode berwarna cyan di kanan, dekat penggunaan konteks; pada terminal sempit label dipadatkan.
+Di TUI, **Tab** meng-toggle Work Mode (`Discuss` ↔ `Build`) dan **Shift+Tab** meng-toggle Permission Mode (`Auto` ↔ `Ask`). `/mode auto|ask` mengubah persetujuan; `/mode discuss|build` mengubah operating mode. Footer menampilkan Work Mode di kiri dan Permission Mode berwarna cyan di kanan, dekat penggunaan konteks; pada terminal sempit label dipadatkan. Panel sidebar kanan (Thinking/Activity/Live, pintasan `Alt+PgUp/PgDn`, `Ctrl+PgUp/PgDn`, `Ctrl+O`) dijelaskan di [TUI](repl.md#sidebar-panel-live).
 
 ## Kapan memakai apa
 
@@ -107,8 +107,15 @@ Kepala tabel penuh ada di [Environment Variables](environment.md); yang paling s
 | `TAVILY_API_KEY` | Tavily web_search (fallback keyless Firecrawl/Mwmbl/Marginalia bila kosong) |
 | `MINICODE_ALLOW_DDG=1` | Aktifkan fallback DDG HTML (default mati; DDG diblokir di Indonesia) |
 | `NO_COLOR` | Matikan warna (menang atas TTY) |
+| `MINICODE_COLOR=0` | Paksa monokrom (identik `NO_COLOR`) |
 | `MINICODE_ASCII=1` | Glyph ASCII untuk konsol tanpa UTF-8 |
 | `MINICODE_STATUSLINE=rich` | Spinner tampilkan token + biaya sesi |
+| `MINICODE_MINIMIZE_ACTIVITY=0` | Tampilkan detail aktivitas per-tool (bukan ringkasan lipat) |
+| `MINICODE_ACTIVITY_PANEL=0` | Matikan panel aktivitas/sidebar |
+| `MINICODE_SESSION_SUMMARY=0` | Matikan blok penutup sesi (model/mode/rincian tool/agent/token) |
+| `MINICODE_STARTUP_PROGRESS=0` | Matikan baris progres startup |
+| `MINICODE_SUB_AGENT_POOL_SIZE` | Slot sub-agent paralel (1..16, default 3) |
+| `MINICODE_SUB_AGENT_TIMEOUT_MS` | Timeout per turn sub-agent (ms, default 300000); ditimpa `timeoutMs` di `delegate_task` |
 
 ## Config
 

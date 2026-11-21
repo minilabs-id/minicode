@@ -26,7 +26,7 @@ Setelah terdaftar, `mcp_list` menampilkan **tools, resources, prompts** sekaligu
 
 Tool dinamis `serverId.toolName` otomatis muncul. `resources`/`prompts` opsional di spec: server "Method not found" tetap terhubung dengan tool utuh.
 
-Keamanan HTTP: host privat ditolak kecuali `--allow-private` (penjaga sama dengan `web_fetch`: resolve DNS tanpa cache + tolak host privat). Redirect tidak diikuti. Ukuran dibatasi. Balasan dicocokkan per request id. Header `Authorization` tidak masuk log.
+Keamanan HTTP: host privat ditolak kecuali `--allow-private` (penjaga sama dengan `web_fetch`: resolve DNS tanpa cache + tolak host privat). Redirect tidak diikuti. Ukuran dibatasi. Mekanisme pinning serupa dipakai `fetchPinnedUrl` untuk katalog harga: IP hasil resolve di-pin ke socket (resolve-once, DNS strict/noCache, host privat & redirect ditolak, cap 2 MB). Balasan dicocokkan per request id. Header `Authorization` tidak masuk log.
 
 Izin: semua MCP bertitik selalu di-gate. Di `ASK`, pemanggilan minta konfirmasi sekali per pasangan server+tool+args (`[a] Always` persist ke allowlist); di `AUTO`, tool yang terdaftar/diotorisasi jalan tanpa prompt sedangkan yang tak dikenal di-*deny* (bukan di-prompt). `readonly`/`plan`/`allowlist` menolak. Tanpa wildcard auto-allow (proteksi supply-chain).
 

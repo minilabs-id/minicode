@@ -2,10 +2,10 @@
 
 ## Offline prices + sync
 
-25 built-in prices are available offline. For wider coverage, pull them yourself — there is **no automatic fetch** on the run path (the run path only reads the local cache so it adds no latency and leaks no usage patterns):
+25 built-in prices are available offline. For wider coverage, pull them yourself — there is **no automatic fetch** on the run path (the run path only reads the local cache so it adds no latency and leaks no usage patterns). `pricing sync` fetches via `fetchPinnedUrl`: the hostname is resolved once and the validated IP is pinned to the socket, redirects re-resolve with strict/no-cache DNS, private hosts are rejected, and there is no bypass through a proxy, connection pool, or redirect; responses are capped at 2 MB. Sync stays explicit-only:
 
 ```bash
-minicode pricing sync                 # pull the catalogue + prices from models.dev
+minicode pricing sync                 # pull the catalogue + prices from models.dev via fetchPinnedUrl (IP-pinned, explicit-only)
 minicode pricing status               # active source + cache age + a (stale) marker when older than 1 day
 minicode pricing show claude-sonnet-4-5
 minicode pricing clear                # back to the built-ins

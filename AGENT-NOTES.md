@@ -1,5 +1,14 @@
 # AGENT NOTES — scratch koordinasi antar-agent (BUKAN kontrak/roadmap)
 
+> ## 🗄️ ARSIP — koordinasi 2026-11-11/12 — tidak berlaku untuk HEAD `1aaca14`.
+>
+> Seluruh angka, nama berkas, pembagian area, dan status "belum di-commit" di
+> bawah adalah **catatan historis** sesi agent lama. Jangan dipakai sebagai
+> status checkout, kontrak, atau roadmap saat ini; rujuk `AGENTS.md` dan versi
+> terbaru `docs/TERMINAL_CONTRACT.md` (v0.33 mengubah kontrak, I36/I37). Angka
+> historis sengaja dibiarkan apa adanya sebagai arsip, bukan diperbarui satu per
+> satu.
+
 > Dibuat 2026-11-11 oleh satu sesi agent. Bukan kontrak produk, bukan roadmap
 > (lihat `AGENTS.md` untuk otoritas). Hapus bila sudah tak relevan.
 

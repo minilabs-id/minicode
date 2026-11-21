@@ -33,7 +33,7 @@ Catatan instalasi dev:
 bun x tsc --noEmit && bun run lint && bun test && bun run gate:coverage && bun run gate:pack
 ```
 
-Coverage naik → naikkan minimum di `scripts/coverage-gate.ts` (per 2026-10-25: **87 funcs / 86 lines** + 19 lantai per-berkas modul kritis; funcs dinaikkan 86 → 87 pada P13.5). Ambang coverage dikunci ke suite CEPAT (`bun test` di CI); gerbang lambat/stokastik tak boleh menaikkan ambang.
+Ambang **saat ini** — **87 funcs / 86 lines** + 19 lantai per-berkas modul kritis — diverifikasi di `scripts/coverage-gate.ts`; ini **ambang**, bukan hasil pengukuran yang dijamin di checkout ini, jadi jalankan ulang gate untuk angka terkini. Coverage naik → naikkan minimum di `scripts/coverage-gate.ts` (funcs dinaikkan 86 → 87 pada P13.5). Ambang coverage dikunci ke suite CEPAT (`bun test` di CI); gerbang lambat/stokastik tak boleh menaikkan ambang.
 
 ## Gate cepat vs lambat (F4.2)
 

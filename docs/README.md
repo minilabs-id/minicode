@@ -1,6 +1,6 @@
 # Dokumentasi MiniCode
 
-MiniCode adalah coding agent terminal yang dibangun di atas kernel MiniCore. Jalur interaktif memakai TUI fullscreen; jalur one-shot dan otomatis menulis ke scrollback atau stream mesin sesuai kontraknya.
+MiniCode adalah coding agent terminal yang dibangun di atas kernel MiniCore. Jalur interaktif memakai TUI fullscreen dengan sidebar kanan adaptif (Thinking + Activity/Live/Log); chat hanya memuat narasi, rekap kategori, dan jawaban akhir. Jalur one-shot dan otomatis menulis ke scrollback atau stream mesin sesuai kontraknya.
 
 ## Mulai
 
@@ -11,7 +11,8 @@ MiniCode adalah coding agent terminal yang dibangun di atas kernel MiniCore. Jal
 ## Batas yang perlu diketahui
 
 - Prompt dan konteks dikirim ke provider yang Anda pilih. Server MCP dan LSP yang dikonfigurasi juga dapat menerima data atau melakukan efek eksternal.
-- Path jail, bash guard, WorkMode, PermissionMode, dan tool access policy membatasi eksekusi; tidak menjamin bahwa keluaran model benar.
+- Path jail, bash guard (tokenizer shell sadar-platform + denylist kata kerja mutasi), WorkMode, PermissionMode, dan tool access policy membatasi eksekusi; tidak menjamin bahwa keluaran model benar.
+- `fetchPinnedUrl` memin alamat untuk mencegah SSRF pada pricing, DNS strict/noCache dipakai saat kompaksi, verifier membatasi `maxBuffer` 32 MB dan mengklasifikasikan kegagalan infrastruktur, serta undo/restore bersifat fail-closed (`rm` yang gagal tercatat sebagai `skipped`).
 - Batasan dan kontrak operasional dijelaskan dalam panduan aktif di direktori ini. Laporan audit bertanggal telah dipangkas dari baseline dokumentasi.
 
 ## Peta dokumentasi

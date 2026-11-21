@@ -10,6 +10,8 @@ Shadow-git checkpoints: a per-turn snapshot as a tree SHA (O(delta), no file cap
 
 Repo-map: per-file symbols (regex, 9 languages) cached in `.minicode/repomap.json` and injected into the system prompt. Tree-sitter is not used — measured reasons in `extractSymbolsAsync` (`src/repo/repomap.ts`).
 
+v0.33 adds a `perf-no-quadratic` guard: reasoning ingest into the right sidebar is incremental (O(n) rather than O(n²)), enforced by `test/perf-no-quadratic.test.ts`.
+
 The secret scrubber redacts `sk-`, `ghp_`, `AKIA`, PEM, JWT, Bearer, and `api_key=...` before text reaches the LLM.
 
 ## Benchmark
@@ -18,7 +20,7 @@ The secret scrubber redacts `sk-`, `ghp_`, `AKIA`, PEM, JWT, Bearer, and `api_ke
 bun run bench                            # requires a provider (real resolve rate)
 bun run bench:smoke                      # --fake, for CI
 bun run bench --tasks path/to/tasks.json # external tasks (SWE-bench format)
-bun run audit:harness                    # 60 deterministic checks, no API key
+bun run audit:harness                    # deterministic checks, no API key (pass/fail/advisory counts printed by the command)
 bun run bench --runs 2                   # median of 2 runs
 bun bench/runner.ts --fake --memory off  # without RAG/auto-memory
 bun bench/runner.ts --fake --memory on   # with RAG + seeded memory

@@ -5,7 +5,7 @@ Variabel yang paling menentukan perilaku (sisanya referensi di bawah):
 - **Batas otonomi di mesin sendiri:** `MINICODE_SANDBOX` + `MINICODE_SANDBOX_STRICT=1` (tolak bash bila isolasi tak ada) + `MINICODE_BUDGET_STRICT=1` (cost tak dikenal = over budget).
 - **Privasi/minim jejak:** `MINICODE_TELEMETRY=0` (tanpa traces), `MINICODE_AUTO_MEMORY=0` (tanpa auto-simpan memori).
 - **Repo asing:** JANGAN set `MINICODE_ALLOW_LOCAL_CONFIG=1` kecuali workspace milik Anda.
-- **Konsol lawas/aksesibilitas:** `MINICODE_ASCII=1`, `MINICODE_A11Y=1`, `MINICODE_BELL=0`, `NO_COLOR`.
+- **Konsol lawas/aksesibilitas:** `MINICODE_ASCII=1`, `MINICODE_A11Y=1`, `MINICODE_BELL=0`, `NO_COLOR`, `MINICODE_COLOR=0`.
 
 ## Runtime & limits
 
@@ -90,7 +90,7 @@ Variabel yang paling menentukan perilaku (sisanya referensi di bawah):
 | `MINICODE_ASCII` | `1` → paksa glyph ASCII (`[OK]`, `>`, `.`) untuk konsol tanpa UTF-8 |
 | `MINICODE_BOX` | gaya sudut kotak popup: default **melengkung** (`╭╮╰╯`); `square` → lancip (`┌┐└┘`); `ascii` → `+-|` (sama dengan `MINICODE_ASCII=1`). Untuk terminal yang merender glyph melengkung jelek |
 | `MINICODE_SCRIM` | `none` → paksa scrim backdrop jadi `faint` saja (tanpa latar gelap `48;5;236`) — diagnostik/tema terminal yang memetakan 256-warna aneh |
-| `MINICODE_COMPACT` | `1` → tool call ringkas, `0` → expanded. Default: compact di TUI, expanded di one-shot/exec (juga `/view compact`, Ctrl+O) |
+| `MINICODE_COMPACT` | `1` → tool call ringkas, `0` → expanded. Default: compact di TUI, expanded di one-shot/exec. Toggle `/view compact` sudah dihapus dan Ctrl+O tidak lagi memutar compact (kini membuka modal detail Live di sidebar) |
 | `MINICODE_JUSTIFY` | `1` → aktifkan rata kanan-kiri (justify) keluaran teks model. Default: mati (opt-in) — justify menyuntik spasi yang mengubah teks asli saat di-copy/–pipe |
 | `MINICODE_DROPDOWN` | `0` → matikan floating dropdown, pakai hint inline (konsol legacy) |
 | `MINICODE_MOUSE_SELECTION` | `0`/`false`/`off`/`no` → matikan mouse tracking TUI; default `1` untuk drag selection + wheel |
@@ -98,14 +98,14 @@ Variabel yang paling menentukan perilaku (sisanya referensi di bawah):
 | `MINICODE_BELL` | `0` → matikan bell `\x07` saat approval (aksesibilitas) |
 | `MINICODE_STATUSLINE` | `rich` → statusline turn menampilkan token kumulatif + biaya sesi (default hemat) |
 | `MINICODE_A11Y` | `1` → live-region approval untuk screen reader (baris polos tanpa ANSI) |
-| `MINICODE_SHOW_THINKING` | reasoning model tersembunyi SECARA DEFAULT (`false`); `1` → paksa terlihat (atau `/view thinking` / `Ctrl+T` / `--verbose`), `0` → paksa tersembunyi |
-| `MINICODE_MINIMIZE_ACTIVITY` | ON secara default di TUI; `0` → transparan (baris per-tool). Lipat aktivitas tool per turn jadi satu ringkasan (detail via `/view expand`) |
-| `MINICODE_ACTIVITY_PANEL` | `0` → matikan panel aktivitas (default AKTIF di TUI; `/view fold` toggle); `1` → paksa aktif juga di jalur linear/one-shot |
+| `MINICODE_SHOW_THINKING` | reasoning model tersembunyi SECARA DEFAULT (`false`); `1` → paksa terlihat (atau `/view thinking` / `--verbose`), `0` → paksa tersembunyi. `Ctrl+T` tidak punya binding |
+| `MINICODE_MINIMIZE_ACTIVITY` | ON secara default di TUI; `0` → transparan (baris per-tool). Lipat aktivitas tool per turn jadi satu ringkasan; detail kini ada di sidebar (panel Live, buka dengan Ctrl+O), bukan `/view expand` |
+| `MINICODE_ACTIVITY_PANEL` | `0` → matikan panel aktivitas/sidebar (default AKTIF di TUI, tapi hanya bila `cols ≥ 100` dan `rows ≥ 20` — geometri, bukan toggle `/view fold` yang sudah dihapus); `1` → paksa aktif juga di jalur linear/one-shot |
 | `MINICODE_AUTORESUME_BG` | `0` → nonaktifkan auto-resume turn TUI saat job background selesai (default aktif; sekali per job, hanya bila tidak ada turn berjalan) |
 | `MINICODE_TURN_AUTO_RESUME` | `0` → nonaktifkan resume otomatis turn setelah kegagalan provider **transien** (`server`/`network`; default aktif). Retry provider dan resume turn berbagi **satu anggaran pemulihan** (`src/policy/recovery-budget.ts`): total 45 dtk dan kuota 6 percobaan untuk satu panggilan logis, dengan full jitter dan `Retry-After` sebagai floor. Berbagi satu anggaran mencegah *retry amplification* (angka terpisah per lapisan membuat biaya berkali: ≈82 dtk untuk provider mati). Kegagalan terminal tidak dipulihkan: `rate_limit` (429 permanen/spend-cap tidak pulih), `auth`, `invalid_request`, `context_length_exceeded`, `budget_exceeded`, `max_steps_exceeded`, dan abort user |
 | `MINICORE_THINKING` | `off` → kirim `enable_thinking:false` ke OpenAI-compat (DeepSeek). Alias lama `MINICODE_THINKING` masih dihormati |
 | `MINICODE_STARTUP_PROGRESS` | `0` → matikan baris progres startup (default AKTIF). Tanpa logo: satu baris `start 57%` yang ditimpa dengan `\r`, angka nyata dari 9 fase `createCliSession`; `update 57%` untuk auto-update. Tutup `start 100%` sekali saat sesi siap |
-| `MINICODE_SESSION_SUMMARY` | `0` → matikan blok penutup sesi (default AKTIF). Ditulis ke scrollback SETELAH alt-screen ditutup: logo asli + `Session : minicode<DDMMYYYYHHMMSS>` + hitungan turn/tool/file/other + tok/biaya/durasi + versi. Data tak tersedia jujur (`0` / `$—`), transkrip tetap utuh |
+| `MINICODE_SESSION_SUMMARY` | `0` → matikan blok penutup sesi (default AKTIF). Ditulis ke scrollback SETELAH alt-screen ditutup: logo asli + `Session : minicode<DDMMYYYYHHMMSS>` + Model + Mode + hitungan turn/tool/file/other dengan rincian tool per kategori + jumlah agent + token in/out + biaya/durasi + versi. Data tak tersedia jujur (`0` / `$—`), transkrip tetap utuh |
 | `MINICODE_COLOR` | `0` → paksa monokrom (identik `NO_COLOR`); selain itu/absen → warna nyala by default di TTY (v7.29+). `TERM=dumb` / non-TTY tetap monokrom untuk determinisme |
 | `NO_COLOR` | Set apa pun selain `0` → matikan seluruh warna |
 

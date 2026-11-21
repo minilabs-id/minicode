@@ -1,7 +1,7 @@
 # Output UX Rules
 
 **Status:** contract grammar untuk normal/verbose/debug/machine output  
-**Tanggal:** 2026-09-25  
+**Tanggal:** 2026-09-25 · **Diperbarui:** 2026-11-21 (v0.33, `1aaca14`)  
 **Kontrak aktif:** proyeksi output di `src/presentation/projection.ts` dan formatter di `src/ui/render/`.
 
 ## 1. North star
@@ -98,6 +98,9 @@ Build failed
   package.json exists, but node_modules/ is absent.
 ```
 
+Dengan sidebar aktif, temuan diproyeksikan ke Activity log sidebar, bukan ke badan
+chat; pada jalur linear tanpa sidebar tetap menjadi entri transkrip tersendiri.
+
 ### Plan
 
 ```text
@@ -116,29 +119,54 @@ Plan hanya future work. “Read file”, “run grep”, dan “think” adalah 
 Audit complete · 18 files · 42s
 ```
 
+## 2b. Sidebar & chat split (v0.33)
+
+Chat berisi narration + category recap (mis. `3 command · 2 read · 5 subagent`) +
+jawaban akhir SAJA. Baris ledger per-tool, label `Tool:`, `/expand`, dan collapsed
+buffer DIHAPUS. `finding.detected` masuk Activity log sidebar bila sidebar aktif;
+bila tidak, jalur linear menaruhnya di transkrip.
+
+Sidebar kanan aktif hanya bila `cols ≥ 100` dan `rows ≥ 20`. Lebar 30% pada `cols ≤ 150`,
+naik linear ke 50% pada `cols ≥ 160`, dengan chat floor 36 kolom. Tinggi pane
+Thinking:Activity 60:40 (dapat diubah 30–80% via `Ctrl+PgUp`/`Ctrl+PgDn`); pada
+`cols ≥ 168` pane Activity terbagi `Live|Log`. Satu separator vertikal redup, gap 3
+baris, padding 1 spasi, tanpa box border — semuanya dilukis dalam **satu frame
+`paint()` / satu write**, bukan scrollback.
+
+Kunci: wheel mouse menggulir pane di bawah kursor, `Alt+PgUp/PgDn` menggulir kedua
+pane dan memindahkan seleksi Live, `Ctrl+O` membuka modal detail live-tool,
+`Home`/`End` membawa chat dan sidebar ke tepi, `PgUp/PgDn` tetap khusus chat.
+Reasoning dirender penuh di pane Thinking bila sidebar aktif dan disimpan sebagai
+session history dengan marker trim (`… N older items trimmed`), bukan baris transkrip.
+
+Retry hanya satu micro-toast footer `retry n/total · Ns` dengan TTL 4 detik dan counter
+live — bukan baris ledger, bukan durasi backoff, dan bukan envelope machine.
+
 ## 3. Status vocabulary
 
 Sejak v0.17.0 ikon status (`✓`/`✗`/`⊘`/`◌`) DIHAPUS — `glyphs.check/cross/denied/circle`
 mengembalikan `""` (`src/ui/render/theme.ts`) karena bising dan tak konsisten antar
-terminal. Status kini disampaikan lewat WARNA + kata; operasi aktif memakai chevron
-`›` (lihat `TERMINAL_CONTRACT.md` invariant #1). Contoh di dokumen ini sudah mengikuti
-format tanpa ikon status.
+terminal. Status disampaikan lewat KATA + struktur teks; warna dan glyph hanya aksen
+hierarki, karena mode mono (`MINICODE_COLOR=0`) dan `NO_COLOR` tetap harus terbaca.
+Operasi aktif memakai chevron `›` (lihat `TERMINAL_CONTRACT.md` invariant #7). Contoh di
+dokumen ini sudah mengikuti format tanpa ikon status.
 
-| Status | Glyph | Teks default | Arti |
-|---|---|---|---|
-| active | `›` | `running` atau `active` | operasi masih berjalan |
-| completed | — | `completed` | sukses terminal |
-| warning | `⚠` | `warning` | perlu perhatian, belum terminal failure |
-| failed | — | `failed` | operasi/turn gagal |
-| denied | — | `denied` | policy/permission menolak |
-| cancelled | — | `cancelled` | dibatalkan user/system |
-| interrupted | — | `interrupted` | proses berhenti sebelum terminal |
-| retrying | `↻` | `retrying` | recovery sedang berjalan |
-| transition | `→` | `next` | tindakan berikutnya |
-| info | `ℹ` | `info` | informasi non-actionable |
+| Status | Glyph | ASCII fallback | Teks default | Arti |
+|---|---|---|---|---|
+| active | `›` | `>` | `running` atau `active` | operasi masih berjalan |
+| completed | — | — | `completed` | sukses terminal |
+| warning | `⚠` | `!` | `warning` | perlu perhatian, belum terminal failure |
+| failed | — | — | `failed` | operasi/turn gagal |
+| denied | — | — | `denied` | policy/permission menolak |
+| cancelled | — | — | `cancelled` | dibatalkan user/system |
+| interrupted | — | — | `interrupted` | proses berhenti sebelum terminal |
+| retrying | `↻` | `~` | `retry n/total · Ns` | recovery sedang berjalan (toast footer 4 dtk) |
+| transition | `→` | `->` | `next` | tindakan berikutnya |
+| info | `ℹ` | `i` | `info` | informasi non-actionable |
 
-Glyph tidak pernah menjadi satu-satunya makna. ASCII fallback memakai kata atau struktur
-yang setara. Warna hanya membantu hierarki, bukan encode status.
+Glyph tidak pernah menjadi satu-satunya makna. Kolom ASCII fallback dipakai saat
+`MINICODE_ASCII=1`, `NO_COLOR`, atau Windows legacy — teks default tetap menjadi
+pembawa makna utama. Warna hanya membantu hierarki, bukan encode status.
 
 ## 4. Progressive disclosure
 
@@ -192,6 +220,10 @@ fields. Tidak mengirim raw kernel shape sebagai public contract.
 
 ## 5. Tool dan parallel operations
 
+> Contoh ledger di bawah ini adalah **mode linear/tanpa sidebar**. Dengan sidebar aktif,
+> detail per-tool tidak lagi dicetak di chat: chat hanya memuat narration, category
+> recap, dan jawaban akhir; detail pindah ke Activity log sidebar.
+
 Activity menjelaskan apa yang sedang dikerjakan, bukan internal implementation dump.
 Satu baris ledger default:
 
@@ -227,6 +259,10 @@ write_file src/router.ts · 1 file · 34ms
 
 ### Parallel
 
+Gaya collapsed/aggregated lama (blok `+ explore · N tools · N ok` dan buffer yang bisa
+dibuka) DIHAPUS di v0.33. Ringkasan kini satu baris category recap; detail ada di
+Activity log sidebar bila aktif.
+
 Jangan interleave raw output. Kelompokkan:
 
 ```text
@@ -248,14 +284,12 @@ Analyzed 11 files
 
 ### Retry
 
-Retry adalah call baru. Tampilkan hubungannya, bukan attempt number buatan:
-
-```text
-↻ read_file src/config.ts
-  retry after ENOENT
-```
-
-Normal tidak menampilkan tool ID. Debug dapat menampilkan `correlationId`.
+Retry adalah call baru dengan link `supersedes`, bukan attempt number buatan. Sejak
+v0.33 satu-satunya representasi normal adalah satu micro-toast footer:
+`retry n/total · Ns` — TTL 4 detik, counter diperbarui live di tempat. Tidak ada baris
+ledger baru dan tidak ada angka backoff yang ditampilkan; event sumber
+`minicode:retry` bersifat UI-transient (bukan envelope machine). Normal tidak
+menampilkan tool ID; debug dapat menampilkan `correlationId`.
 
 ## 6. Progress
 
@@ -384,6 +418,8 @@ terminal task event dan summary tepat satu kali.
 ## 10. Terminal geometry
 
 - Target lebar 80, 100, dan 120+ columns.
+- Sidebar kanan aktif hanya bila `cols ≥ 100` dan `rows ≥ 20`, dengan chat floor
+  36 kolom; pada `cols ≥ 168` pane Activity terbagi `Live|Log`.
 - Semua ukuran memakai display columns; CJK/emoji dua kolom.
 - Long path/command wrap atau truncate dengan marker, tidak pernah dipotong tanpa
   petunjuk.
@@ -452,4 +488,8 @@ Native terminal drag selection is not promised while the app owns mouse tracking
 - [ ] Finding dan evidence terpisah secara semantic.
 - [ ] Copy/paste tetap berguna tanpa color.
 - [ ] 80-column/narrow/Unicode/resize/Windows fallback teruji.
+- [ ] Sidebar hanya aktif pada `cols ≥ 100`/`rows ≥ 20`, satu frame dengan chat, dan mengikuti aturan lebar/tinggi/pane.
+- [ ] Chat memuat recap + narration + answer; tanpa `Tool:`, `/expand`, atau collapsed buffer.
+- [ ] Finding tampil di Activity log saat sidebar aktif dan tetap typed di machine.
+- [ ] Retry hanya satu micro-toast footer 4 dtk, bukan baris ledger atau envelope machine.
 - [ ] Machine output tidak bergantung pada scraping human text.

@@ -1,7 +1,7 @@
 # Output Protocol Specification
 
 **Status:** landed — `exec --json` memakai envelope `minicode.output.v1`, ACP memakai framing JSON-RPC + mapping semantik yang sama; legacy `type:"tool"` hanya bila lifecycle absen  
-**Tanggal:** 2026-09-25  
+**Tanggal:** 2026-09-25 · **Diperbarui:** 2026-11-21 (v0.33, `1aaca14`)  
 **Kontrak aktif:** envelope machine di `src/presentation/projection.ts` dan consumer di `cli/commands/exec.ts` serta `cli/commands/acp.ts`.
 
 ## 1. Prinsip
@@ -75,7 +75,10 @@ Default tampil:
 - task start/current state yang masih berjalan;
 - meaningful progress, diaggregat parallel operation;
 - tool receipt singkat bila ada efek nyata;
-- finding/result/actionable plan;
+- finding/result/actionable plan — finding pada human normal tampil di Activity log
+  sidebar bila sidebar aktif (`cols ≥ 100` dan `rows ≥ 20`), atau di transkrip bila
+  jalur linear tanpa sidebar; consumer machine selalu menerima `finding.detected`
+  bertipe, terlepas dari permukaan tampilnya;
 - terminal error dengan next action;
 - cancellation/timeout/partial status.
 
@@ -152,6 +155,12 @@ Semua event machine SHOULD menggunakan bentuk:
 
 `eventId` contoh hanya format contract; implementasi harus memakai generator yang
 deterministik untuk test dan stabil untuk consumer. `target` contoh bukan data nyata.
+
+`minicode:retry` adalah event bus internal untuk telemetri retry yang dipakai TUI
+(micro-toast footer `retry n/total · Ns`, TTL 4 dtk, counter live). Event ini
+**UI-transient**: bukan public machine envelope dan tidak pernah dipancarkan oleh
+`exec --json` maupun ACP. Machine projection memakai lifecycle `recovery`/tool yang
+bertipe, bukan merekam attempt counter ini.
 
 ### Exec JSONL
 
@@ -289,3 +298,9 @@ Human output harus tetap berguna tanpa warna:
 - Non-TTY: tidak ada ANSI/cursor/alternate screen.
 - ACP setup failure: response JSON error, stdout tetap machine-safe.
 - Parallel tools: setiap call memiliki correlation ID dan terminal state sendiri.
+- Finding dengan sidebar aktif (`cols ≥ 100`, `rows ≥ 20`): tampil di Activity log
+  sidebar dan tetap tersedia sebagai `finding.detected` bertipe; jalur linear tanpa
+  sidebar menaruhnya di transkrip.
+- Retry: `minicode:retry` hanya menghasilkan satu micro-toast footer
+  `retry n/total · Ns` (TTL 4 dtk, counter live), tanpa envelope machine dan tanpa
+  baris transkrip baru.

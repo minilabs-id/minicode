@@ -7,6 +7,11 @@
 > menentukan posisi **Big Phase P1–P14**, next action arsitektur, status track
 > **Quality Remediation Stage 1–10**, dan status follow-up **P0/UX-001**.
 >
+> **Catatan checkout (v0.33):** `ROADMAP.md` **tidak tersedia di checkout ini** —
+> tautan di atas merujuk ke dokumen yang tidak ada di sini, sehingga status Big
+> Phase maupun next action **tidak dapat dinyatakan** dari repo ini. `PLAN.md`
+> ini tetap ledger legacy, bukan pengganti roadmap.
+>
 > - `PLAN.md` = **ledger produk/milestone legacy**: riwayat implementasi,
 >   keputusan, dan status historis era 0.9.x, dirujuk sebagai `LEGACY-0.9/*`.
 >   Ia **bukan** sumber status fase dan tidak pernah menjadi "rencana aktif"
@@ -17,8 +22,9 @@
 > - `P2.x`/`P3.x`/`P12.x` = sub-milestone internal satu fase, bukan Big Phase.
 > - "Quality Remediation Stage 1–10" = jalur hardening lintas-fase, bukan Big
 >   Phase baru.
-> - Kalau status fase tidak tertulis eksplisit di `ROADMAP.md`, nyatakan belum
->   tersedia — jangan menyimpulkan status fase dari dokumen mana pun.
+> - Kalau status fase tidak tertulis eksplisit di `ROADMAP.md` (yang tidak ada
+>   di checkout ini), nyatakan belum tersedia — jangan menyimpulkan status fase
+>   dari dokumen mana pun, termasuk changelog atau kode.
 >
 > Laporan Closure/Handoff/QA di root repo adalah **artefak historis terikat
 > checkpoint** (revisi + tanggal pemeriksaan masing-masing), bukan klaim
@@ -165,8 +171,10 @@ Hasil verifikasi: 2.610 pass / 22 skip / 0 fail; coverage 84,50% funcs /
 85,45% lines; pack 23/23. PTY tabel memakai jalur skip transparan bila
 ConPTY tidak tersedia. Coverage turun tipis dari Fase output (84,52/85,53)
 karena `src/session/persistence.ts` menambah jalur fidelity baru; minimum di
-`scripts/coverage-gate.ts` **tidak** dinaikkan (tetap 84/85) — kebijakan repo
-menaikkan minimum hanya saat coverage naik.
+`scripts/coverage-gate.ts` saat itu **tidak** dinaikkan (tetap 84/85) —
+**historical**, bukan ambang sekarang. Ambang terkini **87 funcs / 86 lines**
+(lihat butir 3 di §"Sisa program legacy v0.9" dan `scripts/coverage-gate.ts`);
+kebijakan repo menaikkan minimum hanya saat coverage naik.
 
 ### Urutan pengerjaan
 
@@ -848,7 +856,10 @@ Skor saat ini **8.2**. Target **P0 (≤3 hari): 8.4**, **P1 (sprint): 8.6**. Ber
 Agar cakupan jelas dan tidak melebar diam-diam:
 
 - **Tidak ada framework TUI baru.** Pure ANSI tetap. Ink/blessed akan membuang seluruh `fullscreen.ts` demi masalah yang perbaikannya berukuran satu fungsi.
-- **Tidak ada mouse support.** Mouse tracking sudah dimatikan di V6 karena byte koordinatnya bocor ke input dan tidak ada konsumennya.
+- **Mouse support — dikoreksi (klaim lama usang).** Catatan V6 ini sudah tidak
+  berlaku: mouse **didukung** sejak v0.30.2 (app-level drag selection; lihat
+  §"TUI mouse selection tanpa mode" di atas) dan sejak v0.33 wheel per-pane di
+  sidebar. Jangan mengutip "tidak ada mouse support" sebagai fakta sekarang.
 - **Tidak ada tema baru.** Empat preset sudah bekerja; menambah tema tanpa pengguna yang meminta adalah spekulasi.
 - **Tidak ada virtual scroll transcript.** Output append-only ke scrollback terminal; layar interaktif (manager/wizard/picker) transient dan menghapus diri sendiri.
 - **Repo-map tetap regex.** Alasan lengkap (dengan tabel pengukuran) ada di komentar `extractSymbolsAsync` di `src/repo/repomap.ts`. Tree-sitter menambah dua dependensi dan ~1,4 MB wasm per bahasa untuk simbol yang hampir seluruhnya member kelas — bukan yang berguna untuk orientasi.
@@ -863,7 +874,10 @@ Agar cakupan jelas dan tidak melebar diam-diam:
 - Ikuti gaya kode yang ada; jangan memperkenalkan pustaka baru.
 - Bahasa komentar: Indonesia, menjelaskan **mengapa** bukan **apa**. Sertakan bukti (angka, nama berkas, perilaku terverifikasi) untuk keputusan non-obvious.
 - Encoding: UTF-8 tanpa BOM. Repo ini pernah rusak karena pipeline PowerShell tanpa encoding eksplisit — `test/import-convention.test.ts` menjaganya, jalankan setelah mengedit berkas berisi karakter non-ASCII.
-- Jangan mengedit `vendor/minicore/**` tanpa keputusan eksplisit (lihat P2.1).
+- `vendor/minicore/**` **HOST-EDITABLE sejak v0.16.0** (keputusan pemilik
+  2026-11-10; lihat `vendor/minicore/VENDOR.md`). Catatan lama "jangan mengedit
+  tanpa keputusan eksplisit" sudah usang; tetap utamakan seam aditif dan jangan
+  menurunkan kontrak lapisan yang dijaga test.
 
 **Sebelum menyatakan selesai:**
 ```bash

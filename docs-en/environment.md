@@ -15,7 +15,6 @@ The variables that most determine behaviour (the rest are referenced below):
 | `MINICODE_DEBUG` | `1` -> print the full stack trace when the process fails fatally (default: one line with the cause only) |
 | `NO_UPDATE_CHECK` | `1` -> skip the update check at startup |
 | `MINICODE_AUTO_UPDATE` | `0`/`false`/`off` -> disable the automatic update check and install |
-| `MINICODE_PLAN` | `1` -> legacy alias for `--work-mode PLAN` (without `--plan`) |
 | `MINICODE_PERMISSION` | `allowlist` -> bash tool-access policy (legacy profile) |
 | `MINICODE_TOOL_SCOPE` | `explore` -> read-only subset of 12 tools (same as `--tool-scope explore`) |
 | `MINICODE_WORK_MODE` | `DISCUSS` \| `PLAN` \| `BUILD` -> operating mode (same as `--work-mode`; default `DISCUSS`; `BUILD` maps to the internal `EXECUTE`; the flag beats the env var; an unknown value falls back to `DISCUSS` with a warning) |
@@ -23,6 +22,10 @@ The variables that most determine behaviour (the rest are referenced below):
 | `MINICODE_SESSION_TTL_DAYS` | Session TTL (default 30; `0` = forever) |
 | `MINICODE_REWIND_DRAFT` | Internal `/undo` handoff: `1` -> the TUI loads the target prompt from the rewind record into the branch composer |
 | `MINICODE_REWIND_NOTICE` | Internal `/undo`/`/redo` handoff: base64 notice shown once in the child session transcript |
+| `MINICODE_SUB_AGENT_TIMEOUT_MS` | Default per-delegation sub-agent timeout (ms, finite >0; default 300000 / 5 minutes). Overridable per delegation with the `timeoutMs` argument of `delegate_task` |
+| `MINICODE_SUB_AGENT_POOL_SIZE` | Number of parallel sub-agent execution slots (1..16, default 3). Raise it when you routinely fan out to 5+ agents at once |
+| `MINICODE_REWIND_LOCK_MAX_AGE_MS` | Maximum age of the rewind `operation.lock` before it is treated as stale (default 600000 ms / 10 minutes). Operators may extend it when rewind is often interrupted on a slow machine |
+| `MINICODE_BOOT_ID` | Machine boot marker for cross-restart rewind-lock validation. When unset it is derived from `hostname` + `Date.now() - os.uptime()`; set it explicitly for determinism when the NTP clock shifts |
 | `MINICODE_HOME` | Override the home for local/global DBs (sessions + vector); default `~` |
 | `MINICODE_TOKENIZERS` | `0`/`off` -> disable on-demand precise tokenizer downloads from HuggingFace (fall back to the density estimator). Default: enabled for open models (deepseek/qwen/mistral/gemma/phi); vocabularies are cached in `~/.minicode/tokenizers/` and not re-downloaded |
 | `MINICODE_TELEMETRY` | `0`/`false`/`off` -> disable writing traces.jsonl |
@@ -87,7 +90,7 @@ The variables that most determine behaviour (the rest are referenced below):
 | `MINICODE_ASCII` | `1` -> force ASCII glyphs (`[OK]`, `>`, `.`) for consoles without UTF-8 |
 | `MINICODE_BOX` | popup box corner style: default **rounded** (`+`-style curves); `square` -> sharp; `ascii` -> `+-|` (same as `MINICODE_ASCII=1`). For terminals that render rounded glyphs badly |
 | `MINICODE_SCRIM` | `none` -> force the backdrop scrim to `faint` only (no dark `48;5;236` background) — diagnostics/terminals that map 256-colour oddly |
-| `MINICODE_COMPACT` | `1` -> compact tool calls, `0` -> expanded. Default: compact in the TUI, expanded in one-shot/exec (also `/view compact`, Ctrl+O) |
+| `MINICODE_COMPACT` | `1` -> compact tool calls, `0` -> expanded. Default: compact in the TUI, expanded in one-shot/exec |
 | `MINICODE_JUSTIFY` | `1` -> enable justified model text output. Default: off (opt-in) — justification injects spaces that change the original text when copied/piped |
 | `MINICODE_DROPDOWN` | `0` -> disable the floating dropdown, use inline hints (legacy consoles) |
 | `MINICODE_MOUSE_SELECTION` | `0`/`false`/`off`/`no` -> disable TUI mouse tracking; default `1` for drag selection + wheel |
@@ -95,12 +98,15 @@ The variables that most determine behaviour (the rest are referenced below):
 | `MINICODE_BELL` | `0` -> disable the `\x07` bell on approval (accessibility) |
 | `MINICODE_STATUSLINE` | `rich` -> the turn status line also shows cumulative tokens + session cost (thrifty by default) |
 | `MINICODE_A11Y` | `1` -> live-region approval for screen readers (plain lines without ANSI) |
-| `MINICODE_SHOW_THINKING` | model reasoning is visible BY DEFAULT; `0` -> minimized (marker only), `1` -> force visible |
-| `MINICODE_MINIMIZE_ACTIVITY` | ON by default in the TUI; `0` -> transparent (one line per tool). Folds per-turn tool activity into one summary (details via `/view expand`) |
-| `MINICODE_ACTIVITY_PANEL` | `0` -> disable the activity panel (ACTIVE by default in the TUI; `/view fold` toggles); `1` -> force it on in the linear/one-shot path too |
+| `MINICODE_SHOW_THINKING` | model reasoning is **hidden by default**; `1` -> force visible (same as `/view thinking` or `--verbose`), `0` -> force hidden. There is no `Ctrl+T` binding; the full history lives in the sidebar Thinking pane |
+| `MINICODE_MINIMIZE_ACTIVITY` | ON by default in the TUI; `0` -> transparent (one line per tool). Folds per-turn tool activity into one summary (details in the sidebar Activity/Log pane, or the transcript on the linear path) |
+| `MINICODE_ACTIVITY_PANEL` | `0` -> disable the sidebar Activity/Live panel (ACTIVE by default in the TUI when the sidebar geometry allows it); `1` -> force it on in the linear/one-shot path too |
 | `MINICODE_AUTORESUME_BG` | `0` -> disable TUI turn auto-resume when a background job finishes (enabled by default; once per job, only when no turn is running) |
 | `MINICODE_TURN_AUTO_RESUME` | `0` -> disable automatic turn resume after a **transient** provider failure (`server`/`network`; enabled by default). Provider retry and turn resume share **one recovery budget** (`src/policy/recovery-budget.ts`): 45 s total and a quota of 6 attempts for one logical call, with full jitter and `Retry-After` as a floor. Sharing one budget prevents *retry amplification* (separate per-layer counts multiply the cost: ~82 s for a dead provider). Terminal failures are not recovered: `rate_limit` (a permanent 429/spend-cap does not recover), `auth`, `invalid_request`, `context_length_exceeded`, `budget_exceeded`, `max_steps_exceeded`, and user abort |
 | `MINICORE_THINKING` | `off` -> send `enable_thinking:false` to OpenAI-compat (DeepSeek). The old `MINICODE_THINKING` alias is still honoured |
+| `MINICODE_STARTUP_PROGRESS` | `0` -> disable the startup progress line (ACTIVE by default). Without a logo: one `start NN%` line overwritten with `\r`, using real figures from the 9 phases of `createCliSession`; `update NN%` for auto-update. Closes with `start 100%` once the session is ready |
+| `MINICODE_SESSION_SUMMARY` | `0` -> disable the closing session block (ACTIVE by default). Written to the scrollback AFTER the alt-screen closes: the `minicode` wordmark + `Session : minicode<DDMMYYYYHHMMSS>` + turn/tool/file/other counts + tokens/cost/duration + version, with the model, mode, per-category tool breakdown, agent count, and token in/out. Unavailable data is reported honestly (`0` / `$—`); the transcript stays intact |
+| `MINICODE_COLOR` | `0` -> force monochrome (identical to `NO_COLOR`); any other value or absent -> colour on by default on a TTY (v7.29+). `TERM=dumb` / non-TTY stay monochrome for determinism |
 | `NO_COLOR` | Any value other than `0` -> disable all colour |
 
 ## API key fallback

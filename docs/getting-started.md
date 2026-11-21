@@ -94,8 +94,10 @@ minicode --interactive
 # minicode › jelaskan isi src/tools/index.ts
 # /model   → picker provider::model, Enter = pilih + atur effort
 # /status  → token + biaya kumulatif sesi
-# /exit    → keluar (Esc ganda saat abort juga bisa)
+# /exit    → keluar (blok penutup: model, mode, rincian kategori tool, jumlah agent, dan token in/out; matikan dengan MINICODE_SESSION_SUMMARY=0 — Esc ganda saat abort juga bisa)
 ```
+
+Pada TUI interaktif dengan lebar ≥100 kolom dan tinggi ≥20 baris, sidebar kanan otomatis aktif: bagian atas menampilkan Thinking, bawahnya Activity (atau Live|Log berdampingan di ≥168 kolom). Chat hanya memuat narasi, rekap kategori (mis. `3 command · 2 read · 5 subagent`), dan jawaban akhir — rincian per-tool (baris `Tool:` dan ledger) ada di sidebar. Arahkan wheel ke pane yang ingin di-scroll; Alt+PgUp/PgDn meng-scroll kedua pane dan menggeser seleksi Live, Ctrl+PgUp/PgDn mengatur tinggi Thinking:Activity, Ctrl+O membuka detail live-tool, Home/End membawa chat dan sidebar ke tepi (PgUp/PgDn tetap khusus chat). `/view expand` sudah dihapus; `MINICODE_ACTIVITY_PANEL=0` mematikan sidebar.
 
 ## 3. Verify otomatis (2 menit)
 

@@ -1,6 +1,6 @@
 // Tokenizer perintah shell untuk allowlist — SADAR PLATFORM.
 //
-// Riset: Node `spawn(cmd,{shell:true})` memakai `/bin/sh` di POSIX dan
+// Riset: Node `spawn` dengan opsi `shell:true` memakai `/bin/sh` di POSIX dan
 // `ComSpec`/cmd.exe di Windows (dokumentasi child_process). Bash manual:
 // backslash = escape character; single/double quotes = quoting. Dokumentasi
 // cmd.exe: `^` = escape, `"` = quote, dan `'` BUKAN pembatas quote (karakter

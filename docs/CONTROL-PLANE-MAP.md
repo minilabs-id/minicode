@@ -1,5 +1,9 @@
 # Control Plane Map — kontrak context/usage/cost/budget/compaction/termination
 
+> **Diperbarui 2026-11-21 — v0.33 (`1aaca14`):** tambahan alasan kompaksi, anggaran
+> sub-agent, dan proyeksi retry micro-toast. Pernyataan/angka historical di bawah tetap
+> berstatus historical pada checkpoint asalnya.
+
 Dokumen ini membekukan kontrak control-plane MiniCode (Phase 6, 2026-09-17).
 Tujuannya: satu sumber kebenaran per konsep, hubungan antar-konsep eksplisit,
 dan setiap keputusan (kompaksi, abort, termination) dapat dijelaskan.
@@ -33,6 +37,14 @@ Relationship eksplisit:
 | Budget | Collector (usage live) + `budgetStatus` | `budgetStatus` (terpusat, seragam TUI/one-shot/exec) + watcher abort |
 | Backpressure | Producer caps + kernel truncate | Cap di producer (sudah benar); kernel truncate terakhir |
 
+Anggaran sub-agent (v0.33): `scope` `file`/`dir`/`subtree`/`repo` → budget
+12/18/26/36 langkah; `plan` ×1.5 lalu di-clamp ke [8,50]. Bila anak mentok, eskalasi
+bertahap `[8,12,20,32,50]`. Menyetel `maxSteps` secara eksplisit **mematikan**
+eskalasi ini; tanpa `scope`, fallback kontrak lama 5/15 tetap berlaku. Pool default 3
+(`MINICODE_SUB_AGENT_POOL_SIZE` 1..16), `MINICODE_SUB_AGENT_TIMEOUT_MS` 300000, dan
+maksimal 2–3 sub-agent per turn. Anggaran ini adalah kontrol termination yang berbeda
+dari maxSteps/budget turn di atas.
+
 ## 3. Compaction Contract (Phase 6 — seam kernel)
 
 **Dua semantics terpisah, tidak lagi satu flag:**
@@ -51,6 +63,16 @@ diselaraskan 0.9.27 saat seam dihilirkan; sebelumnya `budget:<…>`):
   yang bisa dibuang dari messages — operator harus tahu bedanya dari fixed
   overhead: system+tool schema, yang tidak pernah terkompaksi).
 - `recovery` — kompaksi dari recovery (`context_length_exceeded` / `length`).
+- `fixpoint` — kompaksi berhenti karena state sudah stabil (tak ada pengurangan lagi);
+  jangan memutar ulang kompaksi.
+- `impossible` — kondisi tak memungkinkan secara struktural (mis. system/schema saja
+  melebihi anggaran); fail-closed, bukan retry provider.
+- `llm-failed` — kompaksi LLM gagal/timeout, fallback mekanis yang dipakai.
+
+Pengambilan ringkasan kompaksi memakai resolver DNS **strict/noCache** (tanpa cache)
+agar pin alamat tetap berlaku di tengah kompaksi, bersama `fetchPinnedUrl` dengan SSRF
+pinning; verifier membatasi `maxBuffer` 32MB dan memisahkan kegagalan infrastruktur dari
+kegagalan konten.
 
 **Contract wajib menjawab:**
 - *Who requested?* — budget path (kernel, pressure ≥ 75%) atau recovery path
@@ -106,6 +128,12 @@ tanpa `Retry-After` adalah 1, 2, lalu 4 detik. `Retry-After` dibatasi 30 detik.
 Router dapat mencoba provider alternatif sebelum menunggu, kecuali model di-pin.
 Semua penantian retry dan rate-limit dibatalkan oleh timeout/abort pemanggilan.
 
+Catatan v0.33: angka backoff di atas adalah durasi tunggu **internal**, bukan yang
+ditampilkan ke user. UI hanya menampilkan satu micro-toast footer
+`retry n/total · Ns` (TTL 4 dtk, counter live) dari event `minicode:retry` yang
+UI-transient — bukan envelope machine, tidak masuk `exec --json`/ACP, dan tidak
+menambah baris transkrip.
+
 Satu terminal reason per sinyal (`abortError` mempertahankan kind
 `AgentError`); pemutus lain dapat REQUEST, tidak ada competing owners —
 `joinSignals` + `withAbort` = satu titik settle.
@@ -136,7 +164,10 @@ Operator harus bisa membedakan (tanpa ambigu):
 - `/status`: `Context` (window estimate, kernel) vs `Input/Output/Total`
   (provider usage) vs `Cost` (estimated) vs `Budget` (status keputusan).
 - Footer: angka = ukuran jendela saat ini (kernel) — bukan spend kumulatif.
-- `context:compacted` event: reason membedakan policy-pressure/recovery/no-op.
+- `context:compacted` event: reason membedakan policy-pressure/recovery/no-op/fixpoint/impossible/llm-failed.
+- Retry: micro-toast footer `retry n/total · Ns` (TTL 4 dtk) adalah proyeksi UI-transient
+  dari `minicode:retry`; jangan disamakan dengan durasi backoff maupun angka
+  budget/context di `/status`.
 
 ## Proteksi (test → kontrak)
 

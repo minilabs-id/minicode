@@ -12,7 +12,7 @@ Minicode itu apa, kenapa dibangun begitu, dan kenapa beberapa hal sengaja tidak 
 
 ## Loop ReAct
 
-Setiap prompt berjalan sebagai loop `Thought → Action → Observation` sampai jawaban final, batas `--max-steps` (default 50), atau `--timeout` (default 1 jam). Model menerima system prompt berisi `# Environment` (cwd + platform), repo-map ringkas, dan memory yang relevan — lalu memilih tool, melihat hasilnya, dan memilih langkah berikutnya. Tidak ada grafik alur tersembunyi: apa pun yang agent lakukan tampil sebagai ledger di layar.
+Setiap prompt berjalan sebagai loop `Thought → Action → Observation` sampai jawaban final, batas `--max-steps` (default 50), atau `--timeout` (default 1 jam). Model menerima system prompt berisi `# Environment` (cwd + platform), repo-map ringkas, dan memory yang relevan — lalu memilih tool, melihat hasilnya, dan memilih langkah berikutnya. Tidak ada grafik alur tersembunyi: di jalur non-interaktif jejak aksi tampil sebagai ledger di stderr; di TUI interaktif chat hanya memuat narasi, rekap kategori (mis. `3 command · 2 read · 5 subagent`), dan jawaban akhir, sementara rincian per-tool pindah ke sidebar kanan (Activity/Live/Log).
 
 ## Shell-first: non-interaktif polos, interaktif fullscreen
 
@@ -24,7 +24,8 @@ ditulis sendiri) dan membagi dua jalur secara tegas:
   terminal biasa yang bisa di-pipe, di-grep, dan tersimpan di scrollback Anda
   sendiri.
 - **Interaktif** (TTY mampu): satu tampilan **TUI fullscreen** alternate-screen
-  — transkrip ala shell + status bar satu baris + popup komposit; keluar =
+  — transkrip ala shell + status bar satu baris + popup komposit + sidebar kanan
+  adaptif (Thinking + Activity/Live/Log) bila `cols ≥ 100` dan `rows ≥ 20`; keluar =
   buffer utama kembali persis (transkrip tidak di-dump ke scrollback).
 - Warna hanya saat TTY; `NO_COLOR` selalu menang; output program tetap bersih dari cursor-control saat di-pipe.
 
@@ -63,7 +64,7 @@ istilah teknis English — tabel ini mengunci maknanya.
 | **Tool Access Policy** | Batas capability yang tersedia, seperti read-only, allowlist, atau profil akses warisan `--allow-all` |
 | **Gate** | Tool wajib persetujuan manusia saat TTY; non-TTY selalu tolak (mis. `git_commit`, MCP, `delegate_task`) |
 | **Path jail** | Pembatasan akses file ke workspace (realpath + symlink; `O_NOFOLLOW` pada POSIX dan pencocokan identitas handle `dev+ino` pada semua platform); aktif bahkan `--allow-all` |
-| **Bash-guard** | Normalisasi + blokir pola bash berbahaya sebelum eksekusi (quote-split, indirection, wrapper) |
+| **Bash-guard** | Tokenizer shell sadar-platform + denylist kata kerja mutasi: normalisasi + blokir pola bash berbahaya sebelum eksekusi (quote-split, indirection, wrapper) |
 | **Sandbox OS** | bubblewrap (Linux) / seatbelt (macOS) — otomatis bila tersedia |
 | **Sandbox Docker** | Container ephemeral `--network none`, 512m, 1 CPU, `node:22-alpine` |
 | **Checkpoint** | Snapshot per turn via shadow-git: SHA tree di `refs/minicode/…` (O(delta), HEAD/index tak tersentuh) |
@@ -76,9 +77,13 @@ istilah teknis English — tabel ini mengunci maknanya.
 | **Hook** | Skrip `pre/post-run` dari `~/.minicode/hooks` + `.minicode/hooks`; mati default, `MINICODE_HOOKS=1` |
 | **Env scrub** | `sanitizeSpawnEnv` menghapus kata-kunci kredensial dari env subprocess |
 | **Secret scrubber** | Redaksi `sk-`/`ghp_`/`AKIA`/PEM/JWT/Bearer sebelum teks ke LLM |
-| **Ledger** | Baris `  › name target` / `  › name: …` di stderr — jejak aksi agent |
+| **Ledger** | Jejak aksi agent: di jalur non-interaktif berupa baris `  › name target` / `  › name: …` di stderr; di TUI interaktif rinciannya pindah ke sidebar kanan (Activity/Live/Log), chat hanya rekap kategori |
 | **Scrollback** | Riwayat layar terminal; jalur non-interaktif minicode append-only di sana (interaktif pakai alternate screen) |
-| **Transient** | UI muncul-sekali yang menghapus dirinya (spinner, garis status turn) — vs transkrip yang menetap |
+| **Transient** | UI muncul-sekali yang menghapus dirinya (spinner, garis status turn, micro-toast retry `retry n/total · Ns` dengan TTL 4 dtk) — vs transkrip yang menetap |
+| **Sidebar kanan** | Panel adaptif di TUI (Thinking + Activity/Live/Log); aktif bila `cols ≥ 100` dan `rows ≥ 20`, lebar 30–50%, tinggi Thinking:Activity 60:40 — bagian dari frame `paint()` yang sama, bukan scrollback |
+| **Rekap kategori** | Ringkasan per-tool di chat (mis. `3 command · 2 read · 5 subagent`) yang menggantikan ledger per-tool, baris `Tool:`, `/expand`, dan buffer terlipat |
+| **Micro-toast retry** | Satu notifikasi footer `retry n/total · Ns` (TTL 4 dtk, counter langsung) untuk retry — menggantikan toast panjang |
+| **Delegation scope** | `file`/`dir`/`subtree`/`repo` → budget 12/18/26/36 langkah; `plan` ×1,5 di-clamp ke [8,50] (repo+plan = 50); eskalasi `[8,12,20,32,50]` bila mentok — `maxSteps` eksplisit mematikan eskalasi; tanpa scope fallback 5/15 |
 | **Composition root** | `cli/index.ts` + `cli/setup.ts`: satu tempat wiring DI (provider, RAG, session, tools) |
 | **Seam aditif** | Satu-satunya patch yang dibolehkan ke kernel beku: `compactAsync`, `initialMessages`, `cwd` |
 | **Self-contained** | Tanpa clone repo lain — kernel di-vendor, runtime zero-dep, butuh Bun ≥ 1.1.13 |

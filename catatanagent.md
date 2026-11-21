@@ -1,15 +1,20 @@
 # Catatan agent — handoff minicode
 
-> Diperbarui: 2026-11-14, setelah commit `4668553` (v0.25).
-> Tujuan: serah-terima ke agent BERIKUTNYA. Bagian 1 = status; bagian 2 = sisa
-> tugas; bagian 3+ = referensi yang masih berlaku.
+> Diperbarui: 2026-11-14, setelah commit `4668553` (v0.25). **ARSIP** — handoff
+> historis. Untuk status checkout saat ini (HEAD `1aaca14`, v0.33) lihat
+> `AGENTS.md` dan `CHANGELOG.md`.
+> Tujuan awal: serah-terima ke agent BERIKUTNYA. Bagian 1 = status; bagian 2 = sisa
+> tugas; bagian 3+ = referensi. Banyak butir di bawah sudah teratasi di v0.33.
 >
 > **Audit Surface Popup (AUD-001..AUD-011) SUDAH SELESAI dan di-commit** di
 > `4668553`. §6 lama dihapus dari dokumen ini — riwayatnya ada di pesan commit.
 
 ---
 
-## 1. Status: SUDAH DI-COMMIT
+## 1. Status historis (tree `ba50057`, ~v0.24) — bukan status checkout saat ini
+
+> Bagian ini mendeskripsikan commit lama `ba50057`. HEAD sekarang `1aaca14`
+> (v0.33). Angka gate di bawah sudah usang; jangan dikutip sebagai hasil kini.
 
 **`ba50057` — feat(context): kelola jendela konteks dari metadata endpoint +
 kompaksi akuntabel.** 50 file, +3313/−361. Working tree bersih.
@@ -60,21 +65,29 @@ sebagai proses latar lalu baca log-nya — cara ini terbukti berhasil di sini).
 
 ---
 
-## 2. SISA TUGAS — Fase 7 prompt caching
+## 2. Fase 7 prompt caching — SELESAI (historical)
 
-**Status: 7.2 dan 7.3 SELESAI; 7.1 BELUM.** Diverifikasi 2026-11-14 pada
-`4668553` dengan membaca kode + test, bukan dari changelog.
+> **Status akhir: 7.1, 7.2, dan 7.3 semuanya SELESAI.** Fase 7.1 dikerjakan dan
+> di-commit di **v0.25.0** — lihat `CHANGELOG.md`, entri "Dukungan prompt
+> caching dibaca dari metadata endpoint (Fase 7.1)": `prompt_caching` /
+> `supports_cache` / `cache_control` dan aliasnya di `/models` menentukan
+> `enablePromptCaching` per provider. Bagian 2.1–2.3 di bawah adalah **catatan
+> perencanaan historis** yang ditulis sebelum 7.1 selesai; narasi "7.1 BELUM",
+> "masalah belum terselesaikan", dan "kenapa ditunda" sudah tidak menggambarkan
+> checkout saat ini.
+
+**Status saat catatan dibuat (2026-11-14, `4668553`): 7.2 dan 7.3 SELESAI; 7.1 BELUM** — sudah teratasi di v0.25.0.
 
 | # | Item | Status | Bukti |
 |---|---|---|---|
-| 7.1 | Deteksi dukungan cache dari **metadata endpoint** (bukan nama model) | **BELUM** | `enableCache` di `src/providers/anthropic.ts` masih `config.enablePromptCaching !== false && MINICODE_PROMPT_CACHE !== "0"` — default aktif untuk semua model, tidak membaca metadata |
+| 7.1 | Deteksi dukungan cache dari **metadata endpoint** (bukan nama model) | **SELESAI di v0.25.0** (historical) | `CHANGELOG.md` v0.25.0: kapabilitas cache dari `/models` → `enablePromptCaching`; endpoint yang tak menyebutnya tetap pakai default aktif |
 | 7.2 | Prefix stabil → volatile + `cache_control` | SELESAI | `anthropic.ts:84,90,111-114,411`; `test/prompt-caching.test.ts` (3 test) |
 | 7.3 | Laporkan pemakaian cache di `/status` | SELESAI | `cli/commands.ts:241-247`; `cli/commands/exec.ts:397` |
 
-Sisa pekerjaan nyata = **7.1 saja**: baca kapabilitas cache dari metadata
-`/models` saat provisioning (pola sama seperti `context_length` di Fase 1),
-lalu simpan sebagai `enablePromptCaching` yang sudah ada. Kill-switch statis
-tetap dipertahankan sebagai override manual.
+Dulu tersisa **7.1 saja**: baca kapabilitas cache dari metadata `/models` saat
+provisioning (pola sama seperti `context_length` di Fase 1), lalu simpan sebagai
+`enablePromptCaching` yang sudah ada. Kill-switch statis tetap dipertahankan
+sebagai override manual. **(Selesai di v0.25.0 — lihat catatan atas.)**
 
 ### 2.1 Masalah yang diselesaikan
 
@@ -83,7 +96,11 @@ Pada sesi insiden, payload 478.602 karakter hasil tool = 96% konteks, dan
 prefix. Ini bukan bug fungsional, tapi biaya & latensi: turn ke-6 di sesi itu
 mengirim 45,7 juta token kumulatif input.
 
-### 2.2 Kenapa sengaja ditunda sampai sekarang
+### 2.2 Kenapa sengaja ditunda sampai sekarang (alasan historis)
+
+> Catatan ini menjelaskan urutan kerja **saat itu**; penundaan sudah berakhir
+> dengan selesainya 7.1 di v0.25.0. Jangan dibaca sebagai alasan untuk
+> menunda pekerjaan saat ini.
 
 Manfaat caching hanya terasa setelah microcompact stabil, dan keduanya
 **bertabrakan secara mendasar**: setiap perubahan prefix (pemangkasan hasil
@@ -93,7 +110,7 @@ adalah: stabilkan dulu apa yang mengubah prefix, baru optimalkan prefix-nya.
 
 Karena itu Fase 7 harus dimulai dengan **pengukuran**, bukan implementasi.
 
-### 2.3 Langkah yang disarankan
+### 2.3 Langkah yang disarankan (rencana historis — sebagian besar sudah dikerjakan)
 
 1. **Ukur dulu (wajib, jangan lewati).** Tambahkan penghitung cache hit/miss
    dari field usage provider (`cache_read_input_tokens` /
@@ -131,9 +148,11 @@ Karena itu Fase 7 harus dimulai dengan **pengukuran**, bukan implementasi.
 
 ### 2.4 Batasan yang tidak boleh dilanggar
 
-- Jangan turunkan ambang `scripts/coverage-gate.ts` atau naikkan budget
-  `scripts/pack-budget.ts`. Budget pack saat ini **4095 KB dari 4096** — praktis
-  tidak ada ruang; kalau menambah kode, pangkas komentar atau cari byte lain.
+- Jangan turunkan ambang `scripts/coverage-gate.ts` (min 87 funcs / 86 lines)
+  atau naikkan budget `scripts/pack-budget.ts`. Budget pack saat ini
+  **5000 KiB** (`PACK_SIZE_BUDGET_KIB = 5000`); angka lama 4095/4096 adalah
+  snapshot v0.24, bukan nilai sekarang. Perubahan budget butuh bukti baru dan
+  persetujuan pemilik.
 - Jangan ubah urutan pesan yang terlihat oleh model tanpa memperbarui
   `docs/TERMINAL_CONTRACT.md` bila itu mengubah output yang tampil.
 - Jangan memecah pasangan `assistant → tool` (aturan yang sama seperti
@@ -141,10 +160,12 @@ Karena itu Fase 7 harus dimulai dengan **pengukuran**, bukan implementasi.
 
 ### 2.5 Yang belum divalidasi (warisan, jangan diklaim selesai)
 
-- **Probe HTTP aktif** (`probeContextWindow()` dengan `max_tokens:1`) belum
-  dipasang. Modul `src/policy/context-escalation.ts` sudah menyediakan tangga,
-  whitelist pemicu, anggaran, dan padding sintetis; pemanggilnya belum ada.
-  Penjelasan kenapa ditunda ada di `docs/plan-context-window.md` §11.4 butir 1.
+- **Probe HTTP aktif** (`probeContextWindow()` dengan `max_tokens:1`) — **perlu
+  diverifikasi ulang pada HEAD `1aaca14`**. Catatan lama (v0.24) mengatakan
+  "belum dipasang", tetapi klaim itu tidak boleh dianggap fakta sekarang tanpa
+  mengecek kode. Modul `src/policy/context-escalation.ts` menyediakan tangga,
+  whitelist pemicu, anggaran, dan padding sintetis; penjelasan historis kenapa
+  ditunda ada di `docs/plan-context-window.md` §11.4 butir 1.
 - Validasi pada **gateway nyata** (dengan kredensial) belum dilakukan; yang
   divalidasi adalah unit test + jalur sesi dengan provider palsu.
 

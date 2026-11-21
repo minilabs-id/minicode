@@ -1,17 +1,20 @@
 # Output Event Model
 
-**Status:** Phase 2 core state/replay contract landed; renderer/wire protocol masih target
-**Tanggal:** 2026-09-25
+**Status:** landed — state/replay contract, renderer, dan machine protocol (`exec --json`, ACP) aktif; yang tersisa hanya raw bus untuk streaming/internal telemetry (bukan public contract)
+**Tanggal:** 2026-09-25 · **Diperbarui:** 2026-11-21 (v0.33, `1aaca14`)
 **Kontrak aktif:** definisi tipe + registry durability di `src/presentation/events.ts`;
 producer event di `src/presentation/adapter.ts` (events.ts tidak mem-`publish`).
 
 ## Status implementasi
 
 Phase 1 mengimplementasikan `user.message`, exhaustive bridge payload, dan marker
-`PROPOSED_EVENT_TYPES` untuk event yang belum memiliki producer. Phase 2 core kini
+`PROPOSED_EVENT_TYPES` untuk event yang belum memiliki producer. Phase 2 core
 menyimpan collection semantic lengkap, menghitung summary dari evidence, lalu
-memuat ulang dari `presentation_events`; renderer dan machine protocol belum
-dipindahkan penuh.
+memuat ulang dari `presentation_events`. Sejak v0.33 renderer dan machine protocol
+**landed**: `exec --json` memancarkan envelope `minicode.output.v1`, ACP memetakan
+lifecycle yang sama, dan TUI/linear membaca proyeksi canonical. Yang tersisa di raw
+bus hanyalah streaming konten dan telemetri internal (mis. `minicode:retry`,
+`minicode:child-report`) yang bukan public machine envelope.
 
 ## 1. Tujuan
 
@@ -127,16 +130,23 @@ mengarang final message.
 | `tool.cancelled` | adapter | operasi dibatalkan | ya |
 | `file.changed` | journal/checkpoint | ada paths yang committed | ya |
 | `test.completed` | adapter/tool evidence | hasil test terstruktur | ya |
-| `finding.detected` | `submit_result` terstruktur | temuan/evidence semantic eksplisit | ya bila berasal dari agent |
+| `finding.detected` | `submit_result` terstruktur atau baris `[FINDING]` child lewat `minicode:child-report` | temuan/evidence semantic eksplisit | ya bila berasal dari agent |
 | `result.produced` | task finalizer | hasil/actionable conclusion | ya |
 | `checkpoint.created` | checkpoint adapter | checkpoint evidence dan linkage turn | ya |
 | `plan.updated` | planner/tool | rencana dan status langkah | ya bila adopted |
 | `diagnostic.raised` | adapter/policy | diagnostic actionable | ya |
 
-Tool `completed` harus membawa `summary`, `durationMs`, `expandRef`, dan bila ada
-`receipt`. Tool `failed` harus membawa `cause` dan `message` (`hint` dan `expandRef`
-opsional). Tool `denied` harus membawa `reason`; `denied` tidak boleh berubah menjadi generic
-`failed` hanya karena satu renderer tidak tahu policy.
+Tool `completed` harus membawa `summary` dan `durationMs`, dan bila ada `receipt`.
+Field `expandRef` tetap ada sebagai `ContentRef` untuk content store, tetapi sejak
+v0.33 tidak lagi dipetakan ke perintah `/expand` dan collapsed buffer dihapus: detail
+tool live ada di Activity log sidebar bila aktif. Tool `failed` harus membawa `cause`
+dan `message` (`hint` opsional). Tool `denied` harus membawa `reason`; `denied` tidak
+boleh berubah menjadi generic `failed` hanya karena satu renderer tidak tahu policy.
+
+Temuan (`finding.detected`) dari child-agent dihasilkan adapter dari event bus
+`minicode:child-report` yang berasal dari baris `[FINDING]`. Bila sidebar aktif,
+temuan diproyeksikan ke panel Activity log; pada jalur linear tanpa sidebar tetap
+masuk transkrip sebagai entri tersendiri. Keduanya memakai event semantic yang sama.
 
 ### Error, recovery, dan lifecycle
 
@@ -147,6 +157,11 @@ opsional). Tool `denied` harus membawa `reason`; `denied` tidak boleh berubah me
 | `recovery.started` | retry/fallback/compaction | “recovering” | strategi | reason/delay |
 | `recovery.completed` | berhasil pulih | “recovered” | hasil | result |
 | `recovery.failed` | strategi habis | status terminal | cause | full category |
+| `retry.attempted` | retry provider/shell; sumber raw bus `minicode:retry` (UI-transient, bukan envelope machine) | satu micro-toast footer `retry n/total · Ns` (TTL 4 dtk, counter live) | strategi + kategori | tidak diekspos ke machine |
+
+`retry.attempted` sengaja UI-transient: `minicode:retry` tidak pernah dipancarkan
+sebagai envelope machine oleh `exec --json` maupun ACP. Durasi backoff adalah angka
+internal dan bukan pesan yang ditampilkan ke user.
 
 Kategori error yang harus dibedakan:
 
@@ -229,12 +244,19 @@ duration sendiri.
 | Lifecycle | task/tool terminal, approval | ya | ya |
 | Final semantic content | message, result, plan, finding | ya | ya |
 | Evidence ringkas | receipt, test summary, checkpoint | ya | ya |
-| Live stream | model/reasoning delta, progress | tidak | tidak diperlukan |
+| Live stream | model delta, progress, retry toast | tidak | tidak diperlukan |
+| Reasoning delta | `assistant.reasoning.delta` | tidak sebagai delta; diingest inkremental ke `SidebarModel` sebagai session history dengan marker trim | history reasoning dipulihkan sebagai entri Thinking |
 | Derived heartbeat | spinner, elapsed tick | tidak | dihitung dari timestamp |
 | Large content | tool output penuh | ref/store best effort | resolver bila tersedia |
 
 `eventSeq` boleh dipotong pada delta, tetapi harus tetap menghasilkan replay yang
 deterministik untuk event durable. Rebuild tidak boleh memerlukan token-by-token history.
+
+Sejak v0.33 potongan reasoning tidak lagi dibuang setelah tampil: TUI meng-ingest-nya
+inkremental lewat `SidebarModel.ingestThinking` ke session history (kompleksitas O(n²)
+diperbaiki; dijaga `test/perf-no-quadratic.test.ts`). Entri lama dipangkas dengan
+marker eksplisit `… N older items trimmed`. Reasoning dirender penuh di pane Thinking
+sidebar bila aktif, tetapi tidak pernah masuk transkrip chat.
 
 ## 7. Trust dan sanitasi
 
@@ -243,17 +265,17 @@ deterministik untuk event durable. Rebuild tidak boleh memerlukan token-by-token
 - Nama tool, path, command, provider label, dan output model adalah untrusted display
   data. Sanitasi control sequence dilakukan di boundary ingestion atau projection,
   bukan hanya di satu renderer.
-- `NO_COLOR` dan non-TTY berarti SGR tidak boleh menjadi makna. Status tetap punya
-  glyph + kata atau struktur teks.
+- `NO_COLOR`, `MINICODE_COLOR=0`, dan non-TTY berarti SGR tidak boleh menjadi makna.
+  Status tetap punya kata + struktur teks; warna dan glyph hanya aksen.
 - Selection/copy payload berasal dari source map yang sudah disanitasi; tidak boleh
   menyalin escape, padding, atau border tabel.
 - Event diagnostic internal default `debug`; warning yang actionable default
   `normal`; payload mentah default `debug/machine` dengan scrub.
 
-Phase 2 now wires producers for `reasoning.completed`, `plan.updated`,
-`finding.detected`, `result.produced`, `diagnostic.raised`, `test.completed`, and
-`checkpoint.created`. Only `tool.progress` remains proposed because it is
-intentionally live-only.
+Sejak Phase 2 producer tersambung untuk `reasoning.completed`, `plan.updated`,
+`finding.detected`, `result.produced`, `diagnostic.raised`, `test.completed`, dan
+`checkpoint.created`. Hanya `tool.progress` yang masih berstatus proposed karena
+sengaja bersifat live-only.
 
 ## 8. Invariant
 
@@ -270,6 +292,11 @@ intentionally live-only.
   lifecycle yang sama.
 - I-A11: context compaction tidak menghapus presentation history.
 - I-A12: `interrupted`, `failed`, dan `cancelled` eksplisit berbeda.
+
+Catatan v0.33 — sidebar kanan adalah **view state**, bukan semantic truth. Sidebar
+hanya aktif bila `cols ≥ 100` dan `rows ≥ 20`; ia tidak mengubah event, durability,
+atau lifecycle di atas. Temuan yang aktif di sidebar diproyeksikan ke Activity log
+(pada jalur linear tetap ke transkrip), dan reasoning tinggal di pane Thinking.
 
 ## 9. Status migrasi dari implementasi sekarang
 

@@ -6,7 +6,7 @@
 25 harga bawaan tersedia offline. Untuk cakupan luas, tarik sendiri — **tidak ada fetch otomatis** di jalur run (jalur run hanya baca cache lokal agar tidak menambah latensi/bocor pola pemakaian):
 
 ```bash
-minicode pricing sync                 # tarik katalog + harga dari models.dev
+minicode pricing sync                 # tarik katalog + harga dari models.dev lewat fetchPinnedUrl (IP di-pin ke socket, DNS strict/noCache, host privat & redirect ditolak, cap 2 MB)
 minicode pricing status               # sumber aktif + umur cache + tanda (stale) bila cache lebih tua dari 1 hari
 minicode pricing show claude-sonnet-4-5
 minicode pricing clear                # kembali ke bawaan

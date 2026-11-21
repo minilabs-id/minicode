@@ -4,7 +4,9 @@ Petunjuk untuk agent yang bekerja di repo ini. Peta struktur hidup:
 [docs/architecture.md](docs/architecture.md).
 Kontrak terminal FROZEN: [docs/TERMINAL_CONTRACT.md](docs/TERMINAL_CONTRACT.md) —
 baca sebelum menyentuh output/rendering apa pun; perubahan perilaku wajib
-update dokumen + test peta proteksinya.
+update dokumen + test peta proteksinya. "FROZEN" bukan berarti tak pernah
+berubah: kontrak memang diperbarui di v0.33 (sidebar kanan; invarians I36/I37).
+Baca versi terbaru di dokumen, jangan mengandalkan ingatan.
 
 ## Otoritas roadmap
 
@@ -19,7 +21,8 @@ sub-milestone (`P2.x`), Quality Remediation (`Stage 1`–`10`), dan hotfix
 
 ## Status checkout
 
-`CHANGELOG.md` dan `package.json` saat ini mencatat v0.32.2. `PLAN.md` adalah
+HEAD adalah commit v0.33 (`1aaca14`); `CHANGELOG.md` dan `package.json` kini
+mencatat v0.33.0. `PLAN.md` adalah
 ledger milestone legacy, bukan roadmap aktif. `ROADMAP.md`,
 `docs/ARCHITECTURE.html`, dan `docs/audit/` tidak ada; status roadmap belum
 tersedia. Gate repository dapat dijalankan, tetapi checkout tidak boleh
@@ -36,22 +39,34 @@ kontrak terminal: [docs/TERMINAL_CONTRACT.md](docs/TERMINAL_CONTRACT.md).
 bun x tsc --noEmit && bun run lint && bun test && bun run gate:coverage && bun run gate:pack
 ```
 
-Gate memakai manifest `package.json` yang ada pada checkout ini.
+Lima perintah di atas adalah **minimum lokal**. Set canonical untuk seluruh gate
+adalah `bun run gate:fast` — gabungan tsc, lint, test, coverage, pack, bash,
+bench:smoke, audit:harness, dan gate:telemetry. Gate memakai manifest
+`package.json` yang ada pada checkout ini.
 
-### Gate coverage — sudah tuntas (2026-11-13)
+### Gate coverage — HASIL HISTORIS kandidat rilis v0.33.0 (2026-11-21)
 
-`bun run gate:coverage` **selesai dan lulus** pada kandidat 2026-11-13 (tree
-dengan alur context-window/kompaksi + audit UI/UX, sebelum commit):
+> **Bukan janji untuk commit berikutnya.** Angka di bawah tercatat pada pohon
+> kandidat rilis v0.33.0 (checkpoint 2026-11-21): commit fitur `1aaca14`
+> ditambah bump versi, CHANGELOG, dan pembaruan dokumentasi. Angka historis
+> tetap historis — sebutkan checkpoint-nya, jangan menyebutnya sebagai hasil
+> checkout berikutnya. Jalankan ulang gate bila ada perubahan setelah ini.
+
+`bun run gate:coverage` **selesai dan lulus** pada kandidat tersebut:
 
 ```
-[coverage-gate] funcs 88.64% (min 87) · lines 90.10% (min 86)
+[coverage-gate] funcs 90.22% (min 87) · lines 91.07% (min 86)
 [coverage-gate] lantai per-berkas: 19/19 modul kritis hijau
 ```
 
-Angka gate lain pada kandidat yang SAMA: `bun x tsc --noEmit` = bersih (0
-error), `bun run lint` = 705 file / 0 error, `bun test` = 5746 pass / 26 skip /
-0 fail dari 5772 test di 408 file (~1083 dtk), `bun run gate:pack` = 23 pass /
-0 fail, 316 file / 4095 KB.
+Angka gate lain pada kandidat yang SAMA (`bun run gate:fast`, exit 0): `bun x
+tsc --noEmit` = bersih (0 error), `bun run lint` = 851 file / 0 error,
+`bun test` = 6627 pass / 33 skip / 0 fail, `bun run gate:pack` = 23 pass / 0
+fail (budget 5000 KiB, paket 4903 KB / 340 file), `bun run gate:bash`,
+`bun run bench:smoke`, `bun run gate:telemetry` lolos, `bun run audit:harness`
+= 73 pass / 0 fail (2 advisory). Checkpoint lebih awal `1aaca14` (sebelum
+meta/dokumentasi) mencatat coverage 90.19% funcs / 91.07% lines dan paket
+4874 KB — selisih kecil karena perubahan test/i18n/dokumen pada kandidat rilis.
 
 Catatan lama soal "job panjang dihentikan saat sesi berakhir" tidak lagi
 berlaku di lingkungan ini: `gate:coverage` diselesaikan dengan proses latar
@@ -103,8 +118,16 @@ persetujuan pemilik.
   selalu deny / fail-closed. `providers → config` satu arah (provisioning di
   `src/providers/provision.ts`, `src/config.ts` murni IO).
 - Layar `src/ui/screens/` = view murni (props + callback), controller di `cli/`.
+- Modul v0.33: `src/ui/render/{sidebar,sidebar-layout,sidebar-model,activity-format,agent-progress}.ts`
+  dan `src/ui/screens/window.ts` (view sidebar, tetap murni props + callback),
+  serta `src/policy/{shell-tokenize,subagent-budget}.ts` (tokenizer shell sadar
+  platform & anggaran sub-agent). Patuhi batas lapisan yang sama saat mengubahnya.
 - Jalur non-interaktif shell-first (append-only ke scrollback); sesi
   interaktif SELALU TUI alternate-screen (invariant terminal #1, tanpa opsi linear).
+- Sejak v0.33 sesi interaktif punya **sidebar kanan adaptif** (jendela Thinking /
+  Activity / Live; aktif bila `cols ≥ 100` **dan** `rows ≥ 20`; Live|Log split
+  mulai 168 kolom; chat floor 36 kolom; tanpa bingkai). Rincian invariant di
+  `docs/TERMINAL_CONTRACT.md` (I36/I37); peta proteksi di `test/sidebar-*.test.ts`.
 - Ubah struktur/dependensi antarlapisan → wajib update `docs/architecture.md`.
 
 ## Jebakan (semua pernah jadi bug nyata)
@@ -120,6 +143,14 @@ persetujuan pemilik.
   (`width.ts`) SENGAJA mempertahankan sekuens utuh karena footer memakai CHA
   non-SGR untuk merapatkan konteks.
 - `cwd` tool file **wajib** dari `ToolContext.cwd`, bukan `process.cwd()`.
+- Sidebar dihitung dalam **kolom** (`displayWidth`/helper layout), bukan karakter:
+  rasio 30%≤150 kolom → 50%≥160 kolom, Live|Log mulai 168, chat floor 36.
+- Wheel sidebar **per-pane** (pane di bawah kursor), bukan satu state global:
+  `Alt+PgUp/PgDn` menggulir dua kotak + menggeser seleksi Live,
+  `Ctrl+PgUp/PgDn` mengubah rasio tinggi, `Ctrl+O` modal detail, `Home/End` ke
+  tepi chat **dan** sidebar.
+- Retry micro-toast TTL 4 dtk **ditimpa** tiap event: repaint satu baris footer,
+  jangan menumpuk satu baris per percobaan.
 - `vendor/minicore/**` **HOST-EDITABLE** sejak v0.16.0 (keputusan pemilik
   2026-11-10; lihat `vendor/minicore/VENDOR.md`). Tetap utamakan seam aditif
   dan jangan menurunkan kontrak lapisan yang dijaga test.

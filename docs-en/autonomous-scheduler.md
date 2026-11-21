@@ -415,6 +415,17 @@ exclusions approved by the owner on 2026-10-26, not deferred work:
 | Cross-session merge without explicit adoption | The roadmap's authority model: the portfolio is a projection, task changes go through the authority path |
 | A release-ready claim | P14 closure only covers the structured-evidence contract; P13 limitations still apply and the tree is still uncommitted |
 
+> **v0.33 — on release-readiness claims.** Closing this track (or any Quality
+> Remediation stage) is **not** a release-ready claim. Release readiness requires
+> every gate to pass on **one final candidate** — the full deterministic order
+> plus `audit:harness`, a smoke build/package, and the relevant CI checks. Gate
+> thresholds must not be lowered to make a result look green. Before reporting any
+> result, pin the candidate with `git rev-parse HEAD` and `git diff --stat` and
+> attach those to the report: the working tree is transient, and a finding can go
+> stale the moment another session or process changes it. Do not hardcode pass
+> counts — report the numbers the commands actually printed, with the candidate's
+> checkpoint.
+
 ## Related
 
 - [CLI](cli.md) — the complete flag reference.

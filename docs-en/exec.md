@@ -65,6 +65,10 @@ Honest v1 limits: each `run` = a NEW session (no thread/resume); ONE run in flig
 printf '%s\n' '{"id":1,"method":"initialize"}' '{"id":2,"method":"shutdown"}' | minicode acp
 ```
 
+## Delegation in non-TTY: denied, fail-closed
+
+`delegate_task` is a gated tool. On a non-TTY path (one-shot via a pipe, `exec`, ACP, or the daemon) delegation is **always denied without prompting**, whether or not the PermissionMode is `ASK`. The daemon approval broker exception (`allowNonTtyAsk`, an injected `permissionAsk`) **applies only to non-gated tools** (e.g. `web_fetch`); it must not turn `delegate_task` or any other gated tool into an approval path. The reason: a child's side effects persist even when the parent turn fails, so approval without an operator present can duplicate work. One ASK approval covers **one** delegation — the "Always" option is deliberately unavailable for `delegate_task`. See [Sub-Agents](agents.md) for child limits and the recovery warning.
+
 ## Structured results: `submit_result`
 
 The `submit_result` tool produces final structured JSON, called at most once per run, in `NO_PROMPT` mode (no confirmation requested). In `exec --json` the result content is forwarded **verbatim** — an API-style replacement for `response_format`. When `result.findings` holds an explicit list of `{category, severity, summary, evidence?}`, those findings are also projected as `finding.detected` events. Suited to tasks whose results are consumed by another program rather than a human.
@@ -79,7 +83,7 @@ The `submit_result` tool produces final structured JSON, called at most once per
 
 | Control | Default | Note |
 |---|---|---|
-| `--max-steps <n>` | 50 | Tool step limit per run |
+| `--max-steps <n>` | 200 (`LIMITS.DEFAULT_MAX_STEPS`) | Tool step limit per run, with auto-escalation; 50 is only the sub-agent hard cap (`SUB_AGENT_MAX_STEPS`), not this runtime default — the CLI help still says 50 (stale) |
 | `--timeout <ms>` | 900000 (15 minutes) | Hard deadline per run; `0` = Infinity |
 | `--ratelimit <rpm>` | — | LLM request token bucket per minute |
 | `--budget <usd>` | — | Warn at 80%; exceeded -> one-shot `exit(1)`, TUI breaks the loop; `exec` enforces it the same way as one-shot |
@@ -103,7 +107,7 @@ minicode exec "$(cat task.md)" --json
 ## Security notes for CI
 
 - Local config `.minicode/config.json` **is ignored by default** (`--allow-local-config` to trust it) — a cloned repo cannot spawn MCP servers or hijack the prompt. On a runner you fully control, enabling it is fine.
-- `git_commit` and all MCP tools are **gated**: they are always denied on non-TTY. CI that needs a commit must use another path (e.g. a git workflow, not the agent).
+- `git_commit`, `delegate_task`, and all MCP tools are **gated**: they are always denied on non-TTY, including when the daemon approval broker is injected. CI that needs a commit or delegation must use another path (e.g. a git workflow, not the agent).
 - Credential env vars are scrubbed from subprocesses; `GITHUB_TOKEN` and friends do not leak into the `bash` tool. Details in [Security](security.md).
 
 ## Next

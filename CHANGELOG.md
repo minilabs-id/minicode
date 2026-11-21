@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.33.0] - 2026-11-21
+
+### Added — Sidebar kanan, narasi, dan kontrol sesi
+
+- **Sidebar kanan adaptif**: jendela Thinking / Activity / Live, lebar 30% (≤150 kolom) naik linear ke 50% (≥160 kolom), aktif hanya bila `cols ≥ 100` **dan** `rows ≥ 20`, chat tak pernah lebih sempit dari 36 kolom. Activity terbagi Live | Log bersebelasan mulai 168 kolom (garis abu tipis, jarak 3 baris antar jendela, tanpa bingkai). Satu garis vertikal abu memisahkan chat dan sidebar; satu `stdout.write`, satu `SYNC_START..SYNC_END` per frame — sidebar tidak pernah menulis ke scrollback. Modul baru `src/ui/render/{sidebar,sidebar-layout,sidebar-model,activity-format,agent-progress}.ts` dan `src/ui/screens/window.ts`.
+- **Navigasi sidebar**: wheel menggulir pane di bawah kursor; `Alt+PgUp/PgDn` menggulir dua kotak sekaligus + menggeser seleksi Live; `Ctrl+PgUp/PgDn` mengubah rasio tinggi thinking:activity (30–80%, default 60:40); `Ctrl+O` membuka modal detail tool Live; `Home/End` membawa chat **dan** sidebar ke tepi. `PgUp/PgDn` tetap milik chat.
+- **Narasi chat + rekap kategori**: chat hanya narasi + rekap kategori (mis. `3 command · 2 read · 5 subagent`) + jawaban akhir. Riwayat per-tool pindah ke sidebar. `/expand` dan baris `Tool:` dihapus; prompt panjang dibungkus dengan margin 3 kolom. `finding.detected` masuk ke log Activity saat sidebar aktif; jalur linear tetap menulis ke transkrip.
+- **Blok penutup diperkaya**: model, mode, breakdown tool per kategori, jumlah agent, dan pemisah token in/out. Data yang tak tersedia ditulis jujur (`0` / `$—`). Nonaktif via `MINICODE_SESSION_SUMMARY=0`.
+- **Retry micro-toast satu baris** `retry n/total · Ns` di footer (TTL 4 dtk, angka dihitung live), ditimpa tiap event — bukan satu baris per percobaan; seluruh toast dipendekkan.
+
+### Changed — Sub-agent & presentasi
+
+- **Budget sub-agent per scope**: kirim `scope` (`file`|`dir`|`subtree`|`repo`) → budget awal **12/18/26/36** (`plan` ×1,5, di-clamp ke `[8,50]` sehingga `repo`+`plan` = 50) dengan tangga eskalasi `[8,12,20,32,50]`. **Jangan set `maxSteps` sendiri** — nilai eksplisit mematikan eskalasi. Tanpa `scope`, fallback kontrak lama 5/15. Pool dapat diatur lewat `MINICODE_SUB_AGENT_POOL_SIZE` (1..16, default 3); timeout via `MINICODE_SUB_AGENT_TIMEOUT_MS` (default 300.000 ms). Maks 2–3 sub-agent per turn.
+- Prompt tidak lagi mengunci `maxSteps`, memberi ruang bagi eskalasi bertahap saat anak mentok.
+- Transisi, approval binding, dan output window diselaraskan dengan geometri window yang seragam.
+
+### Fixed
+
+- **Perf `ingestThinking` O(n²)** → inkremental (hitung code point + buffer surrogate); dijaga `test/perf-no-quadratic.test.ts`.
+- **Undo/restore fail-closed**: kegagalan baca diff melempar alih-alih dianggap "sudah identik"; `rm` yang gagal dicatat `skipped: remove failed: <code>`, bukan `(removed)`.
+- Stabilitas UI/UX: output window, form, picker, model/provider manager, dan wizard mengikuti geometri window yang sama; string i18n tidak lagi mengiklankan aksi `expand` yang sudah dihapus.
+- Berbagai test lama yang masih mengasumsikan `/expand`, baris `Tool:`, dan sidebar-less UI disesuaikan dengan desain baru.
+
+### Security
+
+- **Tokenizer shell sadar-platform** (`src/policy/shell-tokenize.ts`): POSIX memperlakukan backslash & single-quote sebagai quote, cmd.exe memperlakukan `^` sebagai escape dan `'` literal — menutup bypass allowlist lewat `echo hi ' & del x '`. Denylist verba mutasi (`del`/`rm`/`mv`/`cp`/`Remove-Item`, …) berlaku sebelum pencocokan allowlist di semua mode.
+- **`fetchPinnedUrl` pada pricing sync**: DNS sekali (strict, tanpa cache), IP tervalidasi di-pin ke socket, tanpa proxy/pool/redirect yang bisa mem-bypass; host privat ditolak, body cap 2 MB. Kompaksi memakai cek DNS strict/noCache (risiko residu: provider OpenAI-compat memakai `fetch` global).
+- **Verifier**: `maxBuffer` 32 MB dan klasifikasi kegagalan infra (ENOENT/maxBuffer → `infraFailure`, timeout → `timedOut`) sebagai transient, bukan assertion gagal.
+- **Approval binding**: target tak terbaca (`UNREADABLE_TARGET`) dibedakan dari hilang (`MISSING_TARGET`) atau bukan file (`NOT_A_FILE`); perubahan apa pun = deny fail-closed.
+
+### Verifikasi
+
+- Kandidat rilis v0.33.0 (pohon pasca-`1aaca14` + bump versi, CHANGELOG, dokumentasi; 2026-11-21): `tsc` 0 error · `lint` 851 file / 0 error · `bun test` 6627 pass / 33 skip / 0 fail · `gate:coverage` 90,22% funcs / 91,07% lines, 19/19 modul kritis · `gate:pack` 23 pass / 0 fail, 340 file / 4903 KB (budget 5000 KiB) · `gate:bash`, `bench:smoke`, `gate:telemetry` lolos · `audit:harness` 73 pass / 0 fail (2 advisory) — `bun run gate:fast` exit 0. Checkpoint `1aaca14` sebelum meta/dokumentasi mencatat 90,19% funcs dan paket 4874 KB. Angka historis pada kandidat tersebut, bukan janji untuk commit berikutnya.
+
 ## [0.32.2] - 2026-11-20
 
 ### Fixed — BOM UTF-8 pada config.json

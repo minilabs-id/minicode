@@ -31,6 +31,10 @@ minicode doctor [--json]   # runtime, provider, pricing, memory, sandbox, config
 - **`/provider sync` says restart?** Only when there really are new models (sync honestly reports `{updated,failed}`).
 - **`models --match` is empty?** Header noise is already cleaned; empty means genuinely no match.
 - **Colour leaking into a pipe?** Colour is gated on `stdout.isTTY`; `NO_COLOR` wins; `TERM`/`COLORTERM` do not turn colour on in a pipe.
+- **The sidebar is not showing:** it is active only when `cols ≥ 100` **and** `rows ≥ 20` — widen or lengthen the terminal. It is part of the same `paint()` frame as the chat, never scrollback, and no flag forces it onto a small screen.
+- **`/view expand` no longer works:** that action was removed. Reasoning lives in the right sidebar Thinking pane (hidden by default; `MINICODE_SHOW_THINKING=1` forces it visible, or use `/view thinking`), and `/view` now accepts only `thinking`.
+- **Retry messages piling up:** retries now appear as a single footer micro-toast `retry n/total · Ns` with a 4 s TTL and a live counter, overwritten on each attempt — stacked lines mean an older build.
+- **A sub-agent stalls instead of escalating:** pass `scope` (`file`/`dir`/`subtree`/`repo`) — budgets 12/18/26/36 (`plan` ×1.5, clamped to `[8,50]`) escalate through `[8,12,20,32,50]`. **Do not set `maxSteps` yourself:** an explicit value disables escalation; without `scope` the fallback is 5/15. For wide fan-out, split 2–3 agents per turn and tune `MINICODE_SUB_AGENT_POOL_SIZE` (1..16, default 3) and `MINICODE_SUB_AGENT_TIMEOUT_MS` (default 300000 ms).
 
 ## Further help
 

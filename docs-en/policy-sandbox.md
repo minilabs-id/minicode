@@ -6,7 +6,7 @@ WorkMode, approval, tool access policy, shell command guards, and execution isol
 
 | Axis | Values | Function |
 |---|---|---|
-| **WorkMode** | `DISCUSS` / `PLAN` / `BUILD` (internal `EXECUTE`) | Bounds how the agent works. `DISCUSS` is read-only; `PLAN` may create plan artefacts; `BUILD` adds no ceiling. WorkMode only narrows access. |
+| **WorkMode** | `DISCUSS` / `BUILD` (internal `EXECUTE`) | Bounds how the agent works. `DISCUSS` is read-only (plus plan artefacts); `BUILD` adds no ceiling. The legacy `PLAN` value normalises to `DISCUSS`. WorkMode only narrows access. |
 | **PermissionMode** | `AUTO` / `ASK` | Determines human supervision. `AUTO` runs authorised capability without routine approval; `ASK` requests approval for gated actions. Hard denies still apply. |
 | **Tool Access Policy** | read-only capability, plan, allowlist, legacy access profiles | Determines the available capability. The internal values `readonly`, `plan`, `allowlist`, and `allow-all` are still used for compatibility and access limits, not as supervision choices. |
 
@@ -16,7 +16,7 @@ Related sets: `INTERNAL_WRITE_TOOLS`, `FILE_WRITE_TOOLS`, `GATED_TOOLS` (+ `*.*`
 
 ## Normalised bash-guard
 
-`src/policy/bash-guard.ts`: quote separators are removed and simple assignments substituted **before** inspection.
+`src/policy/bash-guard.ts`: quote separators are removed and simple assignments substituted **before** inspection. A platform-aware tokenizer (`src/policy/shell-tokenize.ts`) splits arguments by the shell's own rules — POSIX `'` / backslash, Windows caret `^`, literal single quotes — then a **mutating-verb denylist** runs ahead of the allowlist.
 
 | Used to pass | Now |
 |---|---|
@@ -43,8 +43,11 @@ Related sets: `INTERNAL_WRITE_TOOLS`, `FILE_WRITE_TOOLS`, `GATED_TOOLS` (+ `*.*`
 | `cat .{env,}`, `cat {.env,x}` | denied; brace expansion happens before inspection |
 | `cat$(printf ' ').env` | denied; reader arguments shaped like command substitution cannot be proven static |
 | `echo "rm -rf /"`, `git commit -m "docs: sudo rm"` | pass (over-block direction); quoted content of echo/printf/grep/git `-m` is DATA, not a command — unless it contains `$(`, a backtick, or `$VAR`, which are still executed |
+| `echo hi ' & del x '` (cmd.exe) | denied; the tokenizer treats the single quote as literal, so `&` inside it is not a separator, and the verb `del` then hits the denylist |
+| `cat .e\nv` (POSIX backslash-quote) | denied; the backslash escapes the character into `.env`, after which the name/jail rules still apply |
+| `del x`, `mv a b`, `Remove-Item -Force x` | denied; mutating verbs hit the denylist before the allowlist and cannot be smuggled through quoting or wrappers |
 
-Allowlist (permitted command shapes; checked AFTER the bash-guard). Two lists:
+Allowlist (permitted command shapes; checked AFTER the bash-guard). Before the allowlist, the platform-aware tokenizer splits arguments and the mutating-verb denylist (`del`/`mv`/`Remove-Item`/`rm` …) rejects dangerous commands first (see the table above). Two lists:
 - **Narrow** (`--allowlist`, untrusted tasks): `git status/diff/log/branch/show`, `bun test/run/x tsc`, `npm/bun/pnpm/yarn install|add`, `npm run/exec/install/ci/test/start`, `node`, `npx`, `ls dir cat type head tail wc grep rg find which echo pwd`. Shell writes (`mkdir cp mv rm touch`) are withheld — use the jailed `write_file`/`edit`.
 - **Developer** (fallback without an OS sandbox — `restrictBash`; a trusted session on your own machine): narrow + broad runtimes/interpreters (`python`/`node`/`ruby`/`php`/`perl`/`lua`/`julia`/`elixir`/`groovy`/`scala`/`java`/`dotnet`/`swift`/`dart`...), package managers (`pip`/`pip3`/`uv`/`pipx`/`poetry`/`pipenv`/`gem`/`bundle`/`composer`/`cargo`/`go`/`nuget`...), frameworks/bundlers (`vite`/`next`/`nuxt`/`webpack`/`esbuild`/`rollup`...), test/lint/build (`pytest`/`ruff`/`mypy`/`jest`/`vitest`/`eslint`/`tsc`/`mvn`/`gradle`/`dotnet`/`make`/`cmake`/`gcc`...), DB CLIs (`psql`/`mysql`/`sqlite3`/`prisma`...), containers (`docker`/`podman`).
 
@@ -56,7 +59,7 @@ Measure, do not claim — run it yourself for current figures:
 bun run gate:bash        # manual corpus of attack patterns + legitimate commands (0 bypass / 0 over-block = pass)
 ```
 
-Fuzzing generates variants from transformations the shell considers equivalent (quote-split, indirection, wrappers, long flags, chaining); findings are locked in as regression tests.
+Fuzzing generates variants from transformations the shell considers equivalent (quote-split by POSIX/Windows rules via the tokenizer, backslash-quote, caret, indirection, wrappers, long flags, chaining); findings are locked in as regression tests.
 
 > Honest limit: static analysis over a Turing-complete language. Dynamic `$(curl ...)` cannot be resolved without execution — that is what the OS sandbox is for.
 
@@ -83,6 +86,6 @@ already happened before the container was stopped.
 
 - **Path jail** realpath-based + `realpath` symlink checks in the permission layer; `.env`/`.git/config`/`node_modules`/Windows hives denied; `.minicode/` is fully locked for write tools based on the REAL target (best-effort realpath `isOwnedStateReal` — internal junctions/symlinks into `.minicode/` are held too; except `.trash/` restore + `hooks/` scripts); the bash-guard blocks CREATING links whose operands are sensitive/owned-state. For reads, `safeOpenRead` re-checks the boundary after stat and matches `dev+ino` from the opened handle; `O_NOFOLLOW` is used on POSIX too. The symlink stress test stays skipped when the host does not grant permission to create symlinks.
 - **Env scrub** `sanitizeSpawnEnv`: strips credential keywords from the final merge; `GITHUB_WORKSPACE`/`GITHUB_REF`/`GOOGLE_CHROME_PATH`/`REDIS_HOST`/`AWS_REGION` remain, `GITHUB_TOKEN`/`AWS_SECRET_ACCESS_KEY`/`DATABASE_URL` are stripped.
-- **web_fetch/web_search**: manual 5-hop redirects + uncached DNS resolve per hop (anti-rebinding) + 2 MB body.
+- **web_fetch/web_search**: manual 5-hop redirects + uncached DNS resolve per hop (anti-rebinding) + 2 MB body. Pricing uses `fetchPinnedUrl` (resolved IP pinned to the socket, strict/noCache DNS, private hosts and redirects denied, 2 MB cap); the OpenAI-compatible summarizer still uses the global `fetch` (residual).
 - **Secret scrubber**: `sk-`, `ghp_`, `AKIA`, PEM, JWT, Bearer, `api_key=...` redacted before reaching the LLM (read_file/bash/grep) — no word whitelist.
 - **Config/allowlist**: atomic randomUUID tmp+rename + chmod 600. MCP serve with curated tools + permission active.

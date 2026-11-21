@@ -153,7 +153,7 @@ Merge dengan **prioritas lokal menang**. Mutasi (add/update provider, MCP, LSP) 
 
 ## Token OAuth bukan di config
 
-Kredensial OAuth di `~/.minicode/auth.json` (chmod 600) — terpisah dari config karena config lokal rawan ikut ter-commit sedangkan token rahasia berumur pendek. Provider OAuth menyimpan `apiKey: ""` di config dan mengambil token saat runtime. Detail di [Config & Provider](config.md).
+Kredensial OAuth di `~/.minicode/auth.json` (chmod 600) — terpisah dari config karena config lokal rawan ikut ter-commit sedangkan token rahasia berumur pendek. Provider OAuth menyimpan `apiKey: ""` di config dan mengambil token saat runtime.
 
 ## Lokasi data
 

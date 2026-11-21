@@ -30,7 +30,7 @@ historical checkpoint and does not change when the kernel is edited on the host.
 
 - `cli/` may import `src/ui/` + `src/`; non-ui `src/` is forbidden to import `src/ui/`; `src/ui/` is forbidden to import `cli/`, non-ui `src/`, `#minicore`. Enforced by `test/ui-boundary.test.ts`.
 - The single UI<->outside window: `src/ui/contract.ts` (`UiEvent/UiBus/UiStep/UiExecution`).
-- DI from the composition root (`cli/index.ts`, `cli/setup.ts`): `createProviderLayer -> loadLastModel -> createRagLayer -> resume presentation-events + planRecovery + reconcileUndoRedo -> setupToolLayer + setAskTextFn -> createMinicodeSession -> journal + checkpoint + semantic event sink + step-trace + runPromptWithVerify (baseline-first + 3-cycle self-heal + hooks) -> logger + turn-status + usage/pricing -> persist/finalize -> close (kill jobs, mcp/lsp close)`. `setSubAgentSessionFactory` before dispatch so TUI/one-shot/`mcp serve` are all covered.
+- DI from the composition root (`cli/index.ts`, `cli/setup.ts`): `createProviderLayer -> loadLastModel -> createRagLayer -> resume presentation-events + planRecovery + reconcileUndoRedo -> setupToolLayer + setAskTextFn -> createMinicodeSession -> journal + checkpoint + semantic event sink + step-trace + runPromptWithVerify (baseline-first + 3-cycle self-heal + hooks) -> logger + turn-status + usage/pricing -> persist/finalize -> close (kill jobs, mcp/lsp close)`. `setSubAgentSessionFactory` before dispatch so TUI/one-shot/`mcp serve` are all covered. A single shared `SidebarModel` instance is injected from the composition root into the TUI painter and the other presenters, so the Activity/Live feeds stay consistent within one frame.
 - `providers -> config` one-way (`src/providers/provision.ts` provisioning, `src/config.ts` pure IO).
 
 ## The flow of one prompt
@@ -128,8 +128,11 @@ Verification writes no `messages`, projections, presentation, Run, or cursor.
 
 An interactive session (`minicode` on a capable TTY) ALWAYS opens the
 **fullscreen alternate-screen** TUI: a shell-like transcript + a one-line status
-bar + composite popups on top of the still-visible (dimmed) transcript. The
-non-interactive path (one-shot prompt, `exec`, pipe/redirect/CI, `TERM=dumb`,
+bar + composite popups on top of the still-visible (dimmed) transcript + an
+adaptive right sidebar (Thinking + Activity/Live/Log) when `cols ≥ 100` **and**
+`rows ≥ 20`. The sidebar is part of the same `paint()` frame as the chat — never
+scrollback; a terminal that is too narrow or too short simply has no sidebar.
+The non-interactive path (one-shot prompt, `exec`, pipe/redirect/CI, `TERM=dumb`,
 screens under 10 lines) stays shell-first: plain append-only output to the
 scrollback with no cursor control.
 
@@ -147,44 +150,59 @@ raw — the arbitrator commits it as a clean permanent line.
 `beginInteractiveScreen` holds all those painters while the interactive screen owns
 the terminal; a foreign write while alt-screen is live also marks the terminal
 "dirty" (`consumeScreenDrift`) so the screen forces a full repaint on the next
-paint. The startup loading bar (`src/ui/runtime/loading-bar.ts`) is the second kind
-of transient painter: a single-line `▓░` block + percent + label, redrawn only when
-`update(label, percent)` is called, TTY-only (non-TTY = zero bytes, a no-op), label
-sanitised. Startup-phase diagnostics (identity/writer/resume/recovery/context) are
-deferred to `ctx.startupNotices` for the REPL and flushed into the TUI transcript;
-non-interactive still prints them directly. 35 invariants (I1-I35) + the test map
-(`tui-app`, `screen-buffer`, `tui-popup`, `transient-arbitration`, `loading-bar`,
-`input-resize`, `exit-codes`, `acp`, `ui-boundary`) are in `TERMINAL_CONTRACT.md`.
+paint. The startup progress line (`MINICODE_STARTUP_PROGRESS=0` disables it) is now a
+single `start NN%` line — `update NN%` for auto-update — overwritten in place with
+`\r`, without a logo, using real figures from the 9 phases of `createCliSession`
+and closing with `start 100%`. The startup loading bar (`src/ui/runtime/loading-bar.ts`)
+is the second kind of transient painter: a single-line `▓░` block + percent + label,
+redrawn only when `update(label, percent)` is called, TTY-only (non-TTY = zero
+bytes, a no-op), label sanitised. Startup-phase diagnostics
+(identity/writer/resume/recovery/context) are deferred to `ctx.startupNotices` for
+the REPL and flushed into the TUI transcript; non-interactive still prints them
+directly. 37 invariants (I1–I37) + the test map (`tui-app`, `screen-buffer`,
+`tui-popup`, `transient-arbitration`, `loading-bar`, `input-resize`, `exit-codes`,
+`acp`, `ui-boundary`, plus the v0.33 additions `sidebar-invariants`, `sidebar-model`,
+`retry-visibility`, `perf-no-quadratic`, `shell-tokenize`, `subagent-budget`) are in
+`TERMINAL_CONTRACT.md`.
 That contract also carries a **protection gap map** — claims whose implementation
 is correct but has no guarding assertion yet; that is a work list, not a green list.
 
-Six display primitives (all inside the fullscreen TUI when interactive): the
+Seven display primitives (all inside the fullscreen TUI when interactive): the
 `minicode >` transcript shown at boot/idle and returning automatically after a
-turn + model answer + ledger `  > name target` green / `  > name: ...` red; a
+turn — chat carries only narration, a category recap (e.g.
+`3 command · 2 read · 5 subagent`), and the final answer; the per-tool ledger,
+`Tool:` line and folded buffers are gone (details live in the sidebar); a
 one-line status bar (`✦ 00.00.00 Discuss  model  cwd ... context  Auto ●` — mode
 values only, product labels `Work Mode:`/`Permission Mode:` removed in v0.24; the
 `●` dot is yellow = allow-list active, grey = inactive, red `○` = unrestricted, a
 `◷ N` badge when background jobs are alive), with new sessions at `DISCUSS`+`AUTO`,
-Work Mode choices only Discuss/Plan/Build and Permission Mode only Auto/Ask; Work
+Work Mode choices only Discuss/Build and Permission Mode only Auto/Ask; Work
 Mode on the left and Permission Mode in cyan right-aligned near the context (timer
 dim when idle, only seconds white when active, minutes light up after 60 s, hours
 after 1 h; process sparkle; no bullet separator; `src/ui/tui/app.ts` renders the
 composer dots and one spacer above the footer per frame); a single-box composite
 popup (`/model`, `/provider`, `/sessions`, forms, approvals) via
 `openAltScreen`/`paintRegion`; dimmed thinking without a transcript marker (composer
-dots; content via `/view expand`); an actionable error message in red once per failure
-(`takePendingError`). Command status/confirmation (sync, auth, config, spinner) uses
-colour only, without icons.
+dots; full history in the right sidebar Thinking pane, hidden by default and forced
+visible with `MINICODE_SHOW_THINKING=1`); an actionable error message in red once per
+failure (`takePendingError`); an adaptive right sidebar — active only when
+`cols ≥ 100` and `rows ≥ 20`, width 30% at ≤150 columns growing linearly to 50% at
+≥160 with a 36-column chat floor, Thinking:Activity 60:40 (30–80% via
+`Ctrl+PgUp`/`PgDn`), Live|Log side by side at ≥168 columns, one dim vertical
+separator, 3-row gap, 1-space padding, no box borders, and part of the same
+`paint()` frame (never scrollback). Command status/confirmation (sync, auth,
+config, spinner) uses colour only, without icons; retry appears as one footer
+micro-toast `retry n/total · Ns` with a 4 s TTL and a live counter.
 
 ## Key modules
 
 - `src/session/verification.ts` + `src/tools/evidence.ts`: application-owned invocation identity, awaited intent/receipt, explicit observation, idempotency, and child-effect correlation — all in the same mutation journal.
 
-- `src/ui/render/`: `theme.ts` (getter `c`/`glyphs`), `width.ts` (columns), `sanitize.ts` (only SGR passes), `ledger.ts` (status word/glyph/paint + shared run marker for TUI & linear), `markdown.ts`, `markdown-table.ts` (streaming pipe-table parser), `table-grid.ts` (terminal grid budget), `cells.ts` (grapheme+SGR framebuffer + a "rewrite the tail" diff for incremental writes), `composer-wrap.ts` (incremental composer wrap), `highlight.ts diff.ts table.ts wrap.ts money.ts errors.ts`.
+- `src/ui/render/`: `theme.ts` (getter `c`/`glyphs`, level-aware 16/256/truecolor palette), `width.ts` (columns), `sanitize.ts` (only SGR passes), `ledger.ts` (status word/glyph/paint + shared run marker for TUI & linear), `hint.ts` (`key label` grammar hints, space-only), `list.ts` (`›` row marker + fixed columns), `notice.ts` (success/error/info notices), `markdown.ts`, `markdown-layout.ts` (markdown layout for the sidebar), `markdown-table.ts` (streaming pipe-table parser), `table-grid.ts` (terminal grid budget), `cells.ts` (grapheme+SGR framebuffer + a "rewrite the tail" diff for incremental writes), `composer-wrap.ts` (incremental composer wrap), `sidebar-layout.ts` (adaptive sidebar geometry), `sidebar.ts` (sidebar painter), `sidebar-model.ts` (sidebar state; incremental `ingestThinking` — the O(n²) path is fixed, guarded by `test/perf-no-quadratic.test.ts`), `activity-format.ts` (Activity line formatting), `agent-progress.ts` (sub-agent progress formatting), `highlight.ts diff.ts table.ts wrap.ts money.ts errors.ts`.
 - `src/presentation/`: `events.ts` defines presentation events and the durability registry; `adapter.ts` maps runtime to `DomainEvent`; `reducer.ts`/`model.ts` build replayable state and derived summaries; `store.ts` stores content references; `projection.ts` forms the `minicode.output.v1` envelope and machine error categories. `src/session/persistence.ts` stores the `presentation_events` and `messages` logs with `reasoning`/`is_error` fidelity. `cli/setup.ts` owns the exhaustive `toPresentationEvent()` bridge; the TUI/linear/machine renderers use policy decisions via `PresentationPolicy` injection.
-- `src/policy/`: `context.ts` (density-aware code/JSON estimator + usage calibration), `context-window.ts` + `context-window-catalog.ts` (window resolution: config -> catalogue -> models.dev -> 128K alias default -> 32K), `bpe.ts` + `tokenizer-registry.ts` (on-demand precise BPE tokenizers from HuggingFace, local cache, density fallback), `compaction.ts` (LLM + mechanical compaction, anti-drift/anti-thrash, prefers the session provider), `usage.ts`/`pricing.ts` (cost estimates + models.dev).
+- `src/policy/`: `context.ts` (density-aware code/JSON estimator + usage calibration), `context-window.ts` + `context-window-catalog.ts` (window resolution: config -> catalogue -> models.dev -> 128K alias default -> 32K), `bpe.ts` + `tokenizer-registry.ts` (on-demand precise BPE tokenizers from HuggingFace, local cache, density fallback), `compaction.ts` (LLM + mechanical compaction, anti-drift/anti-thrash, prefers the session provider), `usage.ts`/`pricing.ts` (cost estimates + models.dev), `shell-tokenize.ts` + `subagent-budget.ts` (platform-aware shell tokenizer and sub-agent step-budget resolution).
 - `src/ui/input/`: `askLine`, `prompt-engine` (grapheme `Intl.Segmenter`, streaming decoder, bracket-paste, mouse X10/SGR press/drag/release + normalised wheel; app-level selection in the TUI).
-- `src/ui/screens/`: pure views `picker/wizard/model-manager/provider-manager`.
+- `src/ui/screens/`: pure views `picker/wizard/model-manager/provider-manager/form/dialog/output-window`; `window.ts` is the sidebar readout view, still pure props + callbacks.
 - `src/ui/assistant/simple.ts`: linear printer + OSC52 clipboard. `turn-status.ts`: the transient line. `approval/prompt.ts`: `promptAsk/promptAskText`.
 - `src/daemon/`: hosted-session runtime, discovery, framed IPC/capabilities, replay, approval brokerage, child supervision, and ordered shutdown; composition via `cli/commands/daemon.ts`.
 - `src/runtime/`: application admission and execution kernel (`dispatch.ts`, `execution-kernel.ts`, `production-execution.ts`) plus recovery (`recovery.ts`).

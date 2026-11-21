@@ -1,6 +1,6 @@
 # MiniCode Documentation
 
-MiniCode is a terminal coding agent built on the MiniCore kernel. The interactive path uses a fullscreen TUI; one-shot and automated paths write to the scrollback or to a machine-readable stream according to their contract.
+MiniCode is a terminal coding agent built on the MiniCore kernel. The interactive path uses a fullscreen TUI with an adaptive right sidebar (Thinking + Activity/Live/Log); the chat pane holds only narration, a category recap, and the final answer. One-shot and automated paths write to the scrollback or to a machine-readable stream according to their contract.
 
 ## Start here
 

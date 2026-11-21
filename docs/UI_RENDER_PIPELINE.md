@@ -3,7 +3,9 @@
 Dokumen ini hasil audit stabilitas UI/UX terminal 2026-09-18 (baseline v0.9.27).
 Sumber kebenaran perilaku tetap `docs/TERMINAL_CONTRACT.md` (FROZEN); dokumen
 ini memetakan IMPLEMENTASI aktual per tahap beserta kontrak event dan temuan
-audit. Angka test di sini diukur di Windows + Bun 1.4.2, suite penuh hijau.
+audit. Angka test di bawah adalah **historical**, diukur di Windows + Bun 1.4.2 pada
+checkpoint audit 2026-09-18 (baseline v0.9.27); di sini tidak ada klaim hijau untuk
+v0.33 (`1aaca14`).
 
 Konvensi: `file:line` menunjuk simbol yang dimaksud. Aturan repo tetap berlaku:
 `cli/` boleh impor `src/ui/` dan `src/`; `src/` non-ui DILARANG impor
@@ -43,8 +45,9 @@ Tahap D — logger utama `src/ui/assistant/simple.ts` (`attachSimpleLogger`):
 append-only
 scrollback, tanpa alternate screen. `provider:text` → `sanitizeAnsi` PER CHUNK
 → `streamBuffer` → `flushBuf` (line-buffered) → `flushLine` (fence-state +
-`decorateMarkdown` + `formatWrapped`) → `stdout`. Jawaban bisa minimize
-(buffer 1MB + marker, dibuka via `/view expand`).
+`decorateMarkdown` + `formatWrapped`) → `stdout`. Jawaban bisa diringkas
+(cap 1MB + marker); sejak v0.33 collapsed buffer dan `/view expand` dihapus — ringkasan
+hanya melaporkan ukuran, bukan buffer yang dibuka lagi.
 
 Tahap E — garis status transient `src/ui/assistant/turn-status.ts`: satu baris
 `stderr` untuk shell/linier, hidup hanya di fase sunyi (latch
@@ -74,18 +77,29 @@ menggeser viewport transkrip, drag kiri membuat selection app-level, dan
 Footer/chrome lama (`src/ui/runtime/chrome.ts`, DECSTBM scroll-region,
 `MINICODE_FOOTER`) DIHAPUS bersama lapisan TUI lama — alternate screen
 menggantikannya; nol byte di non-TTY. Footer baca `session.contextTokens` kernel
-(bukan spend kumulatif).
+(bukan spend kumulatif). Warna footer/sparkle di-gate oleh kemampuan warna
+(`MINICODE_COLOR=0`/`NO_COLOR` → mono, tanpa SGR bermakna). Sejak v0.33 footer juga
+menampilkan satu micro-toast retry `retry n/total · Ns` (TTL 4 dtk, counter live dari
+`minicode:retry`, UI-transient) — bukan baris ledger. Mouse wheel menggulir pane di
+bawah kursor, termasuk pane sidebar Thinking/Activity/Live/Log, bukan hanya viewport
+transkrip.
 
 Tahap H — primitif render `src/ui/render/`: `sanitize.ts` (hanya SGR lolos),
 `markdown.ts` + `highlight.ts` (fence-state per baris, konten utuh),
 `width.ts` (kolom: CJK/emoji 2, potong aman-SGR), `wrap.ts` (lebar dibaca
 per baris → aman resize), `theme.ts` (getter warna/glyph, jangan di-`const`),
-`errors.ts` (pesan actionable + redact), `collapse.ts` (buffer `/view expand`
-200KB/entry, 500KB total), `markdown-table.ts`/`table-grid.ts` (pipe-table
+`errors.ts` (pesan actionable + redact), `collapse.ts` (delegator state collapse
+per-sesi; buffer `/view expand` 200KB/entry + 500KB total sudah tidak ditulis di v0.33), `markdown-table.ts`/`table-grid.ts` (pipe-table
 model), `diff.ts`/`table.ts`/`money.ts`/`format.ts`,
 `activity-group.ts`/`activity-panel.ts` (panel aktivitas: klasifikasi tool →
 keluarga `explore|edit|execute|feed|other` + satu baris ringkas per keluarga,
 maks 10 baris; murni, dipakai TUI + linear).
+
+Modul v0.33: `src/ui/render/sidebar.ts` (painter sidebar), `sidebar-layout.ts`
+(geometri: aktif `cols ≥ 100`/`rows ≥ 20`, lebar 30%→50%, chat floor 36, tinggi
+60:40, split `Live|Log` ≥168), `sidebar-model.ts` (state + ingest thinking
+inkremental), `agent-progress.ts` (progres sub-agent di pane Live), dan
+`activity-format.ts` (format Activity log). Semua dilukis dalam satu frame `paint()`.
 
 Tahap H2 — tabel Markdown model: `src/ui/render/markdown-table.ts` memvalidasi
 header/delimiter, escaped pipe, code span, alignment, dan fence; stream block
@@ -97,14 +111,18 @@ Tahap I — view murni vs controller: `src/ui/screens/` (props + callback,
 tanpa IO) digerakkan `cli/` (`tui.ts`, `commands.ts`, `wizard.ts`,
 `model-manager.ts`, `provider-manager.ts`, `src/ui/approval/prompt.ts` via DI `ask`,
 `setupWhenEmpty`, `setSubAgentSessionFactory`). Readout command (`/help`,
-`/status`, `/context`, `/sessions history`, `/view expand`, `/provider sync`, `/scheduler`) dirender
+`/status`, `/context`, `/sessions history`, `/provider sync`, `/scheduler`) dirender
 `output-window.ts` sebagai jendela ber-scroll di atas chat (v7.18–v7.19, reflow saat
 resize, counter judul, scroll wheel/`j`/`k`/`Space`, dan salin `c` opsional); jendela
 interaktif command (`/model`, `/provider`, `/sessions`, picker) berbagi
 `dialogBox`/`hintLine` (dan `listRow` untuk daftar) yang sama serta mendukung scroll mouse
-wheel. TUI fullscreen menampilkan logo kecil minicode di pojok kiri atas saat transkrip kosong/idle (tanpa identitas/hint di atas prompt),
-`Tab` pada dropdown `/` untuk autocomplete, jeda antar-turn dan label bahasa fence redup,
-serta fallback glyph `MINICODE_ASCII=1` konsisten hingga garis tabel dan ellipsis.
+wheel. TUI fullscreen **tidak** menampilkan logo maupun hint pada zero-state saat
+transkrip kosong/idle (tanpa identitas/hint di atas prompt). `Ctrl+O` membuka modal
+detail live-tool; `/view expand`, `/expand`, dan collapsed buffer dihapus di v0.33.
+`Alt+PgUp/PgDn` menggulir kedua pane dan memindahkan seleksi Live, `Home`/`End`
+membawa chat dan sidebar ke tepi, `PgUp/PgDn` tetap khusus chat. `Tab` pada dropdown
+`/` untuk autocomplete, jeda antar-turn dan label bahasa fence redup, serta fallback
+glyph `MINICODE_ASCII=1` konsisten hingga garis tabel dan ellipsis.
 
 ## 2. Kontrak Event → UI
 
@@ -115,14 +133,16 @@ I = bisa diinterupsi, L = bisa tiba setelah completion.
 |---|---|---|---|---|---|---|---|
 | assistant text | provider stream | stdout/TUI wrap ber-indentasi gantung (margin kiri 3 kolom adaptif, jeda antar-poin/heading/blok) + code fence 3-spasi; pipe-table-aligned di TTY, source sanitized di non-TTY | ya | tidak (E1) | tidak | ya (abort) | tidak (detach flush 1x, E6) |
 | tool call | model → kernel | `› nama target` muted (compact: diam) | tidak | tidak | tidak | ya | tidak |
-| tool result | tool → executor | ledger hijau/merah; minimize → `+ label` + buffer; panel aktivitas ON → baris grup per keluarga tool (`+ explore · N tools · N ok`) | tidak | tidak | tidak | ya | tidak |
-| reasoning | provider extension | default tersembunyi (TUI composer tetap dots clock, isi disimpan ke `/view expand`); bila dibuka (`/view thinking` / `Ctrl+T` / `MINICODE_SHOW_THINKING=1` / `--verbose`), panel aktivitas ON → AREA thinking live maks 10 baris (`+ thinking`, ringkas 1 baris saat turn selesai); panel OFF → alir per baris | ya | tidak | tidak | ya | tidak |
+| tool result | tool → executor | v0.33: ringkasan kategori di chat (`3 command · 2 read · 5 subagent`), bukan ledger per-tool/`Tool:`/`/expand`; detail di Activity log sidebar | tidak | tidak | tidak | ya | tidak |
+| reasoning | provider extension | v0.33: dirender penuh di pane Thinking sidebar bila aktif; di-ingest inkremental via `SidebarModel.ingestThinking` sebagai session history dengan marker trim; TIDAK masuk transkrip chat. Jalur linear: stderr/verbose | ya | tidak | tidak | ya | tidak |
 | thinking effort | picker `/model` | badge + level per model | tidak | tidak | tidak | tidak | tidak |
 | usage | provider extension | verbose saja; masuk budget watcher | ya | tidak | ya (tail pasca-finish) | ya | ya (diabaikan aman) |
-| compaction | kernel loop | `── compacted: <reason>` kuning, reason verbatim | tidak | tidak | tidak | tidak | tidak |
+| compaction | kernel loop | `… compacted: <reason>` dengan reason dibedakan (`pressure:*`, `…:no-op`, `recovery`, serta `fixpoint`/`impossible`/`llm-failed`); tidak menghapus history | tidak | tidak | tidak | tidak | tidak |
+| finding | `submit_result` / child `[FINDING]` | Activity log sidebar bila aktif; transkrip di jalur linear; machine typed `finding.detected` | tidak | tidak | tidak | ya | tidak |
+| retry | recovery policy (`minicode:retry`) | satu micro-toast footer `retry n/total · Ns`, TTL 4 dtk, counter live; UI-transient, bukan envelope machine | ya | ya | tidak | ya | tidak |
 | permission request | executor → `ask` DI | header stdout + `askLine y/a/n`, fail-closed non-TTY | tidak | tidak | tidak | ya (deny) | tidak |
 | permission denied | executor | error tool penuh, tak pernah minimize + reason | tidak | tidak | tidak | tidak | tidak |
-| sub-agent | delegate_task → bus parent | ledger `›` biasa + usage; tanpa view khusus | tidak | tidak (jurnal skip forward) | tidak | ya | tidak |
+| sub-agent | delegate_task → bus parent | v0.33: progres tampil di pane Live sidebar (via `agent-progress.ts`); temuan `[FINDING]` → `minicode:child-report` → `finding.detected` → Activity log; jalur linear tetap ledger | tidak | tidak (jurnal skip forward) | tidak | ya | tidak |
 | error provider | provider extension | `pendingError` consume-once → satu pesan error berwarna oleh driver | tidak | tidak (E15) | tidak | ya | tidak |
 | warning | budget/recovery/verify | `[budget]`/`[recovery]`/`[verify]` kuning stderr | tidak | tidak (warned80 sekali) | tidak | tidak | tidak |
 | completion | kernel loop | flush + `finalizeAnswer` + footer idle | tidak | tidak | tidak | tidak | tidak |
@@ -144,6 +164,10 @@ Lihat kontrak aktif di `docs/OUTPUT_EVENT_MODEL.md`,
 turunan yang disengaja tetap footer memakai `contextTokens` (estimasi jendela), sedangkan `/status`
 memisahkan Context/Input/Output/Total/Cost/Budget di
 `docs/CONTROL-PLANE-MAP.md`.
+
+Ringkasan v0.33: chat = narration + category recap + final answer. Ledger per-tool,
+`Tool:`, `/expand`, dan collapsed buffer tidak lagi dirender; detail berpindah ke
+Activity log sidebar (atau transkrip pada jalur linear).
 
 ## 3. State machine TUI (tidak eksplisit)
 
@@ -195,7 +219,8 @@ Dijaga `test/ansi-fragmentation.test.ts`
 (footer),
 `test/input-resize.test.ts` (gagal di kode lama: CUP ke anchor basi).
 
-Batas yang TERVERIFIKASI BENAR (bukti harness + 178 test UI hijau):
+Batas yang TERVERIFIKASI BENAR (bukti harness + 178 test UI hijau — **historical**,
+checkpoint 2026-09-18, bukan angka v0.33):
 token-by-token tepat-1x (E1), chunk 50KB utuh (E2), fence terbelah benar
 termasuk yatim saat abort (E4/E4b), abort flush tepat-1x tanpa bocor ke turn
 berikut (E6), urutan teks>tool>hasil (E7), permission fail-closed (E8),
@@ -210,11 +235,13 @@ error consume-once + format actionable (E15), resize 120→20 mid-stream aman
 ## 5. Residual risk (jujur, belum dibuktikan di audit ini)
 
 Jalur TTY-live (painter denyut, footer sticky DECSTBM, overlay picker,
-tombol busy) hanya tercakup harness fake-TTY + 178 test; tidak ada sesi TTY
-nyata di audit ini. Chaos kombinasi (stream+resize+abort serentak di TTY)
-dan soak 100+ turn multitool belum dijalankan. Sub-agent tanpa view khusus:
-indukan dibedakan hanya dari nama tool (cukup untuk 1 level, belum diuji
-visual untuk delegasi bertingkat — yang memang dilarang: tanpa nesting).
+tombol busy) hanya tercakup harness fake-TTY + 178 test (angka **historical**
+checkpoint 2026-09-18); tidak ada sesi TTY nyata di audit ini. Chaos kombinasi
+(stream+resize+abort serentak di TTY) dan soak 100+ turn multitool belum dijalankan.
+Catatan v0.33: sub-agent kini punya representasi di pane Live/Activity sidebar
+(`agent-progress.ts`), jadi tidak lagi "tanpa view khusus"; delegasi bertingkat tetap
+dilarang (tanpa nesting). Representasi visual ini belum diuji pada sesi TTY nyata
+dalam audit historical ini.
 
 ## 6. Optimasi latensi ketik & biaya salin (fase 1–4, pasca-audit)
 
@@ -247,8 +274,16 @@ byte FISIK yang ditulis. Kontrak perilaku user-visible tidak berubah, jadi
   (`MAX_CLIPBOARD_BYTES`/`MAX_SELECTION_BYTES` = 256 KiB) di `simple.ts` dan
   `app.ts`; `/copy` dibatasi total byte dan melaporkan `tui.copyTooLarge`.
 
+- **Fase 5 — ingest reasoning inkremental (v0.33).** `SidebarModel.ingestThinking`
+  menambah potongan reasoning ke session history tanpa rebuild O(n²) tiap delta;
+  entri lama dipangkas dengan marker `… N older items trimmed`. Guard
+  `test/perf-no-quadratic.test.ts` menjaga kompleksitas. Reasoning tampil penuh di
+  pane Thinking sidebar bila aktif, bukan di chat.
+
 Penjaga: `test/cells.test.ts` (paritas diff vs tulis-penuh + minimalitas),
 `test/composer-wrap.test.ts` (paritas wrap inkremental), `test/screen.test.ts`
 (satu `write`/frame, repaint penuh pada drift/frame pertama, diff setara),
+`test/perf-no-quadratic.test.ts` (ingest reasoning inkremental),
 plus `test/pty.test.ts` / `test/screen-buffer.test.ts` untuk verifikasi buffer
-nyata. Angka hasil historis (laporan sebelumnya) tetap berstatus historical.
+nyata. Angka hasil historis (laporan sebelumnya, termasuk 178 test UI di atas)
+tetap berstatus historical pada checkpoint-nya; tidak ada klaim hijau v0.33 di sini.

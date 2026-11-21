@@ -26,7 +26,7 @@ Once registered, `mcp_list` shows **tools, resources, prompts** together:
 
 Dynamic `serverId.toolName` tools appear automatically. `resources`/`prompts` are optional in the spec: a server answering "Method not found" still connects with its tools intact.
 
-HTTP security: private hosts are denied unless `--allow-private` (the same guard as `web_fetch`: uncached DNS resolve + reject private hosts). Redirects are not followed. Sizes are bounded. Responses are matched by request id. The `Authorization` header never reaches the logs.
+HTTP security: private hosts are denied unless `--allow-private` (the same guard as `web_fetch`, which uses `fetchPinnedUrl`: resolve once, pin the validated IP to the socket, re-resolve with strict/no-cache DNS on redirects, reject private hosts; no proxy/pool/redirect bypass and a 2 MB cap). Redirects are not followed. Sizes are bounded. Responses are matched by request id. The `Authorization` header never reaches the logs.
 
 Permissions: every dotted MCP tool is always gated. Under `ASK`, a call asks for confirmation once per server+tool+args triple (`[a] Always` persists to the allowlist); under `AUTO`, registered/authorised tools run without a prompt while unknown ones are *denied* (not prompted). `readonly`/`plan`/`allowlist` deny. There is no auto-allow wildcard (supply-chain protection).
 
