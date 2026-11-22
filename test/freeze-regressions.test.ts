@@ -135,5 +135,8 @@ describe("jaring keselamatan proses", () => {
     // Terminal harus dipulihkan sebelum exit, bukan cuma mencetak pesan.
     expect(source).toContain("setRawMode?.(false)")
     expect(source).toContain("\\u001b[?1049l")
+    // EIO dari stdin PTY pasca-/shell tidak boleh membunuh proses sebelum
+    // reacquireTerminal sempat menulis ENTER lagi.
+    expect(source).toContain('e?.code === "EIO"')
   })
 })

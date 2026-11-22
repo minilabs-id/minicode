@@ -107,7 +107,15 @@ function installCrashGuard(): void {
     // 1 = gagal. Dipakai CI dan skrip pemanggil untuk membedakan crash dari exit normal.
     process.exit(1)
   }
-  process.on("uncaughtException", (error) => restoreAndExit("internal error", error))
+  process.on("uncaughtException", (error) => {
+    // PTY Linux bisa melempar EIO dari `read` saat anak /shell selesai dan sisi
+    // master ditutup. Bukan kegagalan aplikasi — mengabaikannya memberi
+    // reacquireTerminal() kesempatan menyelesaikan handoff. Filter sengaja
+    // sempit: hanya read tanpa path saat stdin memang TTY.
+    const e = error as { code?: string; syscall?: string; path?: string }
+    if (e?.code === "EIO" && e?.syscall === "read" && !e?.path && process.stdin.isTTY) return
+    restoreAndExit("internal error", error)
+  })
   process.on("unhandledRejection", (reason) => restoreAndExit("unhandled rejection", reason))
 }
 
