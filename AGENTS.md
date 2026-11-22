@@ -5,8 +5,10 @@ Petunjuk untuk agent yang bekerja di repo ini. Peta struktur hidup:
 Kontrak terminal FROZEN: [docs/TERMINAL_CONTRACT.md](docs/TERMINAL_CONTRACT.md) —
 baca sebelum menyentuh output/rendering apa pun; perubahan perilaku wajib
 update dokumen + test peta proteksinya. "FROZEN" bukan berarti tak pernah
-berubah: kontrak memang diperbarui di v0.33 (sidebar kanan; invarians I36/I37).
-Baca versi terbaru di dokumen, jangan mengandalkan ingatan.
+berubah: kontrak diperbarui di v0.33, lalu v0.34/v0.35/v0.36. **ARSIP v0.33:**
+sidebar kanan sudah dihapus di v0.34; I36/I37 = jendela output command &
+recovery/approval, bukan invariant sidebar. Baca versi terbaru di dokumen
+(entri v0.36 paling atas), jangan mengandalkan ingatan.
 
 ## Otoritas roadmap
 
@@ -21,8 +23,12 @@ sub-milestone (`P2.x`), Quality Remediation (`Stage 1`–`10`), dan hotfix
 
 ## Status checkout
 
-HEAD adalah commit v0.33 (`1aaca14`); `CHANGELOG.md` dan `package.json` kini
-mencatat v0.33.0. `PLAN.md` adalah
+HEAD checkout ini adalah `643f4b3` (garis rilis v0.33). Working tree adalah
+**rilis 0.40.0 belum di-commit**: `CHANGELOG.md` dan `package.json` mencatat
+0.40.0 sebagai nomor publik untuk kandidat v0.34–v0.37; kontrak terminal
+memakai entri v0.37 di atas arsip. Angka gate historis v0.33 di bawah bukan
+hasil checkout ini; hasil kandidat ada di `.audit/FINAL-STATE.md` §9/§11.
+Jangan menganggap angka historis sebagai hasil checkout ini. `PLAN.md` adalah
 ledger milestone legacy, bukan roadmap aktif. `ROADMAP.md`,
 `docs/ARCHITECTURE.html`, dan `docs/audit/` tidak ada; status roadmap belum
 tersedia. Gate repository dapat dijalankan, tetapi checkout tidak boleh
@@ -118,16 +124,23 @@ persetujuan pemilik.
   selalu deny / fail-closed. `providers → config` satu arah (provisioning di
   `src/providers/provision.ts`, `src/config.ts` murni IO).
 - Layar `src/ui/screens/` = view murni (props + callback), controller di `cli/`.
-- Modul v0.33: `src/ui/render/{sidebar,sidebar-layout,sidebar-model,activity-format,agent-progress}.ts`
-  dan `src/ui/screens/window.ts` (view sidebar, tetap murni props + callback),
-  serta `src/policy/{shell-tokenize,subagent-budget}.ts` (tokenizer shell sadar
-  platform & anggaran sub-agent). Patuhi batas lapisan yang sama saat mengubahnya.
+- Modul aktif: `src/ui/render/{chat-column,tool-label,width,agent-progress}.ts`
+  dan `src/ui/tui/{app,transcript}.ts`, serta `src/policy/{shell-tokenize,subagent-budget}.ts`
+  (tokenizer shell sadar platform & anggaran sub-agent). Patuhi batas lapisan
+  yang sama saat mengubahnya. **ARSIP v0.33:** `sidebar.ts`, `sidebar-layout.ts`,
+  `sidebar-model.ts`, `activity-format.ts` dihapus di v0.34; penggantinya
+  `chat-column.ts`. `src/ui/screens/window.ts` bukan lagi view sidebar.
 - Jalur non-interaktif shell-first (append-only ke scrollback); sesi
   interaktif SELALU TUI alternate-screen (invariant terminal #1, tanpa opsi linear).
-- Sejak v0.33 sesi interaktif punya **sidebar kanan adaptif** (jendela Thinking /
-  Activity / Live; aktif bila `cols ≥ 100` **dan** `rows ≥ 20`; Live|Log split
-  mulai 168 kolom; chat floor 36 kolom; tanpa bingkai). Rincian invariant di
-  `docs/TERMINAL_CONTRACT.md` (I36/I37); peta proteksi di `test/sidebar-*.test.ts`.
+- Sejak v0.34 sesi interaktif memakai **kolom chat ter-centre**: `chatCols =
+  floor(cols/2)` bila `cols ≥ 120 && rows ≥ 20`, lebar penuh di bawah ambang;
+  padding kiri/kanan, footer & composer ikut ter-centre, popup tetap full-screen.
+  Sejak v0.36 composer maks 2 baris, dropdown `/` overlay dalam frame yang sama.
+  Sejak v0.37 `composerWidth()`/`chatWidth()` satu sumber di `chat-column.ts`
+  dengan cap progresif, bracketed paste aktif, Ctrl+A = select-all transkrip bila
+  composer kosong, dan resize stabilizer. Rincian di `docs/TERMINAL_CONTRACT.md`
+  entri v0.34–v0.37; peta proteksi `test/chat-column.test.ts`, `test/tui-app.test.ts`.
+  **ARSIP v0.33 (dicabut v0.34):** sidebar kanan, Live|Log split, `test/sidebar-*.test.ts`.
 - Ubah struktur/dependensi antarlapisan → wajib update `docs/architecture.md`.
 
 ## Jebakan (semua pernah jadi bug nyata)
@@ -143,12 +156,10 @@ persetujuan pemilik.
   (`width.ts`) SENGAJA mempertahankan sekuens utuh karena footer memakai CHA
   non-SGR untuk merapatkan konteks.
 - `cwd` tool file **wajib** dari `ToolContext.cwd`, bukan `process.cwd()`.
-- Sidebar dihitung dalam **kolom** (`displayWidth`/helper layout), bukan karakter:
-  rasio 30%≤150 kolom → 50%≥160 kolom, Live|Log mulai 168, chat floor 36.
-- Wheel sidebar **per-pane** (pane di bawah kursor), bukan satu state global:
-  `Alt+PgUp/PgDn` menggulir dua kotak + menggeser seleksi Live,
-  `Ctrl+PgUp/PgDn` mengubah rasio tinggi, `Ctrl+O` modal detail, `Home/End` ke
-  tepi chat **dan** sidebar.
+- Lebar prompt = **kolom**, bukan karakter: `composerWidth() = min(100, chatWidth())`
+  dipakai konsisten oleh wrap, cache, kursor vertikal, klik mouse, dan frame.
+- Wheel selalu menggulir chat; `Home/End` ke top/ekor chat. **ARSIP v0.33
+  (dihapus v0.34):** wheel per-pane, `Alt/Ctrl+PgUp/PgDn`, `Ctrl+O`.
 - Retry micro-toast TTL 4 dtk **ditimpa** tiap event: repaint satu baris footer,
   jangan menumpuk satu baris per percobaan.
 - `vendor/minicore/**` **HOST-EDITABLE** sejak v0.16.0 (keputusan pemilik

@@ -161,9 +161,73 @@ function telemetryEnabled(): boolean {
 // Mutex per-file untuk mencegah race condition pada rotasi konkuren (A6-fix).
 const rotationLocks = new Map<string, Promise<void>>()
 
+// E-19: writeTrace/writeStepTrace dipanggil via `void` (fire-and-forget);
+// keduanya ASINKRON, jadi kontennya adalah contention I/O, BUKAN blocking sinkron.
+// ~2 baris ditulis per step (execution:completed + step:completed) → ~2N append.
+//
+// Counter di bawah HANYA pemicu rotasi: ia bukan sumber kebenaran jumlah baris.
+// `purgeSessionTraces` bisa mengubah berkas di luar counter, jadi `rotateFile`
+// TETAP membaca berkas nyata dan memotong `slice(-LIMITS.TRACE_MAX_LINES)`.
+// Slack mencegah rotasi terjadi pada tiap append setelah ambang terlampaui.
+const ROTATION_SLACK = 96
+const appendCounts = new Map<string, number>()
+const chmodDone = new Set<string>()
+let rotationThresholdOverride: number | null = null
+
+/** Seam uji: paksa ambang rotasi rendah tanpa mengubah konstanta produksi. */
+export function __setTraceRotationThresholdForTest(n: number | null): void {
+  rotationThresholdOverride = n
+}
+
+const rotationStats = { rotations: 0, chmods: 0 }
+
+/** Seam uji: statistik rotasi/chmod (untuk memastikan ≤5× readFile & chmod 1×). */
+export function __traceTelemetryStatsForTest(): { rotations: number; chmods: number } {
+  return { ...rotationStats }
+}
+
+/** Seam uji: reset state modul agar test hermetik. */
+export function __resetTraceTelemetryForTest(): void {
+  appendCounts.clear()
+  chmodDone.clear()
+  rotationLocks.clear()
+  rotationThresholdOverride = null
+  rotationStats.rotations = 0
+  rotationStats.chmods = 0
+}
+
+function rotationThreshold(): number {
+  return rotationThresholdOverride ?? Math.max(1, LIMITS.TRACE_MAX_LINES - ROTATION_SLACK)
+}
+
+async function ensureChmodOnce(file: string): Promise<void> {
+  if (chmodDone.has(file)) return
+  chmodDone.add(file)
+  rotationStats.chmods++
+  await chmod(file, 0o600).catch(() => {})
+}
+
+/** Catat satu append; kembalikan true bila rotasi perlu dipicu. */
+function noteAppend(file: string): boolean {
+  const prev = appendCounts.get(file)
+  // First-touch: file bisa sudah berisi baris dari proses/fixture lain (mis.
+  // seed 1005 baris). Kalibrasi sekali dengan memaksa rotasi pada append
+  // pertama; rotateFile tetap membaca isi nyata dan memotong ke max. Setelah
+  // itu counter inkremental — tidak ada readFile per event.
+  const n = prev === undefined ? rotationThreshold() : prev + 1
+  if (n < rotationThreshold()) {
+    appendCounts.set(file, n)
+    return false
+  }
+  // Reset dulu: rotasi serial lewat rotationLocks, append berikutnya mulai dari 0.
+  appendCounts.set(file, 0)
+  return true
+}
+
 async function rotateFile(file: string): Promise<void> {
   const currentLock = rotationLocks.get(file) ?? Promise.resolve()
   const nextLock = currentLock.then(async () => {
+    rotationStats.rotations++
     try {
       const txt = await readFile(file, "utf8")
       const lines = txt.split("\n").filter(Boolean)
@@ -192,9 +256,10 @@ export async function writeTrace(cwd: string | undefined, trace: RunTrace): Prom
       ...(trace.model ? { model: scrubSecrets(trace.model) } : {}),
     }
     await appendFile(file, `${JSON.stringify(safe)}\n`, "utf8")
-    await chmod(file, 0o600).catch(() => {})
-    // Rotate: keep TRACE_MAX_LINES baris terakhir (serialized via rotateFile)
-    await rotateFile(file)
+    await ensureChmodOnce(file)
+    // Rotate: hanya saat counter pemicu tercapai; rotateFile tetap baca berkas
+    // nyata dan memotong ke TRACE_MAX_LINES baris terakhir.
+    if (noteAppend(file)) await rotateFile(file)
   } catch {}
 }
 
@@ -206,8 +271,8 @@ export async function writeStepTrace(cwd: string | undefined, step: StepTrace): 
     const file = join(dir, "step-traces.jsonl")
     const safe: StepTrace = { ...step, ...(step.args ? { args: scrubSecrets(step.args) } : {}) }
     await appendFile(file, `${JSON.stringify(safe)}\n`, "utf8")
-    await chmod(file, 0o600).catch(() => {})
-    await rotateFile(file)
+    await ensureChmodOnce(file)
+    if (noteAppend(file)) await rotateFile(file)
   } catch {}
 }
 
@@ -252,8 +317,13 @@ export async function purgeSessionTraces(
         keep.push(line)
       }
       if (keep.length === lines.length) continue // tak ada milik sesi ini
-      if (keep.length === 0) await unlink(file).catch(() => {})
-      else await atomicWriteText(file, `${keep.join("\n")}\n`)
+      if (keep.length === 0) {
+        await unlink(file).catch(() => {})
+        // Berkas baru kelak butuh chmod lagi; counter rotasi ikut direset agar
+        // tidak langsung memicu rotasi pada append pertama setelah purge.
+        chmodDone.delete(file)
+        appendCounts.delete(file)
+      } else await atomicWriteText(file, `${keep.join("\n")}\n`)
     } catch {}
   }
   return removed

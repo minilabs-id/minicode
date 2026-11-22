@@ -1,5 +1,222 @@
 # Changelog
 
+## [0.40.0] - 2026-11-22
+
+### Rilis — versi publik untuk kandidat v0.34–v0.37
+
+Ini adalah nomor rilis yang dipakai untuk seluruh pekerjaan pada checkout ini.
+Perilaku detailnya didokumentasikan pada entri di bawah (v0.37 → v0.34); tidak
+ada perubahan kode tambahan antara v0.37.0 dan 0.40.0 selain nomor versi.
+
+- **v0.37** — bracketed paste aktif, select-all `Ctrl+A`, `Ctrl+C` saat drag,
+  resize stabilizer, echo prompt tanpa double-wrap, `composerWidth()` satu sumber
+  dengan cap progresif, guard copy >256 KiB.
+- **v0.36** — composer maks 2 baris, dropdown overlay dalam satu frame.
+- **v0.35** — rekap tool statis + label aktivitas OS.
+- **v0.34** — sidebar dihapus, chat kolom tengah maks 50%.
+- Performa: `session.state` dibaca sekali per setup, ASCII fast-path `width.ts`,
+  memo jendela konteks, dan instrumentasi `MINICODE_DEBUG_PERF=1`.
+
+Catatan rilis jujur: angka gate final dicatat di `.audit/FINAL-STATE.md` setelah
+`gate:fast` dijalankan pada kandidat dengan nomor versi ini. Tidak ada klaim
+"hijau" pada entri ini sebelum gate tersebut selesai.
+
+## [0.37.0] - 2026-11-22
+
+### Changed — Bracketed paste, select-all transkrip, resize stabilizer, echo prompt sekali-wrap, geometri prompt progresif
+
+- **Bracketed paste aktif** di TUI, `askLine`/`askSecret`, dan output-window:
+  `?2004h` saat masuk, `?2004l` saat keluar. Sequence kontrol ini ditulis di
+  **luar frame**, jadi I1 (satu `stdout.write` per frame) tetap utuh. CR di
+  dalam paste dibaca sebagai newline draft, bukan submit — alasannya: paste
+  multi-baris dengan CR merusak draft bila memicu submit bertingkat.
+- **`Ctrl+A` = select-all transkrip** bila composer kosong & dropdown tertutup
+  (key kini `selectAll`); bila ada draft atau menu terbuka, `Ctrl+A` **tetap
+  `Home`** (kompatibel). `Ctrl+C` menyalin seleksi juga **saat drag masih
+  aktif** — drag di-finalisasi dulu, bukan no-op/abort.
+- **Resize stabilizer:** resize menghentikan auto-scroll, membatalkan status
+  drag, mereset kolom preferensi kursor, dan merebase anchor gulir walau
+  seleksi aktif. Dropdown ditutup saat transisi busy/abort. Klik pasca-resize
+  memetakan ke geometri baru. Alasannya: state pra-resize basi setelah terminal
+  berubah ukuran.
+- **Echo prompt tanpa double-wrap:** gema prompt user disimpan **satu baris
+  logis** lalu di-wrap **sekali** oleh proyektor selebar **kolom chat** (bukan
+  lebar terminal penuh) — alasannya: padding centre membuat teks ter-wrap dua
+  kali.
+- **Geometri prompt progresif:** `composerWidth()`/`chatWidth()` satu sumber di
+  `src/ui/render/chat-column.ts`. Cap prompt =
+  `min(chatCols, 100 + floor(max(0, chatCols-100)/4))` (100→100, 200→125,
+  300→150, 500→200). Prefix panjang `minicode › ` bila ruang isi `w−14 ≥ 24`
+  (`w ≥ 38`), sebaliknya `› `; lanjutan `· `. **Composer tetap maks 2 baris** dan
+  **dropdown tetap overlay dalam satu frame** (v0.36 tidak dicabut).
+
+### Catatan migrasi (jujur)
+
+- **Kunci berubah:** `Ctrl+A` kini `selectAll` saat composer kosong & dropdown
+  tertutup. Alur lama yang memakai `Ctrl+A` untuk `Home` tetap bekerja bila ada
+  draft atau menu terbuka; di luar kondisi itu ekspektasinya berubah.
+- **Klausa yang ditimpa/diperjelas:** I1 (sequence paste di luar frame), I14
+  (`Ctrl+A`/Home, `Ctrl+C` saat drag, klik pasca-resize), I17 (cap lebar prompt
+  progresif; composer 2 baris tetap), I19 (dropdown ditutup saat busy/abort),
+  dan butir echo prompt. Arsip v0.36/v0.35/v0.34/v0.33 dan v7.x **tidak
+  dihapus maupun direnomor**; aturan "entri teratas menang" tetap berlaku.
+- **Perilaku yang tidak berubah:** jalur non-interaktif (one-shot/`exec`/ACP),
+  tinggi composer maks 2 baris, dropdown overlay satu frame, rekap committed
+  statis, dan label aktivitas `› …` memakai locale OS.
+- **Tidak ada angka gate di entri ini.** Ini **bukan klaim rilis hijau**. Hasil
+  gate kandidat akan dicatat di `.audit/FINAL-STATE.md` setelah dijalankan pada
+  kandidat final yang sama; jangan membaca entri ini sebagai bukti lulus gate.
+
+### Dokumentasi
+
+- `TERMINAL_CONTRACT.md`: entri `## Perubahan v0.37` baru di paling atas,
+  pointer presedensi & ringkasan keadaan diperbarui, serta amendemen pada
+  I1/I14/I17/I19 dan butir echo prompt (arsip tidak dihapus/direnomor).
+- `architecture.md`, `repl.md`, `concepts.md`, `OUTPUT_RENDERING_SPEC.md`,
+  `OUTPUT_UX_RULES.md`, `UI_RENDER_PIPELINE.md`, `README.md`,
+  `troubleshooting.md`, `cli.md` dan padanan `docs-en/` diselaraskan.
+
+## [0.36.0] - 2026-11-22
+
+### Changed — Composer ≤2 baris, dropdown overlay, lebar prompt tunggal
+
+- **Composer TUI dibatasi maksimal 2 baris** (dulu hingga 5). Draft yang lebih
+  panjang memakai **jendela geser** yang mengikuti kursor — tidak menambah baris
+  di frame dan **tidak menggeser transkrip**. Satu baris kosong pemisah
+  composer–footer tetap ada (I13/I17).
+- **Dropdown `/` jadi overlay di dalam frame yang sama.** Ia tetap digambar
+  dalam satu `paint()` / satu `stdout.write` (I1 utuh), tetapi **tidak
+  mengurangi `viewH`** — menu menimpa baris transkrip bawah, bukan menggeser
+  viewport. Tidak memakai `paintRegion()` terpisah: region terpisah berarti dua
+  write dan flicker saat steer. Klik mouse di area dropdown memetakan ke item
+  menu, bukan seleksi transkrip (I19/I14).
+- **Satu helper lebar prompt:** `composerWidth() = min(100, chatWidth())`.
+  Semua perhitungan composer/wrap/kursor memakai lebar ini, bukan `chatWidth()`
+  mentah, sehingga kursor `↑`/`↓` di draft panjang benar di terminal ≥120 kolom
+  (I14).
+- **Prefix prompt adaptif:** `minicode › ` bila lebar prompt ≥60 kolom,
+  sebaliknya `› `; baris lanjutan memakai `· `.
+
+### Catatan migrasi (jujur)
+
+- **Klausa yang ditimpa (arsip tidak dihapus):** I14 (koordinat composer,
+  `↑`/`↓`, `Home`/`End`, klik-kursor), I17 (composer "tinggi tetap" → maks 2),
+  I19 (dropdown inline → overlay dalam frame tanpa `viewH`), dan I1 (ditegaskan:
+  tetap satu write, tanpa region terpisah). Entri v0.35/v0.34/v0.33 dan v7.x
+  tetap dipertahankan pada kontrak sesuai aturan "entri teratas menang".
+- **Lebar composer bukan lagi lebar chat penuh.** Jika Anda mengandalkan wrap
+  kursor atau posisi klik pada draft panjang di terminal lebar, ekspektasinya
+  sekarang mengikuti `composerWidth()` (plafon 100 kolom), bukan `chatWidth()`.
+- **Dropdown tidak lagi memotong ruang transkrip.** Jumlah baris transkrip yang
+  tampil dan `composerTop` stabil saat menu `/` dibuka; klik di area menu adalah
+  seleksi item, bukan drag/select transkrip.
+- **Tidak ada env var baru.** Perilaku ini menggantikan geometri lama tanpa
+  flag opt-in; konfigurasi lama tetap diterima.
+- **Verifikasi.** Angka gate tidak ditaruh di entri rilis ini (cekpoint
+  penulisan awal). Hasil `gate:fast` pada kandidat v0.36.0 tercatat di
+  `.audit/FINAL-STATE.md` §9; jalankan ulang bila ada perubahan setelahnya.
+
+### Dokumentasi
+
+- `TERMINAL_CONTRACT.md`: entri `## Perubahan v0.36` baru di paling atas, pointer
+  di "Ringkasan keadaan" dan "Aturan presedensi", serta anotasi amendemen pada
+  I1/I14/I17/I19 (arsip v0.35/v0.34/v0.33 dan v7.x tidak dihapus/direnomor).
+- `architecture.md`, `repl.md`, `concepts.md`, `environment.md`,
+  `OUTPUT_RENDERING_SPEC.md`, `OUTPUT_UX_RULES.md`, `UI_RENDER_PIPELINE.md`,
+  `README.md` dan padanan `docs-en/` diselaraskan dengan composer ≤2 baris,
+  dropdown overlay, helper `composerWidth()`, dan prefix adaptif.
+
+## [0.35.0] - 2026-11-22
+
+### Changed — Rekap committed statis & label aktivitas OS
+
+- **Rekap tool jadi baris committed statis, bukan state live.** Rekap berperan
+  sebagai footer tiap narasi: `tool → narasi → └ rekap(tool sebelum narasi)`.
+  Baris `└` menghitung tool yang terjadi sebelum narasi itu; rekap **akhir turn**
+  bersifat kumulatif untuk seluruh tool selama turn. Format satu baris:
+  `└ 2 command · 118 read · 1 other` (hanya kategori bernilai bukan nol).
+- **Label aktivitas tool `› …` memakai bahasa sistem/OS.** Resolusi locale via
+  `Intl` (id/en) dipakai di semua permukaan: TUI, one-shot/`exec`, dan ACP
+  lewat printer linear `src/ui/assistant/simple.ts`. Narasi/progres/jawaban
+  model TETAP memakai bahasa pengguna (`/lang`, fallback `MINICODE_LANG`).
+- **Modul baru `src/ui/render/tool-label.ts`** menjadi sumber tunggal resolusi
+  label aktivitas tool untuk painter TUI dan printer linear, sehingga kosakata
+  tool tidak bisa divergen antar permukaan.
+
+### Catatan migrasi (jujur)
+
+- **Rekap tidak lagi "hidup".** Ubah ekspektasi terhadap tampilan: tidak ada
+  lagi rekap dua baris saat live, `flushActivityFold` net-nol,
+  `liveSummaryRows()` yang mengikuti ekor, atau jeda antar narasi sebagai
+  baris melayang. Itu arsip v0.33/v7.x, kini ditimpa v0.35 — klausa lamanya
+  sengaja tidak dihapus pada kontrak untuk menjaga aturan presedensi.
+- **Dua bahasa sengaja dibedakan.** `/lang` mengubah narasi/jawaban model;
+  locale OS mengubah label `› …`. Mengganti `/lang` tidak akan mengganti label
+  tool, dan sebaliknya. Ini pengecualian sempit dari prioritas i18n lama
+  (`/lang` > `MINICODE_LANG` > state.json > OS > en): khusus label aktivitas
+  tool, OS locale yang menang agar konsisten lintas TUI/`exec`/ACP. Semua
+  toast/kwitansi/peringatan UI (`app.showToast`, `pushError`) juga memakai
+  `tSystem()` ber-kunci sama, bukan `t()` yang mengikuti `/lang`.
+- **Tidak ada env var baru** untuk mengganti perilaku label; konfigurasi lama
+  tetap diterima tanpa efek pada label `› …`.
+- **Verifikasi.** Angka gate tidak ditaruh di entri rilis ini (cekpoint
+  penulisan awal). Hasil `gate:fast` pada kandidat v0.36.0 tercatat di
+  `.audit/FINAL-STATE.md` §9; jalankan ulang bila ada perubahan setelahnya.
+
+### Dokumentasi
+
+- `TERMINAL_CONTRACT.md`: entri v0.35 baru di paling atas (arsip v0.33 dan
+  amendemen v0.34 tidak dihapus/direnomor; aturan "entri teratas menang"
+  dipertahankan), plus pointer di "Ringkasan keadaan" dan anotasi arsip pada
+  klausa v0.33 butir 5 serta v7.36/v7.37.
+- `architecture.md`, `repl.md`, `concepts.md`, `README.md`, `environment.md`,
+  `OUTPUT_RENDERING_SPEC.md`, `OUTPUT_UX_RULES.md` dan padanan `docs-en/`
+  diselaraskan dengan alur rekap footer, label OS, dan modul `tool-label.ts`.
+
+## [0.34.0] - 2026-11-22
+
+### Changed — Sidebar dihapus, chat kolom tengah
+
+- **Sidebar kanan dihapus total** (mencabut v0.33 butir 1–6 yang related ke panel).
+  Tidak ada lagi jendela Thinking / Activity / Live / Log, separator vertikal,
+  maupun writer panel samping. Modul `sidebar-layout.ts`, `sidebar.ts`,
+  `sidebar-model.ts`, `activity-format.ts`, dan view `window.ts` tidak lagi dipakai
+  untuk panel samping; geometri baru ada di `src/ui/render/chat-column.ts`.
+- **Chat menjadi kolom tengah:** `cols ≥ 120 && rows ≥ 20` →
+  `chatCols = floor(cols/2)` (maksimal 50% lebar terminal) dengan padding
+  kiri/kanan; di bawah ambang itu chat penuh lebar. Footer/composer ikut ter-centre.
+  Popup/modal tetap full-screen ter-centre pada `cols` (I20 tidak berubah), dan satu
+  frame / satu `stdout.write` (I1) tidak berubah.
+- **Shortcut pane dihapus:** `Alt+PgUp/PgDn`, `Ctrl+PgUp/PgDn`, wheel per-pane, dan
+  `Ctrl+O` (modal detail Live) tidak lagi terikat; `PgUp/PgDn`, `Shift+PgUp/PgDn`,
+  wheel, dan `Home/End` tetap milik chat. `Ctrl+T` tanpa binding.
+
+### Catatan migrasi (jujur)
+
+- **Detail tool tetap di chat** — baris tool, agregat `✦`, dan `finding.detected`
+  kembali ke chat/transkrip (v0.33 memindahkannya ke Activity/Live sidebar + modal
+  `Ctrl+O`; sekarang dicabut). Label `Tool:`, `/expand`, dan collapsed buffer tetap
+  dihapus; ringkasan kategori tetap ada.
+- **Notifikasi scheduler/job jadi toast** — pemberitahuan terkait scheduler/job
+  ditampilkan sebagai toast ringkas, bukan panel samping yang persisten.
+- **Reasoning tetap di jurnal** — marker `+ thinking` di chat dikontrol
+  `MINICODE_SHOW_THINKING`; detail lengkap dan history ada di jurnal, bukan pane
+  Thinking. `MINICODE_ACTIVITY_PANEL` kini legacy/deprecate (D3) — diterima agar
+  konfigurasi lama tidak error tetapi tidak berpengaruh; `MINICODE_MINIMIZE_ACTIVITY`
+  tetap mengontrol fold.
+- **Shortcut pane dihapus** — lihat daftar di atas; tidak ada pengganti binding untuk
+  `Alt/Ctrl+PgUp/PgDn`, wheel per-pane, atau `Ctrl+O`.
+
+### Dokumentasi
+
+- `TERMINAL_CONTRACT.md`: entri v0.34 meng-override v0.33 butir 1–6 (v0.33 diarsipkan
+  dengan penanda superseded); peta proteksi memakai `test/chat-column.test.ts`
+  menggantikan klaim sidebar. I36 = jendela output command, I37 = recovery/approval —
+  bukan invariant sidebar.
+- Panduan ID/EN (README, architecture, cli, environment, getting-started,
+  troubleshooting, concepts, repl, verify-benchmark) dan spec `OUTPUT_*` /
+  `UI_RENDER_PIPELINE` diselaraskan dengan model tanpa sidebar dan alur render centre.
+
 ## [0.33.0] - 2026-11-21
 
 ### Added — Sidebar kanan, narasi, dan kontrol sesi

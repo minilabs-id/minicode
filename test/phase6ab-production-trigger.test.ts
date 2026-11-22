@@ -872,7 +872,9 @@ describe("6AB S22 - the seam that cannot be executed", () => {
   })
 
   test("S14: help text no longer claims background autonomous execution", async () => {
-    const src = await Bun.file(join(REPO, "cli/index.ts")).text()
+    // HELP dipindah ke cli/help.ts agar entry tipis bisa menjawab --help tanpa
+    // memuat seluruh aplikasi; ini satu-satunya sumber teks help sekarang.
+    const src = await Bun.file(join(REPO, "cli/help.ts")).text()
     expect(src).not.toContain("allow autonomous background task execution")
     expect(src).toContain("no background timer")
     expect(src).toContain("/scheduler run")

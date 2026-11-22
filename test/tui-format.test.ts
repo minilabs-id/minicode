@@ -26,6 +26,7 @@ import {
 import { decorateMarkdown, renderInline } from "../src/ui/render/markdown.ts"
 import { reasoning, setReasoningVisible } from "../src/ui/render/reasoning.ts"
 import { stripAnsi } from "../src/ui/render/theme.ts"
+import { humanToolLabel } from "../src/ui/render/tool-label.ts"
 import { displayWidth } from "../src/ui/render/width.ts"
 import { formatWrapped, justifyLine, visibleLen, wordWrap } from "../src/ui/render/wrap.ts"
 import { registerStatusLine, runWithoutStatus } from "../src/ui/runtime/statusline.ts"
@@ -666,7 +667,7 @@ describe("simple logger (one-shot)", () => {
     })
     detach()
     expect(out()).toContain("write_file a.ts")
-    expect(out()).toContain("edit b.ts")
+    expect(out()).toContain(`${humanToolLabel("edit")} b.ts`)
   })
 
   test("compact: bash menampilkan perintah + potongan 3 baris keluaran", () => {
@@ -692,7 +693,7 @@ describe("simple logger (one-shot)", () => {
       execution: { call: { name: "bash", args: { cmd: "ls -la" } } },
     })
     detach()
-    expect(out()).toContain("bash ls -la")
+    expect(out()).toContain(`${humanToolLabel("bash")} ls -la`)
   })
 
   test("expanded: keluaran bash panjang dipangkas dengan penanda sisa", () => {
@@ -764,7 +765,7 @@ describe("simple logger (one-shot)", () => {
     })
     detach()
     const o = out()
-    expect(o).toContain("edit f.ts")
+    expect(o).toContain(`${humanToolLabel("edit")} f.ts`)
     expect(o).not.toContain("+ baru")
   })
 
@@ -912,7 +913,7 @@ describe("simple logger (one-shot)", () => {
     })
     detach()
     const o = out()
-    expect(o).toContain("todo_write")
+    expect(o).toContain(humanToolLabel("todo_write"))
     expect(o).toContain("1. satu")
     expect(o).toContain("2. dua")
   })
@@ -939,7 +940,7 @@ describe("simple logger (one-shot)", () => {
     })
     detach()
     const o = out()
-    expect(o).toContain("› read_file src/auth.ts")
+    expect(o).toContain(`› ${humanToolLabel("read_file")} src/auth.ts`)
     expect(o).not.toContain("rahasia implementasi")
     expect(o.endsWith("\n")).toBe(true)
   })
@@ -1101,7 +1102,8 @@ describe("simple logger (one-shot)", () => {
       expect(nonEmpty).toHaveLength(20)
       // Setiap baris utuh (bukan hasil tempel/overlap) — overlap lama tampil
       // sebagai dua marker dalam satu baris.
-      for (const l of nonEmpty) expect(l.startsWith("  › read_file f"), l).toBe(true)
+      for (const l of nonEmpty)
+        expect(l.startsWith(`  › ${humanToolLabel("read_file")} f`), l).toBe(true)
       // Tanpa bocor isi file ke ledger compact.
       expect(out()).not.toContain("rahasia-")
     })
@@ -1114,8 +1116,8 @@ describe("simple logger (one-shot)", () => {
       detach()
       setCompactMode(false)
       const o = out()
-      const x = o.indexOf("› read_file: gagal membaca")
-      const ok = o.indexOf("› read_file a.ts")
+      const x = o.indexOf(`› ${humanToolLabel("read_file")}: gagal membaca`)
+      const ok = o.indexOf(`› ${humanToolLabel("read_file")} a.ts`)
       expect(x).toBeGreaterThanOrEqual(0)
       expect(ok).toBeGreaterThan(x)
     })
@@ -1128,8 +1130,8 @@ describe("simple logger (one-shot)", () => {
       detach()
       setCompactMode(false)
       expect(tty!.all()).toContain("PESAN-RAHASIA-UNIK") // stdout = teks model
-      expect(tty!.all()).not.toContain("› read_file")
-      expect(tty!.allErr()).toContain("› read_file a.ts") // stderr = ledger
+      expect(tty!.all()).not.toContain(`› ${humanToolLabel("read_file")}`)
+      expect(tty!.allErr()).toContain(`› ${humanToolLabel("read_file")} a.ts`) // stderr = ledger
       expect(tty!.allErr()).not.toContain("PESAN-RAHASIA-UNIK")
     })
 
@@ -1139,7 +1141,7 @@ describe("simple logger (one-shot)", () => {
       bus.emit("execution:completed", toolDone("grep", "src", false))
       detach()
       expect(tty!.all()).toContain("hasil analisis")
-      expect(tty!.allErr()).toContain("› grep src")
+      expect(tty!.allErr()).toContain(`› ${humanToolLabel("grep")} src`)
     })
   })
 })

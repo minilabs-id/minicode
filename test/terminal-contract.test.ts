@@ -11,6 +11,7 @@ import { setSectionMinimized } from "../src/ui/render/collapse.ts"
 import { setCompactMode } from "../src/ui/render/detail.ts"
 import { setReasoningVisible } from "../src/ui/render/reasoning.ts"
 import { stripAnsi } from "../src/ui/render/theme.ts"
+import { humanToolLabel } from "../src/ui/render/tool-label.ts"
 import { acquireTransientPaint, isTransientPainting } from "../src/ui/runtime/statusline.ts"
 import { createFakeBus, type FakeTty, installFakeTty } from "./helpers/tui-harness.ts"
 
@@ -163,8 +164,8 @@ describe("terminal contract: tidak ada tulis setelah detach/endTurn", () => {
 
   test("quiet TUI: paint ditekan, state tetap jalan (narasi & copy hidup)", async () => {
     // Kontrak I3: saat TUI memiliki layar, printer linier tidak boleh menulis
-    // apa pun — tapi teks turn (copy) tetap terekam. v0.33: buffer /expand
-    // sudah dihapus; riwayat detail ada di SidebarModel, bukan collapse.ts.
+    // apa pun — tapi teks turn (copy) tetap terekam. v0.34: buffer /expand
+    // sudah dihapus; riwayat detail ada di jurnal, bukan collapse.ts.
     const { getLastTurnText } = await import("../src/ui/assistant/simple.ts")
     setCompactMode(true)
     setSectionMinimized("tool", true)
@@ -207,7 +208,9 @@ describe("terminal contract: ledger & streaming", () => {
     const lines = stripAnsi(ledger)
       .split("\n")
       .filter((l) => l.length > 0)
-    expect(lines.filter((l) => l.startsWith("  › read_file a.ts"))).toHaveLength(2)
+    expect(
+      lines.filter((l) => l.startsWith(`  › ${humanToolLabel("read_file")} a.ts`)),
+    ).toHaveLength(2)
     for (const l of lines) expect(l.indexOf("›")).toBe(l.lastIndexOf("›")) // tanpa dua marker sebaris
     const out = tty!.all()
     expect(out.split("baris teks")).toHaveLength(3) // dua baris utuh, tidak menyatu
@@ -258,7 +261,9 @@ describe("terminal contract: ledger & streaming", () => {
     }
     detach()
     const ledger = stripAnsi(tty!.allErr())
-    const markers = ledger.split("\n").filter((l) => l.startsWith("  › read_file"))
+    const markers = ledger
+      .split("\n")
+      .filter((l) => l.startsWith(`  › ${humanToolLabel("read_file")}`))
     expect(markers).toHaveLength(36)
     for (const m of markers) {
       expect(m.indexOf("›"), m).toBe(m.lastIndexOf("›"))

@@ -18,6 +18,35 @@ const globalVectorPath = () => join(homeDir(), ".minicode", "vector.db")
 
 const initializedPaths = new Set<string>()
 
+/**
+ * E-23: kunci inisialisasi DDL/migrasi memakai `PRAGMA user_version` yang
+ * tersimpan DI DALAM berkas SQLite, bukan `Set` per-proses. Set per-proses
+ * lolos saat dua proses membuka DB yang sama → DDL/migrasi jalan dua kali.
+ * user_version dibaca ulang tiap `openAt`, jadi tahan multi-proses & restart.
+ */
+const VECTOR_SCHEMA_VERSION = 1
+let vectorDdlRuns = 0
+
+/** Seam uji: jumlah blok DDL/migrasi yang benar-benar dijalankan. */
+export function __vectorDdlRunsForTest(): number {
+  return vectorDdlRuns
+}
+
+/** Seam uji: reset penghitung (bukan state DB). */
+export function __resetVectorDdlCounterForTest(): void {
+  vectorDdlRuns = 0
+}
+
+function readSchemaVersion(db: Database): number {
+  try {
+    const row = db.prepare("PRAGMA user_version").get() as { user_version?: unknown } | null
+    const v = row?.user_version
+    return typeof v === "number" && Number.isFinite(v) ? v : 0
+  } catch {
+    return 0
+  }
+}
+
 /** Jangan pernah pasangkan DEEPSEEK_API_KEY ke default host api.openai.com. */
 export function resolveEnvEmbeddingAuth(): { baseUrl: string; apiKey: string } {
   const explicitBaseUrl = process.env.AGENT_BASE_URL?.trim()
@@ -191,81 +220,96 @@ function openAt(p: string): Database {
         process.stderr.write(`[warn] vector: wal setup deferred, retry next open: ${p}\n`)
       }
     }
-    db.exec(`
-    CREATE TABLE IF NOT EXISTS memory(id TEXT PRIMARY KEY, text TEXT, embedding BLOB, created_at INTEGER, category TEXT DEFAULT 'fact', tags TEXT, model TEXT, dim INTEGER, parent TEXT, access_count INTEGER DEFAULT 0);
-    CREATE INDEX IF NOT EXISTS idx_memory_created ON memory(created_at);
-    CREATE INDEX IF NOT EXISTS idx_memory_text ON memory(text);
-  `)
-    // P1.3: kolom model/dim untuk deteksi embedding-mismatch (best-effort migrasi)
-    // P2.2: kolom parent untuk chunk entri panjang (chunk berbagi parent id)
-    // P13 S2: kategori terstruktur untuk retrieval presisi
-    // P13 P1: access_count untuk bukti manfaat (berapa kali row ikut jadi hit)
-    // MEM-01 / Fase 5A: provenance tracking (session/turn/source) untuk revokasi selektif
-    try {
-      const cols = db.prepare(`PRAGMA table_info(memory)`).all() as { name: string }[]
-      if (!cols.some((c) => c.name === "model")) db.exec(`ALTER TABLE memory ADD COLUMN model TEXT`)
-      if (!cols.some((c) => c.name === "dim")) db.exec(`ALTER TABLE memory ADD COLUMN dim INTEGER`)
-      if (!cols.some((c) => c.name === "parent"))
-        db.exec(`ALTER TABLE memory ADD COLUMN parent TEXT`)
-      if (!cols.some((c) => c.name === "category"))
-        db.exec(`ALTER TABLE memory ADD COLUMN category TEXT DEFAULT 'fact'`)
-      if (!cols.some((c) => c.name === "tags")) db.exec(`ALTER TABLE memory ADD COLUMN tags TEXT`)
-      if (!cols.some((c) => c.name === "access_count"))
-        db.exec(`ALTER TABLE memory ADD COLUMN access_count INTEGER DEFAULT 0`)
-      // MEM-01: provenance columns (idempoten — skip bila sudah ada)
-      if (!cols.some((c) => c.name === "session_id"))
-        db.exec(`ALTER TABLE memory ADD COLUMN session_id TEXT`)
-      if (!cols.some((c) => c.name === "turn_id"))
-        db.exec(`ALTER TABLE memory ADD COLUMN turn_id TEXT`)
-      if (!cols.some((c) => c.name === "source_kind"))
-        db.exec(`ALTER TABLE memory ADD COLUMN source_kind TEXT`)
-      if (!cols.some((c) => c.name === "source_ref"))
-        db.exec(`ALTER TABLE memory ADD COLUMN source_ref TEXT`)
-      // [Fase 6A / ACE-03] Gate pelajaran kandidat: hanya pelajaran yang sudah
-      // lolos verifikasi yang boleh muncul di retrieval default. Baris legacy
-      // (NULL) diperlakukan sebagai `validated` agar perilaku lama tak berubah.
-      if (!cols.some((c) => c.name === "validation_status"))
-        db.exec(`ALTER TABLE memory ADD COLUMN validation_status TEXT DEFAULT 'validated'`)
-      // F8.1: Supersession tracking untuk memory replacement. Idempoten — skip bila
-      // sudah ada (migration dari versi sebelumnya). `superseded_by IS NOT NULL` menandai
-      // baris yang telah digantikan oleh fakta/keputusan baru; recall default mengabaikan
-      // baris superseded untuk prevent staleness.
-      if (!cols.some((c) => c.name === "supersedes"))
-        db.exec(`ALTER TABLE memory ADD COLUMN supersedes TEXT NULL`)
-      if (!cols.some((c) => c.name === "superseded_by"))
-        db.exec(`ALTER TABLE memory ADD COLUMN superseded_by TEXT NULL`)
-      // F8.1: Index untuk query performan (filter row yang tidak superseded)
-      try {
-        db.exec(
-          `CREATE INDEX IF NOT EXISTS idx_memory_not_superseded ON memory(rowid) WHERE superseded_by IS NULL OR superseded_by = '';`,
-        )
-      } catch {}
-      try {
-        db.exec(
-          `CREATE INDEX IF NOT EXISTS idx_memory_supersedes ON memory(supersedes) WHERE supersedes IS NOT NULL AND supersedes != '';`,
-        )
-      } catch {}
-    } catch {}
-    // P1.1: expression index + FTS5 untuk keyword pre-filter (10-50× vs instr scan)
-    try {
-      db.exec(`CREATE INDEX IF NOT EXISTS idx_memory_text_lower ON memory(lower(text));`)
-    } catch {}
-    try {
+    // E-23: SELURUH DDL/migrasi masuk guard inisialisasi. Kuncinya
+    // `PRAGMA user_version` di dalam DB (tahan multi-proses & restart), bukan
+    // `Set` per-proses. Urutan busy_timeout → journal_mode=WAL → synchronous=NORMAL
+    // di atas TIDAK diubah. FTS rebuild untuk DB lama tetap terjadi sekali,
+    // tepat sebelum user_version dinaikkan.
+    if (readSchemaVersion(db) < VECTOR_SCHEMA_VERSION) {
       db.exec(`
-      CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(text, content='memory', content_rowid='rowid', tokenize='porter unicode61');
-      CREATE TRIGGER IF NOT EXISTS memory_ai AFTER INSERT ON memory BEGIN INSERT INTO memory_fts(rowid, text) VALUES (new.rowid, new.text); END;
-      CREATE TRIGGER IF NOT EXISTS memory_ad AFTER DELETE ON memory BEGIN INSERT INTO memory_fts(memory_fts, rowid, text) VALUES('delete', old.rowid, old.text); END;
-      CREATE TRIGGER IF NOT EXISTS memory_au AFTER UPDATE ON memory BEGIN INSERT INTO memory_fts(memory_fts, rowid, text) VALUES('delete', old.rowid, old.text); INSERT INTO memory_fts(rowid, text) VALUES (new.rowid, new.text); END;
+      CREATE TABLE IF NOT EXISTS memory(id TEXT PRIMARY KEY, text TEXT, embedding BLOB, created_at INTEGER, category TEXT DEFAULT 'fact', tags TEXT, model TEXT, dim INTEGER, parent TEXT, access_count INTEGER DEFAULT 0);
+      CREATE INDEX IF NOT EXISTS idx_memory_created ON memory(created_at);
+      CREATE INDEX IF NOT EXISTS idx_memory_text ON memory(text);
     `)
-      // populate FTS untuk DB lama yang sudah ada sebelum trigger
-      const cnt =
-        (db.prepare(`SELECT count(*) as c FROM memory_fts`).get() as { c: number } | null)?.c ?? 0
-      const total =
-        (db.prepare(`SELECT count(*) as c FROM memory`).get() as { c: number } | null)?.c ?? 0
-      if (cnt === 0 && total > 0) {
-        db.exec(`INSERT INTO memory_fts(memory_fts) VALUES('rebuild')`)
-      }
-    } catch {}
+      // P1.3: kolom model/dim untuk deteksi embedding-mismatch (best-effort migrasi)
+      // P2.2: kolom parent untuk chunk entri panjang (chunk berbagi parent id)
+      // P13 S2: kategori terstruktur untuk retrieval presisi
+      // P13 P1: access_count untuk bukti manfaat (berapa kali row ikut jadi hit)
+      // MEM-01 / Fase 5A: provenance tracking (session/turn/source) untuk revokasi selektif
+      try {
+        const cols = db.prepare(`PRAGMA table_info(memory)`).all() as { name: string }[]
+        if (!cols.some((c) => c.name === "model"))
+          db.exec(`ALTER TABLE memory ADD COLUMN model TEXT`)
+        if (!cols.some((c) => c.name === "dim"))
+          db.exec(`ALTER TABLE memory ADD COLUMN dim INTEGER`)
+        if (!cols.some((c) => c.name === "parent"))
+          db.exec(`ALTER TABLE memory ADD COLUMN parent TEXT`)
+        if (!cols.some((c) => c.name === "category"))
+          db.exec(`ALTER TABLE memory ADD COLUMN category TEXT DEFAULT 'fact'`)
+        if (!cols.some((c) => c.name === "tags")) db.exec(`ALTER TABLE memory ADD COLUMN tags TEXT`)
+        if (!cols.some((c) => c.name === "access_count"))
+          db.exec(`ALTER TABLE memory ADD COLUMN access_count INTEGER DEFAULT 0`)
+        // MEM-01: provenance columns (idempoten — skip bila sudah ada)
+        if (!cols.some((c) => c.name === "session_id"))
+          db.exec(`ALTER TABLE memory ADD COLUMN session_id TEXT`)
+        if (!cols.some((c) => c.name === "turn_id"))
+          db.exec(`ALTER TABLE memory ADD COLUMN turn_id TEXT`)
+        if (!cols.some((c) => c.name === "source_kind"))
+          db.exec(`ALTER TABLE memory ADD COLUMN source_kind TEXT`)
+        if (!cols.some((c) => c.name === "source_ref"))
+          db.exec(`ALTER TABLE memory ADD COLUMN source_ref TEXT`)
+        // [Fase 6A / ACE-03] Gate pelajaran kandidat: hanya pelajaran yang sudah
+        // lolos verifikasi yang boleh muncul di retrieval default. Baris legacy
+        // (NULL) diperlakukan sebagai `validated` agar perilaku lama tak berubah.
+        if (!cols.some((c) => c.name === "validation_status"))
+          db.exec(`ALTER TABLE memory ADD COLUMN validation_status TEXT DEFAULT 'validated'`)
+        // F8.1: Supersession tracking untuk memory replacement. Idempoten — skip bila
+        // sudah ada (migration dari versi sebelumnya). `superseded_by IS NOT NULL` menandai
+        // baris yang telah digantikan oleh fakta/keputusan baru; recall default mengabaikan
+        // baris superseded untuk prevent staleness.
+        if (!cols.some((c) => c.name === "supersedes"))
+          db.exec(`ALTER TABLE memory ADD COLUMN supersedes TEXT NULL`)
+        if (!cols.some((c) => c.name === "superseded_by"))
+          db.exec(`ALTER TABLE memory ADD COLUMN superseded_by TEXT NULL`)
+        // F8.1: Index untuk query performan (filter row yang tidak superseded)
+        try {
+          db.exec(
+            `CREATE INDEX IF NOT EXISTS idx_memory_not_superseded ON memory(rowid) WHERE superseded_by IS NULL OR superseded_by = '';`,
+          )
+        } catch {}
+        try {
+          db.exec(
+            `CREATE INDEX IF NOT EXISTS idx_memory_supersedes ON memory(supersedes) WHERE supersedes IS NOT NULL AND supersedes != '';`,
+          )
+        } catch {}
+      } catch {}
+      // P1.1: expression index + FTS5 untuk keyword pre-filter (10-50× vs instr scan)
+      try {
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_memory_text_lower ON memory(lower(text));`)
+      } catch {}
+      try {
+        db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(text, content='memory', content_rowid='rowid', tokenize='porter unicode61');
+        CREATE TRIGGER IF NOT EXISTS memory_ai AFTER INSERT ON memory BEGIN INSERT INTO memory_fts(rowid, text) VALUES (new.rowid, new.text); END;
+        CREATE TRIGGER IF NOT EXISTS memory_ad AFTER DELETE ON memory BEGIN INSERT INTO memory_fts(memory_fts, rowid, text) VALUES('delete', old.rowid, old.text); END;
+        CREATE TRIGGER IF NOT EXISTS memory_au AFTER UPDATE ON memory BEGIN INSERT INTO memory_fts(memory_fts, rowid, text) VALUES('delete', old.rowid, old.text); INSERT INTO memory_fts(rowid, text) VALUES (new.rowid, new.text); END;
+      `)
+        // populate FTS untuk DB lama yang sudah ada sebelum trigger
+        const cnt =
+          (db.prepare(`SELECT count(*) as c FROM memory_fts`).get() as { c: number } | null)?.c ?? 0
+        const total =
+          (db.prepare(`SELECT count(*) as c FROM memory`).get() as { c: number } | null)?.c ?? 0
+        if (cnt === 0 && total > 0) {
+          db.exec(`INSERT INTO memory_fts(memory_fts) VALUES('rebuild')`)
+        }
+      } catch {}
+      // Tandai SELESAI hanya setelah DDL + migrasi + FTS selesai. Bila gagal di
+      // tengah, user_version tetap lama → open berikutnya mengulang (idempoten).
+      try {
+        db.exec(`PRAGMA user_version=${VECTOR_SCHEMA_VERSION}`)
+      } catch {}
+      vectorDdlRuns++
+    }
     return db
   } catch (err) {
     try {
@@ -618,7 +662,8 @@ export async function addMemory(
   const parentId = randomUUID()
   const now = Date.now()
   const db = open(opts.cwd)
-  chmodMemoryDbSync(dbPath(opts.cwd))
+  // E-23: chmod duplikat dihapus — `openAt` sudah menjalankan
+  // chmodMemoryDbSync di `finally` setiap open (termasuk sidecar WAL/SHM).
   try {
     // F8.1 + Live Hardening §7.5: validasi supersedesId + insert semua chunk +
     // tombstone baris lama dalam SATU transaksi SQLite. Sebelumnya tiap INSERT dan

@@ -19,6 +19,8 @@ import { loadLang, loadLastModel, localConfigNotice } from "../src/config.ts"
 import { LIMITS } from "../src/constants.ts"
 import { runRunHooks, shouldRunHooks } from "../src/hooks/run.ts"
 import { homeDir } from "../src/lib/db-path.ts"
+// [Audit F-04 2026-11-22] Catat ukuran batch flush; nonaktif = no-op O(1).
+import { perfCount, perfEnabled } from "../src/lib/perf-debug.ts"
 import { closeAllLsp as lspCloseAll, setLspProcessSupervisor } from "../src/lsp/client.ts"
 import { closeAll as mcpCloseAll } from "../src/mcp/client.ts"
 import { addMemory, promoteOrRejectLessonsBySession } from "../src/memory/vector.ts"
@@ -1570,6 +1572,8 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   let presentationWriteTail: Promise<void> = Promise.resolve()
   let presentationFlushTimer: ReturnType<typeof setTimeout> | undefined
   const pendingPresentationEvents: DomainEvent[] = []
+  // [Audit F-04] Akumulasi ukuran batch per turn (hanya relevan saat debug aktif).
+  let turnBatchEvents = 0
   // v7.41 (audit #2 / F2): satu gerbang publish terurut untuk SEMUA event.
   // Durable dilepas hanya setelah append (confirmDurable); non-durable ikut
   // antrean tapi langsung lewat bila tak ada durable yang tertahan di depannya.
@@ -1593,6 +1597,9 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     }
     const batch = pendingPresentationEvents.splice(0)
     if (batch.length === 0) return
+    // [Audit F-04] Ukur ukuran batch flush (tanpa mengubah antrean/urutan).
+    perfCount("presentation.flush.batchSize", 0, batch.length)
+    if (perfEnabled()) turnBatchEvents += batch.length
     presentationWriteTail = presentationWriteTail
       .then(async () => {
         const stats = await appendPresentation(batch)
@@ -2555,6 +2562,9 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     } catch {}
   })
   session.events.on("turn:completed", () => {
+    // [Audit F-04] Agregasi ukuran batch presentasi per turn, lalu reset.
+    perfCount("presentation.flush.turnTotal", 0, turnBatchEvents)
+    turnBatchEvents = 0
     // Sapu verifikasi susulan dalam turn yang sama (late verification):
     // baca ulang jurnal untuk call yang selesai tanpa verdict waktu itu.
     try {
@@ -2568,7 +2578,16 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     : ""
   const verifyActive = verifyCommand.length > 0
   if (verifyActive) {
-    await captureSessionEvaluationBaseline(sessionId, cwd ?? process.cwd()).catch(() => {})
+    // BUG-8: kegagalan capture dulu ditelan diam-diam. Sekarang dicatat SEKALI
+    // ke stderr — operator perlu tahu bahwa atribusi tamper akan konservatif.
+    let baselineCaptureWarned = false
+    await captureSessionEvaluationBaseline(sessionId, cwd ?? process.cwd()).catch((err) => {
+      if (baselineCaptureWarned) return
+      baselineCaptureWarned = true
+      process.stderr.write(
+        `[verify] cannot capture evaluation baseline: ${(err as Error)?.message ?? String(err)} — tamper attribution will be conservative\n`,
+      )
+    })
   }
   // Sumber bukti completion untuk domain task (INV-003). Menyimpan hasil
   // verify TERAKHIR: pada saat `todo_write` berjalan, verify untuk turn ini

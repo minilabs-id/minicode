@@ -9,6 +9,8 @@ export { estimateImageTokens }
 
 import { LIMITS } from "../constants.ts"
 import { GIT_SAFE_BASE } from "../lib/git-hardening.ts"
+// [Audit F-03 2026-11-22] Instrumentasi durasi; nonaktif = no-op O(1).
+import { perfCount, perfEnabled } from "../lib/perf-debug.ts"
 import { safeReadFileCapped } from "../lib/safe-open.ts"
 import { resolveTrustedExecutable } from "../lib/trusted-exec.ts"
 import { loadMemoryFiles } from "../memory/files.ts"
@@ -483,10 +485,15 @@ export async function buildSystemPrompt(
   // tunggu di akhir. Tidak diubah menjadi fire-and-forget karena isi prompt
   // harus deterministik per turn (bug "prompt berubah setelah turn pertama").
   const repoMapPromise: Promise<string> = (async () => {
+    const __t = perfEnabled() ? performance.now() : 0
     try {
-      return await loadRepoMap(cwd)
-    } catch {
-      return ""
+      try {
+        return await loadRepoMap(cwd)
+      } catch {
+        return ""
+      }
+    } finally {
+      perfCount("context.repoMap", perfEnabled() ? performance.now() - __t : 0)
     }
   })()
   try {
@@ -494,19 +501,24 @@ export async function buildSystemPrompt(
     if (repoMap) {
       parts.push(`\n# Repo map (symbols)\n${repoMap}`)
     } else {
-      // Audit #10: ls-files memicu fsmonitor repo & bisa mengeksekusi
-      // `git.bat` repo (Windows cwd-first). Resolve absolut + netralisasi.
-      const { stdout } = await execFileAsync(
-        resolveTrustedExecutable("git"),
-        [...GIT_SAFE_BASE, "ls-files"],
-        {
-          cwd,
-          timeout: 2000,
-          encoding: "utf8",
-        },
-      )
-      const files = stdout.trim().split("\n").slice(0, 60).join("\n")
-      if (files) parts.push(`\n# Repo files (sample)\n${files}`)
+      const __fbT = perfEnabled() ? performance.now() : 0
+      try {
+        // Audit #10: ls-files memicu fsmonitor repo & bisa mengeksekusi
+        // `git.bat` repo (Windows cwd-first). Resolve absolut + netralisasi.
+        const { stdout } = await execFileAsync(
+          resolveTrustedExecutable("git"),
+          [...GIT_SAFE_BASE, "ls-files"],
+          {
+            cwd,
+            timeout: 2000,
+            encoding: "utf8",
+          },
+        )
+        const files = stdout.trim().split("\n").slice(0, 60).join("\n")
+        if (files) parts.push(`\n# Repo files (sample)\n${files}`)
+      } finally {
+        perfCount("context.git-ls-files", perfEnabled() ? performance.now() - __fbT : 0)
+      }
     }
   } catch {}
   const full = parts.join("\n\n")

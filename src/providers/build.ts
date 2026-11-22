@@ -103,8 +103,13 @@ export function buildProviderList(cfg: MinicodeConfig): ModelProvider[] {
  */
 export async function buildProviderListAsync(cfg: MinicodeConfig): Promise<ModelProvider[]> {
   const { getSecret } = await import("../lib/keystore.ts")
-  const resolved: MinicodeConfig = { ...cfg, providers: [] }
-  for (const p of cfg.providers) {
+
+  // E-3: dulu loop `await getSecret(...)` satu per satu. SecretRunner kini
+  // async (spawn, bukan spawnSync), jadi `Promise.all` atas spinner itu
+  // BENAR-BENAR paralel. `allSettled` dipakai supaya satu provider yang gagal
+  // tak membatalkan yang lain; hasilnya TETAP dikumpulkan dalam urutan
+  // `cfg.providers` agar urutan fallback router tidak berubah.
+  const jobs = cfg.providers.map(async (p) => {
     if (p.auth !== "oauth") {
       // Referensi keystore (`keystore:<nama>`) di-resolve ke secret OS di
       // sini (lapisan provisioning) — config.ts tetap IO murni. Gagal =
@@ -115,22 +120,31 @@ export async function buildProviderListAsync(cfg: MinicodeConfig): Promise<Model
           process.stderr.write(
             `[auth] provider "${p.id}" keystore entry missing/unreadable — skipped. Run: minicode config set-key ${p.id}\n`,
           )
-          continue
+          return null
         }
-        resolved.providers.push({ ...p, apiKey: secret })
-        continue
+        return { ...p, apiKey: secret }
       }
-      resolved.providers.push(p)
-      continue
+      return p
     }
     const token = await getValidAccessToken(p.id)
     if (!token) {
       process.stderr.write(
         `[auth] provider "${p.id}" uses OAuth but is not logged in (or refresh failed) — skipped. Run: minicode auth login ${p.id}\n`,
       )
-      continue
+      return null
     }
-    resolved.providers.push({ ...p, apiKey: token })
-  }
+    return { ...p, apiKey: token }
+  })
+
+  const settled = await Promise.allSettled(jobs)
+  const resolved: MinicodeConfig = { ...cfg, providers: [] }
+  settled.forEach((s, i) => {
+    if (s.status === "fulfilled") {
+      if (s.value !== null) resolved.providers.push(s.value)
+      return
+    }
+    const id = cfg.providers[i]?.id ?? "?"
+    process.stderr.write(`[auth] provider "${id}" resolution failed — skipped.\n`)
+  })
   return buildProviderList(resolved)
 }

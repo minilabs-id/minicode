@@ -1,9 +1,9 @@
 // Ringkasan progres sub-agent — helper MURNI (tanpa I/O, tanpa TTY).
 //
-// v0.33: satu sumber kebenaran untuk angka yang tampil di chat maupun,
-// nanti, di kotak "aktivitas" sidebar. Transkrip hari ini memakai
-// `formatAgentProgress()` untuk SATU baris yang ditimpa di tempat; sidebar
-// nanti memakai state yang sama tanpa menghitung ulang.
+// v0.34: satu sumber kebenaran untuk agregat `✦` di chat (helper murni).
+// Transkrip memakai `formatAgentProgress()` untuk SATU baris yang ditimpa
+// di tempat. Rencana kotak "aktivitas" sidebar v0.33 tak terwujud — sidebar
+// dihapus total; jangan menambah pane baru untuk angka ini.
 //
 // Angka WAJIB jujur: agent/tools dihitung dari id unik (retry & replay tak
 // boleh menambah), failure dikelompokkan per alasan.

@@ -44,7 +44,10 @@ function stripControl(s: string): string {
 
 function clip(s: string, max: number): string {
   const t = stripControl(s)
-  return t.length > max ? `${safeSlice(t, max)}…` : t
+  // Ellipsis dihitung DALAM cap: mengembalikan max+1 karakter melanggar
+  // MAX_LABEL/MAX_TARGET/MAX_PREVIEW/MAX_SUMMARY dan bisa memanjangkan
+  // satu baris layout tepat di batas kolom.
+  return t.length > max ? `${safeSlice(t, Math.max(0, max - 1))}…` : t
 }
 
 /**

@@ -1,4 +1,4 @@
-# Kontrak Terminal MiniCode (TUI fullscreen — v0.33, landed 1aaca14 2026-11-21)
+# Kontrak Terminal MiniCode (TUI fullscreen — v0.37, bracketed paste + select-all + resize stabilizer + echo prompt sekali-wrap + geometri prompt progresif; v0.36: composer ≤2 baris & dropdown overlay; v0.35: rekap committed statis & label aktivitas OS; v0.34: sidebar dihapus, chat kolom tengah)
 
 > **Status & presedensi (dibaca dulu).** Entri v7.22 di bawah ini adalah
 > **catatan sejarah** dan sebagian besar sudah **ditimpa oleh v7.29+** (lihat
@@ -7,27 +7,299 @@
 > v7.37 — ringkasan status/aktivitas **dipotong per segmen narasi** (bukan
 > satu baris akumulatif di ekor). v7.29 yang mengosongkan kolom chat untuk
 > status sudah ditimpa. Jangan baca klaim v7.22/v7.29/v7.36 sebagai perilaku
-> saat ini. Entri **v0.33 (paling atas)** adalah keadaan produk saat ini dan
-> menimpa klausa v7.x yang bertentangan: sidebar kanan (menggantikan "Tanpa
-> panel/sidebar"), chat narasi + rekap kategori (menggantikan baris `Tool:`
-> dan `/view expand`), `Ctrl+O` = detail Live, dan micro-toast retry di footer.
+> saat ini. Entri **v0.37 (paling atas)** adalah keadaan produk saat ini:
+> bracketed paste aktif di TUI, `askLine`/`askSecret`, dan output-window
+> (`?2004h` saat masuk / `?2004l` saat keluar — sequence di luar frame, jadi
+> I1 tetap satu `write` per frame); `Ctrl+A` (key `selectAll`) memilih seluruh
+> baris logis transkrip bila composer kosong & dropdown tertutup, tetapi tetap
+> `Home` bila ada draft/menu, dan `Ctrl+C` menyalin seleksi juga saat drag
+> masih aktif (drag di-finalisasi dulu); resize menghentikan auto-scroll,
+> membatalkan drag, mereset kolom preferensi kursor, dan merebase anchor gulir
+> walau seleksi aktif, dengan dropdown ditutup saat transisi busy/abort; gema
+> prompt user disimpan satu baris logis lalu di-wrap sekali selebar kolom chat;
+> lebar prompt progresif
+> `composerWidth() = min(chatCols, 100 + floor(max(0, chatCols-100)/4))`
+> dengan prefix `minicode › ` bila `w−14 ≥ 24` (`w ≥ 38`), else `› `, lanjutan
+> `· `. v0.36 TETAP berlaku pada composer ≤2 baris dan dropdown overlay dalam
+> frame yang sama — keduanya tidak dicabut; yang ditimpa v0.37 hanya cap lama
+> `min(100, chatWidth())` dan ambang prefix ≥60 kolom. v0.35 tetap berlaku
+> kecuali pada poin-poin itu — rekap tool = baris committed statis dan label
+> aktivitas `› …` memakai locale OS di semua permukaan; v0.34 tetap berlaku
+> kecuali pada poin-poin itu — sidebar kanan DIHAPUS TOTAL, chat menjadi
+> kolom tengah (maks 50% lebar terminal), baris tool/`✦`/finding/`+ thinking`
+> kembali ke chat, dan shortcut pane dihapus. v0.34 **mencabut v0.33 butir 1–6**;
+> v0.33 tetap diarsipkan di bawah sebagai sejarah.
 >
 > **Aturan presedensi:** entri teratas / tanggal rilis terbaru menang. `v0.x`
 > = versi produk, `v7.x` = versi kontrak terminal — dua namespace, bukan
-> peringkat numerik; v0.33 meng-override klausa v7.x yang bertentangan.
-> Entri lama tetap dipertahankan sebagai sejarah, bukan gambaran tampilan
-> saat ini.
+> peringkat numerik; v0.37 (entri teratas) meng-override klausa v0.36, v0.35,
+> v0.34, v0.33, dan v7.x yang bertentangan (khusus I1, I14, I17, I19, dan
+> butir echo prompt). Entri lama tetap dipertahankan sebagai sejarah,
+> bukan gambaran tampilan saat ini.
 
-> **Ringkasan keadaan saat ini (v0.33 — meng-override seluruh klausa v7.x di bawah):**
-> warna NYALA by default di TTY (`MINICODE_COLOR=0`/`NO_COLOR` → monokrom), bukan
-> "FULL MONOKROM"/`FORCE_MONO`; zero-state KOSONG tanpa logo/hint; ada **sidebar
-> kanan** (bukan "Tanpa panel/sidebar"); reasoning tampil penuh di pane Thinking
-> sidebar saat aktif (bukan "thinking tersembunyi di transkrip"); `/expand` dan
-> `/view compact|fold|minimize` dihapus, `Ctrl+T` tanpa binding, **`Ctrl+O` =
-> modal detail Live**; chat = narasi + rekap kategori + jawaban akhir (baris
-> `Tool:`/`↳`/ledger per-tool pindah ke sidebar); retry = satu micro-toast footer
-> 4 dtk. Entri v7.x di bawah adalah arsip sejarah — jangan dibaca sebagai
-> perilaku kini.
+> **Ringkasan keadaan saat ini (v0.37 — entri teratas; basis v0.34/v0.35/v0.36
+> tetap berlaku kecuali pada poin yang ditimpa):** bracketed paste menyala di
+> semua permukaan input aktif (`?2004h`/`?2004l` di luar frame); `Ctrl+A` =
+> select-all transkrip bila composer kosong & dropdown tertutup (Home bila ada
+> draft/menu), `Ctrl+C` menyalin seleksi juga saat drag aktif; resize membekukan
+> auto-scroll, membatalkan drag, mereset kursor, dan merebase anchor gulir walau
+> seleksi aktif, dropdown ditutup saat busy/abort; gema prompt adalah satu baris
+> logis yang di-wrap sekali selebar kolom chat; lebar prompt
+> `min(chatCols, 100 + floor(max(0, chatCols-100)/4))` (100→100, 200→125,
+> 300→150, 500→200), prefix `minicode › ` bila `w−14 ≥ 24`, else `› `, lanjutan
+> `· `. Composer tetap ≤2 baris dan dropdown tetap overlay satu frame (v0.36
+> tidak dicabut).
+>
+> **Ringkasan basis v0.34 (masih berlaku — meng-override v0.33 butir 1–6 dan
+> seluruh klausa v7.x yang bertentangan; sebagian ditimpa v0.35/v0.36/v0.37):**
+> warna NYALA by default di TTY
+> (`MINICODE_COLOR=0`/`NO_COLOR` → monokrom), bukan "FULL MONOKROM"/
+> `FORCE_MONO`; zero-state KOSONG tanpa logo/hint; **tanpa sidebar kanan** —
+> chat adalah kolom tengah, lebar maksimal 50% terminal (`cols ≥ 120 && rows
+> ≥ 20` → `chatCols = floor(cols/2)` dengan padding kiri/kanan; di bawah
+> ambang itu chat penuh lebar), footer/composer ikut ter-centre; popup/modal
+> tetap full-screen ter-centre pada `cols` (I20 tidak berubah). Reasoning
+> memakai marker `+ thinking` di chat (`MINICODE_SHOW_THINKING` mengontrol);
+> detail tool, agregat `✦`, dan finding kembali ke chat. `MINICODE_ACTIVITY_PANEL`
+> kini legacy/deprecate (D3), `MINICODE_MINIMIZE_ACTIVITY` tetap fold. Shortcut
+> pane (`Alt/Ctrl+PgUp/PgDn`, wheel per-pane, `Ctrl+O` detail Live) DIHAPUS;
+> `Ctrl+T` tanpa binding; `/expand` dan `/view compact|fold|minimize` tetap
+> dihapus. Satu frame / satu `stdout.write` (I1) tidak berubah. Entri v0.33
+> dan v7.x di bawah adalah arsip sejarah — jangan dibaca sebagai perilaku kini.
+>
+> **Pointer v0.37 (entri teratas):** bracketed paste `?2004h`/`?2004l` (di luar
+> frame, I1 utuh) di TUI/`askLine`/`askSecret`/output-window; `Ctrl+A` =
+> select-all bila composer kosong & dropdown tertutup, else Home; `Ctrl+C`
+> menyalin juga saat drag aktif; resize menstabilkan auto-scroll/drag/kursor/
+> anchor gulir dan menutup dropdown saat busy/abort; echo prompt satu baris
+> logis, di-wrap sekali selebar chat; lebar prompt progresif
+> `min(chatCols, 100 + floor(max(0, chatCols-100)/4))`, prefix `minicode › `
+> bila `w−14 ≥ 24`, else `› `, lanjutan `· `. Rincian di entri
+> `## Perubahan v0.37` di bawah.
+>
+> **Pointer v0.36 (geometri/penulisan; cap & ambang prefix-nya ditimpa v0.37):**
+> composer dibatasi **maksimal 2 baris** (draft panjang = jendela geser, tanpa
+> menambah baris / menggeser transkrip); dropdown `/` digambar overlay di DALAM
+> frame yang sama tanpa mengurangi `viewH` (tanpa `paintRegion` terpisah);
+> lebar prompt = `composerWidth() = min(100, chatWidth())` dan prefix
+> `minicode › ` bila lebar prompt ≥60 kolom — **dua angka ini sudah diganti
+> v0.37**; composer ≤2 baris dan dropdown overlay tetap berlaku. Rincian di
+> entri `## Perubahan v0.36` di bawah.
+
+> **Pointer v0.35:** rekap tool kini baris committed statis —
+> footer tiap narasi `tool → narasi → └ rekap(tool sebelum narasi)`, rekap akhir
+> turn kumulatif (`└ 2 command · 118 read · 1 other`) — dan label aktivitas
+> `› …` memakai locale OS di semua permukaan, sedangkan narasi/model tetap
+> memakai bahasa user (`/lang`). Rincian di entri `## Perubahan v0.35` di bawah.
+
+## Perubahan v0.37 (bracketed paste, select-all, resize stabilizer, echo prompt sekali-wrap, geometri prompt progresif)
+
+Entri teratas ini meng-override **I1** (tambahan sequence kontrol di luar
+frame), **I14** (`Ctrl+A`/Home, `Ctrl+C` saat drag, klik pasca-resize), **I17**
+(cap lebar prompt progresif; composer 2 baris TETAP), **I19** (dropdown ditutup
+saat busy/abort), dan **butir echo prompt**. Arsip v0.36/v0.35/v0.34/v0.33 dan
+entri v7.x **tidak dihapus dan tidak direnomor** — aturan presedensi "entri
+teratas menang" tetap berlaku. Cakupan = permukaan interaktif (TUI, `askLine`/
+`askSecret`, output-window) dan proyeksi transkrip; jalur non-interaktif
+(one-shot/`exec`/ACP) tidak berubah. Alasan bersama: CR dari paste multi-baris
+merusak draft bila memicu submit bertingkat, padding centre membuat gema prompt
+ter-wrap dua kali, dan state pra-resize basi setelah geometri berubah.
+
+1. **Bracketed paste aktif (I1 — sequence di luar frame).** TUI, `askLine`/
+   `askSecret`, dan output-window mengaktifkan mode bracketed paste dengan
+   `?2004h` saat masuk dan `?2004l` saat keluar. Kedua sequence adalah
+   **kontrol lifecycle permukaan**, ditulis di LUAR frame `paint()` — bukan sel
+   grid dan bukan bagian dari diff per-repaint — sehingga **I1 (satu
+   `stdout.write` per frame) tetap utuh**. Paste multi-baris yang mengandung CR
+   tidak boleh memicu submit bertingkat: CR di dalam paste dibaca sebagai
+   newline draft, bukan Enter. Tanpa ini, satu paste panjang bisa mengirim
+   beberapa turn dan merusak draft.
+2. **Select-all transkrip & `Ctrl+C` saat drag (I14 — ditimpa/diperjelas).**
+   `Ctrl+A` kini memetakan ke key **`selectAll`**: bila **composer kosong dan
+   dropdown `/` tertutup**, ia memilih **seluruh baris logis transkrip**;
+   bila masih ada draft atau menu terbuka, `Ctrl+A` **tetap `Home`**
+   (kompatibel dengan v0.36). `Ctrl+C` menyalin seleksi termasuk **saat drag
+   masih aktif** — drag di-finalisasi lebih dulu menjadi seleksi, bukan
+   dianggap no-op/abort. Klik pasca-resize memetakan ke **geometri baru**, bukan
+   koordinat pra-resize.
+3. **Resize stabilizer & dropdown busy/abort (I19 — ditimpa/diperjelas).**
+   Resize menghentikan **auto-scroll**, membatalkan **status drag**, mereset
+   **kolom preferensi kursor**, dan **merebase anchor gulir** walau seleksi
+   sedang aktif — jadi selection tidak melompat ke baris lama. Dropdown `/`
+   **ditutup saat transisi busy/abort** (di samping jalur keluar yang sudah
+   ada), sehingga menu tidak bertahan melintasi perubahan state turn. Overlay
+   satu-frame dan pemetaan klik-ke-item dari v0.36 tidak dicabut. Alasan:
+   koordinat/anchor lama basi setelah terminal berubah ukuran.
+4. **Echo prompt tanpa double-wrap (butir echo prompt).** Gema prompt user
+   disimpan sebagai **satu baris logis** dan di-wrap **sekali** oleh proyektor
+   sesuai **lebar kolom chat** — bukan lebar terminal penuh. Alasan: padding
+   centre kolom chat membuat teks yang sudah dibungkus pada lebar penuh
+   ter-wrap lagi saat diproyeksikan ke kolom.
+5. **Geometri prompt fleksibel (I17 — ditimpa pada cap; composer 2 baris tetap).**
+   `composerWidth()` dan `chatWidth()` adalah **satu sumber geometri** di
+   `src/ui/render/chat-column.ts`. Cap lebar prompt progresif:
+   `min(chatCols, 100 + floor(max(0, chatCols-100)/4))` —
+   `100→100`, `200→125`, `300→150`, `500→200`. Prefix panjang `minicode › `
+   dipakai bila ruang isi `w−14 ≥ 24` (yaitu `w ≥ 38`), sebaliknya `› `;
+   baris lanjutan memakai `· `. **Composer tetap maksimal 2 baris** dan
+   **dropdown tetap overlay dalam satu frame** (v0.36 tidak dicabut).
+
+Modul pendukung: `src/ui/render/chat-column.ts` (`composerWidth()`/`chatWidth()`),
+`src/ui/tui/{app,transcript}.ts`, `src/ui/input/{ask-line,prompt-engine}.ts`, dan
+`src/ui/screens/output-window.ts`. Peta proteksi yang menjaga kontrak ini:
+`test/chat-column.test.ts` (cap progresif & ambang prefix), `test/tui-app.test.ts`
++ `test/tui-transcript.test.ts` (select-all, `Ctrl+C` saat drag, resize, echo
+prompt sekali-wrap, dropdown busy/abort), `test/prompt-engine.test.ts` +
+`test/input-resize.test.ts` (sequence `?2004h`/`?2004l` di luar frame, CR
+multi-baris, klik pasca-resize). Angka gate tidak ditaruh di entri kontrak
+(cekpoint penulisan awal); hasil kandidat akan ada di `.audit/FINAL-STATE.md`
+dan harus dijalankan ulang bila ada perubahan setelahnya.
+
+## Perubahan v0.36 (composer ≤2 baris, dropdown overlay dalam frame, lebar prompt tunggal)
+
+Entri teratas ini meng-override klausa composer/koordinat/kursor pada I14,
+tinggi composer pada I17, gambar dropdown pada I19, dan **menegaskan I1**
+(frame tunggal, satu `stdout.write`). Arsip v0.35/v0.34/v0.33 dan entri v7.x
+**tidak dihapus dan tidak direnomor** — aturan presedensi "entri teratas menang"
+tetap berlaku. Perubahan ini hanya menyentuh geometri/penulisan composer &
+dropdown di TUI interaktif; jalur non-interaktif (one-shot/`exec`/ACP) dan
+permukaan popup/form tidak berubah.
+
+1. **Composer maksimal 2 baris (I17 — ditimpa).** Tinggi composer dulu tetap
+   hingga 5 baris; sekarang **maksimal 2 baris** berapapun panjang draft.
+   Draft yang lebih panjang memakai **jendela geser** (baris yang terlihat
+   mengikuti kursor), sehingga **tidak menambah baris** di frame dan **tidak
+   menggeser transkrip** — jumlah baris transkrip yang tampil dan posisi
+   `composerTop` stabil. Satu baris kosong pemisah composer–footer tetap
+   (I13/I17 tidak berubah pada poin itu).
+2. **Dropdown `/` = overlay dalam frame yang sama (I19 — ditimpa; I1
+   ditegaskan).** Dropdown tetap digambar **di DALAM frame `paint()` yang sama**
+   — satu `stdout.write`, satu `SYNC_START..SYNC_END`, I1 utuh — tetapi
+   **tidak mengurangi `viewH`**: ia **menimpa baris transkrip bawah** (overlay),
+   bukan menyisipkan ruang dan bukan menggeser viewport. Konsekuensinya:
+   transkrip tidak bergeser saat dropdown dibuka, dan **tidak ada
+   `paintRegion()` terpisah** untuk dropdown. Alasannya: region terpisah
+   berarti dua `write` dan flicker saat steer/refresh; dengan overlay satu
+   frame, perubahan seleksi dropdown cukup ditulis ulang melalui diff sel yang
+   sama. Klik mouse di area dropdown tetap memetakan ke **item menu**, bukan ke
+   seleksi transkrip (pemetaan mouse menguji batas dropdown lebih dulu).
+3. **Satu helper lebar prompt (I14 — koordinat/kursor ditimpa).** Semua
+   perhitungan composer dan kursor memakai satu sumber:
+   `composerWidth() = min(100, chatWidth())`. Kursor `↑`/`↓` pada draft panjang
+   dan multi-baris sekarang benar di terminal **≥120 kolom** (dulu lebar
+   composer mengikuti lebar kolom chat penuh, sehingga wrap kursor meleset
+   saat chat melebar). `Home`/`End`, klik-untuk-pindah-kursor, dan wrap
+   inkremental memakai lebar yang sama, bukan `chatWidth()` mentah.
+4. **Prefix prompt adaptif.** Prefix baris pertama = `minicode › ` bila
+   `composerWidth() ≥ 60` kolom, sebaliknya `› ` (tanpa spasi trailing di
+   akhir — caret DECSCUSR menempel di `›`, I30). Baris lanjutan draft memakai
+   prefix `· `, juga dihitung dalam `composerWidth()`.
+
+Modul pendukung: helper `composerWidth()` di `src/ui/render/chat-column.ts`
+(bersama `chatWidth()`, satu sumber geometri), pemakaian di painter composer
+`src/ui/tui/app.ts` dan `src/ui/render/composer-wrap.ts`. Peta proteksi:
+`test/chat-column.test.ts`, `test/tui-app.test.ts`, `test/screen.test.ts`
+(satu write per frame). Angka gate tidak ditaruh di entri kontrak (cekpoint
+penulisan awal); hasil kandidat v0.36.0 ada di `.audit/FINAL-STATE.md` §9 dan
+harus dijalankan ulang bila ada perubahan setelahnya.
+
+## Perubahan v0.35 (rekap committed statis & label aktivitas OS)
+
+Entri ini meng-override klausa rekap dan label aktivitas pada v0.34,
+v0.33 butir 5, serta v7.36/v7.37. Arsip v0.33 dan amendemen v0.34 **tidak
+dihapus dan tidak direnomor** — aturan presedensi "entri teratas menang" tetap
+berlaku. Cakupan butir 3 = **semua permukaan**: TUI interaktif, one-shot/`exec`,
+dan ACP (dua jalur terakhir lewat printer linear `src/ui/assistant/simple.ts`).
+
+1. **Rekap tool = baris committed statis, bukan state live.** Rekap adalah
+   baris permanen yang sudah di-commit, bukan baris transient yang berubah-
+   ubah mengikuti tool yang sedang berjalan. Rekap berperan sebagai **footer
+   tiap narasi**: `tool → narasi → └ rekap(tool sebelum narasi)` — baris `└`
+   mendarat tepat setelah narasi dan menghitung tool yang terjadi **sebelum**
+   narasi itu. Rekap **AKHIR turn** = kumulatif **semua** tool selama turn
+   (bukan per segmen yang di-reset tiap narasi). Format satu baris:
+   `└ 2 command · 118 read · 1 other`; kategori
+   `command · edit · read · subagent · thought · other`, hanya angka bukan nol
+   yang dicetak. Baris ini bukan state live di footer/transient — ia sudah
+   ter-commit bersama transkrip, sehingga tidak "bernapas" saat tool masuk.
+2. **Klausa lama jadi arsip v0.33/v7.x (ditimpa, bukan dihapus).** Yang tidak
+   lagi berlaku: (a) rekap dua baris saat live dan `flushActivityFold` yang
+   menulis tepat dua baris saat commit dengan net perubahan nol (v0.33 butir 5);
+   (b) `liveSummaryRows()` yang mengikuti ekor / fold segmen berjalan
+   (v7.36 butir 1, v7.37 butir 2); (c) jeda antar narasi sebagai baris
+   melayang yang dipakai sebagai penanda "tool apa yang barusan dipakai"
+   (v0.33 butir 5). Entri lama tetap terbaca sebagai sejarah sesuai aturan
+   presedensi; jangan dipakai sebagai deskripsi tampilan kini.
+3. **Label aktivitas tool memakai bahasa sistem/OS.** Prefix aktivitas `› …`
+   (nama tool dan status pada baris tool, di SEMUA permukaan — TUI, one-shot/
+   `exec`, dan ACP via `simple.ts`) diambil dari locale OS lewat `Intl`,
+   dipetakan ke `id`/`en`. Ini **berbeda** dengan narasi/jawaban model: narasi,
+   progres, dan jawaban akhir TETAP memakai bahasa pengguna (`/lang`, dengan
+   fallback `MINICODE_LANG`). Jangan mencampur keduanya: `/lang` mengubah
+   bahasa narasi, BUKAN label `› …`; locale OS mengubah label `› …`, BUKAN
+   bahasa jawaban model.
+4. **Presedensi i18n: khusus label aktivitas tool, OS locale yang menang.**
+   Klausa lama di bagian "Popup, dialog, form & i18n" (prioritas
+   `/lang` > `MINICODE_LANG` > state.json `lang` > locale OS > en, dan I26)
+   **TIDAK dihapus** dan tetap mengatur seluruh label UI. Pengecualian sempit
+   hanya untuk label aktivitas tool `› …`: di sana locale OS yang menang,
+   terlepas dari `/lang`, `MINICODE_LANG`, dan state.json. Alasannya
+   konsistensi lintas permukaan — TUI, `exec`, dan ACP harus memakai kosakata
+   tool yang sama untuk satu mesin, tanpa bergantung pada `/lang` per sesi
+   maupun profil pengguna yang berbeda. Cakupan ini juga mencakup **seluruh
+    toast/kwitansi/peringatan UI** (semua `app.showToast` di `cli/tui.ts` dan
+    `pushError` status): memakai `tSystem()` dengan kunci kamus yang sama,
+    bukan `t()` yang mengikuti `/lang`. Hanya narasi, progres, dan jawaban
+    model yang tetap memakai bahasa pengguna.
+
+Modul pendukung: `src/ui/render/tool-label.ts` (resolusi locale OS → label
+aktivitas tool) dipakai bersama oleh painter TUI dan printer linear. Peta
+proteksi: `test/tool-label.test.ts`, `test/i18n.test.ts`, `test/tui-app.test.ts`.
+Angka gate tidak ditaruh di entri kontrak (cekpoint penulisan awal); hasil
+kandidat v0.36.0 ada di `.audit/FINAL-STATE.md` §9 dan harus dijalankan ulang
+bila ada perubahan setelahnya.
+
+## Perubahan v0.34 (sidebar dihapus total; chat kolom tengah — MENCABUT v0.33 butir 1–6):
+
+1. **Sidebar kanan dihapus total.** Tidak ada lagi jendela Thinking / Activity
+   / Live / Log, garis pemisah chat↔sidebar, maupun writer panel samping.
+   Baris tool, agregat `✦` agent, `finding.detected`, dan marker `+ thinking`
+   kembali ke chat/transkrip (yang di non-TTY memang sudah demikian).
+   `MINICODE_ACTIVITY_PANEL` kini **legacy/deprecate (D3)**: variabel lama tetap
+   diterima agar konfigurasi tidak error, tetapi tidak lagi mengubah tampilan.
+   `MINICODE_MINIMIZE_ACTIVITY` tetap mengontrol fold; `MINICODE_SHOW_THINKING`
+   kini mengontrol marker `+ thinking` di chat.
+2. **Chat kolom tengah.** Di terminal `cols ≥ 120 && rows ≥ 20`, chat dibatasi
+   `chatCols = floor(cols/2)` (maksimal 50% lebar terminal) dengan padding
+   kiri/kanan; di bawah ambang itu chat memakai lebar penuh. Footer & composer
+   ikut ter-centre mengikuti kolom chat. Ini menggantikan aturan lebar sidebar
+   v0.33 (30%→50%, floor 36 kolom, split 168 kolom) — alasannya: panel samping
+   sudah tidak ada, sehingga ruang habis untuk transkrip yang terpusat.
+3. **Popup/modal tetap full-screen ter-centre** pada `cols` (I20 tidak
+   berubah) — tidak mengikuti penyempitan kolom chat. Jendela output command,
+   picker, form, dan wizard memakai geometri popup yang sama seperti sebelumnya.
+4. **Shortcut pane dihapus:** `Alt+PgUp/PgDn`, `Ctrl+PgUp/PgDn`, wheel
+   per-pane, dan `Ctrl+O` (modal detail Live) tidak lagi terikat. `PgUp/PgDn`,
+   `Shift+PgUp/PgDn`, wheel, dan `Home/End` tetap milik chat. `Ctrl+T` tetap
+   tanpa binding.
+5. **Frame tunggal tidak berubah:** satu frame / satu `stdout.write` (I1), satu
+   `SYNC_START..SYNC_END`, per-cell diff; alt-screen tetap satu pasangan
+   buka/tutup. Perubahan hanya pada geometri kolom, bukan mekanisme penulisan.
+   I36 = jendela output command, I37 = recovery/approval — keduanya tidak
+   berhubungan dengan geometri panel dan tidak berubah oleh entri ini.
+6. **Peta proteksi:** klaim aktif menghapus `test/sidebar-model.test.ts`,
+   `test/sidebar-invariants.test.ts`, `test/sidebar-width.test.ts`, dan
+   `test/thinking-truncation.test.ts`; menambah `test/chat-column.test.ts`
+   untuk geometri kolom tengah. `test/tui-geometry.test.ts` TIDAK menguji
+   sidebar (hanya lebar popup), jadi tidak boleh dijadikan bukti klaim geometri
+   panel maupun kolom.
+
+> **ARSIP — v0.33 (landed 1aaca14, 2026-11-21): SUPERSEDED oleh v0.34.**
+> Butir 1–6 di bawah **DICABUT** dan tidak lagi menggambarkan perilaku saat ini
+> (sidebar kanan, aturan ukuran/lebar sidebar, ledger per-tool pindah ke sidebar,
+> `SidebarModel`, navigasi pane, peta proteksi sidebar). Butir 7 (auto-update tak
+> menahan sesi) tetap berlaku. Blok ini dipertahankan hanya sebagai catatan
+> sejarah sesuai aturan presedensi di atas.
 
 Perubahan v0.33 (landed 1aaca14, 2026-11-21 — sidebar kanan, menggantikan klausa "Tanpa panel/sidebar"):
 
@@ -45,7 +317,7 @@ Perubahan v0.33 (landed 1aaca14, 2026-11-21 — sidebar kanan, menggantikan klau
    Sidebar penuh atas–bawah; footer & composer selebar chat. Tinggi kotak
    thinking:aktivitas = **60:40** (default), diubah dengan `Ctrl+PgUp/PgDn`
    (30-80%); TANPA border kotak — hanya SATU garis vertikal abu pemisah chat↔sidebar
-   dan jarak 3 baris kosong antar jendela. Di jendela ≥168 kolom (~70% desktop), Activity terbagi dua berdampingan: Live (kiri, tool in-flight dari record terstruktur: nama/target/status/durasi/child) | Log (kanan, baris selesai), jarak 2 spasi. Thinking tetap lebar penuh. Wheel membedakan pane via x dan y; Ctrl+O membuka detail Live. Di bawah threshold Activity satu kolom seperti biasa. Isi jendela diberi 1 spasi dari separator; tanpa placeholder/hint gulir. Thinking redup, aktivitas berwarna (tool hijau/merah/biru sesuai status, target abu, alasan merah). Saat mati, perilaku kembali persis
+   dan jarak 3 baris kosong antar jendela. Di jendela ≥168 kolom (~70% desktop), kotak bawah terbagi dua berdampingan: Activity (kiri, posisi TETAP, baris selesai) | Live (kanan, tool in-flight dari record terstruktur: nama/target/status/durasi/child), jarak 2 spasi. Split ditentukan **hanya oleh lebar terminal**, bukan oleh ada/tidaknya tool — sehingga pane tidak muncul/hilang dan Activity tidak pernah bergeser (tanpa jitter). Saat tidak ada tool berjalan, pane Live menampilkan satu baris idle yang stabil. Thinking tetap lebar penuh. Wheel membedakan pane via x dan y; Ctrl+O membuka detail Live. Di bawah threshold Activity satu kolom seperti biasa. Pada 100–167 kolom, ringkasan tool in-flight memakai SATU baris tetap di atas kotak Activity (placeholder idle saat tidak ada tool), sehingga log tidak bergeser saat tool mulai/selesai; tanpa pane Live terpisah. Prefix umur Activity memakai slot lebar tetap, demikian pula meta durasi/child pada Live. Isi jendela diberi 1 spasi dari separator; tanpa placeholder/hint gulir. Thinking redup, aktivitas berwarna (tool hijau/merah/biru sesuai status, target abu, alasan merah). Saat mati, perilaku kembali persis
    ke satu kolom (baris agregat `✦` di transkrip).
 3. **Satu sumber angka.** `AgentProgressSnapshot` (`src/ui/render/agent-progress.ts`)
    dipakai baris `✦` di chat dan kotak aktivitas — angka agent/tool/gagal tak
@@ -63,7 +335,15 @@ Perubahan v0.33 (landed 1aaca14, 2026-11-21 — sidebar kanan, menggantikan klau
    Rekap kategori (`3 command · 2 read · 5 subagent`) tidak hilang saat sidebar aktif
    — tetap tampil di chat (indeks "tool apa yang barusan dipakai" + jeda antar
    narasi). Kotak Activity sidebar HANYA log detail per-tool, tanpa rekap.
-6. **Peta proteksi baru:** `test/tui-geometry.test.ts`, `test/screen.test.ts`
+    positionBar dihitung dari jendela aktif setelah collapse idle; penanda
+    "N baris lebih" ditaruh di baris judul (meta), BUKAN baris isi — jumlah
+    baris isi tetap dan baris terbaru selalu tampil saat follow. Rekap kategori
+    di transkrip memakai dua baris saat live, dan `flushActivityFold` menulis
+    tepat dua baris saat commit — net perubahan nol, ekor tidak lompat.
+    **(ARSIP v0.33 — ditimpa v0.35 butir 1–2: rekap = baris committed statis
+    `└ …`, bukan dua baris live/net-nol dan bukan jeda antar narasi melayang.)**
+6. **Peta proteksi baru (ARSIP; lihat koreksi v0.34 butir 6):**
+   `test/tui-geometry.test.ts`, `test/screen.test.ts`
    (satu write/frame), `test/tui-transcript.test.ts` (getters sidebar),
    `test/sidebar-model.test.ts`, `test/sidebar-invariants.test.ts`,
    `test/ui-boundary.test.ts`, `test/writer-inventory.test.ts`,
@@ -71,8 +351,22 @@ Perubahan v0.33 (landed 1aaca14, 2026-11-21 — sidebar kanan, menggantikan klau
    `test/shell-tokenize.test.ts`, `test/subagent-budget.test.ts`,
    `test/audit-fix-communication-prompt.test.ts`,
    `test/audit-fix-retry-visibility.test.ts`, `test/audit-fix-activity-tidy.test.ts`,
-   `test/audit-fix-finding-render.test.ts`, `test/audit-fix-window-uniform*.test.ts`.
+   `test/audit-fix-finding-render.test.ts`, `test/audit-fix-window-uniform*.test.ts`,
+   `test/tui-scroll-width.test.ts`, `test/transcript-incremental.test.ts`,
+   `test/sidebar-width.test.ts` (file dibuat bersama implementasi UI terkait).
    Klausa lama "Tanpa panel/sidebar" di bagian Sifat produk tidak lagi berlaku.
+   **Koreksi jujur (v0.34):** `test/tui-geometry.test.ts` sebenarnya hanya
+   meng-assert lebar popup/lebar beku per mount — bukan geometri sidebar;
+   menjadikannya bukti klaim sidebar di entri ini adalah gap nominal. Geometri
+   panel tidak pernah benar-benar teruji oleh file itu. I36 = jendela output
+   command dan I37 = recovery/approval — bukan invariant sidebar.
+7. **Auto-update tak menahan sesi.** Pengecekan auto-update tidak menahan
+   pembukaan sesi; progres/notice ditulis setelah TUI aktif; restart otomatis
+   hanya sebelum input pertama atau saat proses keluar, tidak di tengah turn.
+   Pada implementasi saat ini pemeriksaan dipindah ke setelah `createCliSession`
+   dan sebelum `runTui`, memakai format progres ringkas yang sama seperti
+   sebelumnya (`update 33%\r` … `update 100%\n`, termasuk notice yang didahului
+   `\r\x1b[2K`); jalur non-interaktif tetap fire-and-forget.
 
 Perubahan v7.44 (unreleased — startup persen & closing block):
 
@@ -241,6 +535,8 @@ Perubahan v7.37 (unreleased — ringkasan DIPOTONG per segmen narasi):
    barisnya sendiri. Contoh: `+ 2 command · 2 read`, lalu segmen berikutnya
    `+ 3 command · 1 edit · 10 subagent`, dst. Turn tutup hanya mem-flush sisa
    segmen terakhir (tanpa dobel).
+    **(ARSIP v7.37 — ditimpa v0.35 butir 1: rekap akhir turn kumulatif untuk
+    seluruh tool, bukan per segmen yang di-reset.)**
 3. **Kategori `subagent`.** `delegate_task` dipetakan ke kategori baru
    (bukan `other`) dengan token i18n `ts.toolCategory.subagent` di en/id.
    Urutan: `command · edit · read · subagent · thought · other`.
@@ -264,6 +560,8 @@ Perubahan v7.36 (unreleased — status & daftar tool live di bawah narasi — DI
    mengalir, bukan baru muncul saat `turn.completed` dan bukan di footer.
    Cache `projectedBase` dipaksa invalidsaat `activityFold` aktif, sehingga
    hitungan ikut berubah tiap tool selesai.
+    **(ARSIP v7.36 — ditimpa v0.35 butir 1–2: `liveSummaryRows()` yang
+    mengikuti ekor narasi tidak lagi berlaku.)**
 2. **Daftar tool saat per-tool ditahan.** Bila `minimizeActivity`/panel aktif,
    baris kedua `Tool: name1 · name2` ditambahkan (nama lewat `sanitizeAnsiLine`,
    dipotong per lebar kolom). Di mode default baris per-tool sudah live, jadi
@@ -1077,10 +1375,12 @@ proteksi").
   tidak dicetak (transkrip sesi tidak di-dump ke scrollback).
 - **Non-interaktif** (one-shot prompt, `exec`, pipe/redirect/CI): cetak polos,
   tak pernah membuka TUI.
-- Sidebar kanan opsional (lihat entri v0.33): dua kotak di frame yang SAMA,
-  bukan writer/scrollback terpisah. Mouse app-level untuk wheel scroll dan
-  drag-selection transkrip (bukan native terminal selection); klik di area
-  sidebar diabaikan. Tanpa animasi dekoratif
+- Tanpa sidebar (v0.34): chat adalah kolom tengah — `cols ≥ 120 && rows ≥ 20`
+  → `chatCols = floor(cols/2)` dengan padding kiri/kanan, footer/composer ikut
+  ter-centre; di bawah ambang itu chat penuh lebar. Popup/modal tetap
+  full-screen ter-centre pada `cols` (I20). Mouse app-level untuk wheel scroll
+  dan drag-selection transkrip (bukan native terminal selection); wheel kini
+  selalu menggulir chat (tidak ada pane). Tanpa animasi dekoratif
   (pulse spark status bar dapat dimatikan `MINICODE_MOTION=0` — I13).
 
 ## Contract stdout/stderr
@@ -1151,9 +1451,10 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
   turn berikutnya). Saat busy TANPA draft, slot tetap
   berisi baris status aktivitas (dots + timer), jadi tinggi frame tidak
   berubah. Tab/Shift+Tab/Ctrl+T/Ctrl+R tetap ditahan selama busy
-  (memutasi mode/membuka overlay di tengah turn = balapan state); v0.33:
-  **Ctrl+O dikecualikan** — modal detail Live boleh dibuka saat busy (ditangani
-  di awal `handleKey`, sebelum gate busy), tanpa mengubah state turn.
+  (memutasi mode/membuka overlay di tengah turn = balapan state). Sejak v0.34
+  tidak ada pengecualian pane: `Ctrl+O` dihapus bersama sidebar, sehingga gate
+  busy berlaku tanpa carve-out (v0.33 pernah mengecualikan `Ctrl+O` untuk modal
+  detail Live — dicabut).
   Abort pertama menampilkan hint "tekan Esc lagi untuk keluar" di slot
   indikator SEKALI (anti keluar sesi tak sengaja saat double-tap "memastikan"
   — I14); abort kedua dalam 1,5 dtk = quit.
@@ -1219,6 +1520,14 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
   dan `/lang` hanya mengatur label UI, bukan bahasa balasan. Kutipan, kode, log,
   serta hasil tool bukan penentu bahasa pengguna. Peta proteksi prompt:
   `test/context-audit.test.ts`; kepatuhan model perlu diuji dengan provider nyata.
+   > **Amendemen v0.35 (khusus label aktivitas tool, tidak menghapus klausa di
+   > atas):** prioritas `/lang` > `MINICODE_LANG` > state.json > locale OS > en
+   > TETAP berlaku untuk seluruh label UI. Pengecualian sempit: label aktivitas
+   > tool `› …` (nama/status tool di TUI, one-shot/`exec`, dan ACP via
+   > `simple.ts`) memakai **locale OS** lewat `Intl` (id/en), yang menang atas
+   > `/lang`, env, dan state.json. Narasi/model tetap memakai bahasa user
+   > (`/lang`). Alasan: konsistensi kosakata tool lintas permukaan. Lihat entri
+   > `## Perubahan v0.35` butir 3–4.
 - **Keybinding konsisten** (kontrak I25): `Esc` dua-tahap di semua input
   teks; `backspace`/`delete` selalu edit teks (aksi hapus-data via `d`/
   `Del` + confirm dalam popup, tercatat); navigasi daftar = `↑↓` + `pgup/
@@ -1272,6 +1581,16 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
    menandai terminal "kotor" (`statusline.consumeScreenDrift`) dan memaksa
    repaint penuh pada paint berikutnya; tanpa ini baris yang kebetulan tak
    berubah akan mempertahankan fragmen asing di atas diff inkremental.
+   **Amendemen v0.36 (I1 ditegaskan):** dropdown `/` TIDAK memakai
+   `paintRegion()`/`write` terpisah — ia masuk dalam frame `paint()` yang sama
+   (satu `stdout.write`, satu `SYNC_START..SYNC_END`). Lihat entri
+   `## Perubahan v0.36` butir 2.
+   **Amendemen v0.37 (I1 — sequence di luar frame):** bracketed paste
+   (`?2004h` saat masuk, `?2004l` saat keluar di TUI, `askLine`/`askSecret`,
+   dan output-window) dipancarkan sebagai sequence kontrol **di luar frame
+   `paint()`** — bukan sel grid, bukan diff per-repaint. Jadi "satu `write`
+   per frame" tetap utuh: sequence dipancarkan sekali per lifecycle permukaan,
+   bukan tiap repaint. Lihat entri `## Perubahan v0.37` butir 1.
 2. stdout/stderr contract seperti tabel di atas (TTY & non-TTY deterministic).
 3. Satu kepemilikan layar (`App`); popup satu lifecycle (`suspend`/`resume` +
    `paintRegion`).
@@ -1329,8 +1648,9 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
      terbungkus/multi-baris (menjaga kolom) lalu ke histori saat di baris
      visual pertama/terakhir; Tab WorkMode / Shift+Tab PermissionMode
      (`Ctrl+T` serta `/view compact|fold|minimize|expand` sudah DIHAPUS karena
-     tak punya target visual; v0.33: **`Ctrl+O` diikat ulang** — membuka modal
-     detail tool Live saat sidebar aktif); Ctrl+D baris-kosong
+     tak punya target visual; v0.34: `Ctrl+O` juga DIHAPUS bersama sidebar —
+     v0.33 pernah mengikatnya ulang ke modal detail Live, sekarang dicabut);
+     Ctrl+D baris-kosong
      keluar; Esc membersihkan selection lebih dulu, lalu batal input / abort
      turn (busy: ketikan hidup & Enter menyelipkan informasi tambahan ke turn
      aktif, dengan antrean sebagai fallback; Tab/Shift+Tab ditahan,
@@ -1345,6 +1665,21 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
      menampilkan timer redup di footer dan prompt `minicode ›`; prompt hilang
      saat busy, lalu otomatis muncul kembali kosong setelah turn selesai.
      Scroll ke atas + stream masuk = indikator `↓ N baris baru`.
+      **Amendemen v0.36 (I14 — koordinat/kursor ditimpa):** semua perhitungan
+      composer/kursor memakai `composerWidth() = min(100, chatWidth())`, bukan
+      `chatWidth()` mentah; `↑`/`↓` pada draft panjang/multi-baris kini benar di
+      terminal ≥120 kolom, `Home`/`End` dan klik-untuk-pindah-kursor mengikuti
+      lebar itu. Tinggi composer maks 2 baris (jendela geser), dan klik mouse di
+      area dropdown `/` memetakan ke item menu, bukan seleksi transkrip. Lihat
+      entri `## Perubahan v0.36` butir 1–4.
+      **Amendemen v0.37 (I14 — `Ctrl+A`/`Ctrl+C` & klik pasca-resize):**
+      `Ctrl+A` kini memetakan ke key **`selectAll`**: bila composer KOSONG dan
+      dropdown `/` tertutup ia memilih **seluruh baris logis transkrip**; bila
+      ada draft atau menu terbuka ia **tetap `Home`** (kompatibel v0.36).
+      `Ctrl+C` menyalin seleksi **juga saat drag masih aktif** — drag
+      di-finalisasi lebih dulu, bukan no-op/abort. Klik pasca-resize memetakan
+      ke **geometri baru**, bukan koordinat lama. Lihat entri
+      `## Perubahan v0.37` butir 2–3.
 15. (Dihapus bersama jendela info — nomor dipertahankan.)
 16. Popup komposit: region tanpa clear + union-clear anti-hantu + clearRegion
     saat tutup + suspend/resume berpasangan; layar tak mampu = tolak bersuara
@@ -1357,9 +1692,12 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
      reasoning, atau tool target; satu baris kosong selalu memisahkannya dari
      footer. Proyeksi presentasi (v7.22): tool tampil sebagai SATU baris ringkas
      `› nama target`; status hanya untuk NON-sukses (`failed`/`denied`/
-     `cancelled`/`interrupted`, dipisah `·`) dan TANPA warna. Activity panel/
-     fold, area thinking, baris running, dan ringkasan turn (counter/`ckpt`)
-     TIDAK dirender; event diagnostik non-tool tetap dikonsumsi tanpa baris.
+     `cancelled`/`interrupted`, dipisah `·`) dan TANPA warna. Klaim v7.22 soal
+     "Activity panel/fold, area thinking TIDAK dirender" berlaku untuk proyeksi
+     flat non-interaktif; di TUI interaktif v0.34 baris tool/`✦`/finding dan
+     marker `+ thinking` KEMBALI ke chat (sidebar sudah dihapus). Ringkasan turn
+     (counter/`ckpt`) tetap tidak dirender; event diagnostik non-tool tetap
+     dikonsumsi tanpa baris.
      **Retry provider:** setiap `model.delta`/`reasoning.delta` live membawa
      `attemptId`. Bila attempt gagal setelah mengirim konten, TUI membuang
      ekor attempt yang belum di-commit dan menambah diagnostic invalidasi.
@@ -1377,14 +1715,27 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
      — `parentToolCallId` = taut ke pemanggil, bukan identitas run, jadi dua
      makna itu tak boleh disamakan. Baris running anak memakai aturan yang
      sama (marker per run).
-     **Amendemen v0.33 (landed 1aaca14):** dengan sidebar aktif, ledger per-tool
-     (termasuk baris `↳` grup anak) TIDAK lagi ditambahkan ke chat — jejak
-     lengkap ada di pane Activity/Live sidebar + modal `Ctrl+O`. Chat hanya
-     narasi + rekap kategori (`3 command · 2 read · 5 subagent`) + jawaban
-     akhir. `finding.detected` masuk log Activity sidebar (linear tetap ke
-     transkrip). Retry live = satu micro-toast footer 4 dtk
+     **Amendemen v0.34 (menggantikan amendemen v0.33 landed 1aaca14):** ledger
+     per-tool (termasuk baris `↳` grup anak), agregat `✦`, dan
+     `finding.detected` KEMBALI ke chat/transkrip — v0.33 memindahkannya ke pane
+     Activity/Live sidebar + modal `Ctrl+O`, sekarang sidebar dihapus total.
+     Rekap kategori (`3 command · 2 read · 5 subagent`) dan jawaban akhir tetap
+     di chat. Retry live = satu micro-toast footer 4 dtk
      (`retry n/total · Ns`), bukan baris transkrip. Repaint jalur wheel chat
      coalesce 16 ms (event-bus 30 ms tetap).
+     **Amendemen v0.36 (I17 — tinggi composer ditimpa):** "tinggi tetap" kini
+     berarti **maksimal 2 baris** (dulu hingga 5). Draft panjang memakai jendela
+     geser — tanpa menambah baris di frame dan tanpa menggeser transkrip;
+     satu baris kosong pemisah composer–footer tetap. Lihat entri
+     `## Perubahan v0.36` butir 1.
+     **Amendemen v0.37 (I17 — cap lebar prompt progresif):** cap lebar prompt
+     berubah dari `min(100, chatWidth())` menjadi
+     `min(chatCols, 100 + floor(max(0, chatCols-100)/4))` (100→100, 200→125,
+     300→150, 500→200); `composerWidth()`/`chatWidth()` tetap dua helper di
+     `src/ui/render/chat-column.ts`. Prefix panjang `minicode › ` bila ruang
+     isi `w−14 ≥ 24` (`w ≥ 38`), sebaliknya `› `, lanjutan `· `. **Tinggi
+     composer maks 2 baris TIDAK dicabut.** Lihat entri `## Perubahan v0.37`
+     butir 5.
 
 18. Prompt multiline (Ctrl+J newline), histori memori-sesi (tak persist ke
     berkas histori lama). Draft hasil undo mempertahankan newline dan Unicode,
@@ -1394,6 +1745,17 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
     oldest-to-newest) melalui OSC 52.
 19. Dropdown `/` inline TANPA bingkai (renderer flat); `listRow` memakai marker
      kolom tetap, Enter pada menu melengkapi + kirim, Tab melengkapi tanpa kirim.
+     **Amendemen v0.36 (I19 — gambar dropdown ditimpa):** dropdown tetap digambar
+     di DALAM frame `paint()` yang sama (I1, satu `stdout.write`), tetapi
+     **tidak mengurangi `viewH`** — ia menimpa baris transkrip bawah sebagai
+     overlay, tanpa `paintRegion()` terpisah (menghindari dua write & flicker saat
+     steer). Klik mouse di area dropdown memetakan ke item menu, bukan seleksi
+     transkrip. Lihat entri `## Perubahan v0.36` butir 2.
+     **Amendemen v0.37 (I19 — dropdown ditutup saat busy/abort):** dropdown
+     `/` ditutup saat transisi **busy/abort** (selain jalur keluar yang sudah
+     ada), sehingga menu tidak bertahan melintasi perubahan state turn. Overlay
+     satu-frame dan pemetaan klik-ke-item dari v0.36 tetap berlaku. Lihat entri
+     `## Perubahan v0.37` butir 3.
 20. Lebar kotak popup **diskalakan dari lebar layar secara dinamis saat resize**:
     `popupBoxWidth(cols) = min(max(40, min(88, floor(cols*0.6))), cols-4)`
     (v7.14; adaptif `resize` di seluruh permukaan sejak v7.19). Semua
@@ -1414,27 +1776,27 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
      di footer form ("batal dalam 10 dtk" — bukan countdown hidup), 10 dtk
      berikutnya = auto-batal (cancel), total semantik 90 dtk lama; SATU
      ketikan apa pun me-reset kedua timer.
-22. Thinking (v0.33 — menggantikan klausa lama "tersembunyi default / `/view
-     expand`"). Saat sidebar aktif, SELURUH reasoning dirender di jendela
-     Thinking lebar-penuh di atas (redup, dibungkus penuh dengan `wrapByWidth`,
-     disanitasi dua kali) dan disimpan di `SidebarModel` sebagai riwayat sesi;
-     potongan karena batas ditandai jujur (`… N older items trimmed`, cap
-     200.000 code point). Composer tetap memakai dots clock saat thinking;
-     transkrip tetap bersih tanpa marker thinking. Saat sidebar nonaktif
-     (terminal <100 kolom atau <20 baris), reasoning masuk jalur linear biasa.
-     `/expand`, `Ctrl+T`, dan area thinking 10-baris di transkrip sudah
-     dihapus; `/view thinking` dan `MINICODE_SHOW_THINKING` tetap ada untuk
-     jalur linear/tanpa sidebar. Detail hidup di sidebar + journal.
+22. Thinking (v0.34 — menggantikan klausa v0.33 "jendela Thinking sidebar" dan
+     klausa lama "tersembunyi default / `/view expand`"). Reasoning tampil
+     sebagai marker `+ thinking` di chat (dengan jumlah baris bila perlu),
+     dikontrol `MINICODE_SHOW_THINKING`; detail lengkap tetap di jurnal, bukan
+     di pane sidebar. Composer memakai dots clock saat thinking. Potongan karena
+     batas ditandai jujur (`… N older items trimmed`, cap 200.000 code point).
+     `/expand`, `Ctrl+T`, dan area thinking 10-baris permanen di transkrip sudah
+     dihapus; `/view thinking` tetap ada. `MINICODE_ACTIVITY_PANEL` kini
+     legacy/deprecate (D3) dan tidak lagi menghidupkan panel; v0.33 menyimpan
+     reasoning di `SidebarModel` — sekarang dicabut.
 23. Approval & ask_user tercatat di transkrip (pertanyaan + keputusan) dan
      terlihat sebelum menjawab; non-TTY = deny/null fail-closed; stdout
      di-pipe tanpa sink TUI = deny/null (prompt tak terlihat + mencemari
      output program bila dipaksa).
-24. v0.33: `/view expand` sudah dihapus sebagai command UI. Detail per-tool
-     diakses lewat sidebar Activity/Live + modal `Ctrl+O` (pilih baris Live,
-     tekan `Ctrl+O` → nama/target/status/durasi/child/detail). Content Store
-     tetap dipakai internal untuk replay (buka-ulang identik, tidak
-     sekali-habis; dengan id = satu tool, tanpa id = seluruh entry hidup;
-     miss → durable sqlite → penanda retensi), bukan lagi permukaan perintah.
+24. v0.34: `/view expand` tetap dihapus sebagai command UI. Detail per-tool
+     tidak lagi diakses lewat sidebar Activity/Live + modal `Ctrl+O` (v0.33,
+     sekarang dicabut): baris tool/`✦`/finding ada di chat, detail hidup di
+     jurnal. Content Store tetap dipakai internal untuk replay (buka-ulang
+     identik, tidak sekali-habis; dengan id = satu tool, tanpa id = seluruh
+     entry hidup; miss → durable sqlite → penanda retensi), bukan lagi
+     permukaan perintah.
      Pilihan `/model`
      persist antar sesi + struk `model: x`; `/help` ringkas (penuh via
      `/help full`, pintasan via `/help keys`).
@@ -1449,6 +1811,11 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
      (tsc mengawal); fallback kunci hilang → en; prioritas sesi > env >
      state.json > locale OS > en (di OS: `LC_ALL` > `LANG`, string kosong
      diabaikan); literal Indonesia hardcode dilarang.
+     Amendemen v0.35 (I26): khusus label aktivitas tool `› …`, locale OS
+     menang lewat `Intl` (id/en) di SEMUA permukaan (TUI, one-shot/`exec`, ACP
+     via `simple.ts`); klausa prioritas di atas TIDAK dihapus dan tetap berlaku
+     untuk label UI lain. Narasi/jawaban model tetap memakai bahasa user
+     (`/lang`). Lihat entri `## Perubahan v0.35` butir 3–4.
 31. Sinyal fatal saat TUI hidup (SIGTERM/SIGHUP): restore terminal dulu
     (alt-screen exit + raw mode pulih + handler exit sinkron) lalu exit
     `128+n` (143/129). Pasangan ketat per-run — handler dipasang di
@@ -1604,14 +1971,27 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
 
 ## Grammar (ringkas)
 
-prompt `minicode ›` tampil saat boot/idle dan hilang saat busy (dropdown `/` TANPA bingkai; `Tab` melengkapi command terpilih saat terbuka, dan memutar WorkMode saat tertutup) · transkrip kosong TANPA logo/hint · prompt user terakhir = CARD TRANSPARAN tepat di atas composer (teks/tools dirender di atasnya; gema inline `minicode › <prompt>` disembunyikan) · jeda SATU baris kosong di setiap batas blok (user↔jawaban/tools, antar turn, card↔composer) · status bar `✦ 00.00.00 Discuss  model  cwd … context  Auto ●` (warna nyala by default di TTY; `MINICODE_COLOR=0`/`NO_COLOR` → monokrom; format timer tetap; `●`/`○` tetap penanda permission; badge `◷ N` bila job background hidup) + micro-toast retry `retry n/total · Ns` (4 dtk, angka live) di atas footer · SATU baris tool ringkas `› name target` (` · <status>` hanya untuk non-sukses) di jalur linear; dengan sidebar aktif ledger per-tool pindah ke pane Activity/Live sidebar · error `pesan` sekali per kegagalan · pesan error TUI = formatter kanonik (`formatError`, `src/ui/render/errors.ts`): credential di-redaksi (bearer/key/query), escape ANSI dibuang, body provider diringkas + dipotong; `e.message` mentah tak pernah tampil · popup: konten redup di belakang + kotak terpusat (form di dalam) + Esc tutup · approval tercatat · `/status`, `/sessions history`, `/help`, `/context` tampil di jendela output command di atas chat · `/mode` = satu pintu dua sumbu (`discuss|build` = WorkMode intent layer, `auto|ask` = permission mode) · `/view compact|fold|minimize|expand` dan `Ctrl+T` sudah DIHAPUS (`VIEW_ACTIONS` = `thinking`); **`Ctrl+O` diikat ulang v0.33** = modal detail tool Live saat sidebar aktif; `/expand` digantikan sidebar kanan · tabel markdown FLAT tanpa kotak ber-`wrap` (konten panjang tidak kepotong) + margin kiri 3 kolom (adaptif di lebar < 36); fence kode tanpa bar `│` dan tanpa header bahasa; area teks jawaban (paragraf, heading, daftar, blockquote, code block) ber-margin kiri 3 kolom dengan hanging-indent wrap · Projection V2: marker evict tetap; baris running, area thinking, baris diagnostik non-tool, dan ringkasan turn TIDAK dirender; v0.33: chat = narasi + rekap kategori + jawaban akhir, baris `Tool:`/buffer terlipat dihapus, `finding.detected` → log Activity sidebar saat aktif ·
+prompt `minicode ›` tampil saat boot/idle dan hilang saat busy (dropdown `/` TANPA bingkai; `Tab` melengkapi command terpilih saat terbuka, dan memutar WorkMode saat tertutup) · transkrip kosong TANPA logo/hint · chat = kolom tengah (v0.34: `cols ≥ 120 && rows ≥ 20` → `chatCols = floor(cols/2)`, padding kiri/kanan, footer/composer ter-centre; di bawah ambang chat penuh lebar; popup/modal tetap full-screen ter-centre pada `cols`) · prompt user terakhir = CARD TRANSPARAN tepat di atas composer (teks/tools dirender di atasnya; gema inline `minicode › <prompt>` disembunyikan) · jeda SATU baris kosong di setiap batas blok (user↔jawaban/tools, antar turn, card↔composer) · status bar `✦ 00.00.00 Discuss  model  cwd … context  Auto ●` (warna nyala by default di TTY; `MINICODE_COLOR=0`/`NO_COLOR` → monokrom; format timer tetap; `●`/`○` tetap penanda permission; badge `◷ N` bila job background hidup) + micro-toast retry `retry n/total · Ns` (4 dtk, angka live) di atas footer · SATU baris tool ringkas `› name target` (` · <status>` hanya untuk non-sukses) di chat; ledger per-tool, agregat `✦`, dan `finding.detected` kembali ke chat sejak v0.34 (sidebar dihapus) · error `pesan` sekali per kegagalan · pesan error TUI = formatter kanonik (`formatError`, `src/ui/render/errors.ts`): credential di-redaksi (bearer/key/query), escape ANSI dibuang, body provider diringkas + dipotong; `e.message` mentah tak pernah tampil · popup: konten redup di belakang + kotak terpusat (form di dalam) + Esc tutup · approval tercatat · `/status`, `/sessions history`, `/help`, `/context` tampil di jendela output command di atas chat · `/mode` = satu pintu dua sumbu (`discuss|build` = WorkMode intent layer, `auto|ask` = permission mode) · `/view compact|fold|minimize|expand` dan `Ctrl+T` sudah DIHAPUS (`VIEW_ACTIONS` = `thinking`); **`Ctrl+O` dihapus sejak v0.34** (v0.33 pernah mengikatnya ulang ke modal detail Live); `/expand` tetap dihapus tanpa pengganti sidebar · tabel markdown FLAT tanpa kotak ber-`wrap` (konten panjang tidak kepotong) + margin kiri 3 kolom (adaptif di lebar < 36); fence kode tanpa bar `│` dan tanpa header bahasa; area teks jawaban (paragraf, heading, daftar, blockquote, code block) ber-margin kiri 3 kolom dengan hanging-indent wrap · Projection V2: marker evict tetap; baris running, area thinking, baris diagnostik non-tool, dan ringkasan turn TIDAK dirender; v0.33: chat = narasi + rekap kategori + jawaban akhir, baris `Tool:`/buffer terlipat dihapus, `finding.detected` → log Activity sidebar saat aktif ·
+
+Rekap v0.35: footer tiap narasi `tool → narasi → └ rekap(tool sebelum narasi)`;
+rekap akhir turn kumulatif `└ 2 command · 118 read · 1 other` — baris committed
+statis, bukan state live. Label `› …` memakai locale OS (`Intl`, id/en) di semua
+permukaan; narasi/jawaban model tetap memakai bahasa user (`/lang`).
+
+Butir echo prompt v0.37: gema prompt user disimpan sebagai **satu baris logis**
+dan di-wrap **sekali** oleh proyektor selebar **kolom chat** (bukan lebar
+terminal penuh) — double-wrap akibat padding centre dilarang. `Ctrl+A` =
+select-all transkrip bila composer kosong & dropdown tertutup (Home bila ada
+draft/menu); bracketed paste aktif (`?2004h`/`?2004l` di luar frame). Lebar
+prompt `min(chatCols, 100 + floor(max(0, chatCols-100)/4))`, prefix `minicode › `
+bila `w−14 ≥ 24` else `› `, lanjutan `· `.
 
 `Esc` saat turn = abort (+ hint sekali, antrean dibuang); Esc kedua dalam 1,5 dtk
 = quit walau turn langsung selesai; `ESC`+printable (Alt) diabaikan, bukan abort ·
 busy = composer hidup, Enter menyelipkan info tambahan ke turn aktif (`steer` di
 batas step; fallback antrean ditolak selama `abortRequested`) ·
-Mouse wheel = scroll transkrip (di atas pane sidebar → pane itu), PgUp/PgDn = scroll chat, Shift+PgUp/PgDn = setengah
-halaman, `Alt+PgUp/PgDn` = gulir dua kotak sidebar + geser seleksi Live, `Ctrl+PgUp/PgDn` = ubah rasio 30–80%, `Ctrl+O` = modal detail Live, Home/End (prompt kosong) = lompat top/ekor chat **dan** sidebar · indikator `↓ N baris baru` ·
+Mouse wheel = scroll transkrip/chat (v0.34: tidak ada pane, wheel selalu menggulir chat), PgUp/PgDn = scroll chat, Shift+PgUp/PgDn = setengah
+halaman, `Alt+PgUp/PgDn`, `Ctrl+PgUp/PgDn`, dan `Ctrl+O` DIHAPUS bersama sidebar (v0.33: gulir kotak / ubah rasio / modal detail Live — dicabut), Home/End (prompt kosong) = lompat top/ekor chat · indikator `↓ N baris baru` ·
 tab dihitung 8 kolom (batas atas stop
 terminal — tak pernah undercount) · C1/bidi/tag dibuang dari teks
 tak-terpercaya (sanitasi) · truncate/chunk hanya menyalin SGR (non-SGR
@@ -1687,8 +2067,9 @@ panjang).
   `test/audit-fix-control-dead-keys.test.ts` — v7.23: card prompt transparan di
   atas composer (tanpa gema inline dobel), teks/tools di atas card; Esc+printable
   tak meng-abort, `Alt+Enter` lintas chunk, batas UTF-8 paste, double-Esc quit,
-  Ctrl+T dan `/view compact|fold|minimize|expand` tak lagi terikat; v0.33:
-  Ctrl+O diikat ulang ke modal detail tool Live saat sidebar aktif.
+  Ctrl+T dan `/view compact|fold|minimize|expand` tak lagi terikat; v0.34:
+  Ctrl+O juga tak terikat (v0.33 pernah mengikatnya ulang ke modal detail
+  Live — dicabut).
 - `test/prompt-engine.test.ts` — decoder streaming CSI/SGR/X10 (`Alt+Enter`,
   CSI-u `Shift+Enter`, `modifyOtherKeys` → `ctrl-j`, batas payload bracketed
   paste 512 KiB, `Tab` complete di menu terbuka), wheel menjadi key scroll,
@@ -1707,10 +2088,11 @@ panjang).
   ber-chevron `›` tanpa warna, status sukses TIDAK mencetak kata status, fence
   TANPA bar `│`/header bahasa, baris diagnostik non-tool TIDAK dirender, cap
   5000 + marker evict, `total()` monotonik kebal evict, viewport).
-- `test/thinking-area.test.ts` — I22 (v7.22: area thinking dan marker
-  `+ thinking`/`… N baris lagi` TIDAK dirender di transkrip, tak ada yang
-  di-commit). v0.33: reasoning lengkap tampil di jendela Thinking sidebar
-  (`SidebarModel`, inkremental — dijaga `test/perf-no-quadratic.test.ts`).
+- `test/thinking-area.test.ts` — I22 (v7.22: area thinking permanen TIDAK
+  dirender di transkrip, tak ada yang di-commit). v0.34: marker `+ thinking`
+  KEMBALI ke chat (dikontrol `MINICODE_SHOW_THINKING`); klaim v0.33 soal
+  jendela Thinking `SidebarModel` sudah dicabut. Inkrementalitas parsing
+  reasoning tetap dijaga `test/perf-no-quadratic.test.ts`.
 - `test/presentation-projections.test.ts` — I12/I17/I32 (v7.22: projection
   snapshot, marker evict + `total()` monotonik; **ringkasan turn, `ckpt`, dan
   baris status task TIDAK dirender di renderer flat** — test meng-assert
@@ -1859,15 +2241,12 @@ panjang).
 - `test/theme.test.ts` — I6 (strip DCS/APC/PM/SOS + final CSI non-huruf).
 - `test/ansi-fragmentation.test.ts` — I6/I8 (setiap titik split ≡ string utuh).
 - `test/non-tty-output.test.ts` — I6.
-- `test/thinking-truncation.test.ts` — I12 (buffer thinking >200 KB → marker
-  truncasi). v0.33: command `/view expand` dipensiunkan; potongan ditandai
-  `… N older items trimmed` di jendela Thinking sidebar (`SidebarModel`).
 - `test/collapse.test.ts`, `test/presentation-expand.test.ts`,
   `test/presentation-store.test.ts` — **I24** (semantik Content Store: buka-ulang
   identik, dengan id vs tanpa id, miss → durable sqlite + penanda retensi).
-  v0.33: `/view expand` sudah dihapus sebagai command UI; detail per-tool kini
-  diakses lewat sidebar Activity/Live + modal `Ctrl+O`, Content Store tetap
-  dipakai internal untuk replay.
+  v0.34: `/view expand` tetap dihapus sebagai command UI; detail per-tool
+  kembali ke chat/jurnal (v0.33 memakai sidebar Activity/Live + modal `Ctrl+O`,
+  sekarang dicabut). Content Store tetap dipakai internal untuk replay.
 - `test/ui-combined.test.ts` — DIHAPUS bersama chrome.
 - `test/repl-linear.test.ts`, `test/footer-chrome.test.ts`,
   `test/info-window.test.ts` — DIHAPUS bersama REPL/chrome/jendela.
@@ -1909,8 +2288,32 @@ panjang).
 - `test/cli-help-language.test.ts` — I26/I25 (label en, kelengkapan /help;
   v7.16: grup View terisi di full help — compact/thinking/expand/minimize/fold
   terdaftar, bukan heading kosong).
+- `test/chat-column.test.ts` — v0.34: geometri chat kolom tengah (`cols ≥ 120
+  && rows ≥ 20` → `chatCols = floor(cols/2)`, padding kiri/kanan, di bawah
+  ambang chat penuh lebar) dan footer/composer ter-centre mengikuti kolom;
+  popup/modal tetap full-screen ter-centre pada `cols` (I20 tidak berubah).
+  Test ini menggantikan klaim lama `test/sidebar-*.test.ts` yang sudah dicabut.
+- **v0.37 — peta proteksi yang ditargetkan** (assertion mengikuti implementasi
+  A/B; angka/status gate tidak diklaim di entri ini — lihat
+  `.audit/FINAL-STATE.md`):
+  - `test/chat-column.test.ts` — v0.37: `composerWidth()`/`chatWidth()` satu
+    sumber di `src/ui/render/chat-column.ts`; cap progresif
+    `min(chatCols, 100 + floor(max(0, chatCols-100)/4))` (100/200/300/500 →
+    100/125/150/200); prefix `minicode › ` bila `w−14 ≥ 24` else `› `, lanjutan
+    `· ` (menggantikan cap `min(100, chatWidth())` dan ambang ≥60 v0.36).
+  - `test/tui-app.test.ts` + `test/tui-transcript.test.ts` — v0.37: `Ctrl+A`
+    (`selectAll`) vs `Home` saat draft/menu, `Ctrl+C` saat drag aktif, resize
+    (auto-scroll berhenti / drag batal / kursor reset / anchor rebase walau
+    seleksi aktif), dropdown ditutup saat busy/abort, dan echo prompt satu
+    baris logis yang di-wrap sekali selebar kolom chat.
+  - `test/prompt-engine.test.ts` + `test/input-resize.test.ts` — v0.37:
+    sequence `?2004h`/`?2004l` di luar frame di `askLine`/`askSecret`/
+    output-window, CR multi-baris tak memicu submit bertingkat, dan klik
+    pasca-resize memakai geometri baru.
 - `test/tui-geometry.test.ts` — I20/I25 (lebar tetap per permukaan, step
-  wizard, form error).
+  wizard, form error). Catatan: file ini TIDAK menguji geometri sidebar maupun
+  kolom chat; klaim sidebar yang pernah bersandar padanya (v0.33 butir 6)
+  adalah gap nominal, sudah dikoreksi di entri v0.34.
 - `test/sanitize.test.ts` — I2 (C1/bidi/tag dibuang, ZWJ dipertahankan;
   NO_COLOR menang di cleanUntrusted).
 - `test/width.test.ts` — I2/I7 + UI-RENDER-01 (VS16, skin tone, ZWJ, regional
@@ -1974,7 +2377,8 @@ tetap UNVERIFIED; keberadaan implementasi saja bukan bukti UAT.
 |---|---|---|
 | I14 — "berlaku juga saat layar MENCIUT: abort+scroll selalu lolos" | Terimplementasi (`src/ui/tui/app.ts`: PgUp/PgDn dan Esc diintercept sebelum `tooSmall()`) | Ditutup: `test/tui-app.test.ts` membuktikan scroll posisi baca bertahan saat layar dipulihkan dan Esc memanggil abort; `Ctrl+D` tetap jalan keluar terakhir. |
 | I13/I17 — "satu baris kosong memisahkan composer dari footer" | Terimplementasi (`src/ui/tui/app.ts` merender satu spacer per frame) | Ditutup: `test/tui-app.test.ts` meng-assert baris spacer dalam frame penuh 14 baris. |
-| I20 — lebar kotak popup tetap per permukaan | Terimplementasi | Ditutup: label di `test/tui-app.test.ts` kini bertanda `(I13)`, dan lebar kotak popup diverifikasi di `test/tui-geometry.test.ts` + `test/dialog.test.ts`. |
+| I20 — lebar kotak popup tetap per permukaan | Terimplementasi | Ditutup: label di `test/tui-app.test.ts` kini bertanda `(I13)`, dan lebar kotak popup diverifikasi di `test/tui-geometry.test.ts` + `test/dialog.test.ts`. I20 adalah invariant popup, BUKAN geometri panel/panel samping. |
+| Geometri sidebar v0.33 (lebar 30–50%, split 168 kolom, rasio 60:40) | Dihapus total di v0.34 | Ditutup oleh penghapusan: klaim lama tidak pernah di-assert oleh `test/tui-geometry.test.ts` (file itu hanya menguji lebar popup/lebar beku per mount) — gap nominal kini tidak relevan karena sidebar tidak ada. Geometri pengganti (kolom tengah) dijaga `test/chat-column.test.ts`. I36 = jendela output command, I37 = recovery/approval — keduanya bukan invariant sidebar. |
 | I5 — tak ada popup yatim / input bocor setelah success/failure/cancel/SIGINT/session end | Terimplementasi | Ditutup untuk dropdown `/` + submit error + abort/Esc di `test/tui-app.test.ts` (`I5`) dan arbiter transient `test/turn-status.test.ts`; SIGINT/POSIX tetap teruji di `test/tui-signal.test.ts` + `test/pty.test.ts`. |
 | I26 pada jalur presentasi | Terimplementasi | Ditutup: `test/presentation-projections.test.ts` kini memverifikasi locale `id` di transcript & logger linier bersama `test/i18n.test.ts` + `test/i18n-hardcode.test.ts`. |
 | I2/I6/I28 pada proyeksi linear/ACP | Terimplementasi | Ditutup: `test/presentation-linear-acp.test.ts` kini meng-assert split stdout/stderr non-TTY, bebas CSI/OSC cursor control (`I2/I6`), dan exit code `0` ACP (`I28`). |

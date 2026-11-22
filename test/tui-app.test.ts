@@ -10,6 +10,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import type { UiPresentationActivity, UiPresentationEvent } from "../src/ui/contract.ts"
 import { resetLocaleState, setSessionLocale } from "../src/ui/i18n/locale.ts"
+import { stripSgr } from "../src/ui/render/sanitize.ts"
+import { tSystem } from "../src/ui/render/tool-label.ts"
 import { displayWidth } from "../src/ui/render/width.ts"
 import { altScreenDepth, resetAltScreenDepth } from "../src/ui/runtime/screen.ts"
 import {
@@ -63,6 +65,17 @@ function menuNames(text: string): string[] {
       .replace(/^\s*›\s*/, "")
       .trim(),
   )
+}
+
+/** Baris frame mentah dari paint PENUH terakhir (sebelum diff/CUP). */
+function rawFrameLines(stream: string): string[] {
+  const at = stream.lastIndexOf("\x1b[2J")
+  if (at < 0) return []
+  const tail = stream.slice(at + "\x1b[2J".length)
+  // Batas frame = RESET_ATTRS + HIDE_CURSOR yang ditambahkan screen.paint
+  // SESUDAH semua baris; jangan split di `\x1b[0m` (warna di dalam baris).
+  const resetTail = new RegExp(`${"\\x1b"}\\[0m$`)
+  return (tail.split("\x1b[?25l")[0] ?? "").replace(resetTail, "").split("\r\n")
 }
 
 function setup(
@@ -242,33 +255,88 @@ describe("TuiApp", () => {
     expect(tty!.all()).toContain("\x1b[?1002l")
     expect(tty!.all()).toContain("\x1b[?1000l")
   })
-  test("v0.33: terminal lebar memuat sidebar dua kotak, frame tetap tepat rows", async () => {
+  test("cols=120: chat ter-centre 30/60/30 tanpa panel, frame tepat rows", async () => {
     const { app } = setup({ columns: 120, rows: 30 })
     const runP = app.run()
     await tty!.ready()
     await tty!.waitForOutput((o) => o.includes("00.00.00"))
     const frame = tty!.screen()
     expect(frame).toHaveLength(30)
-    // Dua judul kotak + pemisah harus hadir di kolom kanan.
+    // Tak ada lagi panel kanan: semua baris adalah chat + padding spasi.
     const text = frame.join("\n")
-    expect(text).toContain("Thinking")
-    expect(text).toContain("Activity")
-    // Footer tetap full-width (terakhir baris frame).
+    expect(text).not.toContain("Thinking")
+    expect(text).not.toContain("Activity")
+    expect(text).not.toContain("│")
+    // Footer tetap hadir, ikut ter-centre bersama chat.
     expect(frame[frame.length - 1]).toContain("Discuss")
+    const raw = rawFrameLines(tty!.all())
+    expect(raw).toHaveLength(30)
+    for (const line of raw) {
+      expect(stripSgr(line)).toHaveLength(120)
+      expect(line.startsWith(" ".repeat(30))).toBe(true)
+    }
     await tty!.send(KEY.ctrlD)
     await runP
   })
 
-  test("v0.33: terminal sempit memakai layout satu kolom (tanpa sidebar)", async () => {
+  test("cols=80: chat penuh (bukan 40), padding nol di bawah ambang centre", async () => {
     const { app } = setup({ columns: 80, rows: 20 })
     const runP = app.run()
     await tty!.ready()
     await tty!.waitForOutput((o) => o.includes("00.00.00"))
-    const text = tty!.screen().join("\n")
-    expect(text).not.toContain("Thinking")
-    expect(text).not.toContain("Activity")
+    const raw = rawFrameLines(tty!.all())
+    expect(raw).toHaveLength(20)
+    for (const line of raw) expect(stripSgr(line)).toHaveLength(80)
+    // Baris composer diawali margin 3 kolom, BUKAN 40 spasi padding.
+    const composerLine = raw.find((l) => stripSgr(l).includes("minicode")) ?? ""
+    expect(stripSgr(composerLine).startsWith("   minicode")).toBe(true)
     await tty!.send(KEY.ctrlD)
     await runP
+  })
+
+  test("cols=200: End/PgUp paritas dengan cols=100 pada teks wrap panjang", async () => {
+    const run = async (columns: number) => {
+      const { app, transcript } = setup({ columns, rows: 24 })
+      const runP = app.run()
+      await tty!.ready()
+      await tty!.waitForOutput((o) => o.includes("00.00.00"))
+      // 200 kolom teks → 2 baris wrap di chatCols=100 (centre maupun penuh).
+      const long = (i: number) => `baris-${String(i).padStart(2, "0")} ${"kata ".repeat(40)}`
+      transcript.pushInfo(Array.from({ length: 40 }, (_, i) => long(i)))
+      await tty!.send("x")
+      await tty!.waitForScreen((f) => f.some((l) => l.includes("baris-39")))
+      const raw = rawFrameLines(tty!.all())
+      // Buang padding kiri agar perbandingan murni soal scroll, bukan offset.
+      const snap = () =>
+        tty!
+          .screen()
+          .map((l) => l.replace(/^ +/, ""))
+          .join("\n")
+      const trace: string[] = [snap()]
+      await tty!.send(KEY.backspace) // prompt kosong → Home/End jadi navigasi
+      await tty!.send(KEY.home)
+      trace.push(snap())
+      await tty!.send(KEY.pgDown)
+      trace.push(snap())
+      await tty!.send(KEY.end)
+      trace.push(snap())
+      await tty!.send(KEY.pgUp)
+      trace.push(snap())
+      expect(trace[0]).toContain("baris-39")
+      expect(trace[1]).toContain("baris-00")
+      expect(trace[3]).toContain("baris-39")
+      expect(trace[4]).not.toContain("baris-39")
+      await tty!.send(KEY.ctrlD)
+      await runP
+      tty!.restore()
+      tty = null
+      return { trace, raw }
+    }
+    const wide = await run(200)
+    const base = await run(100)
+    expect(wide.trace).toEqual(base.trace)
+    expect(wide.raw).toHaveLength(24)
+    for (const line of wide.raw) expect(stripSgr(line)).toHaveLength(200)
   })
 
   test("initial paint exception memulihkan layar, raw mode, listeners, dan timer", async () => {
@@ -730,7 +798,8 @@ describe("TuiApp", () => {
     await tty!.send(KEY.pgUp)
     expect(screenText()).not.toContain("baris-29")
     expect(screenText()).toContain("baris-20")
-    // Dua halaman lagi → kepala terlihat.
+    // Composer tetap 2 baris → viewH=7. Tiga halaman lagi → kepala terlihat.
+    await tty!.send(KEY.pgUp)
     await tty!.send(KEY.pgUp)
     await tty!.send(KEY.pgUp)
     expect(screenText()).toContain("baris-0")
@@ -850,12 +919,12 @@ describe("TuiApp", () => {
     await tty!.send(`\x1b[<0;${endX};${end}m`)
     expect(tty!.all()).toContain("\x1b[7m")
     await tty!.send(KEY.ctrlC)
-    // v0.33: gap transkrip↔composer menggeser viewport 1 baris.
-    expect(copied[0]).toBe("baris-22\nbaris-23\nbaris-24")
+    // Composer tetap 2 baris → viewport 7 baris, ekor = baris-23..29.
+    expect(copied[0]).toBe("baris-23\nbaris-24\nbaris-25")
     // v7.30: kwitansi salin di footer (toast), BUKAN baris transkrip permanen.
     const rows = tty!.screen()
-    expect(rows[rows.length - 1]).toContain("selection copied")
-    expect(rows.slice(0, -1).join("\n")).not.toContain("selection copied")
+    expect(rows[rows.length - 1]).toContain(tSystem("msg.copied"))
+    expect(rows.slice(0, -1).join("\n")).not.toContain(tSystem("msg.copied"))
     await tty!.send(KEY.backspace)
     await tty!.send(KEY.ctrlD)
     await runP
@@ -1231,7 +1300,7 @@ describe("TuiApp", () => {
     await tty!.send(KEY.esc, 90)
     await new Promise((r) => setTimeout(r, 100))
     expect(tty!.all()).not.toContain("\x1b[?1049l")
-    expect(screenText()).toContain("abort sent")
+    expect(screenText()).toContain(tSystem("msg.abortedHint"))
     expect(screenText()).not.toMatch(/\b(Working|Thinking|Running|Stopping)\b/)
     // Esc kedua <1.5 dtk: quit.
     await tty!.send(KEY.esc, 90)
@@ -1269,20 +1338,21 @@ describe("TuiApp", () => {
     await tty!.send(KEY.enter)
     await waitForCall(calls, "/slow")
     await tty!.send(KEY.ctrlC, 90)
-    expect(screenText()).not.toContain("abort sent")
+    expect(screenText()).not.toContain(tSystem("msg.abortedHint"))
     await tty!.send(KEY.esc, 90)
-    expect(screenText()).toContain("abort sent")
+    expect(screenText()).toContain(tSystem("msg.abortedHint"))
     expect(screenText()).not.toMatch(/\b(Working|Thinking|Running|Stopping)\b/)
     await tty!.send(KEY.esc, 90)
     await runP
     expect(tty!.all()).toContain("\x1b[?1049l")
   })
 
-  test("terminal 40 kolom: hint abort (id 51 kolom) dipotong, frame tetap <= cols", async () => {
+  test("terminal 40 kolom: hint abort dipotong bila perlu, frame tetap <= cols", async () => {
     // Gagal-di-kode-lama: baris indikator tak dipotong → lebih lebar dari
     // terminal → auto-wrap → frame rows+1 → seluruh diff CUP meleset.
     const { app, calls, screenText } = setup({ columns: 40, rows: 12 })
-    // installFakeTty mereset locale ke en → set SESUDAH setup.
+    // /lang sesi sengaja dibedakan: toast abort mengikuti bahasa SISTEM
+    // (tSystem), bukan sesi — tapi tetap dipotong ke lebar terminal.
     setSessionLocale("id")
     const runP = app.run()
     await tty!.ready()
@@ -1291,7 +1361,7 @@ describe("TuiApp", () => {
     await tty!.send(KEY.enter)
     await waitForCall(calls, "/slow")
     await tty!.send(KEY.esc, 90)
-    expect(screenText()).toContain("abort terkirim")
+    expect(screenText()).toContain(tSystem("msg.abortedHint"))
     for (const line of tty!.screen()) expect(displayWidth(line)).toBeLessThanOrEqual(40)
     await tty!.send(KEY.esc, 90)
     await runP
@@ -1384,32 +1454,33 @@ describe("TuiApp", () => {
   })
   test("kursor baris-wrap tengah: kolom tepat, bukan EOL", async () => {
     // Gagal-di-kode-lama: baris tengah selalu diparkir di ujung baris.
-    // v7.42: prefix 14 kolom (3 margin + "minicode › " 11) + 50 "a" pada
-    // terminal 30 kolom → baris 30/30/4; prefix mengisi 14 kolom di baris 0,
-    // sehingga 20 'left' dari ekor mendarat di grapheme ke-30 pada baris visual 1.
-    // Kolom kursor = 0 (tanpa prefix lanjutan) + 14 grapheme + 1 = 15, baris 11.
+    // Prefix adaptif 2 kolom (`› ` / `· `) pada chat 30 kolom: 50 "a" →
+    // baris 28 + 22; 20 'left' dari ekor mendarat di grapheme ke-30 (baris 1).
+    // Kolom = prefix lanjutan 2 + 2 grapheme + 1 = 5, baris 12 (composer ke-2).
     const { app } = setup({ columns: 30, rows: 14 })
     const runP = app.run()
     await tty!.ready()
-    await tty!.waitForOutput((o) => o.includes("minicode"))
+    await tty!.waitForScreen((f) => f.some((l) => l.length > 0))
     await tty!.send("a".repeat(50))
     for (let i = 0; i < 20; i++) await tty!.send(KEY.left)
-    expect(tty!.all()).toContain("\x1b[11;15H")
+    expect(tty!.all()).toContain("\x1b[12;5H")
     await tty!.send(KEY.ctrlU)
     await tty!.send(KEY.ctrlD)
     await runP
     void app
   })
   test("input panjang: jendela mengikuti kursor (bukan ekor buta)", async () => {
-    // 8 baris logis > MAX 5: ekor tampil; Home → kursor ke atas → jendela
-    // gulir ke atas. Gagal-di-kode-lama: kursor diparkir di baris salah.
+    // 8 baris logis > COMPOSER_MAX_ROWS 2: hanya ekor (l6/l7) yang tampil;
+    // Home → kursor ke atas → jendela gulir ke atas. Composer tak pernah
+    // tumbuh lebih dari 2 baris, jadi transkrip tetap di tempatnya.
     const { app, screenText } = setup()
     const runP = app.run()
     await tty!.ready()
     await tty!.waitForOutput((o) => o.includes("00.00.00"))
     await tty!.send("l0\nl1\nl2\nl3\nl4\nl5\nl6\nl7")
     expect(screenText()).toContain("l7")
-    expect(screenText()).toContain("l3")
+    expect(screenText()).toContain("l6")
+    expect(screenText()).not.toContain("l3")
     expect(screenText()).not.toContain("l0")
     await tty!.send(KEY.home)
     expect(screenText()).toContain("l0")
@@ -1471,7 +1542,7 @@ describe("TuiApp", () => {
     await tty!.ready()
     await tty!.waitForOutput((o) => o.includes("00.00.00"))
     tty!.resize(60, 5)
-    await tty!.waitForOutput((o) => o.includes("too small"))
+    await tty!.waitForOutput((o) => o.includes(tSystem("msg.tooSmall")))
     // Ketikan normal diabakan saat menciut.
     await tty!.send("zzz")
     // Ctrl+D tetap keluar.
@@ -1493,7 +1564,7 @@ describe("TuiApp", () => {
     expect(calls).toContain("/slow")
 
     tty!.resize(60, 5)
-    await tty!.waitForOutput((output) => output.includes("too small"))
+    await tty!.waitForOutput((output) => output.includes(tSystem("msg.tooSmall")))
     for (let i = 0; i < 5; i++) await tty!.send(KEY.pgUp)
     await tty!.send(KEY.esc, 90)
     expect(abortCalls()).toBeGreaterThan(0)
@@ -1589,18 +1660,18 @@ describe("TuiApp", () => {
     const { app } = setup({ columns: 30, rows: 14 })
     const runP = app.run()
     await tty!.ready()
-    await tty!.waitForOutput((o) => o.includes("minicode"))
-    // v7.42: prefix 14 kolom (3 margin + `minicode › ` 11) menggeser wrap.
-    // 25 'a' → baris 0 berisi 16 'a' (14+16 = 30), baris lanjutan berisi 9 'a'.
-    await tty!.send("a".repeat(25))
-    const row2Index = tty!.screen().indexOf("aaaaaaaaa")
+    await tty!.waitForScreen((f) => f.some((l) => l.length > 0))
+    // Prefix adaptif 2 kolom (`› ` / `· `) pada chat 30 kolom: baris 0 memuat
+    // 28 'a', baris lanjutan memuat 12 'b' — jelas beda dari baris pertama.
+    await tty!.send("a".repeat(28) + "b".repeat(12))
+    const row2Index = tty!.screen().findIndex((l) => l.includes("bbbbbbbbbbbb"))
     expect(row2Index).toBeGreaterThan(0)
-    // Klik kolom ke-3 pada baris lanjutan (tanpa prefix → tak bergeser): sesudah
-    // 2 karakter 'aa'. Grapheme target sama; hanya sisa barisnya yang bertambah.
-    await tty!.send(`\x1b[<0;3;${row2Index + 1}M\x1b[<0;3;${row2Index + 1}m`)
+    // Klik kolom ke-5 (prefix 2 + 2 grapheme) pada baris lanjutan → sesudah
+    // dua 'b'. Grapheme target sama; hanya sisa barisnya yang bertambah.
+    await tty!.send(`\x1b[<0;5;${row2Index + 1}M\x1b[<0;5;${row2Index + 1}m`)
     await tty!.send("X")
     const joined = tty!.screen().join("\n")
-    expect(joined).toContain("aaXaaaaaaa")
+    expect(joined).toContain("bbXbbbbbbbb")
     await tty!.send(KEY.ctrlU)
     await tty!.send(KEY.ctrlD)
     await runP
@@ -1628,7 +1699,7 @@ describe("TuiApp", () => {
     await tty!.send(KEY.enter)
     await waitForCall(calls, "/slow")
     await tty!.send(KEY.esc, 90)
-    expect(screenText()).toContain("abort sent")
+    expect(screenText()).toContain(tSystem("msg.abortedHint"))
     expect(screenText()).not.toContain("    model")
     await tty!.send(KEY.ctrlD)
     await runP
@@ -1677,7 +1748,7 @@ describe("TuiApp", () => {
     const { app, calls } = setup({ columns: 30, rows: 14 })
     const runP = app.run()
     await tty!.ready()
-    await tty!.waitForOutput((o) => o.includes("minicode"))
+    await tty!.waitForScreen((f) => f.some((l) => l.length > 0))
     // Isi histori agar fallback Up di baris visual pertama tetap teruji.
     await tty!.send("histori-lama")
     await tty!.send(KEY.enter)
@@ -1686,26 +1757,25 @@ describe("TuiApp", () => {
     // bukan card indented — tunggu itu sebelum mengisi prompt panjang.
     await tty!.waitForScreen((rows) => rows.some((l) => l.includes("minicode › histori-lama")))
 
-    // v7.42: prefix 14 kolom (3 margin + `minicode › ` 11) menggeser wrap.
-    // Baris visual 0: prefix 14 + 16 'a'; baris 1: 3 'a' + 27 'b'; baris 2: 3 'b' + 14 'c'.
-    await tty!.send("a".repeat(19) + "b".repeat(30) + "c".repeat(14))
-    // Up dari baris 2 → baris 1 mendarat di grapheme 'b' yang sama (bukan histori).
-    // Karena baris 1 kini diawali 3 'a', sisa 'b' setelah kursor tinggal 12.
+    // Prefix adaptif 2 kolom (`› ` / `· `) pada chat 30 kolom. Tiga baris
+    // logis (dipisah \n) masing-masing satu baris visual, semua punya ruang
+    // untuk satu karakter tambahan — jadi navigasi ↑/↓ tak menggeser wrap.
+    await tty!.send(`${"a".repeat(20)}\n${"b".repeat(20)}\n${"c".repeat(20)}`)
+    // Up dari baris 2 → baris 1: desiredCol dijaga, Y mendarat di ekor 'b'.
     await tty!.send(KEY.up)
     await tty!.send("Y")
-    expect(tty!.screen().join("\n")).toContain(`${"b".repeat(14)}Y${"b".repeat(12)}`)
+    expect(tty!.screen().join("\n")).toContain(`· ${"b".repeat(20)}Y`)
 
-    // Down kembali ke baris 2: kini 3 'b' + 14 'c' (18 col), Z tetap di ujung kanan.
+    // Down kembali ke baris 2: Z tetap di ekor 'c'.
     await tty!.send(KEY.down)
     await tty!.send("Z")
-    expect(tty!.screen().join("\n")).toContain(`${"b".repeat(4)}${"c".repeat(14)}Z`)
+    expect(tty!.screen().join("\n")).toContain(`· ${"c".repeat(20)}Z`)
 
-    // Up dua kali ke baris 0: desiredCol terjaga, X tetap di grapheme 'a' ke-6;
-    // baris 0 sekarang hanya punya 16 'a' (prefix 14) → 10 'a' setelah X.
+    // Up dua kali ke baris 0: desiredCol terjaga, X di ekor 'a'.
     await tty!.send(KEY.up)
     await tty!.send(KEY.up)
     await tty!.send("X")
-    expect(tty!.screen().join("\n")).toContain("   minicode › aaaaaXaaaaaaaaaa")
+    expect(tty!.screen().join("\n")).toContain(`› ${"a".repeat(20)}X`)
 
     // Sudah di baris visual paling atas → Up berikutnya memanggil histori lama.
     // v7.29: gema lama sudah ada di transkrip, jadi yang dibuktikan harus
@@ -1714,10 +1784,9 @@ describe("TuiApp", () => {
     const composerRow =
       tty!
         .screen()
-        .filter((l) => l.startsWith("   minicode ›"))
+        .filter((l) => l.startsWith("› "))
         .at(-1) ?? ""
-    // v7.42: gema histori memakai margin 3 kolom yang sama dengan prompt.
-    expect(composerRow).toContain("   minicode › histori-lama")
+    expect(composerRow).toContain("› histori-lama")
     await tty!.send(KEY.ctrlU)
     await tty!.send(KEY.ctrlD)
     await runP
@@ -1727,36 +1796,32 @@ describe("TuiApp", () => {
     const { app } = setup({ columns: 30, rows: 16 })
     const runP = app.run()
     await tty!.ready()
-    await tty!.waitForOutput((o) => o.includes("minicode"))
-    // v7.42: prefix 14 kolom menggeser wrap. 6 baris visual (> MAX_INPUT_ROWS 5)
-    // tetap menyembunyikan baris 0; tiap baris kini diawali 3 digit sisa baris
-    // sebelumnya, mis. "111" + 27 '2'. Jendela menampilkan baris 1..5.
+    await tty!.waitForScreen((f) => f.some((l) => l.length > 0))
+    // Prefix adaptif 2 kolom (`› ` / `· `) pada chat 30 kolom: 6 baris visual
+    // (> COMPOSER_MAX_ROWS 2) menyembunyikan baris 0; jendela menampilkan
+    // baris 4..5. Tiap baris penuh berisi 28 digit.
+    // Baris logis dipisah \n supaya jalur wrap penuh dipakai (prefix hadir di
+    // tiap baris). 6 baris visual (> COMPOSER_MAX_ROWS 2) → jendela di ekor.
     await tty!.send(
-      "0".repeat(19) +
-        "1".repeat(30) +
-        "2".repeat(30) +
-        "3".repeat(30) +
-        "4".repeat(30) +
-        "5".repeat(8),
+      `${"0".repeat(20)}\n${"1".repeat(20)}\n${"2".repeat(20)}\n${"3".repeat(20)}\n${"4".repeat(20)}\n${"5".repeat(20)}`,
     )
     const screen = tty!.screen()
-    const row2 = screen.findIndex((l) => l.startsWith("111"))
-    expect(row2).toBeGreaterThan(0)
-    // Klik kolom ke-6 pada baris lanjutan itu -> menyisip di baris yang diklik
-    // (bukan baris 0). Grapheme target sama; isi barisnya yang bergeser 3 digit.
-    await tty!.send(`\x1b[<0;6;${row2 + 1}M\x1b[<0;6;${row2 + 1}m`)
+    const row4 = screen.findIndex((l) => l.includes(`· ${"4".repeat(20)}`))
+    expect(row4).toBeGreaterThan(0)
+    // Klik kolom ke-6 (prefix 2 + 3 digit) pada baris ke-4 → menyisip di
+    // baris yang diklik (bukan baris 0).
+    await tty!.send(`\x1b[<0;6;${row4 + 1}M\x1b[<0;6;${row4 + 1}m`)
     await tty!.send("M")
-    expect(tty!.screen().join("\n")).toContain("11122M222")
+    expect(tty!.screen().join("\n")).toContain(`· 444M${"4".repeat(17)}`)
 
-    // Navigasi panah Up menggulir jendela ke baris 0 ("000..."), klik tetap akurat.
+    // Navigasi panah Up menggulir jendela ke baris 0, klik tetap akurat.
     for (let i = 0; i < 4; i++) await tty!.send(KEY.up)
-    const row0 = tty!.screen().findIndex((l) => l.includes("   minicode › 000"))
+    const row0 = tty!.screen().findIndex((l) => l.includes(`› ${"0".repeat(20)}`))
     expect(row0).toBeGreaterThanOrEqual(0)
-    // v7.42: prefix 14 → kolom ke-18 = sesudah 3 digit '0' (dulu kolom 15).
-    // Sengaja dijaga agar M dan A mendarat pada grapheme yang sama dengan layout lama.
+    // Kolom ke-18 = prefix 2 + 15 digit '0' → A mendarat di grapheme ke-16.
     await tty!.send(`\x1b[<0;18;${row0 + 1}M\x1b[<0;18;${row0 + 1}m`)
     await tty!.send("A")
-    expect(tty!.screen().join("\n")).toContain("   minicode › 000A000")
+    expect(tty!.screen().join("\n")).toContain(`› ${"0".repeat(15)}A${"0".repeat(5)}`)
     await tty!.send(KEY.ctrlU)
     await tty!.send(KEY.ctrlD)
     await runP
@@ -1806,8 +1871,8 @@ describe("TuiApp", () => {
     expect(copied[0]).toContain("const akhir = 42")
     // v7.30: bukti toast — pesan HANYA di baris footer, bukan di badan transkrip.
     const rows = tty!.screen()
-    expect(rows[rows.length - 1]).toContain("selection copied")
-    expect(rows.slice(0, -1).join("\n")).not.toContain("selection copied")
+    expect(rows[rows.length - 1]).toContain(tSystem("msg.copied"))
+    expect(rows.slice(0, -1).join("\n")).not.toContain(tSystem("msg.copied"))
 
     // v7.28 anchor atas: baris padding kosong kini ada DI BAWAH konten
     // (bukan di atas). Klik sekali pada padding bawah membatalkan seleksi
@@ -1818,6 +1883,248 @@ describe("TuiApp", () => {
     await tty!.send(KEY.ctrlC)
     expect(copied.length).toBe(1)
 
+    await tty!.send(KEY.ctrlD)
+    await runP
+  })
+
+  test("kursor ↑/↓ memakai composerWidth (chat 120/200 kolom), bukan cols layar", async () => {
+    for (const { columns, cap } of [
+      { columns: 120, cap: 56 },
+      { columns: 200, cap: 96 },
+    ]) {
+      const { app } = setup({ columns, rows: 24 })
+      const runP = app.run()
+      await tty!.ready()
+      await tty!.waitForScreen((f) => f.some((l) => l.length > 0))
+      // composerWidth = cap progresif(chatCols) = 60 / 125 (chat 60/100).
+      // Baris 0 memuat `cap-10` 'a', baris 1 `cap` 'b', baris 2 sepuluh 'c'.
+      await tty!.send(`${"a".repeat(cap - 10)}\n${"b".repeat(cap)}\n${"c".repeat(10)}`)
+      // ↑ dari ekor HARUS mendarat di baris 'b' (wrap 60/100), bukan histori
+      // atau baris 'a' (wrap 120/200 kalau memakai cols mentah).
+      await tty!.send(KEY.up)
+      await tty!.send("X")
+      // Baris 'b' penuh → X menggeser ekor ke wrap berikutnya; cukup buktikan
+      // X mendarat setelah 10 'b' pada baris visual yang dikunjungi ↑.
+      expect(tty!.screen().join("\n")).toContain(`  · ${"b".repeat(10)}X${"b".repeat(3)}`)
+      // ↓ kembali ke ekor: Y mendarat setelah 'c'. (Draft diulang agar
+      // penyisipan X yang memecah baris 'b' tak menggeser indeks visual.)
+      await tty!.send(KEY.ctrlU)
+      await tty!.send(`${"a".repeat(cap - 10)}\n${"b".repeat(cap)}\n${"c".repeat(10)}`)
+      await tty!.send(KEY.up)
+      await tty!.send(KEY.down)
+      await tty!.send("Y")
+      expect(tty!.screen().join("\n")).toContain(`  · ${"c".repeat(10)}Y`)
+      await tty!.send(KEY.ctrlU)
+      await tty!.send(KEY.ctrlD)
+      await runP
+      tty!.restore()
+      tty = null
+      void app
+    }
+  })
+
+  test("transkrip tak bergeser saat draft 8 baris maupun saat dropdown muncul", async () => {
+    const { app, transcript, screenText } = setup()
+    const runP = app.run()
+    await tty!.ready()
+    await tty!.waitForOutput((o) => o.includes("00.00.00"))
+    transcript.pushInfo(["T0", "T1", "T2", "T3"])
+    await tty!.send("x") // repaint sinkron; info masuk lewat bus, bukan key
+    await tty!.waitForScreen((f) => f.some((l) => l.includes("T3")))
+    await tty!.send(KEY.backspace)
+    const tags = ["T0", "T1", "T2", "T3"]
+    const positions = () => tags.map((t) => tty!.screen().findIndex((l) => l.includes(t)))
+    const before = positions()
+    expect(before.every((p) => p >= 0)).toBe(true)
+
+    // Draft 8 baris logis tetap dikompres ke 2 baris composer (jendela geser).
+    await tty!.send("l0\nl1\nl2\nl3\nl4\nl5\nl6\nl7")
+    expect(screenText()).toContain("l7")
+    expect(positions()).toEqual(before)
+
+    // Dropdown '/' adalah overlay: menimpa baris bawah, bukan menambah baris.
+    await tty!.send(KEY.ctrlU)
+    await tty!.send("/")
+    expect(menuNames(screenText())).toContain("model")
+    expect(positions()).toEqual(before)
+    await tty!.send(KEY.ctrlU)
+    await tty!.send(KEY.ctrlD)
+    await runP
+  })
+
+  test("bracketed paste aktif di alt-screen, dimatikan saat cleanup (di luar frame)", async () => {
+    const { app } = setup({ columns: 60, rows: 14 })
+    const runP = app.run()
+    await tty!.ready()
+    await tty!.waitForOutput((o) => o.includes("00.00.00"))
+    const out = tty!.all()
+    const on = out.indexOf("\x1b[?2004h")
+    expect(on).toBeGreaterThanOrEqual(0)
+    // I1: sekuens ini ditulis SEBELUM frame pertama (bukan di dalam paint).
+    const firstFrame = out.indexOf("\x1b[?2026h")
+    expect(firstFrame).toBeGreaterThan(on)
+    await tty!.send(KEY.ctrlD)
+    await runP
+    const off = tty!.all().indexOf("\x1b[?2004l")
+    expect(off).toBeGreaterThan(on)
+  })
+
+  test("Ctrl+A saat prompt kosong = select-all transkrip; Ctrl+C menyalin semuanya", async () => {
+    const { app, transcript, copied } = setup({ columns: 60, rows: 14 })
+    transcript.pushInfo(["alpha-satu", "beta-dua", "gamma-tiga"])
+    const runP = app.run()
+    await tty!.ready()
+    await tty!.waitForScreen((f) => f.some((l) => l.includes("gamma-tiga")))
+
+    await tty!.send(KEY.ctrlA)
+    await tty!.send(KEY.ctrlC)
+    expect(copied).toHaveLength(1)
+    expect(copied[0]).toContain("alpha-satu")
+    expect(copied[0]).toContain("beta-dua")
+    expect(copied[0]).toContain("gamma-tiga")
+
+    // Esc tetap membersihkan seleksi: Ctrl+C berikutnya tak menyalin lagi.
+    await tty!.send(KEY.esc)
+    await tty!.send(KEY.ctrlC)
+    expect(copied).toHaveLength(1)
+    await tty!.send(KEY.ctrlD)
+    await runP
+  })
+
+  test("Ctrl+A dengan draft/menu aktif tetap berperilaku seperti Home", async () => {
+    const { app, copied, screenText } = setup({ columns: 60, rows: 14 })
+    const runP = app.run()
+    await tty!.ready()
+    await tty!.waitForOutput((o) => o.includes("00.00.00"))
+    await tty!.send("abcd")
+    await tty!.send(KEY.ctrlA) // home: caret ke awal baris
+    await tty!.send("X")
+    expect(screenText()).toContain("Xabcd")
+    await tty!.send(KEY.ctrlC) // bukan select-all → tak ada salinan
+    expect(copied).toHaveLength(0)
+    await tty!.send(KEY.ctrlU)
+    await tty!.send(KEY.ctrlD)
+    await runP
+  })
+
+  test("Ctrl+C saat drag aktif menyalin seleksi (bukan no-op/abort)", async () => {
+    const { app, transcript, copied, abortCalls } = setup({ columns: 60, rows: 14 })
+    transcript.pushInfo(["DRAG-SENTINEL"])
+    const runP = app.run()
+    await tty!.ready()
+    await tty!.waitForScreen((f) => f.some((l) => l.includes("DRAG-SENTINEL")))
+    const y = tty!.screen().findIndex((l) => l.includes("DRAG-SENTINEL")) + 1
+    expect(y).toBeGreaterThan(0)
+    await tty!.send(`\x1b[<0;6;${y}M`) // press = anchor
+    await tty!.send(`\x1b[<32;16;${y}M`) // drag = focus (belum release)
+    expect(copied).toHaveLength(0)
+    await tty!.send(KEY.ctrlC)
+    expect(copied).toHaveLength(1)
+    expect(copied[0]).toContain("SENTINE")
+    expect(abortCalls()).toBe(0)
+    await tty!.send(KEY.ctrlD)
+    await runP
+  })
+
+  test("resize 200×30 → 40×30 → 200×30: seleksi, draft panjang & dropdown tetap terpetakan", async () => {
+    const { app, transcript, copied, screenText } = setup({ columns: 200, rows: 30 })
+    transcript.pushInfo(Array.from({ length: 20 }, (_, i) => `baris-${String(i).padStart(2, "0")}`))
+    const runP = app.run()
+    await tty!.ready()
+    await tty!.waitForScreen((f) => f.some((l) => l.includes("baris-19")))
+
+    // Dropdown + draft panjang tetap hidup lintas resize (padLeft 50 → 0 → 50).
+    await tty!.send(`/mode${"l".repeat(30)}`)
+    expect(menuNames(screenText()).some((n) => n.includes("model"))).toBe(true)
+    tty!.resize(40, 30)
+    tty!.resize(200, 30)
+    expect(screenText()).toContain("/model")
+    expect(menuNames(screenText()).some((n) => n.includes("model"))).toBe(true)
+
+    // Select-all tetap utuh walau anchor dihitung ulang saat lebar berubah.
+    await tty!.send(KEY.ctrlU)
+    await tty!.send(KEY.ctrlA)
+    tty!.resize(40, 30)
+    tty!.resize(200, 30)
+    await tty!.send(KEY.ctrlC)
+    expect(copied[0]).toContain("baris-00")
+    expect(copied[0]).toContain("baris-19")
+
+    // Klik setelah resize memetakan koordinat layar ke kolom chat yang baru.
+    const y = tty!.screen().findIndex((l) => l.includes("baris-19")) + 1
+    expect(y).toBeGreaterThan(0)
+    await tty!.send(`\x1b[<0;54;${y}M`) // padLeft 50 + kolom 4 (margin 3 + 1)
+    await tty!.send(`\x1b[<32;66;${y}m`) // padLeft 50 + kolom 16 (ujung "baris-19")
+    await tty!.send(KEY.ctrlC)
+    expect(copied[1]).toContain("19")
+    await tty!.send(KEY.ctrlD)
+    await runP
+  })
+
+  test("prefix prompt adaptif ambang 38 kolom (38/40 panjang, 36 pendek)", async () => {
+    const trace = async (columns: number): Promise<string[]> => {
+      const { app } = setup({ columns, rows: 14 })
+      const runP = app.run()
+      await tty!.ready()
+      await tty!.waitForOutput((o) => o.includes("00.00.00"))
+      // Newline eksplisit memaksa prefix lanjutan (`· `) dipakai penuh,
+      // bukan jalur wrap inkremental yang mewarisi baris tanpa prefix.
+      await tty!.send(`${"a".repeat(20)}\n${"b".repeat(20)}`)
+      const lines = tty!.screen().filter((l) => l.trim().length > 0)
+      await tty!.send(KEY.ctrlU)
+      await tty!.send(KEY.ctrlD)
+      await runP
+      tty!.restore()
+      tty = null
+      return lines
+    }
+    for (const columns of [38, 40]) {
+      const lines = await trace(columns)
+      expect(lines.some((l) => l.startsWith("   minicode ›"))).toBe(true)
+      expect(lines.some((l) => l.startsWith("  · "))).toBe(true)
+    }
+    const narrow = await trace(36)
+    expect(narrow.some((l) => l.startsWith("› "))).toBe(true)
+    expect(narrow.some((l) => l.startsWith("· "))).toBe(true)
+    expect(narrow.some((l) => l.startsWith("   minicode ›"))).toBe(false)
+  })
+
+  test("klik menu tidak merusak seleksi transkrip", async () => {
+    const { app, transcript, copied, calls, screenText } = setup()
+    const runP = app.run()
+    await tty!.ready()
+    await tty!.waitForOutput((o) => o.includes("00.00.00"))
+    transcript.pushInfo(["S0", "S1", "S2", "S3", "S4"])
+    await tty!.send("x") // repaint sinkron; info masuk lewat bus, bukan key
+    await tty!.waitForScreen((f) => f.some((l) => l.includes("S4")))
+    await tty!.send(KEY.backspace)
+    await tty!.send("/")
+    expect(menuNames(screenText())).toContain("help")
+
+    // Buat seleksi transkrip pada S1..S2 SELAGI dropdown terbuka.
+    const rows = tty!.screen()
+    const s1 = rows.findIndex((l) => l.includes("S1"))
+    const s2 = rows.findIndex((l) => l.includes("S2"))
+    expect(s1).toBeGreaterThanOrEqual(0)
+    expect(s2).toBeGreaterThan(s1)
+    const endX = rows[s2]!.trimEnd().length + 1
+    await tty!.send(`\x1b[<0;4;${s1 + 1}M`)
+    await tty!.send(`\x1b[<32;${endX};${s2 + 1}M`)
+    await tty!.send(`\x1b[<0;${endX};${s2 + 1}m`)
+
+    // Klik baris "help" di menu (overlay di bawah transkrip): harus mengubah
+    // seleksi dropdown, BUKAN anchor seleksi transkrip.
+    const helpRow = tty!.screen().findIndex((l) => l.includes("help"))
+    expect(helpRow).toBeGreaterThanOrEqual(0)
+    await tty!.send(`\x1b[<0;6;${helpRow + 1}M\x1b[<0;6;${helpRow + 1}m`)
+
+    // Seleksi transkrip masih utuh → Ctrl+C menyalin S1..S2.
+    await tty!.send(KEY.ctrlC)
+    expect(copied[0]).toContain("S1")
+    expect(copied[0]).toContain("S2")
+    // Klik menu benar-benar memilih "help": Enter mengirim /help.
+    await tty!.send(KEY.enter)
+    await waitForCall(calls, "/help")
     await tty!.send(KEY.ctrlD)
     await runP
   })

@@ -852,7 +852,7 @@ describe("label.ts", () => {
       { origin: "builtin", name: "read_file", qualified: "read_file" },
       { target: `${"x".repeat(300)}\x1b[2J`, text: "" },
     )
-    expect(s.length).toBeLessThanOrEqual(201)
+    expect(s.length).toBeLessThanOrEqual(200)
     expect(s).not.toContain("\x1b")
   })
 
@@ -1136,6 +1136,52 @@ describe("phase 2 semantic state", () => {
     expect(state.conversation.length).toBeLessThanOrEqual(MAX_STATE_ENTRIES)
     expect(state.plans.size).toBeLessThanOrEqual(MAX_STATE_ENTRIES)
     expect(state.results.size).toBeLessThanOrEqual(MAX_STATE_ENTRIES)
+  })
+
+  // F-09 guard: kode eviction sengaja tidak diganti ring buffer (alasan ada di
+  // reducer.ts). Test ini mengunci invarian yang HARUS tetap jika suatu hari
+  // dioptimasi: cap, urutan marker evicted (FIFO dari depan), order index ikut
+  // dibersihkan, dan seq (durability) tidak disentuh oleh trimState.
+  test("F-09 guard: eviction array menjaga cap, urutan marker, order, dan durability", () => {
+    const state = createInitialState("s1")
+    const over = MAX_STATE_ENTRIES + 5
+    state.seq = 777 // sentinel: model.delta non-durable, trimState tak boleh mengubahnya
+    for (let i = 1; i <= over; i++) {
+      state.conversation.push({
+        kind: "message",
+        id: `m${i}`,
+        seq: i,
+        sessionId: "s1",
+        turnId: i,
+        role: "user",
+        text: `t${i}`,
+        truncated: false,
+      })
+      state.order.push({ kind: "message", id: `m${i}`, seq: i })
+    }
+
+    reduce(
+      state,
+      { eventSeq: 1, ts: 1, sessionId: "s1", turnId: 1, type: "model.delta", delta: "x" },
+      createReducerDiagnostics(),
+    )
+
+    expect(state.conversation.length).toBe(MAX_STATE_ENTRIES)
+    expect(state.conversation[0]?.id).toBe("m6")
+    expect(state.conversation[MAX_STATE_ENTRIES - 1]?.id).toBe(`m${over}`)
+    expect(state.evicted).toEqual(
+      Array.from({ length: 5 }, (_, i) => ({
+        kind: "message",
+        id: `m${i + 1}`,
+        seq: i + 1,
+        reason: "bounded",
+      })),
+    )
+    const orderIds = state.order.filter((o) => o.kind === "message").map((o) => o.id)
+    expect(orderIds).toHaveLength(MAX_STATE_ENTRIES)
+    expect(orderIds[0]).toBe("m6")
+    expect(orderIds).not.toContain("m1")
+    expect(state.seq).toBe(777)
   })
 })
 

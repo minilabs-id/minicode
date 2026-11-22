@@ -102,6 +102,22 @@ interface DisplayToken {
   escape: boolean
 }
 
+/**
+ * True bila setiap code unit adalah ASCII printable (0x20–0x7E).
+ *
+ * Jalur cepat F-06 hanya sah untuk rentang ini: di luarnya ada combining mark,
+ * CJK/emoji lebar-2, tab (8 kolom), kontrol (0 kolom), dan ESC. Semua itu
+ * harus tetap lewat `segmentGraphemes` + `graphemeWidth` supaya invariant
+ * TERMINAL_CONTRACT (lebar = kolom) tak berubah.
+ */
+function isAsciiPrintable(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const code = s.charCodeAt(i)!
+    if (code < 0x20 || code > 0x7e) return false
+  }
+  return true
+}
+
 /** Token terminal: escape utuh atau grapheme utuh dengan lebar display yang sama. */
 function* displayTokens(s: string): Generator<DisplayToken> {
   let i = 0
@@ -118,8 +134,17 @@ function* displayTokens(s: string): Generator<DisplayToken> {
     if (end < 0) end = s.length
     if (end === i) end = i + 1
     const run = s.slice(i, end)
-    for (const text of segmentGraphemes(run)) {
-      yield { text, width: graphemeWidth(text), escape: false }
+    if (isAsciiPrintable(run)) {
+      // ASCII printable = satu kolom per code unit: tak perlu Intl.Segmenter,
+      // tak perlu regex graphemeWidth. Token per karakter tetap dipertahankan
+      // agar batas potong di truncate/chunk identik dengan jalur lambat.
+      for (let j = 0; j < run.length; j++) {
+        yield { text: run[j]!, width: 1, escape: false }
+      }
+    } else {
+      for (const text of segmentGraphemes(run)) {
+        yield { text, width: graphemeWidth(text), escape: false }
+      }
     }
     i = end
   }
@@ -159,6 +184,11 @@ export function charWidth(cp: number): number {
  * dua kolom per grapheme. Lebar glyph spesifik terminal tidak diprobe.
  */
 export function displayWidth(s: string): number {
+  // Jalur cepat F-06: ASCII printable murni tanpa escape tak punya grapheme
+  // majemuk, combining mark, atau glyph lebar-2 — lebar = jumlah code unit.
+  // Menghindari generator + Intl.Segmenter sekaligus untuk teks yang justru
+  // dominan di TUI (label tool, path berkas, angka, prosa ASCII).
+  if (s.indexOf("\x1b") === -1 && isAsciiPrintable(s)) return s.length
   let w = 0
   for (const token of displayTokens(s)) if (!token.escape) w += token.width
   return w
@@ -305,11 +335,26 @@ function hasNonSgrEscape(s: string): boolean {
  */
 export function truncateToWidth(s: string, width: number, ellipsis = "..."): string {
   if (width <= 0) return ""
+  // ASCII printable murni yang sudah muat: lebar = jumlah code unit, tak ada
+  // escape untuk ditutup — langsung kembali tanpa mengalokasikan token sama sekali.
+  if (s.indexOf("\x1b") === -1 && isAsciiPrintable(s) && s.length <= width) return s
+
+  // SATU lintasan (F-06): kumpulkan token sekali, hitung lebar visible dari
+  // token yang SAMA, lalu pakai ulang untuk pemotongan. Dulu `displayWidth(s)`
+  // memindai seluruh string, setelah itu loop `displayTokens(s)` memindainya
+  // lagi — dua kali Intl.Segmenter untuk teks non-ASCII.
+  const tokens: DisplayToken[] = []
+  let total = 0
+  for (const token of displayTokens(s)) {
+    tokens.push(token)
+    if (!token.escape) total += token.width
+  }
+
   // Muat tanpa potong DAN tanpa escape asing: tetap tutup SGR yang terbuka
   // agar tak bleed ke chrome berikut (dulu early-return membocorkan warna).
   // Bila ada non-SGR, jatuh ke loop filter di bawah (tanpa ellipsis bila
   // akhirnya tak ada yang dipotong).
-  if (displayWidth(s) <= width && !hasNonSgrEscape(s)) {
+  if (total <= width && !hasNonSgrEscape(s)) {
     return sgrLeftOpen(s) ? `${s}\x1b[0m` : s
   }
 
@@ -319,7 +364,7 @@ export function truncateToWidth(s: string, width: number, ellipsis = "..."): str
   let w = 0
   let sawSgr = false
   let cut = false
-  for (const token of displayTokens(s)) {
+  for (const token of tokens) {
     if (token.escape) {
       // Hanya SGR yang disalin — sekuens kontrol lain (clear, alternate
       // screen, OSC) DIBUANG di sini agar satu pemanggil yang lupa sanitasi

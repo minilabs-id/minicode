@@ -409,7 +409,8 @@ test("decodeKey: home/end/delete dalam bentuk CSI dan VT", () => {
     ["\x1b[3~", "delete"],
     ["\x1b[5~", "pageup"],
     ["\x1b[6~", "pagedown"],
-    ["\x01", "home"],
+    // Ctrl+A (0x01) sekarang select-all, BUKAN home. Home di bawah lewat ESC.
+    ["\x01", "selectAll"],
     ["\x05", "end"],
   ]
   for (const [seq, type] of seqs) {
@@ -541,7 +542,7 @@ test("decodeKey: Ctrl+N punya tipe sendiri (tambah model)", () => {
 
 test("decodeKey: kontrol yang PUNYA arti tetap dipetakan", () => {
   const dikenal: [number, PromptKey["type"]][] = [
-    [0x01, "home"],
+    [0x01, "selectAll"],
     [0x03, "ctrl-c"],
     [0x04, "ctrl-d"],
     [0x05, "end"],
@@ -757,4 +758,53 @@ test("bracketed paste tanpa terminator berhenti di batas ukuran tanpa mengunci i
   expect(keys.length).toBe(1)
   expect(keys[0]?.key.type).toBe("char")
   expect(st.pending.length).toBe(0)
+})
+
+// ── Ctrl+A = selectAll, Ctrl+V = ignore, bracketed paste ────────────────────
+
+test("Ctrl+A (0x01) jadi selectAll, bukan home — home lewat Escape-sequence", () => {
+  expect(decodeKeys(new Uint8Array([0x01])).map((d) => d.key.type)).toEqual(["selectAll"])
+  expect(
+    decodeKeysStream(new Uint8Array([0x01]), createDecoderState()).map((d) => d.key.type),
+  ).toEqual(["selectAll"])
+  // Home/End tetap bisa lewat escape sequence (VT/CSI).
+  expect(decodeKeys(new TextEncoder().encode("\x1b[H")).map((d) => d.key.type)).toEqual(["home"])
+  expect(decodeKeys(new TextEncoder().encode("\x1b[1~")).map((d) => d.key.type)).toEqual(["home"])
+  expect(decodeKeys(new TextEncoder().encode("\x1b[F")).map((d) => d.key.type)).toEqual(["end"])
+  // Di prompt teks selectAll = no-op (seleksi dipakai host TUI app.ts).
+  const s = typeAll("abcdef")
+  const r = applyKey(s, { type: "selectAll" }, hints)
+  expect(r.action).toBe("none")
+  expect(r.state).toEqual(s)
+})
+
+test("Ctrl+V (0x16) = ignore (paste lewat terminal), bukan submit dan tak crash", () => {
+  const k = decodeKeys(new Uint8Array([0x16]))
+  expect(k.map((d) => d.key.type)).toEqual(["ignore"])
+  const s = typeAll("teks")
+  const r = applyKey(s, k[0]!.key, hints)
+  expect(r.action).toBe("none")
+  expect(r.state.line).toBe("teks")
+  const mixed = decodeKeys(new TextEncoder().encode("a\u0016b"))
+  expect(mixed.map((d) => d.key.type)).toEqual(["char", "ignore", "char"])
+})
+
+test("bracketed paste dua baris dengan \\r tak menambah submit bertingkat", () => {
+  const payload = "\x1b[200~baris1\rbaris2\x1b[201~"
+  const enc = new TextEncoder()
+  // Jalur streaming (dipakai view sungguhan): satu char, TANPA `enter`.
+  const st = createDecoderState()
+  const keys = decodeKeysStream(enc.encode(payload), st)
+  expect(keys.map((d) => d.key.type)).toEqual(["char"])
+  expect(keys[0]!.key).toEqual({ type: "char", ch: "baris1\rbaris2" })
+  expect(keys.some((d) => d.key.type === "enter")).toBe(false)
+  // decodeKeys sekali chunk (harness) konsisten.
+  expect(decodeKeys(enc.encode(payload)).map((d) => d.key.type)).toEqual(["char"])
+  // applyKey menggepeng \r jadi \n dan TAK submit — baris tetap multi-baris.
+  const r = applyKey(createState(), keys[0]!.key, hints)
+  expect(r.action).toBe("render")
+  expect(r.state.line).toBe("baris1\nbaris2")
+  // Enter sungguhan SESUDAH paste tetap satu submit.
+  const withEnter = decodeKeysStream(enc.encode(`${payload}\r`), createDecoderState())
+  expect(withEnter.map((d) => d.key.type)).toEqual(["char", "enter"])
 })

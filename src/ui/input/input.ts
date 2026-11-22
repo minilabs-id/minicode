@@ -198,6 +198,7 @@ export async function askLine(opts: AskLineOptions = {}): Promise<string | null>
     // askLine berikutnya memasang listener kedua → MaxListenersExceeded).
     const decoder: DecoderState = createDecoderState()
     let done = false
+    let bracketedPasteOn = false
     let onData!: (chunk: Buffer) => void
     let idleTimer: ReturnType<typeof setTimeout> | undefined
     const clearIdle = () => {
@@ -214,6 +215,9 @@ export async function askLine(opts: AskLineOptions = {}): Promise<string | null>
       try {
         pump.dispose()
       } catch {}
+      // Matikan bracketed paste memakai writer yang SAMA dengan output prompt
+      // (process.stdout), di semua jalur selesai (submit/batal/error).
+      if (bracketedPasteOn) process.stdout.write("\x1b[?2004l")
       try {
         process.stdin.setRawMode(false)
       } catch {}
@@ -251,6 +255,12 @@ export async function askLine(opts: AskLineOptions = {}): Promise<string | null>
       reject(e)
       return
     }
+    // Bracketed paste: terminal membungkus paste dengan ESC[200~ … ESC[201~,
+    // sehingga CR di tengah paste tak dibaca sebagai submit bertingkat.
+    // Decoder prompt-engine sudah menerima sekuens ini; aktifkan sejak prompt
+    // mulai dan matikan di cleanup (writer = process.stdout, sama dgn output).
+    process.stdout.write("\x1b[?2004h")
+    bracketedPasteOn = true
 
     let state = createState()
     let prevRows = 0 // jumlah baris dropdown yang tergambar (untuk clear)
@@ -781,6 +791,7 @@ export async function askSecret(
     const endScreen = beginInteractiveScreen()
     const decoder: DecoderState = createDecoderState()
     let done = false
+    let bracketedPasteOn = false
     let onData!: (chunk: Buffer) => void
     let idleTimer: ReturnType<typeof setTimeout> | undefined
     const clearIdle = () => {
@@ -794,6 +805,8 @@ export async function askSecret(
       try {
         secretPump.dispose()
       } catch {}
+      // Sama seperti askLine — matikan bracketed paste via writer output.
+      if (bracketedPasteOn) process.stdout.write("\x1b[?2004l")
       try {
         process.stdin.setRawMode(false)
       } catch {}
@@ -907,6 +920,10 @@ export async function askSecret(
       fail(e)
       return
     }
+    // Bracketed paste untuk prompt rahasia juga — payload API key dengan CR
+    // tak boleh memicu submit bertingkat. Writer sama dengan output (stdout).
+    process.stdout.write("\x1b[?2004h")
+    bracketedPasteOn = true
     process.stdin.on("data", onData)
     resetIdle()
   })

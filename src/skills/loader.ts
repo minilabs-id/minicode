@@ -199,7 +199,11 @@ export function invalidateSkillCache(): void {
 }
 
 export async function renderSkill(skill: Skill, args: string): Promise<string> {
-  return skill.body.replace(/\{\{args\}\}/g, args).replace(/\$ARGUMENTS/g, args)
+  // Argumen user = data, bukan pola replacement. Replacer string membuat
+  // `$&`, `` $` ``, `$'` dan `$1` di-artikan ulang oleh String.replace
+  // (menggantikan seluruh kecocokan / menyisipkan grup tangkapan), sehingga
+  // prompt skill bisa berubah diam-diam. Fungsi replacer memaksa literal.
+  return skill.body.replace(/\{\{args\}\}/g, () => args).replace(/\$ARGUMENTS/g, () => args)
 }
 
 export async function findSkill(

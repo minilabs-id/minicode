@@ -42,6 +42,41 @@ describe("audit F3/F5/F7: kontrak terminal jujur", () => {
     expect(contract).toMatch(/Aturan presedensi:/m)
   })
 
+  test("entri v0.36 adalah entri teratas dan mengalahkan v0.35/v0.34", () => {
+    // Aturan "entri teratas menang" hanya berlaku bila entri baru benar-benar
+    // ada DI ATAS arsip. Tanpa guard ini, memindahkan blok v0.36 ke bawah
+    // diam-diam mengembalikan geometri composer/menu lama tanpa test merah.
+    expect(contract).toMatch(/^## Perubahan v0\.36/m)
+    expect(contract).toMatch(/^## Perubahan v0\.35/m)
+    expect(contract.indexOf("## Perubahan v0.36")).toBeLessThan(
+      contract.indexOf("## Perubahan v0.35"),
+    )
+    expect(contract.indexOf("## Perubahan v0.35")).toBeLessThan(
+      contract.indexOf("## Perubahan v0.34"),
+    )
+  })
+
+  test("entri v0.37 adalah entri teratas dan mengalahkan v0.36", () => {
+    // Sama seperti guard v0.36: tanpa ini, memindahkan/menghapus blok v0.37
+    // membuat aturan "entri teratas menang" diam-diam kembali ke perilaku lama.
+    expect(contract).toMatch(/^## Perubahan v0\.37/m)
+    expect(contract).toMatch(/^## Perubahan v0\.36/m)
+    expect(contract.indexOf("## Perubahan v0.37")).toBeLessThan(
+      contract.indexOf("## Perubahan v0.36"),
+    )
+  })
+
+  test("versi package.json sinkron dengan entri teratas CHANGELOG", () => {
+    // `--version` membaca package.json; bila CHANGELOG sudah menulis entri
+    // rilis baru tanpa bump versi, CLI self-report ikut tertinggal diam-diam.
+    const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as {
+      version: string
+    }
+    const changelog = readFileSync(join(ROOT, "CHANGELOG.md"), "utf8")
+    const top = /^##\s+\[([^\]]+)\]/m.exec(changelog)
+    expect(top?.[1]).toBe(pkg.version)
+  })
+
   test("peta proteksi zero-state: KOSONG tanpa logo (bukan 'logo+hint')", () => {
     // tui-app.test.ts:1413 menegaskan transkrip awal KOSONG.
     expect(contract).not.toMatch(/zero-state\s+logo\s*\+\s*hint/i)

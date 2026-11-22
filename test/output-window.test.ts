@@ -2,7 +2,9 @@
 // judul + hint seragam, bisa scroll, dan fail-closed (false) di non-TTY agar
 // pemanggil fallback ke transkrip.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { MAX_CLIPBOARD_BYTES } from "../src/ui/assistant/simple.ts"
 import { resetLocaleState, setSessionLocale } from "../src/ui/i18n/locale.ts"
+import { tSystem } from "../src/ui/render/tool-label.ts"
 import { resetAltScreenDepth } from "../src/ui/runtime/screen.ts"
 import { outputWindowWidth, runOutputWindow } from "../src/ui/screens/output-window.ts"
 import { installFakeTty, KEY } from "./helpers/tui-harness.ts"
@@ -73,8 +75,29 @@ describe("runOutputWindow", () => {
     await tty.ready()
     await tty.waitForScreen((f) => f.some((l) => l.includes("c copy")))
     await tty.send("c")
-    await tty.waitForScreen((f) => f.some((l) => l.includes("selection copied")))
+    await tty.waitForScreen((f) => f.some((l) => l.includes(tSystem("msg.copied"))))
     expect(copied).toBe("  Model: test-a\n  Context: 12k")
+    await tty.send(KEY.esc, 90)
+    expect(await p).toBe(true)
+  })
+
+  test("payload besar: c menolak salin (guard byte sama dengan /copy) + pesan tooLarge", async () => {
+    tty = installFakeTty({ columns: 90, rows: 24 })
+    let called = false
+    const p = runOutputWindow({
+      title: "Big",
+      lines: ["x".repeat(MAX_CLIPBOARD_BYTES + 1)],
+      onCopy: () => {
+        called = true
+        return true
+      },
+    })
+    await tty.ready()
+    await tty.waitForScreen((f) => f.some((l) => l.includes("c copy")))
+    await tty.send("c")
+    await tty.waitForScreen((f) => f.some((l) => l.includes(tSystem("msg.copyTooLarge"))))
+    // Callback TAK dipanggil sama sekali, bukan sekadar gagal "butuh TTY".
+    expect(called).toBe(false)
     await tty.send(KEY.esc, 90)
     expect(await p).toBe(true)
   })

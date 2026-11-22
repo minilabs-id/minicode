@@ -45,6 +45,7 @@ import { renderLogoRows } from "../src/ui/render/logo.ts"
 import { formatUsd } from "../src/ui/render/money.ts"
 import { sanitizeAnsiLine } from "../src/ui/render/sanitize.ts"
 import { c, glyphs } from "../src/ui/render/theme.ts"
+import { tSystem } from "../src/ui/render/tool-label.ts"
 import { canRenderModal, dialogBox, popupBoxWidth } from "../src/ui/screens/dialog.ts"
 import { runOutputWindow } from "../src/ui/screens/output-window.ts"
 // [Area A · PROMPT 06] State UI milik SESI ini. TUI + printer linier sesi yang
@@ -78,8 +79,9 @@ const WORK_MODE_CYCLE = ["DISCUSS", "EXECUTE"] as const
 // Aksi view yang benar-benar punya efek di renderer flat. compact/minimize/fold
 // dihapus: mengubah flag-flag itu tak mengubah satu sel pun di layar (hanya
 // menghasilkan kwitansi palsu), jadi jangan ditawarkan lagi di picker /view.
-// v0.33: `/expand` dihapus — seluruh riwayat thinking & aktivitas kini ada
-// di sidebar dan bisa digulir dengan mouse.
+// `/expand` sengaja tak ada lagi: renderer flat tak punya mode expand. Yang
+// tersisa, `/view thinking`, mengubah visibilitas reasoning inline di transkrip
+// (bukan panel/sidebar terpisah) lewat `tui.thinkingSet`.
 const VIEW_ACTIONS = ["thinking"] as const
 const DRIVER_COMMANDS = ["/view", "/mode", "/lang", "/clear", "/copy", "/undo", "/redo"]
 
@@ -567,6 +569,104 @@ function readTuiVersion(): string {
 }
 
 /**
+ * F-01/F-05: accessor ringan untuk token konteks. `session.state` adalah
+ * `snapshotState` = deep clone SELURUH riwayat — dibaca HANYA SEKALI di sini
+ * (saat setup). Setelah itu counter turn dipakai sebagai kunci cache dan
+ * diperbarui dari event turn, sehingga `getContextTokens()`/`getStatus()` tidak
+ * pernah menyentuh `session.state` lagi (termasuk pada ketikan idle).
+ *
+ * `session.contextTokens` (getter angka murah) dibaca HANYA saat cache miss —
+ * satu kali per turn, bukan dua kali per paint.
+ */
+export interface ContextTokenSession {
+  /** Snapshot penuh. Dipakai sekali untuk inisialisasi counter, lalu ditinggalkan. */
+  readonly state?: { readonly turnCount?: number } | undefined
+  /** Getter angka murah (tanpa snapshot history). */
+  readonly contextTokens: number
+}
+
+/** Bus minimal yang dibutuhkan tracker (struktural, cocok dengan UiBus/EventBus). */
+export interface ContextTokenBus {
+  on(type: string, handler: (event: any) => void): () => void
+}
+
+export interface ContextTokenTracker {
+  getContextTokens(): number
+  getTurnCount(): number
+  /** Buang angka live saat turn gagal/abort tanpa `turn:interrupted` dari kernel. */
+  invalidate(): void
+  dispose(): void
+}
+
+export function createContextTokenTracker(
+  session: ContextTokenSession,
+  bus: ContextTokenBus,
+): ContextTokenTracker {
+  // Inisialisasi SATU-SATUNYA pembacaan `session.state` (deep clone sekali).
+  // Fixture test parsial boleh tanpa `state` → counter mulai dari 0.
+  let turnCount = 0
+  try {
+    turnCount = session.state?.turnCount ?? 0
+  } catch {}
+
+  let cachedContext: { turn: number; tokens: number } | null = null
+  let liveContextTokens: number | undefined
+  const unsubs: Array<() => void> = []
+
+  const subscribe = (name: string, handler: (event: any) => void): void => {
+    try {
+      const off = bus.on(name, handler)
+      if (typeof off === "function") unsubs.push(off)
+    } catch {}
+  }
+  const resetCache = (): void => {
+    liveContextTokens = undefined
+    cachedContext = null
+  }
+
+  // Nilai per-step dari kernel; O(1) dan menang saat turn berjalan.
+  subscribe("provider:extension", (event: any) => {
+    if (event?.forwardedChild != null) return
+    if (event?.kind !== "context-window") return
+    const data = event.data as { usedTokens?: unknown } | undefined
+    if (typeof data?.usedTokens === "number") liveContextTokens = data.usedTokens
+  })
+
+  subscribe("turn:started", (event: any) => {
+    // Kernel meng-emit turn SEBELUM increment: `turn = state.turnCount;
+    // emit(turn); state.turnCount++` (loop.ts). Jadi turnCount baru = turn + 1.
+    // `Math.max` menjaga counter tak mundur bila event duplikat/warisan tiba.
+    turnCount =
+      typeof event?.turn === "number" ? Math.max(turnCount, event.turn + 1) : turnCount + 1
+    resetCache()
+  })
+  for (const name of ["turn:completed", "turn:interrupted", "context:compacted"]) {
+    subscribe(name, () => resetCache())
+  }
+
+  return {
+    getContextTokens(): number {
+      // Urutan penting: live → counter LOKAL → cache → session.contextTokens
+      // (hanya saat miss). TIDAK ada `session.state` di jalur ini.
+      if (liveContextTokens !== undefined) return liveContextTokens
+      if (!cachedContext || cachedContext.turn !== turnCount) {
+        cachedContext = { turn: turnCount, tokens: session.contextTokens }
+      }
+      return cachedContext.tokens
+    },
+    getTurnCount: () => turnCount,
+    invalidate: resetCache,
+    dispose() {
+      for (const off of unsubs.splice(0)) {
+        try {
+          off()
+        } catch {}
+      }
+    },
+  }
+}
+
+/**
  * Kumpulkan statistik secara read-only & fail-jujur: data yang tak tersedia
  * jadi 0 / `$—`, bukan angka rekaan. Ditulis SETelah alt-screen ditutup dan
  * `close()` selesai supaya blok persisten & bisa disalin dari scrollback.
@@ -575,7 +675,7 @@ async function writeSessionSummary(
   ctx: CliSession,
   startedAt: number,
   write: (s: string) => void,
-  extra: { model?: string; mode?: string } = {},
+  extra: { model?: string; mode?: string; turns?: number } = {},
 ): Promise<void> {
   if (process.env.MINICODE_SESSION_SUMMARY === "0") return
   let turns = 0
@@ -588,9 +688,9 @@ async function writeSessionSummary(
   let agents = 0
   let inputTokens: number | undefined
   let outputTokens: number | undefined
-  try {
-    turns = (ctx.session.state as { turnCount?: number } | undefined)?.turnCount ?? 0
-  } catch {}
+  // F-01: counter diambil dari tracker (sudah diinisialisasi sekali), bukan
+  // dari `ctx.session.state` yang melakukan deep clone riwayat penuh.
+  turns = extra.turns ?? 0
   try {
     const activities = ctx.getPresentationSnapshot?.().activities ?? []
     tools = activities.length
@@ -744,64 +844,15 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
   const countLiveBackgroundJobs = (): number =>
     listBackgroundJobs().reduce((n, j) => (j.done ? n : n + 1), 0)
 
-  // Fase 1 perf (butir 2b): `session.contextTokens` adalah getter O(history)
-  // (estimateMessages mengiterasi SELURUH store + estimator per pesan). Footer
-  // membacanya tiap paint/ketikan — untuk chat panjang ini pengulangan token
-  // estimation penuh per ketikan. Committed store hanya berubah saat turn
-  // selesai (turnCount naik), jadi cache keyed turnCount aman + output-identik.
-  let cachedContext: { turn: number; tokens: number } | null = null
-  // Item 16 (live context): nilai per-step yang di-emit kernel (loop.ts, event
-  // `provider:extension` kind `context-window`). Saat turn berjalan nilainya
-  // O(1) dan terus diperbarui tiap step; direset di batas turn agar idle
-  // kembali ke nilai committed.
-  let liveContextTokens: number | undefined
-  const liveContextUnsubs: (() => void)[] = []
-  const uiBus = session.events as unknown as UiBus
-  try {
-    liveContextUnsubs.push(
-      uiBus.on(
-        "provider:extension",
-        (e: { kind?: unknown; data?: unknown; forwardedChild?: unknown }) => {
-          if (e?.forwardedChild != null) return
-          if (e?.kind !== "context-window") return
-          const d = e.data as { usedTokens?: unknown } | undefined
-          if (typeof d?.usedTokens === "number") liveContextTokens = d.usedTokens
-        },
-      ),
-    )
-  } catch {}
-  for (const evName of ["turn:started", "turn:completed", "context:compacted"] as const) {
-    try {
-      liveContextUnsubs.push(
-        uiBus.on(evName, () => {
-          liveContextTokens = undefined
-          cachedContext = null
-        }),
-      )
-    } catch {}
-  }
-  try {
-    // Kernel memancarkan `turn:interrupted` saat abort/error meski tidak ada di subset UiBus.
-    const unsubInterrupted = (
-      session.events as unknown as { on?: (t: string, fn: () => void) => () => void }
-    ).on?.("turn:interrupted", () => {
-      liveContextTokens = undefined
-      cachedContext = null
-    })
-    if (typeof unsubInterrupted === "function") liveContextUnsubs.push(unsubInterrupted)
-  } catch {}
-  const getContextTokens = (): number => {
-    // Live (per-step) menang saat turn berjalan; idle → committed (cache).
-    if (liveContextTokens !== undefined) return liveContextTokens
-    // Beberapa fixture test menyediakan `session` parsial (tanpa `state`): tanpa
-    // sinyal turn yang andal, baca langsung seperti perilaku lama.
-    const turn = (session.state as { turnCount?: number } | undefined)?.turnCount
-    if (turn === undefined) return session.contextTokens
-    if (!cachedContext || cachedContext.turn !== turn) {
-      cachedContext = { turn, tokens: session.contextTokens }
-    }
-    return cachedContext.tokens
-  }
+  // F-01/F-05: `session.state` adalah deep clone penuh riwayat. Tracker
+  // mengambilnya SEKALI saat setup, lalu memakai counter turn dari event dan
+  // cache per turn. `getContextTokens()` (dipakai 2× oleh getStatus per paint)
+  // kini tidak pernah menyentuh snapshot history — termasuk saat idle/mengetik.
+  const contextTokens = createContextTokenTracker(
+    session as unknown as ContextTokenSession,
+    session.events as unknown as ContextTokenBus,
+  )
+  const getContextTokens = contextTokens.getContextTokens
 
   // Bahasa UI: state.json (sesi bisa menimpa via /lang). Gagal baca = default.
   const { setConfigLocale } = await import("../src/ui/i18n/locale.ts")
@@ -812,11 +863,7 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
 
   // Kebijakan proyeksi kanonik di-inject di sini (batas lapisan: src/ui
   // tidak boleh impor src/presentation).
-  // v0.33: SATU model sidebar dipakai Transcript (pengisi) & App (gulir).
-  const { SidebarModel } = await import("../src/ui/render/sidebar-model.ts")
-  const sidebarModel = new SidebarModel()
   const transcript = new Transcript(session.events as unknown as UiBus, {
-    sidebarModel,
     getSnapshot: getPresentationSnapshot,
     onPresentationEvent: ctx.onPresentationEvent,
     // [Area A · PROMPT 06] State sesi yang sama dengan printer linier.
@@ -842,8 +889,8 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
     transcript.pushInfo(ctx.startupNotices)
   }
   try {
-    const turnCount = (session.state as { turnCount?: number } | undefined)?.turnCount ?? 0
-    if (turnCount > 0) {
+    // Pakai counter dari tracker (sudah diinisialisasi dari session.state sekali).
+    if (contextTokens.getTurnCount() > 0) {
       const { loadPresentationEvents } = await import("../src/session/persistence.ts")
       const { toPresentationEvent } = await import("./setup.ts")
       const durable = await loadPresentationEvents(sessionId, cwd)
@@ -960,27 +1007,6 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
       return budgetStatus(budget, u.cost, budgetStrict ?? false, u.totalTokens)
     },
   }
-
-  // [PHASE 6AB] Live scheduler notices -> transcript as SYSTEM entries.
-  //
-  // [DESIGN DECISION] `pushInfo` appends with `kind: "system"`, which is a
-  // distinct transcript kind from `user`/`assistant`/`activity`/`approval`. That
-  // is exactly the separation §8 asks for: a scheduler lifecycle line is NOT a
-  // user turn, NOT assistant prose, and NOT tool output. Nothing here synthesises
-  // a model message, and no tool result is duplicated — these lines originate in
-  // `Scheduler.emit`/`TriggerCoordinator.emit` and are passed through verbatim.
-  //
-  // [DESIGN DECISION] Attached HERE, after the Transcript exists, rather than in
-  // `createCliSession`. See `SchedulerObservability.onSchedulerNotice`: anything
-  // emitted before this line still reaches `/scheduler status` through the bounded
-  // log, so the delay loses no information.
-  //
-  // [DESIGN DECISION] Guarded. `runTui` is also driven by test fixtures that build
-  // a partial CliSession, and a projection that is absent must degrade to "no live
-  // notices" rather than take the whole TUI down on the first scheduler event.
-  schedulerObservability?.onSchedulerNotice((line) =>
-    sidebarModel.ingestActivity(`[scheduler] ${line}`),
-  )
 
   const suggestions = (line: string): string[] => {
     if (!line.startsWith("/")) return []
@@ -1229,7 +1255,7 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
       return
     }
     if (preStatus === "unknown-strict") {
-      transcript.pushError(t("tui.budgetUnknown", { tokens: spent.totalTokens }))
+      transcript.pushError(tSystem("tui.budgetUnknown", { tokens: spent.totalTokens }))
       return
     }
     let finalPrompt = prompt
@@ -1257,18 +1283,22 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
       try {
         await runPromptWithVerify(finalPrompt, ctrl.signal)
         // v7.30: kwitansi abort/antrean/budget = status UI, bukan giliran bicara.
-        if (ctrl.signal.aborted) app.showToast(t("tui.stopped"))
+        if (ctrl.signal.aborted) app.showToast(tSystem("tui.stopped"))
       } catch (error) {
         // v7.31: abort user melempar `AgentError(aborted)` dari decideTurnResume.
         // Tanpa penanganan di sini, rejection sampai ke doSubmit.catch yang
         // menulis error permanen ke transkrip — dan toast "stopped" di atas tak
         // pernah tercapai. Abort = status UI, bukan giliran bicara.
         if (ctrl.signal.aborted || (error as { kind?: string })?.kind === "aborted") {
-          app.showToast(t("tui.stopped"))
+          app.showToast(tSystem("tui.stopped"))
         } else {
           throw error
         }
       } finally {
+        // Kernel hanya emit `turn:interrupted` bila ada partial commit. Abort/error
+        // sebelum step boundary tak memancarkan event itu → angka live dari turn
+        // yang di-rollback harus dibuang di sini, bukan dipakai saat idle.
+        contextTokens.invalidate()
         // v7.41: turn rekap berakhir — lepas kunci anti-loop sebelum batas fire.
         childRecap.setInRecapTurn(false)
         // Abort membatalkan NIAT user: pesan yang sempat diantrikan tak boleh
@@ -1281,7 +1311,7 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
             .filter((q) => q.needsEcho).length
           const droppedSteered = steeredEchoes.splice(0).length
           const dropped = droppedQueued + droppedSteered
-          if (dropped > 0) app.showToast(t("tui.queueDropped", { n: String(dropped) }))
+          if (dropped > 0) app.showToast(tSystem("tui.queueDropped", { n: String(dropped) }))
           // v7.41 (audit): anak di-abort mengirim STRING error via tool.completed.
           // Ringkasan yang sudah terkumpul di turn ini WAJIB dibuang, kalau tidak
           // turn bersih berikutnya mengutipnya seolah hasil asli. Ini TIDAK
@@ -1293,7 +1323,10 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
       const u = usage.get(modelRef.current)
       await persistCurrent(u)
       // P2.2: histori yang tak durable = error transkrip eksplisit (bukan diam).
-      if (ctx.isWriterStale()) transcript.pushError(`[writer] ${ctx.writerStaleNote()}`)
+      // Detail teknis (epoch/bootId/catatan) tetap di jurnal & log; layar hanya
+      // pesan pendek bahasa sistem — bukan prefix teknis yang tak berarti
+      // bagi user. Lihat test/tui-lang.test.ts (P03-B).
+      if (ctx.isWriterStale()) transcript.pushError(tSystem("msg.staleWriter"))
       usage.reset()
       const sess = usage.getSession(modelRef.current)
       if (
@@ -1304,7 +1337,9 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
         !warned80
       ) {
         warned80 = true
-        app.showToast(t("tui.budget80", { spent: formatUsd(sess.cost), budget: formatUsd(budget) }))
+        app.showToast(
+          tSystem("tui.budget80", { spent: formatUsd(sess.cost), budget: formatUsd(budget) }),
+        )
       }
 
       // v7.41: BATAS FIRE — badan turn sudah tuntas, UI idle, antrean user kosong.
@@ -1333,7 +1368,9 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
       // Audit #3: notifikasi job yang ditunda saat turn sibuk kini aman
       // dikeluarkan — streaming sudah selesai, tak ada fence untuk dipecah.
       const deferred = bgNotices.drain()
-      for (const line of deferred) sidebarModel.ingestActivity(line)
+      // Notifikasi job yang ditunda tampil sebagai SATU micro-toast di footer.
+      // Bukan entri transkrip: pushInfo memaksa commit & memecah fence streaming.
+      if (deferred.length) app.showToast(deferred.join(" · "))
       // Batch 3 #3: job yang selesai saat turn aktif TIDAK ditandai resumed di
       // handler. Di sini antrean dikuras ke `queuedPrompts` — BUKAN `runTurn`
       // langsung — supaya loop yang sedang berjalan yang mengambilnya (anti
@@ -1408,20 +1445,20 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
     // v7.30: semua kwitansi /copy adalah urusan UI, bukan percakapan —
     // tampil di footer (toast) supaya histori transkrip tetap murni dialog.
     if (!txt) {
-      app.showToast(t("tui.copyNone"))
+      app.showToast(tSystem("tui.copyNone"))
       return
     }
     // Guard byte SEBELUM base64: 10 turn panjang bisa melewati batas OSC 52;
     // memberi pesan spesifik lebih baik daripada gagal "butuh TTY" yang keliru.
     const bytes = clipboardByteLength(txt)
     if (bytes > MAX_CLIPBOARD_BYTES) {
-      app.showToast(t("tui.copyTooLarge", { n: bytes, max: MAX_CLIPBOARD_BYTES }))
+      app.showToast(tSystem("tui.copyTooLarge", { n: bytes, max: MAX_CLIPBOARD_BYTES }))
       return
     }
     if (writeClipboardOsc52(txt)) {
       const key = turns.length > 1 ? "tui.copyOkMany" : "tui.copyOk"
-      app.showToast(t(key, { n: txt.length, turns: turns.length }))
-    } else app.showToast(t("tui.copyNeedTty"))
+      app.showToast(tSystem(key, { n: txt.length, turns: turns.length }))
+    } else app.showToast(tSystem("tui.copyNeedTty"))
   }
 
   async function submit(line: string): Promise<{ quit?: boolean } | undefined> {
@@ -1459,7 +1496,7 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
       const nextWork = parseWorkModeValue(args)
       if (nextWork) {
         if (!workModeControl) {
-          app.showToast(t("tui.workModeUnavailable"))
+          app.showToast(tSystem("tui.workModeUnavailable"))
           return
         }
         workModeControl.setWorkMode(nextWork)
@@ -1468,12 +1505,12 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
         // dan mengulang informasi yang sudah terlihat (histori tetap dialog).
       } else if ((PERMISSION_MODES as readonly string[]).includes(args.toLowerCase())) {
         if (!permissions) {
-          app.showToast(t("tui.permissionUnavailable"))
+          app.showToast(tSystem("tui.permissionUnavailable"))
           return
         }
         setPermissionAxis(args.toLowerCase() as (typeof PERMISSION_MODES)[number])
       } else {
-        app.showToast(t("tui.unknownMode", { a: args, modes: "DISCUSS, BUILD, AUTO, ASK" }))
+        app.showToast(tSystem("tui.unknownMode", { a: args, modes: "DISCUSS, BUILD, AUTO, ASK" }))
         return
       }
       app.repaint()
@@ -1486,7 +1523,7 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
       const parsed = parseToggleArg(args)
       if (parsed === "invalid") {
         // v7.30: kwitansi toggle = status UI, bukan percakapan (footer/toast).
-        app.showToast(t("tui.unrestrictedUsage"))
+        app.showToast(tSystem("tui.unrestrictedUsage"))
         return
       }
       const next = parsed === undefined ? mode !== "unrestricted" : parsed
@@ -1500,11 +1537,11 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
         // WorkMode EXECUTE (BUILD) agar ceiling DISCUSS tak menahan tulis.
         workModeControl?.setWorkMode("EXECUTE")
         app.repaint()
-        app.showToast(`${glyphs.unlock} ${t("tui.unrestrictedOn")}`)
+        app.showToast(`${glyphs.unlock} ${tSystem("tui.unrestrictedOn")}`)
         return
       }
       if (mode !== "unrestricted") {
-        app.showToast(`${glyphs.lock} ${t("tui.unrestrictedOff", { m: mode })}`)
+        app.showToast(`${glyphs.lock} ${tSystem("tui.unrestrictedOff", { m: mode })}`)
         return
       }
       mode = modeBeforeUnrestricted ?? "auto"
@@ -1522,12 +1559,12 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
       const { currentLocale, setSessionLocale } = await import("../src/ui/i18n/locale.ts")
       if (!args) {
         // v7.30: readout/pesan /lang = kwitansi UI — footer (toast), bukan transkrip.
-        app.showToast(t("tui.langLine", { v: `${currentLocale()} (en|id)` }))
+        app.showToast(tSystem("tui.langLine", { v: `${currentLocale()} (en|id)` }))
         return
       }
       const next = args.trim().toLowerCase()
       if (next !== "en" && next !== "id") {
-        app.showToast(t("tui.langUnknown", { a: args }))
+        app.showToast(tSystem("tui.langUnknown", { a: args }))
         return
       }
       setSessionLocale(next)
@@ -1537,7 +1574,7 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
         await saveLang(next)
       } catch {}
       // v7.30: hapus duplikasi transkrip — toast di footer sudah menyampaikan hasilnya.
-      app.showToast(t("tui.langLine", { v: next }))
+      app.showToast(tSystem("tui.langLine", { v: next }))
       return
     }
     let viewAction = ""
@@ -1571,7 +1608,7 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
       args = parts.join(" ")
       if (!(VIEW_ACTIONS as readonly string[]).includes(viewAction)) {
         // v7.30: kwitansi /view = status UI, bukan giliran bicara (toast di footer).
-        app.showToast(t("tui.viewUse"))
+        app.showToast(tSystem("tui.viewUse"))
         return
       }
     }
@@ -1580,12 +1617,12 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
       // flag-nya tak dibaca renderer flat, jadi hanya menyisakan kwitansi palsu.
       const parsed = parseToggleArg(args)
       if (parsed === "invalid") {
-        app.showToast(t("tui.toggleUse", { cmd: viewAction }))
+        app.showToast(tSystem("tui.toggleUse", { cmd: viewAction }))
         return
       }
       app.showToast(
-        t("tui.thinkingSet", {
-          v: t(ui.setReasoningVisible(parsed) ? "state.expanded" : "state.minimized"),
+        tSystem("tui.thinkingSet", {
+          v: tSystem(ui.setReasoningVisible(parsed) ? "state.expanded" : "state.minimized"),
         }),
       )
       return
@@ -1600,7 +1637,7 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
     if (name === "copy") {
       const count = parseCopyCount(args)
       if (count === null) {
-        app.showToast(t("tui.copyInvalid", { n: args, max: MAX_COPY_TURNS }))
+        app.showToast(tSystem("tui.copyInvalid", { n: args, max: MAX_COPY_TURNS }))
         return
       }
       await copyLastTurn(count)
@@ -1692,9 +1729,9 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
       ])
       // v7.30: perintah tak dikenal adalah umpan balik UI, bukan pesan percakapan.
       app.showToast(
-        t("tui.unknownCmd", {
+        tSystem("tui.unknownCmd", {
           name,
-          tail: hint ? t("tui.didYou", { hint }) : t("tui.tryHelp"),
+          tail: hint ? tSystem("tui.didYou", { hint }) : tSystem("tui.tryHelp"),
         }),
       )
       return
@@ -1705,13 +1742,12 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
 
   const host: TuiHost = {
     bus: session.events as unknown as TuiHost["bus"],
-    // v0.33: detail tool Live dibuka lewat output-window yang sudah ada.
-    openSidebarDetail: (title, lines) => {
-      void showCommandOutput(title, lines)
-    },
     getStatus: () => {
       const busy = abort != null
       const liveMode = livePermissionMode()
+      // F-05: satu pembacaan token per paint (dua pemakaian di footer). Tracker
+      // menjamin angka ini cache-backed & tanpa deep clone riwayat.
+      const ctxTokens = getContextTokens()
       const status = {
         footer: {
           // Normalisasi: sumbu persetujuan hanya AUTO/ASK. Profil warisan
@@ -1728,8 +1764,8 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
           workMode: workModeControl?.getWorkMode() ?? "DISCUSS",
           model: modelRef.current ?? cfg.providers[0]?.models[0] ?? t("tui.noModel"),
           cwd: cwd ?? process.cwd(),
-          context: fmtCtx(getContextTokens()),
-          metrics: fmtUsageMetrics(ctx, getContextTokens()),
+          context: fmtCtx(ctxTokens),
+          metrics: fmtUsageMetrics(ctx, ctxTokens),
           // Jumlah job background hidup — dihitung di sini karena badge footer
           // adalah view murni (src/ui dilarang impor src/ non-UI).
           backgroundJobs: countLiveBackgroundJobs(),
@@ -1762,12 +1798,12 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
       if (turnState.abortRequested) {
         // Jangan diam: user perlu tahu barisnya tak jadi turn hantu.
         // v7.30: kwitansi antrean = status UI (toast), bukan baris percakapan.
-        app.showToast(t("tui.queueAborted"))
+        app.showToast(tSystem("tui.queueAborted"))
         return false
       }
       if (line.startsWith("/")) {
         const name = line.split(/\s+/)[0] ?? line
-        app.showToast(t("tui.busyCmd", { cmd: name }))
+        app.showToast(tSystem("tui.busyCmd", { cmd: name }))
         return false
       }
       // `?.` menjaga fixture/komposisi lama yang belum punya seam ini (fail-safe:
@@ -1778,19 +1814,20 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
         // untuk notifikasi pembatalan bila turn di-abort sebelum itu terjadi.
         transcript.pushUser(line)
         if (steeredEchoes.length < 8) steeredEchoes.push(line)
-        app.showToast(t("tui.steered"))
+        app.showToast(tSystem("tui.steered"))
         return true
       }
       // v7.41 (audit F1): gema DITUNDA sampai runTurn benar-benar mengonsumsi
       // baris ini. Kalau dibuang saat abort, ia tak pernah digema → tak ada
       // prompt hantu yang seolah dikirim ke model.
       queuedPrompts.push({ text: line, needsEcho: true })
-      app.showToast(t("tui.queued", { n: String(queuedPrompts.length) }))
+      app.showToast(tSystem("tui.queued", { n: String(queuedPrompts.length) }))
       return true
     },
     copySelection: (text) => writeClipboardOsc52(text),
     abort: () => {
       turnState.markAbortRequested()
+      contextTokens.invalidate()
       abort?.abort()
     },
     cycleWorkMode: (dir) => {
@@ -1818,7 +1855,15 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
       if (record?.branchSessionId === sessionId) initialDraft = record.prompt
     } catch {}
   }
-  const app = new TuiApp(transcript, host, { initialDraft, sidebarModel })
+  const app = new TuiApp(transcript, host, { initialDraft })
+  // [6AD] Scheduler lifecycle → micro-toast SATU baris di footer, BUKAN entri
+  // transkrip. Sink-nya `app.showToast` sudah ada di App: tak ada writer
+  // stdout/stderr baru. Dipasang setelah TuiApp terbentuk; notice yang muncul
+  // lebih awal masih tercatat di bounded log `/scheduler status`, jadi tak ada
+  // informasi yang hilang permanen (hanya kwitansi sesaatnya yang terlewat).
+  schedulerObservability?.onSchedulerNotice((line) =>
+    app.showToast(tSystem("msg.scheduler", { line })),
+  )
   // v7.30: notisi rewind = status sesi sesaat, bukan riwayat percakapan.
   if (rewindNotice) app.showToast(sanitizeAnsiLine(rewindNotice))
   // Approval sebagai warga TUI: blok pertanyaan + keputusan tercatat di
@@ -1918,11 +1963,7 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
     setApprovalSink(null)
     unsubscribeJobFinished()
     unsubscribeChildRecap()
-    for (const unsub of liveContextUnsubs.splice(0)) {
-      try {
-        unsub()
-      } catch {}
-    }
+    contextTokens.dispose()
     transcript.dispose()
     // Blok penutup ditulis PALING AKHIR: app.run() sudah menutup alt-screen
     // lewat cleanupRun(), jadi teks ini jadi scrollback permanen, bukan frame
@@ -1937,6 +1978,7 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
           await writeSessionSummary(ctx, startedAt, (s) => process.stdout.write(s), {
             model: modelRef.current || undefined,
             mode: `${displayWorkMode(workModeControl?.getWorkMode() ?? "DISCUSS")}/${livePermissionMode().toUpperCase()}`,
+            turns: contextTokens.getTurnCount(),
           })
         } catch {}
       }

@@ -96,7 +96,11 @@ export async function runRunHooks(
     } catch {}
     await new Promise<void>((res) => {
       const p = spawn(process.execPath, [file], {
-        env: sanitizeSpawnEnv(process.env, { MINICODE_HOOK_CTX: JSON.stringify(ctx) }),
+        // E-10: sanitasi env dilakukan SATU kali sebelum loop. Tiap hook hanya
+        // menambahkan konteksnya sendiri — jangan sanitasi ulang process.env
+        // per hook (biaya O(env) × N) dan jangan paralelisasi (efek samping hook
+        // harus berurutan).
+        env: { ...baseKillEnv, MINICODE_HOOK_CTX: JSON.stringify(ctx) },
         stdio: "ignore",
         detached: process.platform !== "win32",
       })

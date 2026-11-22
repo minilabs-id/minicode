@@ -1,7 +1,7 @@
 import {
   chmodSync,
+  type Dirent,
   existsSync,
-  lstatSync,
   mkdtempSync,
   readdirSync,
   rmSync,
@@ -60,27 +60,27 @@ export function discoverSandboxMaskTargets(cwd: string): SandboxMaskTargets {
   while (queue.length > 0 && visitedDirs < MAX_SCAN_DIRS) {
     const { dir, depth } = queue.shift()!
     visitedDirs++
-    let entries: string[]
+    let entries: Dirent[]
     try {
-      entries = readdirSync(dir)
+      // E-9: `readdirSync(..., { withFileTypes: true })` sudah membawa tipe
+      // entri dari syscall yang sama. Memanggil `lstatSync` per entri menambah
+      // ratusan syscall (baseline ~15ms) — di sini cukup sekali readdir per
+      // direktori. `Dirent.isSymbolicLink()` tetap mendeteksi symlink tanpa
+      // mengikuti targetnya (perilaku lstat lama dipertahankan persis).
+      entries = readdirSync(dir, { withFileTypes: true })
     } catch {
       continue
     }
-    for (const name of entries) {
+    for (const ent of entries) {
+      const name = ent.name
       const full = join(dir, name)
-      let st: ReturnType<typeof lstatSync>
-      try {
-        st = lstatSync(full)
-      } catch {
-        continue
-      }
-      if (st.isDirectory()) {
+      if (ent.isDirectory()) {
         if (depth < MAX_SCAN_DEPTH && !SKIP_DIRS.has(name)) {
           queue.push({ dir: full, depth: depth + 1 })
         }
         continue
       }
-      if ((st.isFile() || st.isSymbolicLink()) && isSensitiveEnvFileName(name)) {
+      if ((ent.isFile() || ent.isSymbolicLink()) && isSensitiveEnvFileName(name)) {
         const rel = relative(abs, full).replace(/\\/g, "/")
         if (rel && !rel.startsWith("..")) envFiles.push(rel)
       }

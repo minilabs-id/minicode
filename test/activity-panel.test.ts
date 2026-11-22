@@ -6,6 +6,7 @@ import { setSessionLocale } from "../src/ui/i18n/locale.ts"
 import { activityGroup } from "../src/ui/render/activity-group.ts"
 import { groupActivities, groupLine, renderActivityPanel } from "../src/ui/render/activity-panel.ts"
 import { stripAnsi } from "../src/ui/render/theme.ts"
+import { humanToolLabel } from "../src/ui/render/tool-label.ts"
 import { UiSessionState } from "../src/ui/session-state.ts"
 import { Transcript } from "../src/ui/tui/transcript.ts"
 import { createFakeBus } from "./helpers/tui-harness.ts"
@@ -222,12 +223,12 @@ describe("panel aktivitas di Transcript (TUI)", () => {
     })
     const visible = () => t.view(120, 20, 0).map(stripAnsi).join("\n")
     // Tool gagal TIDAK masuk fold-sunyi: baris flat tetap memikul nama + alasan.
-    expect(visible()).toContain("bash_output · failed: unknown job id")
+    expect(visible()).toContain(`${humanToolLabel("bash_output")} · failed: unknown job id`)
     // Hitungan agregat `1 failed` dulu berasal dari ringkasan grup — kini hilang.
     expect(visible()).not.toContain("1 failed")
     expect(groupLines(t)).toHaveLength(0)
     emit({ type: "turn.completed", seq: 3, turnId: 1 })
-    expect(visible()).toContain("bash_output · failed: unknown job id")
+    expect(visible()).toContain(`${humanToolLabel("bash_output")} · failed: unknown job id`)
     expect(visible().match(/unknown job id/g)).toHaveLength(1)
   })
 
@@ -248,7 +249,7 @@ describe("panel aktivitas di Transcript (TUI)", () => {
       t
         .view(80, 12, 0)
         .map(stripAnsi)
-        .some((l) => l.includes("read_file")),
+        .some((l) => l.includes(humanToolLabel("read_file"))),
     ).toBe(true)
   })
 

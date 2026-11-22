@@ -1628,10 +1628,59 @@ const EVALUATION_SCAN_ROOTS = [
 ] as const
 
 /** Baseline status git pra-sesi per (root::sessionId) agar edit user sebelum sesi tak jadi false-positive. */
-const sessionEvaluationBaselines = new Map<string, Map<string, string>>()
+const SESSION_BASELINE_MAX_ENTRIES = 256
+const SESSION_BASELINE_TTL_MS = 24 * 60 * 60 * 1000
+
+/**
+ * BUG-8: cache baseline tanpa eviksi tumbuh sepanjang hidup proses (satu entri
+ * per sesi yang pernah di-verify). Sekarang berupa LRU + TTL: entri terakhir
+ * dipakai dipindah ke belakang `Map`, dan entri tertua dibuang saat penuh atau
+ * kedaluwarsa.
+ *
+ * `GIT_FAILED` adalah sentinel berbeda dari "baseline memang tidak ada":
+ * bila `git status` gagal saat capture, baseline TIDAK bisa dipercaya, jadi
+ * jangan menandai seluruh path kotor sebagai tamper (false-tamper).
+ */
+const GIT_FAILED = Symbol("evaluation-baseline-git-failed")
+type SessionBaseline = Map<string, string> | typeof GIT_FAILED
+
+const sessionEvaluationBaselines = new Map<string, { value: SessionBaseline; at: number }>()
 
 function sessionBaselineKey(sessionId: string, workspaceRoot: string): string {
   return `${resolve(workspaceRoot)}::${sessionId}`
+}
+
+function getSessionBaseline(key: string): SessionBaseline | undefined {
+  const hit = sessionEvaluationBaselines.get(key)
+  if (!hit) return undefined
+  if (Date.now() - hit.at > SESSION_BASELINE_TTL_MS) {
+    sessionEvaluationBaselines.delete(key)
+    return undefined
+  }
+  // Sentuh ulang untuk LRU (Map.insertion-order).
+  sessionEvaluationBaselines.delete(key)
+  sessionEvaluationBaselines.set(key, hit)
+  return hit.value
+}
+
+function setSessionBaseline(key: string, value: SessionBaseline): void {
+  sessionEvaluationBaselines.delete(key)
+  sessionEvaluationBaselines.set(key, { value, at: Date.now() })
+  while (sessionEvaluationBaselines.size > SESSION_BASELINE_MAX_ENTRIES) {
+    const oldest = sessionEvaluationBaselines.keys().next().value
+    if (oldest === undefined) break
+    sessionEvaluationBaselines.delete(oldest)
+  }
+}
+
+/** Seam uji: jumlah entri baseline yang masih hidup (untuk assertion eviksi). */
+export function __sessionBaselineCacheSizeForTest(): number {
+  return sessionEvaluationBaselines.size
+}
+
+/** Seam uji: kosongkan cache baseline (uji hermetik). */
+export function __clearSessionBaselineCacheForTest(): void {
+  sessionEvaluationBaselines.clear()
 }
 
 function isProtectedEvaluatorSurface(rel: string): boolean {
@@ -1650,8 +1699,22 @@ function countTautologies(text: string): number {
   return (text.match(TAUTOLOGY_RE) ?? []).length
 }
 
-function listDirtyEvaluationPaths(root: string): string[] {
-  if (!isGitRepo(root)) return []
+/**
+ * Sama seperti `listDirtyEvaluationPaths`, tapi membedakan "git sukses, tak ada
+ * path kotor" dari "git gagal / bukan repo". Keduanya dulu mengembalikan `[]`
+ * yang tak terbedakan → baseline kosong dianggap sah dan semua path kotor kena
+ * tamper. Sekarang `ok: false` dipertahankan sampai ke baseline.
+ */
+/** Seam uji: simulasi git gagal vs git sukses tanpa mengubah environment. */
+type DirtyScan = (root: string) => { ok: boolean; paths: string[] }
+let dirtyScanOverride: DirtyScan | null = null
+export function __setEvaluationDirtyScanForTest(fn: DirtyScan | null): void {
+  dirtyScanOverride = fn
+}
+
+function listDirtyEvaluationPathsResult(root: string): { ok: boolean; paths: string[] } {
+  if (dirtyScanOverride) return dirtyScanOverride(root)
+  if (!isGitRepo(root)) return { ok: false, paths: [] }
   try {
     const r = spawnSync(
       resolveTrustedExecutable("git"),
@@ -1670,7 +1733,7 @@ function listDirtyEvaluationPaths(root: string): string[] {
         maxBuffer: INTEGRITY_MAX_BYTES,
       },
     )
-    if (r.status !== 0 || typeof r.stdout !== "string") return []
+    if (r.status !== 0 || typeof r.stdout !== "string") return { ok: false, paths: [] }
     const out: string[] = []
     for (const rawLine of r.stdout.split(/\r?\n/)) {
       if (rawLine.length < 4) continue
@@ -1682,10 +1745,15 @@ function listDirtyEvaluationPaths(root: string): string[] {
       }
       if (p) out.push(p.replace(/\\/g, "/"))
     }
-    return out
+    return { ok: true, paths: out }
   } catch {
-    return []
+    return { ok: false, paths: [] }
   }
+}
+
+/** Pembungkus kompatibel: hanya path-nya, untuk pemanggil lama. */
+function listDirtyEvaluationPaths(root: string): string[] {
+  return listDirtyEvaluationPathsResult(root).paths
 }
 
 async function hashWorkspaceRel(root: string, rel: string): Promise<string> {
@@ -1708,11 +1776,18 @@ export async function captureSessionEvaluationBaseline(
 ): Promise<void> {
   const root = resolve(workspaceRoot)
   const key = sessionBaselineKey(sessionId, root)
+  const scanned = listDirtyEvaluationPathsResult(root)
+  // Fail-closed JUJUR: git gagal → jangan simpan baseline kosong yang nanti
+  // membuat semua path kotor tampak "berubah dari baseline".
+  if (!scanned.ok) {
+    setSessionBaseline(key, GIT_FAILED)
+    return
+  }
   const baseline = new Map<string, string>()
-  for (const rel of listDirtyEvaluationPaths(root)) {
+  for (const rel of scanned.paths) {
     baseline.set(rel, await hashWorkspaceRel(root, rel))
   }
-  sessionEvaluationBaselines.set(key, baseline)
+  setSessionBaseline(key, baseline)
 }
 
 /**
@@ -1783,9 +1858,17 @@ export async function collectSessionModifiedFiles(
   if (sessionMutatingTools.size > 0) {
     const dirtyPaths = listDirtyEvaluationPaths(root)
     if (dirtyPaths.length > 0) {
-      const baseline = sessionEvaluationBaselines.get(sessionBaselineKey(sessionId, root))
+      const baseline = getSessionBaseline(sessionBaselineKey(sessionId, root))
       for (const rel of dirtyPaths) {
+        if (baseline === GIT_FAILED) {
+          // Baseline gagal dibuat (git error/bukan repo). Menandai semua path
+          // kotor sebagai tamper di sini adalah false-positive: kita tak punya
+          // titik perbandingan yang valid.
+          continue
+        }
         if (!baseline) {
+          // Baseline memang tidak ada (capture tak pernah dipanggil) →
+          // fail-closed tetap berlaku: anggap path berubah.
           combined.add(rel)
           continue
         }

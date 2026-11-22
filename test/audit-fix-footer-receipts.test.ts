@@ -8,6 +8,7 @@ import { tmpdir } from "node:os"
 import type { CliSession } from "../cli/setup.ts"
 import { runTui } from "../cli/tui.ts"
 import { resetLocaleState, setSessionLocale, t } from "../src/ui/i18n/locale.ts"
+import { tSystem } from "../src/ui/render/tool-label.ts"
 import { TuiApp, type TuiHost } from "../src/ui/tui/app.ts"
 import { Transcript } from "../src/ui/tui/transcript.ts"
 import { createFakeBus, installFakeTty, KEY } from "./helpers/tui-harness.ts"
@@ -96,10 +97,10 @@ describe("v7.30: kwitansi perintah di footer, bukan transkrip", () => {
     await tty.send(`\x1b[<0;${endX};${picked.row}m`)
     await tty.send(KEY.ctrlC)
 
-    const msg = t("tui.selectionCopied")
+    const msg = tSystem("msg.copied")
     expect(copied).toHaveLength(1)
     expect(seen).toContain(msg)
-    expect(footerRow()).toContain("selection copied")
+    expect(footerRow()).toContain(msg)
     expect(transcriptText()).not.toContain(msg)
     await tty.send(KEY.backspace) // kosongkan draft "x" supaya Ctrl+D quit, bukan hapus char
     await tty.send(KEY.ctrlD)
@@ -171,7 +172,7 @@ describe("v7.30: kwitansi perintah di footer, bukan transkrip", () => {
       await tty.waitForOutput((o) => o.includes("00.00.00"))
       await tty.send("/mode bogus")
       await tty.send(KEY.enter)
-      const msg = t("tui.unknownMode", { a: "bogus", modes: "DISCUSS, BUILD, AUTO, ASK" })
+      const msg = tSystem("tui.unknownMode", { a: "bogus", modes: "DISCUSS, BUILD, AUTO, ASK" })
       await tty.waitForScreen((f) => (f[f.length - 1] ?? "").includes(msg))
       expect(footerRow()).toContain("unknown mode")
       expect(transcriptText()).not.toContain(msg)
@@ -211,10 +212,10 @@ describe("v7.30: kwitansi perintah di footer, bukan transkrip", () => {
       await waitFor(() => h.submitted.length === 1, "turn pertama mulai")
       await tty.send("tambahan")
       await tty.send(KEY.enter)
-      const msg = t("tui.steered")
+      const msg = tSystem("tui.steered")
       await tty.waitForScreen((f) => (f[f.length - 1] ?? "").includes(msg))
       expect(h.steered).toEqual(["tambahan"])
-      expect(footerRow()).toContain("steered into turn")
+      expect(footerRow()).toContain(msg)
       // Entri user asli BOLEH di transkrip; kwitansinya TIDAK.
       expect(transcriptText()).not.toContain(msg)
       h.release()

@@ -58,7 +58,7 @@ describe("/help: kelengkapan & ukuran", () => {
       expect(teks, cmd).toContain(cmd)
     expect(teks).toContain("[id|history|branches]")
     // v0.33: /view hanya menerima `thinking` — expand/compact/minimize/fold
-    // dihapus; expand digantikan sidebar kanan. Jangan mengunci permukaan lama.
+    // dihapus; detail di jurnal/chat, rekap footer sejak v0.35. Jangan mengunci permukaan lama.
     expect(teks).toContain("thinking")
     expect(teks).not.toContain("expand")
     for (const cmd of [

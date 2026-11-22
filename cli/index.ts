@@ -1,5 +1,4 @@
 #!/usr/bin/env bun
-import { readFileSync } from "node:fs"
 import { resolve as resolvePath } from "node:path"
 import { expandMentions } from "../src/app/mentions.ts"
 import { NoProviderError } from "../src/app/provider-layer.ts"
@@ -34,6 +33,7 @@ import {
   resolveToolScope,
   resolveWorkModeFlag,
 } from "./args.ts"
+import { buildHelpJson, HELP, readVersion } from "./help.ts"
 import { dispatch } from "./router.ts"
 import { createChildCompaction, createCliSession } from "./setup.ts"
 
@@ -111,69 +111,10 @@ function installCrashGuard(): void {
   process.on("unhandledRejection", (reason) => restoreAndExit("unhandled rejection", reason))
 }
 
-/** Versi dibaca dari package.json — satu sumber, tidak di-hardcode dua tempat. */
-function readVersion(): string {
-  try {
-    const pkgPath = resolvePath(import.meta.dir, "..", "package.json")
-    return (JSON.parse(readFileSync(pkgPath, "utf8")) as { version?: string }).version ?? "0.0.0"
-  } catch {
-    return "0.0.0"
-  }
-}
-
-const HELP = `Minicode - coding agent on frozen MiniCore
-Usage:
-  minicode                        # interactive chat
-  minicode "prompt" [options]     # one-shot run
-  minicode exec "prompt" [--json] # headless CI mode (JSON stream)
-  minicode acp                  # JSON-RPC stdio server for IDEs (minimal subset)
-  minicode daemon <cmd>         # daemon host / status / stop / issue / sessions
-  echo "prompt" | minicode        # via pipe
-  minicode sync                   # refresh models from all providers
-  minicode openwork               # cross-session unfinished work (P14, read-only)
-Options:
-  -h, --help          show help
-  -v, --version       show version
-  --verbose           show reasoning & usage
-  --cwd <dir>         workspace root (default .)
-  --allow-local-config trust .minicode/config.json in workspace (default: ignore)
-  --resume <id>       resume session id
-  --adopt-task <source>/<taskId>
-                      P14: adopt one unfinished task from another session into this
-                      session (explicit authority; scheduler is NOT started)
-  --model <name>      override model (provider::model)
-  --provider <id>     force provider id
-  --session <id>      session id (default random)
-  --allow-all         allow all tools (privileged access profile; hard jail/guard still apply)
-  --ask               ask per tool (y/n/a) — human-supervised execution
-  --allowlist         bash allowlist only (see MINICODE_BASH_ALLOWLIST)
-  --max-steps <n>     max tool steps (default 50)
-  --context-window <n> context window tokens
-  --timeout <ms>      hard deadline per run (default 3600000 = 1h, 0 = off)
-  --interactive       interactive TUI (default bila tanpa prompt di TTY)
-  --verify            auto-verify + self-heal (typecheck/test/tsconfig)
-  --sandbox <mode>    bash sandbox: docker (ephemeral, no network) | os (bwrap/seatbelt)
-  --ratelimit <rpm>   LLM requests per minute
-  --budget <usd>      session cost limit
-  --budget-strict     unknown cost + spend counts as over budget (fail-closed default)
-  --tool-scope <s>    full (default) | explore (read-only subset)
-  --work-mode <m>     DISCUSS | BUILD (default: DISCUSS). Operating mode: DISCUSS =
-                      read-only investigation, discussion & planning, BUILD = implementation.
-  --tui               deprecated no-op (interactive mode is always the fullscreen TUI)
-  --enable-scheduler  EXPERIMENTAL: opt in to the autonomous scheduler (default: off).
-                      Manual only - run /scheduler run. No timer; autonomous turns are
-                      readonly. Inspect with /scheduler status; release with /scheduler stop.
-  --runtime <mode>    off (default) | constructed | owned. Execution architecture:
-                      off = current behaviour, unchanged. constructed = runtime + durable
-                      journal built, turns still run the legacy way. owned = every turn is
-                      admitted through the runtime (kernel + durable journal); a rejected
-                      admission runs nothing. Unknown value = off.
-
-TUI: /help /provider /model /context /status /sessions /init /exit /mode /undo /redo /clear /copy /view /lang /scheduler
-Keys: Enter submit · Tab work-mode · Shift+Tab permission · Up/Down history · Mouse wheel/PgUp/PgDn scroll (Shift = half page)
-      Home/End jump to transcript top/tail · Ctrl+R search · Esc abort turn (twice = quit) · Ctrl+D exit
-Subcommand flags (config/mcp/sessions/skills/exec/...): see 'minicode <cmd> --help'.
-`
+// HELP + readVersion() + buildHelpJson() tinggal SATU sumber di ./help.ts.
+// Entry tipis (cli/entry.ts) memakai modul yang sama untuk menjawab meta flag
+// tanpa memuat aplikasi; pemanggilan langsung cli/index.ts tetap berperilaku
+// identik (dispatch tetap lebih dulu, lalu --version/--help).
 
 const args = process.argv.slice(2)
 // Dipasang SEBELUM dispatch: crash di jalur mana pun (termasuk config/mcp/exec)
@@ -306,76 +247,7 @@ if (args.includes("-h") || args.includes("--help")) {
   }
   if (args.includes("--json")) {
     // machine-readable help for CI (minicode --help --json)
-    console.log(
-      JSON.stringify({
-        name: "minicode",
-        version: readVersion(),
-        usage: [
-          "minicode",
-          'minicode "prompt" [options]',
-          'minicode exec "prompt" [--json]',
-          "minicode acp",
-          "minicode daemon <start|status|stop|issue|sessions>",
-          "minicode providers|models|sync|config|mcp|skills|sessions|stats|memory",
-          "minicode openwork — cross-session unfinished work portfolio (P14)",
-        ],
-        options: [
-          { flag: "--version", desc: "show version" },
-          { flag: "--verbose", desc: "show reasoning & usage" },
-          { flag: "--cwd <dir>", desc: "workspace root" },
-          {
-            flag: "--allow-local-config",
-            desc: "trust .minicode/config.json in workspace (default: ignore)",
-          },
-          { flag: "--resume <id>", desc: "resume session id" },
-          {
-            flag: "--adopt-task <source>/<taskId>",
-            desc:
-              "P14: explicitly adopt ONE unfinished task from another session into this " +
-              "session (workspace-local; requires both sessions' writer authority; " +
-              "does not start the scheduler)",
-          },
-          {
-            flag: "--enable-scheduler",
-            // [PHASE 6AB] REWRITTEN. 6AA recorded this text as the single most
-            // misleading fact an operator would meet: it promised "autonomous
-            // background task execution" for a process that could not execute
-            // anything at all. The replacement says what the flag does, how to
-            // make it act, and — the part the old text omitted — that triggering
-            // is MANUAL and there is no recurring background loop.
-            desc:
-              "EXPERIMENTAL: opt in to the autonomous scheduler for this session (default: off). " +
-              "Runs on manual /scheduler run only — no background timer, no recurring polling. " +
-              "Autonomous turns are readonly. Use /scheduler status|stop inside the session.",
-          },
-          { flag: "--model <name>", desc: "override model (provider::model)" },
-          { flag: "--provider <id>", desc: "force provider id" },
-          { flag: "--session <id>", desc: "session id" },
-          { flag: "--max-steps <n>", desc: "max tool steps (default 50)" },
-          { flag: "--context-window <n>", desc: "context window tokens" },
-          {
-            flag: "--timeout <ms>",
-            desc: "hard deadline per run (default 3600000 = 60min; 0 = Infinity)",
-          },
-          { flag: "--allow-all", desc: "allow all tools (privileged access profile)" },
-          { flag: "--ask", desc: "ask per tool (human-supervised)" },
-          { flag: "--allowlist", desc: "bash allowlist only" },
-          { flag: "--interactive", desc: "interactive TUI" },
-          { flag: "--verify", desc: "auto-verify + self-heal" },
-          { flag: "--sandbox <docker|os>", desc: "bash sandbox" },
-          { flag: "--ratelimit <rpm>", desc: "LLM requests/min" },
-          { flag: "--budget <usd>", desc: "session cost limit" },
-          { flag: "--budget-strict", desc: "unknown cost + spend counts as over budget (default)" },
-          { flag: "--tool-scope <full|explore>", desc: "tool subset (explore = read-only)" },
-          {
-            flag: "--work-mode <DISCUSS|BUILD>",
-            desc: "operating mode: DISCUSS (default, read-only), BUILD",
-          },
-          { flag: "--json", desc: "JSON output (help/exec)" },
-          { flag: "--tui", desc: "deprecated no-op (interactive is always the fullscreen TUI)" },
-        ],
-      }),
-    )
+    console.log(JSON.stringify(buildHelpJson()))
     process.exit(0)
   }
   console.log(HELP)
@@ -523,49 +395,11 @@ if (ignoredFlags.length > 0) {
   )
 }
 const enterRepl = interactive || (!prompt && process.stdin.isTTY)
-// REPL interaktif: cek update FRESH tiap dibuka → install + restart bila ada
-// versi baru (tak pernah kembali bila restart). Budget cek 1.8 dtk tetap —
-// hanya UX-nya yang berubah.
-// v7.44: auto-update memakai format yang SAMA dengan progress sesi —
-// `update 33%\r` … `update 100%\n`, hanya angka yang berubah, tanpa label
-// "checking/installing" dan tanpa LoadingBar (area sekitar tetap bersih).
-// Notice asli (hasil install/gagal) TETAP ditulis, didahului `\r\x1b[2K`
-// supaya tak menimpa angka progres yang sedang aktif.
-if (enterRepl) {
-  let updateStarted = false
-  const writeUpdate = (pct: number) => {
-    process.stderr.write(`update ${pct}%\r`)
-    updateStarted = true
-  }
-  const ctrl = new AbortController()
-  const to = setTimeout(() => ctrl.abort(), 1800)
-  try {
-    const { maybeAutoUpdate } = await import("./auto-update.ts")
-    const { readGlobalInstalledVersion } = await import("../src/policy/update-check.ts")
-    await maybeAutoUpdate(readVersion(), ctrl.signal, {
-      // Tidak ada painter transient lagi — tidak perlu stop.
-      onLongOp: () => {},
-      // v0.33: verifikasi dari prefix npm global, bukan package.json di samping
-      // modul (bisa cache/transpilasi) — akar "versi tidak cocok" lalu rollback.
-      getInstalledVersion: readGlobalInstalledVersion,
-      onPhase: (phase) => {
-        if (phase === "check") writeUpdate(33)
-        else if (phase === "install") writeUpdate(66)
-        else if (phase === "restart") writeUpdate(95)
-      },
-      onNotice: (line) => {
-        // Tutup garis progres dulu bila ada, supaya notice tak menimpa angka.
-        if (updateStarted) process.stderr.write("\r\x1b[2K")
-        process.stderr.write(line)
-        updateStarted = false
-      },
-    })
-  } catch {}
-  clearTimeout(to)
-  // Tutup garis update HANYA bila fase update benar-benar pernah berjalan;
-  // jalur tanpa update (kasus paling umum) tetap nol byte.
-  if (updateStarted) process.stderr.write("update 100%\n")
-}
+// Auto-update REPL TIDAK lagi di-await di sini. Dulu blok ini menahan
+// createCliSession sampai 1,8 dtk hanya untuk cek registry. Kini sesi dibuka
+// dulu; pengecekan + (bila ada) install/restart dijalankan SETELAH sesi berdiri
+// dan SEBELUM runTui menerima input pertama — lihat blok di bawah `finally`.
+// Dengan begitu restart tak pernah memotong TUI aktif/turn yang sedang jalan.
 if (!prompt && !enterRepl) {
   process.stderr.write('usage: minicode "prompt"  |  minicode (interactive mode)\n')
   // Salah pakai (bukan gagal runtime): exit 2 agar skrip bisa membedakan
@@ -668,6 +502,50 @@ try {
   // Tutup angka progres walau createCliSession melempar (provider/MCP gagal) —
   // tanpa ini baris `start N%` menggantung tanpa newline.
   startupProgress.finish()
+}
+
+// Auto-update REPL — dijalankan di sini, BUKAN sebelum createCliSession.
+// Sesi sudah berdiri tetapi runTui belum menerima input pertama: satu-satunya
+// jendela aman untuk install + restart. maybeAutoUpdate memanggil process.exit
+// saat restart (auto-update.ts:140-146); membiarkannya berjalan setelah input
+// pertama akan memotong TUI aktif/turn yang sedang berjalan. Jalur one-shot
+// tetap fire-and-forget di atas (tidak tersentuh).
+// v7.44: format progres dipertahankan persis — `update 33%\r` … `update 100%\n`,
+// hanya angka yang berubah; notice asli didahului `\r\x1b[2K` agar tak menimpa.
+if (enterRepl) {
+  let updateStarted = false
+  const writeUpdate = (pct: number) => {
+    process.stderr.write(`update ${pct}%\r`)
+    updateStarted = true
+  }
+  const ctrl = new AbortController()
+  const to = setTimeout(() => ctrl.abort(), 1800)
+  try {
+    const { maybeAutoUpdate } = await import("./auto-update.ts")
+    const { readGlobalInstalledVersion } = await import("../src/policy/update-check.ts")
+    await maybeAutoUpdate(readVersion(), ctrl.signal, {
+      // Tidak ada painter transient lagi — tidak perlu stop.
+      onLongOp: () => {},
+      // v0.33: verifikasi dari prefix npm global, bukan package.json di samping
+      // modul (bisa cache/transpilasi) — akar "versi tidak cocok" lalu rollback.
+      getInstalledVersion: readGlobalInstalledVersion,
+      onPhase: (phase) => {
+        if (phase === "check") writeUpdate(33)
+        else if (phase === "install") writeUpdate(66)
+        else if (phase === "restart") writeUpdate(95)
+      },
+      onNotice: (line) => {
+        // Tutup garis progres dulu bila ada, supaya notice tak menimpa angka.
+        if (updateStarted) process.stderr.write("\r\x1b[2K")
+        process.stderr.write(line)
+        updateStarted = false
+      },
+    })
+  } catch {}
+  clearTimeout(to)
+  // Tutup garis update HANYA bila fase update benar-benar pernah berjalan;
+  // jalur tanpa update (kasus paling umum) tetap nol byte.
+  if (updateStarted) process.stderr.write("update 100%\n")
 }
 
 if (enterRepl) {

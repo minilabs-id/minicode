@@ -11,7 +11,7 @@ What MiniCode is, why it is built this way, and why some things are deliberately
 
 ## The ReAct loop
 
-Every prompt runs as a `Thought -> Action -> Observation` loop until a final answer, the `--max-steps` limit (default 200; the 50 figure is only the sub-agent cap), or `--timeout` (default 1 hour). The model receives a system prompt containing `# Environment` (cwd + platform), a condensed repo-map, and relevant memory — then selects a tool, observes the result, and picks the next step. There is no hidden flow graph: whatever the agent does shows up as a ledger on screen.
+Every prompt runs as a `Thought -> Action -> Observation` loop until a final answer, the `--max-steps` limit (default 200; the 50 figure is only the sub-agent cap), or `--timeout` (default 1 hour). The model receives a system prompt containing `# Environment` (cwd + platform), a condensed repo-map, and relevant memory — then selects a tool, observes the result, and picks the next step. There is no hidden flow graph: whatever the agent does shows up as a ledger on screen. Since v0.35 the tool recap is a static committed row at the footer of each narration (`tool -> narration -> └ recap(tools before that narration)`, with the final turn recap cumulative), and the `› …` activity label follows the OS locale while narration/model answers keep the user's `/lang` language. Since v0.36 the TUI composer is capped at 2 rows (long drafts use a sliding window, without shifting the transcript) and the `/` dropdown is an overlay inside the same frame without reducing `viewH`. Since v0.37 bracketed paste is active (`?2004h`/`?2004l` outside the frame), `Ctrl+A` selects the whole transcript when the composer is empty and the dropdown is closed, resize stabilises auto-scroll/drag/cursor/anchor, the echoed prompt is wrapped once to the chat width, and the prompt cap is progressive: `min(chatCols, 100 + floor(max(0, chatCols-100)/4))` with prefix `minicode › ` when `w−14 ≥ 24`, else `› `, plus `· ` for continuation rows — the 2-row composer and one-frame dropdown are not revoked.
 
 ## Shell-first: plain non-interactive, fullscreen interactive
 
@@ -22,9 +22,12 @@ is hand-written) and splits the two paths sharply:
   output flows **append-only into the scrollback** — the agent's result is an
   ordinary terminal artifact you can pipe, grep, and keep in your own scrollback.
 - **Interactive** (capable TTY): a single **fullscreen alternate-screen TUI** —
-  shell-like transcript + one-line status bar + composite popups + an adaptive
-  right sidebar (Thinking/Activity/Live) when `cols ≥ 100` **and** `rows ≥ 20`;
-  the sidebar lives in the same paint frame as the chat, not in scrollback.
+  shell-like transcript + one-line status bar + composite popups. Since v0.34
+  there is no right sidebar: the chat is a centred middle column — `cols ≥ 120
+  && rows ≥ 20` gives `chatCols = floor(cols/2)` (max 50% of the terminal) with
+  padding and a centred footer/composer, full width below that threshold; popups
+  stay centred on the full terminal width. It is all one paint frame, not
+  scrollback.
   Exiting restores the primary buffer exactly (the transcript is not dumped to
   scrollback).
 - Colour only on a TTY; `NO_COLOR` always wins; program output stays free of cursor control when piped.
@@ -77,6 +80,11 @@ MiniCode terms with a specific meaning.
 | **Env scrub** | `sanitizeSpawnEnv` strips credential keywords from subprocess env |
 | **Secret scrubber** | Redacts `sk-`/`ghp_`/`AKIA`/PEM/JWT/Bearer before text reaches the LLM |
 | **Ledger** | Lines `  > name target` / `  > name: ...` on stderr — the trace of agent actions |
+| **Category recap** | Since v0.35: a static committed row at the footer of each narration (`tool -> narration -> └ recap(tools before that narration)`, e.g. `└ 2 command · 118 read · 1 other`); the final turn recap is cumulative for every tool. Replaces the two-line live recap / net-zero `flushActivityFold` / tail-following `liveSummaryRows` of archived v0.33/v7.x |
+| **Tool activity label** | The `› …` prefix (tool name/status), which uses the **OS locale** via `Intl` (id/en) on every surface (TUI, one-shot/`exec`, ACP via `simple.ts`) — distinct from narration/model answers, which keep `/lang`. Single resolver: `src/ui/render/tool-label.ts` |
+| **Composer (v0.36–v0.37)** | The TUI input area, at most **2 rows** tall; a long draft uses a sliding window that adds no rows and does not shift the transcript. `composerWidth()`/`chatWidth()` share one source in `chat-column.ts`; v0.37 cap = `min(chatCols, 100 + floor(max(0, chatCols-100)/4))` (100→100, 200→125, 300→150, 500→200); prefix `minicode › ` when `w−14 ≥ 24` / else `› `, continuation `· ` |
+| **Bracketed paste & select-all (v0.37)** | `?2004h`/`?2004l` in the TUI/`askLine`/`askSecret`/output window, written outside the frame (I1 intact); a paste CR is not a submit. `Ctrl+A` = `selectAll` with an empty composer and closed dropdown (else `Home`); `Ctrl+C` copies even while a drag is active; resize rebases the scroll anchor even with an active selection |
+| **Dropdown overlay (v0.36)** | The `/` menu drawn inside the same `paint()` frame (one `stdout.write`, I1), covering the lower transcript rows without reducing `viewH` — not a separate `paintRegion()`; a click in the dropdown area selects a menu item |
 | **Scrollback** | Terminal screen history; the non-interactive MiniCode path appends there (interactive uses the alternate screen) |
 | **Transient** | A show-once UI element that erases itself (spinner, turn status line) — unlike the persistent transcript |
 | **Composition root** | `cli/index.ts` + `cli/setup.ts`: the single place where DI is wired (provider, RAG, session, tools) |

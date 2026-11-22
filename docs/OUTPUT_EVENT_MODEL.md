@@ -137,16 +137,18 @@ mengarang final message.
 | `diagnostic.raised` | adapter/policy | diagnostic actionable | ya |
 
 Tool `completed` harus membawa `summary` dan `durationMs`, dan bila ada `receipt`.
-Field `expandRef` tetap ada sebagai `ContentRef` untuk content store, tetapi sejak
-v0.33 tidak lagi dipetakan ke perintah `/expand` dan collapsed buffer dihapus: detail
-tool live ada di Activity log sidebar bila aktif. Tool `failed` harus membawa `cause`
+Field `expandRef` tetap ada sebagai `ContentRef` untuk content store, tetapi tidak
+lagi dipetakan ke perintah `/expand` dan collapsed buffer dihapus: sejak v0.34
+detail/baris tool kembali ke chat (v0.33 memindahkannya ke Activity log sidebar —
+dicabut). Tool `failed` harus membawa `cause`
 dan `message` (`hint` opsional). Tool `denied` harus membawa `reason`; `denied` tidak
 boleh berubah menjadi generic `failed` hanya karena satu renderer tidak tahu policy.
 
 Temuan (`finding.detected`) dari child-agent dihasilkan adapter dari event bus
-`minicode:child-report` yang berasal dari baris `[FINDING]`. Bila sidebar aktif,
-temuan diproyeksikan ke panel Activity log; pada jalur linear tanpa sidebar tetap
-masuk transkrip sebagai entri tersendiri. Keduanya memakai event semantic yang sama.
+`minicode:child-report` yang berasal dari baris `[FINDING]`. Sejak v0.34 temuan
+tampil di chat (TUI) dan di transkrip (linear) sebagai entri tersendiri — v0.33
+memproyeksikannya ke panel Activity log sidebar, sekarang dicabut. Keduanya
+memakai event semantic yang sama.
 
 ### Error, recovery, dan lifecycle
 
@@ -245,7 +247,7 @@ duration sendiri.
 | Final semantic content | message, result, plan, finding | ya | ya |
 | Evidence ringkas | receipt, test summary, checkpoint | ya | ya |
 | Live stream | model delta, progress, retry toast | tidak | tidak diperlukan |
-| Reasoning delta | `assistant.reasoning.delta` | tidak sebagai delta; diingest inkremental ke `SidebarModel` sebagai session history dengan marker trim | history reasoning dipulihkan sebagai entri Thinking |
+| Reasoning delta | `assistant.reasoning.delta` | tidak sebagai delta; history reasoning dipulihkan dari jurnal (marker `+ thinking` di chat bila `MINICODE_SHOW_THINKING=1`) | history reasoning dipulihkan sebagai entri jurnal |
 | Derived heartbeat | spinner, elapsed tick | tidak | dihitung dari timestamp |
 | Large content | tool output penuh | ref/store best effort | resolver bila tersedia |
 
@@ -253,10 +255,11 @@ duration sendiri.
 deterministik untuk event durable. Rebuild tidak boleh memerlukan token-by-token history.
 
 Sejak v0.33 potongan reasoning tidak lagi dibuang setelah tampil: TUI meng-ingest-nya
-inkremental lewat `SidebarModel.ingestThinking` ke session history (kompleksitas O(n²)
-diperbaiki; dijaga `test/perf-no-quadratic.test.ts`). Entri lama dipangkas dengan
-marker eksplisit `… N older items trimmed`. Reasoning dirender penuh di pane Thinking
-sidebar bila aktif, tetapi tidak pernah masuk transkrip chat.
+inkremental ke session history (kompleksitas O(n²) diperbaiki; dijaga
+`test/perf-no-quadratic.test.ts`). Entri lama dipangkas dengan marker eksplisit
+`… N older items trimmed`. Sejak v0.34 reasoning tidak dirender di pane Thinking
+sidebar (dihapus): marker `+ thinking` tampil di chat bila diaktifkan
+(`MINICODE_SHOW_THINKING=1` / `/view thinking`), detail lengkap tinggal di jurnal.
 
 ## 7. Trust dan sanitasi
 
@@ -293,10 +296,12 @@ sengaja bersifat live-only.
 - I-A11: context compaction tidak menghapus presentation history.
 - I-A12: `interrupted`, `failed`, dan `cancelled` eksplisit berbeda.
 
-Catatan v0.33 — sidebar kanan adalah **view state**, bukan semantic truth. Sidebar
-hanya aktif bila `cols ≥ 100` dan `rows ≥ 20`; ia tidak mengubah event, durability,
-atau lifecycle di atas. Temuan yang aktif di sidebar diproyeksikan ke Activity log
-(pada jalur linear tetap ke transkrip), dan reasoning tinggal di pane Thinking.
+Catatan v0.34 — sidebar kanan sudah **dihapus total**, jadi tidak ada lagi view state
+panel yang perlu dibedakan dari semantic truth. Geometri kolom chat (`chatCols =
+floor(cols/2)` bila `cols ≥ 120 && rows ≥ 20`, level penuh di bawah ambang) tidak
+mengubah event, durability, atau lifecycle di atas. Temuan tampil di chat/transkrip,
+dan reasoning memakai marker `+ thinking` di chat dengan detail di jurnal. Catatan
+v0.33 tentang Activity log sidebar bersifat historis dan sudah dicabut.
 
 ## 9. Status migrasi dari implementasi sekarang
 

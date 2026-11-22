@@ -296,6 +296,9 @@ describe("PTY: boot & kontrak layar", () => {
       // Byte stream dapat berisi teks saat frame sync masih ditulis; tunggu
       // sampai parser grid melihat teks pada frame yang lengkap.
       await waitForScreenText(tui, reply, 30000)
+      // Footer digambar di frame berikutnya; di bawah beban suite penuh bisa
+      // belum sempat terpaint saat teks sudah terlihat. Tunggu eksplisit.
+      await waitForScreenText(tui, "gpt-4o-mini", 30000)
       const screen = parseScreenBuffer(tui.raw(), PTY_COLS, PTY_ROWS)
       expect(screen.join("\n")).toContain(reply)
       expect(screen[PTY_ROWS - 1]).toContain("gpt-4o-mini")

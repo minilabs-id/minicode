@@ -7,10 +7,13 @@
 // memakai fake TTY in-process supaya paint tetap SINKRON (sama seperti
 // produksi) tanpa round-trip PTY yang menutupi biaya CPU.
 //
-// Dua bagian:
+// Tiga bagian:
 //   1. per-keystroke  — TuiApp + fake TTY, p50/p95/max per key.
 //   2. komponen       — batch-mean fungsi murni (applyKey, wrap, footer,
 //                       resolveContextWindow) untuk atribusi biaya.
+//   3. status (F-08)  — replika getStatus() produksi yang membaca counter sesi,
+//                       dengan riwayat 200/400/1000 pesan, dibandingkan dengan
+//                       jalur lama "state-first" (regresi F-01).
 //
 // Angka absolut bergantung mesin. Yang bermakna: RASIO antar komponen dan
 // delta sebelum/sesudah perbaikan pada mesin yang sama. TIDAK ada ambang dan
@@ -505,6 +508,118 @@ function componentRows(): ComponentRow[] {
   return rows
 }
 
+// ── Bagian 3: replika getStatus() produksi (F-08) ───────────────────────────
+//
+// `makeGetStatus()` di bagian atas adalah STUB STATIS: tidak pernah membaca
+// `session.state`/`session.contextTokens`, jadi bench lama buta terhadap F-01
+// (deep clone riwayat dua kali per paint saat idle). Di sini dipakai replika
+// jalur asli `cli/tui.ts`: counter turn diambil SEKALI dari `session.state`,
+// lalu cache per turn; getter `state` meng-clone tiap pesan supaya regresi
+// "baca state dulu" terlihat sebagai lonjakan biaya pada riwayat panjang.
+
+interface StatusSession {
+  readonly state?: { turnCount: number; history: unknown[] }
+  readonly contextTokens: number
+}
+
+function makeStatusSession(messages: number): StatusSession {
+  const history = Array.from({ length: messages }, (_, i) => ({
+    id: `msg-${i}`,
+    content: "x".repeat(160),
+    toolArgs: { i, payload: "y".repeat(64) },
+  }))
+  return {
+    get state() {
+      // Simulasi snapshotState(): clone seluruh pesan (biaya O(history)).
+      return {
+        turnCount: 4,
+        history: history.map((m) => ({ ...m, toolArgs: { ...(m.toolArgs as object) } })),
+      }
+    },
+    get contextTokens() {
+      return 42_100
+    },
+  }
+}
+
+/** Replika getStatus() produksi: counter lokal + cache per turn (F-01 teratasi). */
+function makeStatusReplica(session: StatusSession): () => TuiStatusSnapshot {
+  let turnCount = 0
+  try {
+    turnCount = session.state?.turnCount ?? 0 // SATU kali, saat setup
+  } catch {}
+  let cachedContext: { turn: number; tokens: number } | null = null
+  const getContextTokens = (): number => {
+    if (!cachedContext || cachedContext.turn !== turnCount) {
+      cachedContext = { turn: turnCount, tokens: session.contextTokens }
+    }
+    return cachedContext.tokens
+  }
+  return () => {
+    const used = getContextTokens()
+    return {
+      footer: {
+        mode: "auto",
+        strictBash: true,
+        workMode: "EXECUTE",
+        model: MODEL,
+        cwd: "D:\\Github\\minicode\\src\\ui\\tui",
+        context: `${Math.round(used / 1000)}k`,
+        metrics: "$1.23 33%",
+      },
+      busy: false,
+    }
+  }
+}
+
+/** Replika jalur LAMA (regresi F-01): baca `state.turnCount` sebelum cek cache. */
+function makeOldStatusReplica(session: StatusSession): () => TuiStatusSnapshot {
+  let cachedContext: { turn: number; tokens: number } | null = null
+  const getContextTokens = (): number => {
+    // Urutan lama: state (deep clone) dipanggil dulu, baru cache dicek.
+    const turn = session.state?.turnCount
+    if (turn === undefined) return session.contextTokens
+    if (!cachedContext || cachedContext.turn !== turn) {
+      cachedContext = { turn, tokens: session.contextTokens }
+    }
+    return cachedContext.tokens
+  }
+  return () => {
+    const used = getContextTokens()
+    return {
+      footer: {
+        mode: "auto",
+        strictBash: true,
+        workMode: "EXECUTE",
+        model: MODEL,
+        cwd: "D:\\Github\\minicode\\src\\ui\\tui",
+        context: `${Math.round(used / 1000)}k`,
+        metrics: "$1.23 33%",
+      },
+      busy: false,
+    }
+  }
+}
+
+function statusSnapshotRows(): ComponentRow[] {
+  const rows: ComponentRow[] = []
+  for (const messages of [200, 400, 1_000]) {
+    const fixed = makeStatusReplica(makeStatusSession(messages))
+    rows.push(
+      measureBatch(`getStatus replika · cached counter · ${messages} pesan`, () => {
+        fixed()
+      }),
+    )
+    const old = makeOldStatusReplica(makeStatusSession(messages))
+    rows.push(
+      measureBatch(`getStatus replika · old state-first · ${messages} pesan`, () => {
+        old()
+      }),
+    )
+  }
+  return rows
+}
+
 // ── Main ────────────────────────────────────────────────────────────────────
 
 setSessionLocale("en")
@@ -558,7 +673,7 @@ const bursts = [
   await runBurstScenario({ chars: 200, bracketedPaste: false }),
   await runBurstScenario({ chars: 500, bracketedPaste: false }),
 ]
-const components = componentRows()
+const components = [...componentRows(), ...statusSnapshotRows()]
 
 if (JSON_OUT) {
   console.log(
@@ -574,6 +689,7 @@ if (JSON_OUT) {
           "fake TTY in-process; bukan terminal/PTY nyata dan bukan jaringan",
           "angka absolut bergantung host; tidak ada ambang/gerbang CI",
           "cache JIT dan theme global memengaruhi run pertama",
+          "baris getStatus replika memakai fake session.state (clone histories), bukan IO/DB nyata",
         ],
       },
       null,

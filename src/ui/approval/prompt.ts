@@ -22,6 +22,7 @@ import { hintLine } from "../render/hint.ts"
 import { listRow } from "../render/list.ts"
 import { sanitizeAnsiLine } from "../render/sanitize.ts"
 import { c, glyphs, stripAnsi } from "../render/theme.ts"
+import { tSystem } from "../render/tool-label.ts"
 import { displayWidth, truncateToWidth } from "../render/width.ts"
 import { boxLeftPad, canRenderModal, dialogBox } from "../screens/dialog.ts"
 import { IDLE_CANCEL_MS, IDLE_WARN_MS } from "../screens/form.ts"
@@ -288,7 +289,7 @@ function paintModal(
   const cols = process.stdout.columns || 80
   const rows = process.stdout.rows || 24
   if (!canRenderModal(cols, rows)) {
-    sink.paintRegion([c.warning(truncateToWidth(t("tui.tooSmall"), Math.max(1, cols)))], 1)
+    sink.paintRegion([c.warning(truncateToWidth(tSystem("msg.tooSmall"), Math.max(1, cols)))], 1)
     return
   }
   const safeRows = Math.max(5, rows)

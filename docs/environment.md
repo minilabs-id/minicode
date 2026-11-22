@@ -45,6 +45,13 @@ Variabel yang paling menentukan perilaku (sisanya referensi di bawah):
 | `MINICODE_KEYSTORE_FORCE_DPAPI` | `1`/`true` → paksa jalur DPAPI/Windows walau di non-Windows (khusus test portabilitas; bukan konfigurasi produksi) |
 | `MINICODE_MINIMIZE_TOOL` | Di TUI section tool minimize default (setara `1`); set ke nilai selain `1` (mis. `0`) → tampilkan penuh |
 
+> **Catatan v0.35 — label aktivitas tool:** `MINICODE_LANG`/`/lang` mengatur
+> bahasa UI dan narasi/jawaban model, tetapi **bukan** label aktivitas `› …`.
+> Khusus label itu, **locale OS** (`Intl`, id/en) yang menang di semua
+> permukaan — TUI, one-shot/`exec`, dan ACP via `src/ui/assistant/simple.ts` —
+> demi kosakata tool yang konsisten lintas permukaan. Tidak ada variabel env
+> untuk mengganti perilaku ini; lihat `TERMINAL_CONTRACT.md` entri v0.35.
+
 ## Sandbox
 
 | Variabel | Fungsi |
@@ -90,17 +97,17 @@ Variabel yang paling menentukan perilaku (sisanya referensi di bawah):
 | `MINICODE_ASCII` | `1` → paksa glyph ASCII (`[OK]`, `>`, `.`) untuk konsol tanpa UTF-8 |
 | `MINICODE_BOX` | gaya sudut kotak popup: default **melengkung** (`╭╮╰╯`); `square` → lancip (`┌┐└┘`); `ascii` → `+-|` (sama dengan `MINICODE_ASCII=1`). Untuk terminal yang merender glyph melengkung jelek |
 | `MINICODE_SCRIM` | `none` → paksa scrim backdrop jadi `faint` saja (tanpa latar gelap `48;5;236`) — diagnostik/tema terminal yang memetakan 256-warna aneh |
-| `MINICODE_COMPACT` | `1` → tool call ringkas, `0` → expanded. Default: compact di TUI, expanded di one-shot/exec. Toggle `/view compact` sudah dihapus dan Ctrl+O tidak lagi memutar compact (kini membuka modal detail Live di sidebar) |
+| `MINICODE_COMPACT` | `1` → tool call ringkas, `0` → expanded. Default: compact di TUI, expanded di one-shot/exec. Toggle `/view compact` sudah dihapus; `Ctrl+O` juga dihapus sejak v0.34 (v0.33 pernah membuka modal detail Live di sidebar) |
 | `MINICODE_JUSTIFY` | `1` → aktifkan rata kanan-kiri (justify) keluaran teks model. Default: mati (opt-in) — justify menyuntik spasi yang mengubah teks asli saat di-copy/–pipe |
-| `MINICODE_DROPDOWN` | `0` → matikan floating dropdown, pakai hint inline (konsol legacy) |
+| `MINICODE_DROPDOWN` | `0` → matikan dropdown, pakai hint inline (konsol legacy). Sejak v0.36 dropdown (bila aktif) digambar sebagai **overlay di dalam frame `paint()` yang sama**, bukan `paintRegion()` terpisah, dan tidak mengurangi `viewH` — lebar prompt/kursor memakai `composerWidth()` dengan cap progresif (100→100, 200→125, 300→150, 500→200; sejak v0.37) |
 | `MINICODE_MOUSE_SELECTION` | `0`/`false`/`off`/`no` → matikan mouse tracking TUI; default `1` untuk drag selection + wheel |
 | `MINICODE_MOTION` | `0` → matikan animasi status (pulse spark saat turn berjalan jadi glyph statis) — aksesibilitas/rekaman layar/SSH lambat |
 | `MINICODE_BELL` | `0` → matikan bell `\x07` saat approval (aksesibilitas) |
 | `MINICODE_STATUSLINE` | `rich` → statusline turn menampilkan token kumulatif + biaya sesi (default hemat) |
 | `MINICODE_A11Y` | `1` → live-region approval untuk screen reader (baris polos tanpa ANSI) |
-| `MINICODE_SHOW_THINKING` | reasoning model tersembunyi SECARA DEFAULT (`false`); `1` → paksa terlihat (atau `/view thinking` / `--verbose`), `0` → paksa tersembunyi. `Ctrl+T` tidak punya binding |
-| `MINICODE_MINIMIZE_ACTIVITY` | ON secara default di TUI; `0` → transparan (baris per-tool). Lipat aktivitas tool per turn jadi satu ringkasan; detail kini ada di sidebar (panel Live, buka dengan Ctrl+O), bukan `/view expand` |
-| `MINICODE_ACTIVITY_PANEL` | `0` → matikan panel aktivitas/sidebar (default AKTIF di TUI, tapi hanya bila `cols ≥ 100` dan `rows ≥ 20` — geometri, bukan toggle `/view fold` yang sudah dihapus); `1` → paksa aktif juga di jalur linear/one-shot |
+| `MINICODE_SHOW_THINKING` | reasoning model tersembunyi SECARA DEFAULT (`false`); `1` → tampilkan marker `+ thinking` di chat (atau `/view thinking` / `--verbose`), `0` → paksa tersembunyi. `Ctrl+T` tidak punya binding; detail lengkap tetap di jurnal |
+| `MINICODE_MINIMIZE_ACTIVITY` | ON secara default di TUI; `0` → transparan (baris per-tool). Lipat aktivitas tool per turn jadi satu ringkasan di chat — toggle fold ini TETAP berlaku sejak v0.34; baris tool/`✦`/finding sendiri kembali ke chat (v0.33 pernah memindahkannya ke panel Live + `Ctrl+O`, sekarang dicabut), bukan `/view expand` |
+| `MINICODE_ACTIVITY_PANEL` | **Legacy/deprecate (D3)** sejak v0.34: nilai `0`/`1` tetap diterima agar konfigurasi lama tidak error, tetapi tidak lagi mengubah tampilan. Dulu mengontrol panel aktivitas/sidebar (aktif bila `cols ≥ 100` dan `rows ≥ 20`); sidebar sudah dihapus total, jadi variabel ini tidak ada efeknya |
 | `MINICODE_AUTORESUME_BG` | `0` → nonaktifkan auto-resume turn TUI saat job background selesai (default aktif; sekali per job, hanya bila tidak ada turn berjalan) |
 | `MINICODE_TURN_AUTO_RESUME` | `0` → nonaktifkan resume otomatis turn setelah kegagalan provider **transien** (`server`/`network`; default aktif). Retry provider dan resume turn berbagi **satu anggaran pemulihan** (`src/policy/recovery-budget.ts`): total 45 dtk dan kuota 6 percobaan untuk satu panggilan logis, dengan full jitter dan `Retry-After` sebagai floor. Berbagi satu anggaran mencegah *retry amplification* (angka terpisah per lapisan membuat biaya berkali: ≈82 dtk untuk provider mati). Kegagalan terminal tidak dipulihkan: `rate_limit` (429 permanen/spend-cap tidak pulih), `auth`, `invalid_request`, `context_length_exceeded`, `budget_exceeded`, `max_steps_exceeded`, dan abort user |
 | `MINICORE_THINKING` | `off` → kirim `enable_thinking:false` ke OpenAI-compat (DeepSeek). Alias lama `MINICODE_THINKING` masih dihormati |

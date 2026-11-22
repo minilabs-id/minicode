@@ -32,6 +32,7 @@ import {
   runTui,
 } from "../cli/tui.ts"
 import { resetLocaleState, setSessionLocale } from "../src/ui/i18n/locale.ts"
+import { tSystem } from "../src/ui/render/tool-label.ts"
 import { createFakeBus, installFakeTty, KEY } from "./helpers/tui-harness.ts"
 
 let tty: ReturnType<typeof installFakeTty> | null = null
@@ -301,7 +302,7 @@ test("integrasi F1: baris antre yang dibuang saat abort tak pernah digema", asyn
     // Abort → baris antre dibuang; tetap tak ada prompt hantu.
     await tty.send(KEY.esc)
     // Tunggu abort terproses (toast setelah host.abort()) sebelum gate dilepas.
-    await tty.waitForScreen((f) => f.some((line) => line.includes("abort sent")))
+    await tty.waitForScreen((f) => f.some((line) => line.includes(tSystem("msg.abortedHint"))))
     h.releaseTurn()
     // Toast queueDropped muncul di inner finally, tepat setelah gate dilepas.
     await tty.waitForScreen((f) => f.some((line) => line.includes("queued dropped")))

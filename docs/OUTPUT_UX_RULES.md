@@ -1,7 +1,7 @@
 # Output UX Rules
 
 **Status:** contract grammar untuk normal/verbose/debug/machine output  
-**Tanggal:** 2026-09-25 · **Diperbarui:** 2026-11-21 (v0.33, `1aaca14`)  
+**Tanggal:** 2026-09-25 · **Diperbarui:** 2026-11-22 (v0.35; arsip 2026-11-21 v0.33, `1aaca14`)  
 **Kontrak aktif:** proyeksi output di `src/presentation/projection.ts` dan formatter di `src/ui/render/`.
 
 ## 1. North star
@@ -98,8 +98,8 @@ Build failed
   package.json exists, but node_modules/ is absent.
 ```
 
-Dengan sidebar aktif, temuan diproyeksikan ke Activity log sidebar, bukan ke badan
-chat; pada jalur linear tanpa sidebar tetap menjadi entri transkrip tersendiri.
+Sejak v0.34 temuan tampil di badan chat (TUI) dan sebagai entri transkrip tersendiri
+pada jalur linear — klaim lama "Activity log sidebar" sudah dicabut bersama sidebar.
 
 ### Plan
 
@@ -119,28 +119,63 @@ Plan hanya future work. “Read file”, “run grep”, dan “think” adalah 
 Audit complete · 18 files · 42s
 ```
 
-## 2b. Sidebar & chat split (v0.33)
+## 2b. Chat kolom tengah (v0.34 — menggantikan split sidebar v0.33)
 
-Chat berisi narration + category recap (mis. `3 command · 2 read · 5 subagent`) +
-jawaban akhir SAJA. Baris ledger per-tool, label `Tool:`, `/expand`, dan collapsed
-buffer DIHAPUS. `finding.detected` masuk Activity log sidebar bila sidebar aktif;
-bila tidak, jalur linear menaruhnya di transkrip.
+Sidebar kanan DIHAPUS total. Chat berisi narration + category recap (mis.
+`3 command · 2 read · 5 subagent`) + baris tool, agregat `✦`, `finding.detected`,
+marker `+ thinking`, dan jawaban akhir. Label `Tool:`, `/expand`, dan collapsed
+buffer tetap DIHAPUS; jalur linear juga menaruh finding di transkrip.
 
-Sidebar kanan aktif hanya bila `cols ≥ 100` dan `rows ≥ 20`. Lebar 30% pada `cols ≤ 150`,
-naik linear ke 50% pada `cols ≥ 160`, dengan chat floor 36 kolom. Tinggi pane
-Thinking:Activity 60:40 (dapat diubah 30–80% via `Ctrl+PgUp`/`Ctrl+PgDn`); pada
-`cols ≥ 168` pane Activity terbagi `Live|Log`. Satu separator vertikal redup, gap 3
-baris, padding 1 spasi, tanpa box border — semuanya dilukis dalam **satu frame
-`paint()` / satu write**, bukan scrollback.
+Chat adalah kolom tengah: `cols ≥ 120 && rows ≥ 20` → `chatCols = floor(cols/2)`
+dengan padding kiri/kanan (maks 50% terminal), footer/composer ikut ter-centre;
+di bawah ambang chat memakai lebar penuh. Popup/modal tetap full-screen ter-centre
+pada `cols` (I20 tidak berubah). Semuanya dilukis dalam **satu frame `paint()` /
+satu write** (I1), bukan scrollback.
 
-Kunci: wheel mouse menggulir pane di bawah kursor, `Alt+PgUp/PgDn` menggulir kedua
-pane dan memindahkan seleksi Live, `Ctrl+O` membuka modal detail live-tool,
-`Home`/`End` membawa chat dan sidebar ke tepi, `PgUp/PgDn` tetap khusus chat.
-Reasoning dirender penuh di pane Thinking bila sidebar aktif dan disimpan sebagai
-session history dengan marker trim (`… N older items trimmed`), bukan baris transkrip.
+Kunci: wheel mouse menggulir chat (tidak ada pane); `PgUp/PgDn` satu halaman,
+`Shift+PgUp/PgDn` setengah halaman, `Home`/`End` (prompt kosong) ke top/ekor chat.
+Shortcut pane lama (`Alt+PgUp/PgDn`, `Ctrl+PgUp/PgDn`, `Ctrl+O` modal Live, wheel
+per-pane) dihapus. Reasoning memakai marker `+ thinking` di chat bila diaktifkan
+(`MINICODE_SHOW_THINKING=1`), dengan marker trim (`… N older items trimmed`) pada
+history dan detail lengkap di jurnal — bukan pane Thinking.
 
 Retry hanya satu micro-toast footer `retry n/total · Ns` dengan TTL 4 detik dan counter
 live — bukan baris ledger, bukan durasi backoff, dan bukan envelope machine.
+
+**v0.35 — rekap footer & label aktivitas.** Rekap tool adalah **baris committed
+statis**, bukan state live: footer tiap narasi
+`tool → narasi → └ rekap(tool sebelum narasi)`, format
+`└ 2 command · 118 read · 1 other`. Rekap akhir turn kumulatif seluruh tool
+selama turn. Klausa lama (rekap dua baris saat live, `flushActivityFold`
+net-nol, `liveSummaryRows` mengikuti ekor, jeda antar narasi melayang) adalah
+arsip v0.33/v7.x yang ditimpa v0.35. Label aktivitas `› …` memakai **locale OS**
+lewat `Intl` (id/en) di semua permukaan (TUI, one-shot/`exec`, ACP via
+`simple.ts`; resolver `src/ui/render/tool-label.ts`), sementara narasi/jawaban
+model tetap memakai bahasa user (`/lang`).
+
+**v0.36 — composer & dropdown overlay.** Composer tinggi **maksimal 2 baris**
+(dulu hingga 5): draft panjang memakai jendela geser, tanpa menambah baris di
+frame dan tanpa menggeser transkrip; satu baris kosong pemisah footer tetap.
+Lebar prompt/kursor = `composerWidth() = min(100, chatWidth())` (bukan
+`chatWidth()` penuh), prefix `minicode › ` bila ≥60 kolom else `› `, lanjutan
+`· `. Dropdown `/` digambar **di dalam frame `paint()` yang sama** (satu
+`stdout.write`, I1) sebagai overlay yang menimpa baris transkrip bawah, **tanpa
+mengurangi `viewH`** dan tanpa `paintRegion()` terpisah (menghindari dua write &
+flicker saat steer). Klik di area dropdown memilih item menu, bukan seleksi
+transkrip. Klausa lama (composer 5 baris, dropdown memotong `viewH`, kursor
+mengikuti `chatWidth()` penuh) adalah arsip yang ditimpa v0.36.
+
+**v0.37 — bracketed paste, select-all, resize & geometri progresif.** TUI,
+`askLine`/`askSecret`, dan output-window memakai `?2004h`/`?2004l` di luar frame
+(I1 tetap satu `write` per frame); CR dalam paste = newline draft, bukan submit
+bertingkat. `Ctrl+A` = `selectAll` seluruh baris logis transkrip bila composer
+kosong & dropdown tertutup (Home bila ada draft/menu); `Ctrl+C` menyalin juga
+saat drag aktif. Resize menghentikan auto-scroll, membatalkan drag, mereset
+kolom kursor, dan merebase anchor gulir walau seleksi aktif; dropdown ditutup
+saat busy/abort; klik pasca-resize memakai geometri baru. Gema prompt disimpan
+satu baris logis dan di-wrap sekali selebar kolom chat. Cap prompt progresif
+`min(chatCols, 100 + floor(max(0, chatCols-100)/4))` dengan prefix `minicode › `
+bila `w−14 ≥ 24`, else `› `; composer 2 baris & dropdown overlay tetap.
 
 ## 3. Status vocabulary
 
@@ -220,9 +255,10 @@ fields. Tidak mengirim raw kernel shape sebagai public contract.
 
 ## 5. Tool dan parallel operations
 
-> Contoh ledger di bawah ini adalah **mode linear/tanpa sidebar**. Dengan sidebar aktif,
-> detail per-tool tidak lagi dicetak di chat: chat hanya memuat narration, category
-> recap, dan jawaban akhir; detail pindah ke Activity log sidebar.
+> Contoh ledger di bawah ini berlaku untuk TUI maupun linear sejak v0.34 (sidebar
+> sudah dihapus): detail per-tool, agregat `✦`, dan finding kembali dicetak di chat
+> bersama narration, category recap, dan jawaban akhir. Klaim lama "detail pindah ke
+> Activity log sidebar" sudah dicabut.
 
 Activity menjelaskan apa yang sedang dikerjakan, bukan internal implementation dump.
 Satu baris ledger default:
@@ -260,8 +296,8 @@ write_file src/router.ts · 1 file · 34ms
 ### Parallel
 
 Gaya collapsed/aggregated lama (blok `+ explore · N tools · N ok` dan buffer yang bisa
-dibuka) DIHAPUS di v0.33. Ringkasan kini satu baris category recap; detail ada di
-Activity log sidebar bila aktif.
+dibuka) DIHAPUS. Ringkasan kini satu baris category recap; detail per-tool kembali ke
+chat sejak v0.34 (v0.33 memindahkannya ke Activity log sidebar — dicabut).
 
 Jangan interleave raw output. Kelompokkan:
 
@@ -281,6 +317,13 @@ Untuk batch besar:
 ```text
 Analyzed 11 files
 ```
+
+### Rekap tool (v0.35)
+
+Satu baris `└` per narasi, committed dan statis: `tool → narasi → └ rekap(tool
+sebelum narasi)`. Contoh `└ 2 command · 118 read · 1 other`. Rekap akhir turn =
+kumulatif semua tool turn (bukan per segmen). Label `› …` pada baris tool
+memakai locale OS (`Intl`, id/en), berbeda dari narasi yang memakai `/lang`.
 
 ### Retry
 
@@ -418,9 +461,16 @@ terminal task event dan summary tepat satu kali.
 ## 10. Terminal geometry
 
 - Target lebar 80, 100, dan 120+ columns.
-- Sidebar kanan aktif hanya bila `cols ≥ 100` dan `rows ≥ 20`, dengan chat floor
-  36 kolom; pada `cols ≥ 168` pane Activity terbagi `Live|Log`.
+- Chat kolom tengah: `cols ≥ 120 && rows ≥ 20` → `chatCols = floor(cols/2)` dengan
+  padding kiri/kanan (maks 50% terminal), footer/composer ter-centre; di bawah
+  ambang chat penuh lebar. Popup/modal tetap full-screen ter-centre pada `cols`
+  (I20). Tidak ada sidebar/pane sejak v0.34.
 - Semua ukuran memakai display columns; CJK/emoji dua kolom.
+- Composer maksimal 2 baris (v0.36, tetap): lebar prompt/kursor v0.37 =
+  `composerWidth() = min(chatCols, 100 + floor(max(0, chatCols-100)/4))`, prefix
+  `minicode › ` bila `w−14 ≥ 24` / `› `, lanjutan `· `; dropdown `/` = overlay
+  dalam frame yang sama, tidak mengurangi `viewH`, tanpa region terpisah. Klik
+  area dropdown = item menu; dropdown ditutup saat busy/abort.
 - Long path/command wrap atau truncate dengan marker, tidak pernah dipotong tanpa
   petunjuk.
 - Resize terjadi saat paint; cursor selalu diparkir di input/overlay aktif.
@@ -449,9 +499,14 @@ Output harus berguna bila disalin ke issue, log, chat, atau docs:
 - source text, bukan terminal escape, masuk ke clipboard;
 - app-level selection dipetakan ke source melalui wrap/CJK/SGR/table;
 - prompt/popup/footer tidak selectable kecuali dirancang eksplisit;
-- `Ctrl+C` menyalin selection jika ada, tanpa selection no-op;
+- `Ctrl+C` menyalin selection jika ada, tanpa selection no-op — sejak v0.37
+  juga saat drag masih aktif (drag di-finalisasi dulu, bukan no-op/abort);
 - `Esc` membersihkan selection sebelum behavior cancel apa pun;
-- kegagalan OSC52 terlihat dan `/copy` tetap menjadi fallback.
+- kegagalan OSC52 terlihat dan `/copy` tetap menjadi fallback;
+- v0.37: `Ctrl+A` = select-all seluruh baris logis transkrip bila composer
+  kosong & dropdown tertutup (Home bila ada draft/menu); paste multi-baris
+  memakai bracketed paste `?2004h`/`?2004l` di luar frame, CR bukan submit;
+  resize merebase anchor walau seleksi aktif.
 
 Native terminal drag selection is not promised while the app owns mouse tracking.
 
@@ -464,6 +519,12 @@ Native terminal drag selection is not promised while the app owns mouse tracking
 - Prioritas locale: session command > environment > persisted state > OS locale
   > English fallback.
 - Translation key yang hilang fallback ke English, bukan mencetak key secara diam-diam.
+- **Pengecualian v0.35 (label aktivitas tool):** prioritas di atas TETAP berlaku
+  untuk label UI dan untuk narasi/jawaban model (`/lang`), tetapi khusus prefix
+  aktivitas tool `› …` **OS locale yang menang** (`Intl`, id/en) di semua
+  permukaan — TUI, one-shot/`exec`, dan ACP via `simple.ts` — demi konsistensi
+  kosakata tool lintas permukaan. Dua bahasa ini sengaja dibedakan: `/lang`
+  mengubah narasi, locale OS mengubah label `› …`.
 
 ## 14. Anti-patterns
 
@@ -488,8 +549,11 @@ Native terminal drag selection is not promised while the app owns mouse tracking
 - [ ] Finding dan evidence terpisah secara semantic.
 - [ ] Copy/paste tetap berguna tanpa color.
 - [ ] 80-column/narrow/Unicode/resize/Windows fallback teruji.
-- [ ] Sidebar hanya aktif pada `cols ≥ 100`/`rows ≥ 20`, satu frame dengan chat, dan mengikuti aturan lebar/tinggi/pane.
-- [ ] Chat memuat recap + narration + answer; tanpa `Tool:`, `/expand`, atau collapsed buffer.
-- [ ] Finding tampil di Activity log saat sidebar aktif dan tetap typed di machine.
+- [ ] Chat kolom tengah: `cols ≥ 120`/`rows ≥ 20` → `chatCols = floor(cols/2)` (padding, maks 50%), penuh lebar di bawah ambang; satu frame dengan popup ter-centre.
+- [ ] Chat memuat recap + narration + answer + baris tool/`✦`/finding/`+ thinking`; tanpa `Tool:`, `/expand`, atau collapsed buffer.
+- [ ] Finding tampil di chat (TUI) / transkrip (linear) dan tetap typed di machine.
 - [ ] Retry hanya satu micro-toast footer 4 dtk, bukan baris ledger atau envelope machine.
+- [ ] (v0.35) Rekap = baris committed statis `└ …` di footer tiap narasi; rekap akhir turn kumulatif; label `› …` memakai locale OS, narasi memakai `/lang`.
+- [ ] (v0.36) Composer maks 2 baris (jendela geser, transkrip tidak bergeser); lebar `composerWidth() = min(100, chatWidth())`; dropdown `/` overlay dalam satu frame tanpa mengurangi `viewH` dan tanpa `paintRegion()` terpisah; klik area dropdown = item menu.
+- [ ] (v0.37) Bracketed paste `?2004h`/`?2004l` di luar frame tanpa submit bertingkat; `Ctrl+A` select-all (Home bila draft/menu) & `Ctrl+C` saat drag aktif; resize stabilizer (auto-scroll/drag/kursor/anchor, dropdown busy/abort); echo prompt satu baris logis di-wrap sekali selebar chat; cap prompt progresif `min(chatCols, 100 + floor(max(0, chatCols-100)/4))`.
 - [ ] Machine output tidak bergantung pada scraping human text.

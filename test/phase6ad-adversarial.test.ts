@@ -452,11 +452,14 @@ describe("6AD cancellation - stop() prevents further autonomous work", () => {
 // â”€â”€ M16: event routing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 describe("6AD event routing - scheduler events are not conversation", () => {
-  test("M16: scheduler notice sink is the sidebar Activity log, not a user turn", async () => {
+  test("M16: scheduler notice sink is a one-line toast, not a user turn", async () => {
     const tui = await Bun.file(join(import.meta.dir, "..", "cli", "tui.ts")).text()
-    // v0.33: notifikasi scheduler dipindah ke log Activity sidebar supaya chat
-    // tetap naratif. Yang dilarang tetap sama: jalur pesan user.
-    expect(tui).toMatch(/onSchedulerNotice\([\s\S]{0,160}sidebarModel\.ingestActivity\(/)
+    // Notifikasi scheduler kini jadi micro-toast SATU baris di footer lewat
+    // app.showToast (sink yang sudah ada) — bukan entri transkrip. Jalur lama
+    // (ingestActivity) dan jalur pesan user tetap dilarang.
+    expect(tui).toMatch(/onSchedulerNotice\([\s\S]{0,160}showToast\(/)
+    expect(tui).not.toMatch(/onSchedulerNotice\([\s\S]{0,160}ingestActivity\(/)
+    expect(tui).not.toMatch(/onSchedulerNotice\([\s\S]{0,160}pushInfo\(/)
     expect(tui).not.toMatch(/onSchedulerNotice\([\s\S]{0,160}pushUser\(/)
     expect(tui).not.toMatch(/onSchedulerNotice\([\s\S]{0,160}stream\(/)
     expect(tui).not.toMatch(/onSchedulerNotice\([\s\S]{0,160}prompt\(/)
@@ -585,10 +588,10 @@ describe("6AD session invalidation through the production handle", () => {
   }, 60_000)
 })
 
-// â”€â”€ M16: the sink must be the SYSTEM path, tightly â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â”€â”€ M16: the notice sink must be a footer toast, tightly â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 describe("6AD event routing is source-checked", () => {
-  test("M16: the notice sink is sidebar Activity, never a user-message path", async () => {
+  test("M16: the notice sink is a one-line footer toast, never a user-message path", async () => {
     const tui = await Bun.file(join(import.meta.dir, "..", "cli", "tui.ts")).text()
     // [DESIGN DECISION] Slice the source AROUND the sink rather than matching the
     // call with a regex. The first version used a lazy group that stopped at the
@@ -598,14 +601,19 @@ describe("6AD event routing is source-checked", () => {
     // cannot fail is worse than no check, because it looks like evidence.
     const at = tui.indexOf("onSchedulerNotice(")
     expect(at).toBeGreaterThan(-1)
-    const body = tui.slice(at, at + 400)
-    // v0.33: sink = sidebar Activity log, BUKAN transkrip chat.
-    expect(body).toContain("ingestActivity")
+    const body = tui.slice(at, at + 200)
+    // Sink = micro-toast satu baris di footer via app.showToast — BUKAN transkrip.
+    expect(body).toContain("showToast")
+    expect(body).not.toContain("ingestActivity")
     expect(body).not.toContain("pushInfo")
     // [FACT] Case-INSENSITIVE on purpose — tangkap mutan jalur pesan user.
     for (const userPath of ["pushuser", "pusherror", "runpromptwithverify", "session.prompt"]) {
       expect(body).not.toContain(userPath)
     }
+    // Pastikan jalur sidebar lama benar-benar hilang dari driver, bukan cuma
+    // dari potongan sumber di atas.
+    expect(tui).not.toContain("sidebarModel")
+    expect(tui).not.toContain("ingestActivity")
   })
 })
 describe("6AD context isolation - the parent session is untouched", () => {

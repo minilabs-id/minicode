@@ -16,6 +16,7 @@ import { SESSION_LEASE_MS } from "../src/task/session-authority.ts"
 import { resetTaskStoreHandles } from "../src/task/store.ts"
 import { attachSimpleLogger } from "../src/ui/assistant/simple.ts"
 import { currentLocale, resetLocaleState } from "../src/ui/i18n/locale.ts"
+import { tSystem } from "../src/ui/render/tool-label.ts"
 import { startFakeProvider } from "./helpers/fake-provider.ts"
 import { createFakeBus, installFakeTty, KEY } from "./helpers/tui-harness.ts"
 
@@ -324,8 +325,9 @@ describe("P03-B: TUI stale refusal", () => {
   // take-over DI ANTARA dua turn (deterministik: turn 1 sudah durable,
   // terdeteksi via poll DB); turn 2 dilewati pagar pra-turn (E04) lalu
   // persistCurrent-nya tetap dipanggil → StaleWriterError typed → error
-  // transkrip `[writer] …` (tui.ts:318-320). Sengaja TANPA notice
-  // turn-level baru — itu keputusan owner terpisah (§13.3 matriks).
+  // transkrip pesan pendek bahasa SISTEM `tSystem("msg.staleWriter")`; detail
+  // teknis (epoch/bootId/catatan) tetap di jurnal/log, bukan di layar.
+  // Sengaja TANPA notice turn-level baru — keputusan owner terpisah (§13.3).
   test("persist ditolak → error transkrip, loop lanjut, turn berikut nol spend", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "minicode-p03b-"))
     // BUKAN tmpRoots bersama: handle sqlite Windows (GC bun:sqlite + peta
@@ -389,21 +391,24 @@ describe("P03-B: TUI stale refusal", () => {
       // Turn 2: gate pra-turn menolak (nol spend) → persistCurrent tetap jalan
       // → StaleWriterError → error transkrip; TUI tetap operasional.
       // Submit bisa hilang bila TUI masih finalisasi turn 1 (input belum
-      // fokus) — kirim ulang berbatas hingga `[writer]` teramati. Hasil
+      // fokus) — kirim ulang berbatas hingga pesan stale teramati. Hasil
       // deterministik: muncul = turn tersubmit + ditolak; gagal total =
       // error keras, bukan pass diam. Submit ganda pun aman (skip idempoten,
-      // spend tetap nol).
+      // spend tetap nol). Pesan memakai kamus sistem → pakai tSystem, bukan
+      // literal, supaya test locale-independent.
+      const stale = tSystem("msg.staleWriter")
       await Bun.sleep(500)
       let out = ""
-      for (let attempt = 0; attempt < 3 && !out.includes("[writer]"); attempt++) {
+      for (let attempt = 0; attempt < 3 && !out.includes(stale); attempt++) {
         await tty.send("pertanyaan dua")
         await tty.send(KEY.enter)
         try {
-          out = await tty.waitForOutput((o) => o.includes("[writer]"), 8000)
+          out = await tty.waitForOutput((o) => o.includes(stale), 8000)
         } catch {}
       }
-      expect(out).toContain("[writer]")
-      expect(out).toContain("pre-turn epoch mismatch")
+      expect(out).toContain(stale)
+      // Detail teknis jangan bocor ke layar (tetap di jurnal/log).
+      expect(out).not.toContain("pre-turn epoch mismatch")
       expect(cli.isWriterStale()).toBe(true)
       // Nol spend tambahan: gate menghentikan turn 2 sebelum provider.
       expect(provider.requestCount()).toBe(1)

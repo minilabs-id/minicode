@@ -320,3 +320,60 @@ describe("wrapByWidth", () => {
     }
   })
 })
+
+// Regresi F-06 (audit performa 2026-11-22): jalur cepat ASCII di
+// displayTokens/displayWidth dan lintasan tunggal di truncateToWidth tidak
+// boleh mengubah invariant lebar = kolom.
+describe("fast-path ASCII (F-06)", () => {
+  test("seluruh ASCII printable = satu kolom per code unit", () => {
+    const all = Array.from({ length: 0x7e - 0x20 + 1 }, (_, i) =>
+      String.fromCharCode(0x20 + i),
+    ).join("")
+    expect(all.length).toBe(95)
+    expect(displayWidth(all)).toBe(95)
+  })
+
+  test("batas token ASCII identik dengan jalur grapheme saat dipotong/dipecah", () => {
+    const s = "abcdefghij".repeat(20)
+    expect(displayWidth(s)).toBe(200)
+    expect(truncateToWidth(s, 9)).toBe("abcdef...")
+    const chunks = chunkByWidth(s, 7)
+    expect(chunks.join("")).toBe(s)
+    for (const c of chunks) expect(displayWidth(c)).toBeLessThanOrEqual(7)
+    expect(padToWidth("abc", 6)).toBe("abc   ")
+  })
+
+  test("di luar ASCII printable tetap lewat jalur lambat", () => {
+    // Tab 8 kolom, newline/DEL 0 kolom, combining mark melekat pada basisnya.
+    expect(displayWidth("a\tb")).toBe(10)
+    expect(displayWidth("a\nb")).toBe(2)
+    expect(displayWidth("a\x7fb")).toBe(2)
+    expect(displayWidth("e\u0301")).toBe(1)
+  })
+
+  test("CJK/emoji/ZWJ/flag tetap dua kolom di tengah run ASCII", () => {
+    const s = "ab字cd👨‍👩‍👧‍👦ef🇮🇩gh"
+    expect(displayWidth(s)).toBe(14)
+    expect(truncateToWidth(s, 8, "")).toBe("ab字cd👨‍👩‍👧‍👦")
+    expect(displayWidth(truncateToWidth(s, 8, ""))).toBe(8)
+  })
+
+  test("SGR tidak ikut dihitung dan closure ellipsis tidak berubah", () => {
+    const s = `\x1b[1;31m${"abcd".repeat(20)}`
+    expect(displayWidth(s)).toBe(80)
+    expect(truncateToWidth(s, 7)).toBe("\x1b[1;31mabcd\x1b[0m...")
+    expect(truncateToWidth("\x1b[0mhi", 10)).toBe("\x1b[0mhi")
+    expect(truncateToWidth("\x1b[31mhi", 10)).toBe("\x1b[31mhi\x1b[0m")
+    expect(padToWidth("\x1b[32mab\x1b[39m", 5)).toBe("\x1b[32mab\x1b[39m   ")
+  })
+
+  test("ASCII panjang tetap jalur cepat (guard regresi performa, ambang longgar)", () => {
+    const s = "the quick brown fox jumps over the lazy dog ".repeat(200)
+    const t0 = performance.now()
+    for (let i = 0; i < 200; i++) void displayWidth(s)
+    // Jalur lambat (Intl.Segmenter per grapheme) jauh lebih mahal; ambang ini
+    // hanya menangkap regresi kasar, bukan benchmark. Divalidasi: ~8 ms vs
+    // ~760 ms di mesin audit.
+    expect(performance.now() - t0).toBeLessThan(500)
+  })
+})

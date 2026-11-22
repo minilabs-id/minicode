@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
+import { statSync } from "node:fs"
 import { rm } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve } from "node:path"
 import { LIMITS } from "../constants.ts"
@@ -49,11 +50,60 @@ export interface ShadowChange {
 
 const REF_NAMESPACE = "refs/minicode"
 
+// E-27: cache per-cwd HANYA untuk pembacaan konfigurasi (gitDir &
+// gitFilterNeutralizers). DILARANG cache ephemeralTree/write-tree/update-ref/
+// GIT_INDEX_FILE — itu state kerja yang berubah tiap operasi.
+const gitDirCache = new Map<string, { dir: string | null; stamp: string }>()
+const filterNeutralizerCache = new Map<string, { args: string[]; stamp: string }>()
+
+/** Stamp perubahan marker `.git` di cwd (file worktree atau direktori). */
+function gitMarkerStamp(cwd: string): string {
+  try {
+    const st = statSync(join(cwd, ".git"))
+    return `${st.mtimeMs}:${st.size}:${st.ino}`
+  } catch {
+    return "none"
+  }
+}
+
+/** Stamp konfigurasi filter: config lokal `.git/config` + global ~/.gitconfig. */
+function gitConfigStamp(cwd: string): string {
+  const parts: string[] = []
+  for (const p of [join(cwd, ".git", "config"), join(cwd, ".git")]) {
+    try {
+      const st = statSync(p)
+      parts.push(`${st.mtimeMs}:${st.size}`)
+    } catch {
+      parts.push("-")
+    }
+  }
+  return parts.join("|")
+}
+
+/** Seam uji: ganti eksekutor git (tanpa menyentuh hardening di produksi). */
+type ShadowGitRunner = (
+  args: string[],
+  cwd: string,
+  opts?: { env?: Record<string, string>; timeoutMs?: number },
+) => Promise<{ code: number; stdout: string; stderr: string }>
+let gitRunnerOverride: ShadowGitRunner | null = null
+
+export function __setShadowGitRunnerForTest(fn: ShadowGitRunner | null): void {
+  gitRunnerOverride = fn
+}
+
+/** Reset dua cache per-cwd (E-27) — dipakai test agar hermetik. */
+export function __resetShadowGitCachesForTest(): void {
+  gitDirCache.clear()
+  filterNeutralizerCache.clear()
+}
+
 function git(
   args: string[],
   cwd: string,
   opts: { env?: Record<string, string>; timeoutMs?: number } = {},
 ): Promise<{ code: number; stdout: string; stderr: string }> {
+  if (gitRunnerOverride) return gitRunnerOverride(args, cwd, opts)
   return new Promise((resolveOut) => {
     // `core.autocrlf=false` WAJIB: di Windows default-nya `true`, sehingga
     // checkout-index menerapkan smudge filter dan memulihkan file LF sebagai
@@ -110,10 +160,25 @@ function git(
 
 /** Direktori `.git` (absolut) atau null bila bukan repo. */
 export async function gitDir(cwd: string): Promise<string | null> {
+  // E-27: cache per-cwd. Invalidasi saat marker `.git` berubah (dibuat/hapus/
+  // diputar worktree) — kalau tidak, repo baru di cwd yang sama terbaca null.
+  const stamp = gitMarkerStamp(cwd)
+  const hit = gitDirCache.get(cwd)
+  if (hit && hit.stamp === stamp) return hit.dir
   const r = await git(["rev-parse", "--absolute-git-dir"], cwd)
-  if (r.code !== 0) return null
-  const dir = r.stdout.trim()
-  return dir || null
+  const dir = r.code === 0 ? r.stdout.trim() || null : null
+  gitDirCache.set(cwd, { dir, stamp })
+  return dir
+}
+
+/** E-27: filter driver git di-discover sekali per cwd, bukan tiap snapshot. */
+async function cachedGitFilterNeutralizers(cwd: string): Promise<string[]> {
+  const stamp = gitConfigStamp(cwd)
+  const hit = filterNeutralizerCache.get(cwd)
+  if (hit && hit.stamp === stamp) return hit.args
+  const args = await gitFilterNeutralizers(cwd)
+  filterNeutralizerCache.set(cwd, { args, stamp })
+  return args
 }
 
 export async function isGitRepo(cwd: string): Promise<boolean> {
@@ -145,7 +210,7 @@ export async function snapshotTree(
     // di repo jahat!). Netralkan driver terkonfigurasi → cat (identitas
     // byte): snapshot butuh byte worktree apa adanya, bukan hasil konversi.
     // Index user tak tersentuh (temp), jadi semantik clean milik user aman.
-    const neutral = await gitFilterNeutralizers(cwd)
+    const neutral = await cachedGitFilterNeutralizers(cwd)
     // `-- .` membatasi ke cwd; tanpa ini `add -A` memakai toplevel repo.
     // Flag -c harus sebelum subcommand: helper git() menaruh hardened base
     // di depan, neutral di sini tepat setelahnya, sebelum "add".
@@ -231,7 +296,7 @@ export async function ephemeralTree(cwd: string): Promise<string | null> {
   try {
     // Netralisasi sama seperti snapshotTree (lihat di atas): write-tree juga
     // menerapkan ulang clean filter — override wajib ikut ke kedua subcommand.
-    const neutral = await gitFilterNeutralizers(cwd)
+    const neutral = await cachedGitFilterNeutralizers(cwd)
     if ((await git([...neutral, "add", "-A", "--", "."], cwd, { env })).code !== 0) return null
     const w = await git([...neutral, "write-tree"], cwd, { env })
     if (w.code !== 0) return null
@@ -297,6 +362,10 @@ export async function restoreTree(
 
   const inside = (p: string): boolean => isPathWithinWorkspace(root, p)
   if (opts) {
+    // E-26: jail/sensitive check TETAP duluan (sebelum lookup), dan `change.from`
+    // ikut divalidasi. Baru setelah semua path aman, lookup di-batch: satu
+    // `git ls-tree -r -z` per 200 path, bukan satu spawn per path.
+    const toVerify = new Set<string>()
     for (const change of changes) {
       for (const path of [change.path, ...(change.from ? [change.from] : [])]) {
         const absolute = resolve(root, path)
@@ -307,8 +376,24 @@ export async function restoreTree(
           isSensitive(absolute)
         )
           throw new Error(`unsafe restore path: ${path}`)
-        const entry = await git(["ls-tree", tree, "--", path], cwd)
-        if (entry.code !== 0 || (entry.stdout && !/^100(?:644|755) blob /.test(entry.stdout)))
+        toVerify.add(path)
+      }
+    }
+    const paths = [...toVerify]
+    for (let i = 0; i < paths.length; i += LIMITS.SHADOW_GIT_PATH_BATCH) {
+      const chunk = paths.slice(i, i + LIMITS.SHADOW_GIT_PATH_BATCH)
+      const r = await git(["ls-tree", "-r", "-z", tree, "--", ...chunk], cwd)
+      // Chunk gagal = jangan lanjut: restore partial lebih berbahaya daripada
+      // undo yang gagal total.
+      if (r.code !== 0) throw new Error(`ls-tree failed: ${r.stderr.trim().slice(0, 200)}`)
+      // Format: `mode SP type SP object TAB path NUL`.
+      for (const rec of r.stdout.split("\0")) {
+        if (!rec) continue
+        const tab = rec.indexOf("\t")
+        if (tab < 0) continue
+        const meta = rec.slice(0, tab)
+        const path = rec.slice(tab + 1)
+        if (!/^100(?:644|755) blob [0-9a-f]{40,64}$/.test(meta))
           throw new Error(`unsupported restore entry: ${path}`)
       }
     }
@@ -348,7 +433,7 @@ export async function restoreTree(
         // punya batas panjang command line. Netralisasi smudge (audit #10):
         // restore wajib byte-exact + tanpa eksekusi filter repo. Pasangan -c
         // WAJIB sebelum subcommand (git berhenti parsing global di sana).
-        const neutral = await gitFilterNeutralizers(cwd)
+        const neutral = await cachedGitFilterNeutralizers(cwd)
         for (let i = 0; i < toCheckout.length; i += LIMITS.SHADOW_GIT_PATH_BATCH) {
           const batch = toCheckout.slice(i, i + LIMITS.SHADOW_GIT_PATH_BATCH)
           const co = await git([...neutral, "checkout-index", "-f", "--", ...batch], cwd, { env })

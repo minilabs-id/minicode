@@ -226,7 +226,10 @@ const INVENTORY: Record<string, { max: number; owner: string }> = {
   "src/ui/approval/prompt.ts": { max: 4, owner: "diagnostic" },
   "src/ui/assistant/simple.ts": { max: 3, owner: "human-cmd" },
   "src/ui/assistant/turn-status.ts": { max: 1, owner: "diagnostic" },
-  "src/ui/input/input.ts": { max: 40, owner: "screen" },
+  // [v0.37] 40 -> 44: dua pasangan `?2004h`/`?2004l` untuk askLine & askSecret.
+  // Sequence kontrol ini di luar frame; tanpa aktifasi, paste multi-baris dengan
+  // CR pecah jadi submit bertingkat di terminal yang tidak mengirim bracketed paste.
+  "src/ui/input/input.ts": { max: 44, owner: "screen" },
   "src/ui/runtime/bus-debug.ts": { max: 1, owner: "debug" },
   // [UI-RENDER-02] 15 -> 19 for best-effort restore writes: failed ENTER
   // independently attempts EXIT + scroll-region reset; close and fatal-signal
@@ -236,6 +239,8 @@ const INVENTORY: Record<string, { max: number; owner: string }> = {
   "src/ui/runtime/statusline.ts": { max: 13, owner: "diagnostic" },
   "src/ui/runtime/loading-bar.ts": { max: 1, owner: "diagnostic" },
   "src/ui/screens/dialog.ts": { max: 0, owner: "screen" },
+  // [v0.37] pasangan `?2004h`/`?2004l` untuk paste di jendela output.
+  "src/ui/screens/output-window.ts": { max: 2, owner: "screen" },
   "src/ui/screens/form.ts": { max: 1, owner: "screen" },
   "src/ui/screens/model-manager.ts": { max: 6, owner: "screen" },
   "src/ui/screens/picker.ts": { max: 10, owner: "screen" },

@@ -45,6 +45,13 @@ The variables that most determine behaviour (the rest are referenced below):
 | `MINICODE_KEYSTORE_FORCE_DPAPI` | `1`/`true` -> force the DPAPI/Windows path even on non-Windows (portability testing only; not a production setting) |
 | `MINICODE_MINIMIZE_TOOL` | The tool section is minimized by default in the TUI (equivalent to `1`); set to any value other than `1` (e.g. `0`) -> show it fully |
 
+> **v0.35 note — tool activity labels:** `MINICODE_LANG`/`/lang` controls the UI
+> language and narration/model answers, but **not** the `› …` activity label.
+> For that label alone the **OS locale** (`Intl`, id/en) wins on every surface —
+> TUI, one-shot/`exec`, and ACP via `src/ui/assistant/simple.ts` — so tool
+> vocabulary stays consistent across surfaces. There is no env var to override
+> this; see the v0.35 entry in `TERMINAL_CONTRACT.md`.
+
 ## Sandbox
 
 | Variable | Function |
@@ -92,15 +99,15 @@ The variables that most determine behaviour (the rest are referenced below):
 | `MINICODE_SCRIM` | `none` -> force the backdrop scrim to `faint` only (no dark `48;5;236` background) — diagnostics/terminals that map 256-colour oddly |
 | `MINICODE_COMPACT` | `1` -> compact tool calls, `0` -> expanded. Default: compact in the TUI, expanded in one-shot/exec |
 | `MINICODE_JUSTIFY` | `1` -> enable justified model text output. Default: off (opt-in) — justification injects spaces that change the original text when copied/piped |
-| `MINICODE_DROPDOWN` | `0` -> disable the floating dropdown, use inline hints (legacy consoles) |
+| `MINICODE_DROPDOWN` | `0` -> disable the dropdown, use inline hints (legacy consoles). Since v0.36 the dropdown (when active) is drawn as an **overlay inside the same `paint()` frame**, not a separate `paintRegion()`, and does not reduce `viewH` — prompt/cursor width uses `composerWidth()` with a progressive cap (100->100, 200->125, 300->150, 500->200; since v0.37) |
 | `MINICODE_MOUSE_SELECTION` | `0`/`false`/`off`/`no` -> disable TUI mouse tracking; default `1` for drag selection + wheel |
 | `MINICODE_MOTION` | `0` -> disable status animation (the pulse spark while a turn runs becomes a static glyph) — accessibility/screen recording/slow SSH |
 | `MINICODE_BELL` | `0` -> disable the `\x07` bell on approval (accessibility) |
 | `MINICODE_STATUSLINE` | `rich` -> the turn status line also shows cumulative tokens + session cost (thrifty by default) |
 | `MINICODE_A11Y` | `1` -> live-region approval for screen readers (plain lines without ANSI) |
-| `MINICODE_SHOW_THINKING` | model reasoning is **hidden by default**; `1` -> force visible (same as `/view thinking` or `--verbose`), `0` -> force hidden. There is no `Ctrl+T` binding; the full history lives in the sidebar Thinking pane |
-| `MINICODE_MINIMIZE_ACTIVITY` | ON by default in the TUI; `0` -> transparent (one line per tool). Folds per-turn tool activity into one summary (details in the sidebar Activity/Log pane, or the transcript on the linear path) |
-| `MINICODE_ACTIVITY_PANEL` | `0` -> disable the sidebar Activity/Live panel (ACTIVE by default in the TUI when the sidebar geometry allows it); `1` -> force it on in the linear/one-shot path too |
+| `MINICODE_SHOW_THINKING` | model reasoning is **hidden by default**; `1` -> show the `+ thinking` marker in the chat (same as `/view thinking` or `--verbose`), `0` -> force hidden. There is no `Ctrl+T` binding; the full reasoning stays in the journal |
+| `MINICODE_MINIMIZE_ACTIVITY` | ON by default in the TUI; `0` -> transparent (one line per tool). Folds per-turn tool activity into one summary in the chat — this fold toggle still applies in v0.34. Tool/`✦`/finding lines themselves returned to the chat (v0.33 routed them to a Live panel + `Ctrl+O`, now revoked), not to `/view expand` |
+| `MINICODE_ACTIVITY_PANEL` | **Legacy/deprecated (D3)** since v0.34: `0`/`1` are still accepted so old configs do not error, but the value no longer changes the display. It used to control the sidebar Activity/Live panel (active when `cols ≥ 100` and `rows ≥ 20`); the sidebar has been removed entirely |
 | `MINICODE_AUTORESUME_BG` | `0` -> disable TUI turn auto-resume when a background job finishes (enabled by default; once per job, only when no turn is running) |
 | `MINICODE_TURN_AUTO_RESUME` | `0` -> disable automatic turn resume after a **transient** provider failure (`server`/`network`; enabled by default). Provider retry and turn resume share **one recovery budget** (`src/policy/recovery-budget.ts`): 45 s total and a quota of 6 attempts for one logical call, with full jitter and `Retry-After` as a floor. Sharing one budget prevents *retry amplification* (separate per-layer counts multiply the cost: ~82 s for a dead provider). Terminal failures are not recovered: `rate_limit` (a permanent 429/spend-cap does not recover), `auth`, `invalid_request`, `context_length_exceeded`, `budget_exceeded`, `max_steps_exceeded`, and user abort |
 | `MINICORE_THINKING` | `off` -> send `enable_thinking:false` to OpenAI-compat (DeepSeek). The old `MINICODE_THINKING` alias is still honoured |

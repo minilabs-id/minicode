@@ -56,14 +56,41 @@ function validWindow(value: unknown): value is number {
 
 let contextWindowOverlay: Record<string, number> | null = null
 
+/** F-07: memo hasil scan overlay per `modelId` (sudah lowercase). Overlay
+ * models.dev bisa memuat 1000+ entri; tanpa memo tiap request/step mengulang
+ * `Object.keys(map).length` + `Object.entries(map)` per segmen model. Cache ini
+ * HANYA dipakai oleh `findContextWindowFromOverlay` — jalur footer sudah memakai
+ * snapshot statis (`ctx.contextWindowTokens`) dan sengaja tidak diubah.
+ *
+ * `undefined` juga di-cache (memakai `has`, bukan `get`), supaya model yang tak
+ * dikenal tidak memicu scan ulang. Invalidasi terpusat di `setOverlayMap`:
+ * setiap kali overlay dimuat/di-reset/di-suntik, seluruh entri dibuang. */
+const overlayWindowMemo = new Map<string, number | undefined>()
+
+// Penghitung test-only: membuktikan jalur lambat (scan 1000+ entri) benar-benar
+// dilewati pada cache hit. Tanpa ini test kesamaan hasil saja lolos walau memo
+// tidak ada — klaim F-07 jadi tak terbukti.
+let overlayScanCount = 0
+export function __overlayScanCount(): number {
+  return overlayScanCount
+}
+export function __resetOverlayScanCount(): void {
+  overlayScanCount = 0
+}
+
+function setOverlayMap(map: Record<string, number> | null): void {
+  contextWindowOverlay = map
+  overlayWindowMemo.clear()
+}
+
 /** Reset state modul — untuk test hermetic. */
 export function __resetContextWindowOverlay(): void {
-  contextWindowOverlay = null
+  setOverlayMap(null)
 }
 
 /** Suntik overlay — untuk test (jalur produksi lewat loadContextWindowOverlay). */
 export function __setContextWindowOverlay(map: Record<string, number> | null): void {
-  contextWindowOverlay = map
+  setOverlayMap(map)
 }
 
 /** Muat cache jendela konteks dari disk (sekali per proses). */
@@ -78,22 +105,33 @@ export async function loadContextWindowOverlay(): Promise<Record<string, number>
         if (typeof v === "number" && Number.isFinite(v) && v > 0)
           out[k.toLowerCase()] = Math.floor(v)
       }
-      contextWindowOverlay = out
+      setOverlayMap(out)
       return out
     }
   } catch {
     // tak ada cache = normal
   }
-  contextWindowOverlay = {}
-  return contextWindowOverlay
+  const empty: Record<string, number> = {}
+  setOverlayMap(empty)
+  return empty
 }
 
 /** Cari jendela konteks dari overlay models.dev (sinkron, setelah dimuat). */
 export function findContextWindowFromOverlay(model: string): number | undefined {
-  const map = contextWindowOverlay
-  if (!map || Object.keys(map).length === 0) return undefined
   const m = model.toLowerCase()
-  if (map[m] !== undefined) return map[m]
+  // Cek memo SEBELUM menyentuh map: pada cache hit (termasuk hasil `undefined`)
+  // kita tak perlu membayar `Object.keys(...).length` apalagi scan `Object.entries`.
+  if (overlayWindowMemo.has(m)) return overlayWindowMemo.get(m)
+  overlayScanCount++
+  const map = contextWindowOverlay
+  if (!map || Object.keys(map).length === 0) {
+    overlayWindowMemo.set(m, undefined)
+    return undefined
+  }
+  if (map[m] !== undefined) {
+    overlayWindowMemo.set(m, map[m])
+    return map[m]
+  }
   // Segmen (pemisah `/`/`:`) dicocokkan dengan kunci overlay sebagai prefiks —
   // pola sama dengan findPrice sehingga `deepseek-v4-flash` menang atas `deepseek`.
   let best: { k: string; v: number } | undefined
@@ -110,7 +148,9 @@ export function findContextWindowFromOverlay(model: string): number | undefined 
       }
     }
   }
-  return best?.v
+  const result = best?.v
+  overlayWindowMemo.set(m, result)
+  return result
 }
 
 /**

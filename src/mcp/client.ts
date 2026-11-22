@@ -155,7 +155,9 @@ export class McpSchemaPinRegistry {
     }
   }
 
+  /** Seam uji: hitung pemanggilan persist (tanpa mengganti implementasi FS). */
   private persist(): void {
+    pinPersistProbe?.()
     if (!this.path) return
     try {
       mkdirSync(dirname(this.path), { recursive: true })
@@ -190,6 +192,29 @@ export class McpSchemaPinRegistry {
     }
   }
 
+  /**
+   * E-24: pin banyak tool dalam SATU `persist()`. `wrapTools` memanggil ini
+   * sekali per discover alih-alih `verify()` per tool (yang menulis berkas N×).
+   * Pin pertama tetap otoritas; hash yang sudah ada TIDAK ditimpa. Drift
+   * dikembalikan per-entri supaya pemanggil tetap bisa mematikan tool-nya.
+   */
+  pinMany(
+    entries: readonly { serverId: string; toolName: string; hash: string }[],
+  ): ("ok" | "pinned" | "drift")[] {
+    this.load()
+    const results = entries.map(({ serverId, toolName, hash }) => {
+      const key = `${serverId}:${toolName}`
+      const pinned = this.pins.get(key)
+      if (pinned === undefined) {
+        this.pins.set(key, hash)
+        return "pinned" as const
+      }
+      return pinned === hash ? ("ok" as const) : ("drift" as const)
+    })
+    this.persist()
+    return results
+  }
+
   /** Approve eksplisit: ganti pin dengan hash baru (persetujuan pengguna). */
   approveMcpSchemaUpdate(serverId: string, toolName: string, newHash: string): void {
     this.load()
@@ -221,6 +246,13 @@ export class McpSchemaPinRegistry {
     this.loaded = true
     this.persist()
   }
+}
+
+let pinPersistProbe: (() => void) | null = null
+
+/** Seam uji: amati jumlah `persist()` (E-24: 1× per discover). */
+export function __setMcpPinPersistProbeForTest(fn: (() => void) | null): void {
+  pinPersistProbe = fn
 }
 
 export const mcpSchemaPinRegistry = new McpSchemaPinRegistry()
@@ -592,14 +624,20 @@ class McpConnection {
   }
 
   wrapTools(serverId: string): Tool[] {
+    // E-24: SATU persist untuk seluruh discover. `verify()` per-tool dulu
+    // menulis file pin N kali (N = jumlah tool server). `pinMany` mempertahankan
+    // semantik "pin pertama otoritas" dan mengembalikan verdict per tool.
+    const hashes = this.tools.map((t) => computeMcpToolSchemaHash(t))
+    const verdicts = mcpSchemaPinRegistry.pinMany(
+      this.tools.map((t, i) => ({ serverId, toolName: t.name, hash: hashes[i]! })),
+    )
     return this.tools
-      .map((t): Tool | null => {
-        // F8.2: pin/verify skema pada setiap discovery. `verify` mem-pin bila
-        // pertama kali, dan menolak SELURUH tool server bila ada drift — server
-        // yang mengubah skema tanpa persetujuan dianggap tidak tepercaya hingga
+      .map((t, index): Tool | null => {
+        // F8.2: drift menolak SATU tool (fail-closed) — server yang mengubah
+        // skema tanpa persetujuan dianggap tidak tepercaya hingga
         // `approveMcpSchemaUpdate` eksplisit.
-        const hash = computeMcpToolSchemaHash(t)
-        const v = mcpSchemaPinRegistry.verify(serverId, t.name, hash)
+        const hash = hashes[index]!
+        const v = verdicts[index]!
         if (v === "drift") {
           // Fail-closed: tool drift TIDAK diekspos. Sebelumnya tool tetap masuk
           // daftar (baru ditolak saat execute) — model melihat tool yang pasti

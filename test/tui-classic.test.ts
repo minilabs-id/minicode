@@ -164,12 +164,15 @@ describe("askLine: editing baris", () => {
     expect(await p).toBe("abcXdef")
   })
 
-  test("Ctrl+A ke awal, Ctrl+E ke akhir", async () => {
+  test("Home (Escape) ke awal, Ctrl+E ke akhir; Ctrl+A = selectAll no-op", async () => {
     tty = installFakeTty()
     const p = askLine({ prompt: "> " })
     await tty.ready()
     await tty.send("dunia")
+    // Ctrl+A (0x01) sekarang selectAll — dipakai host TUI, no-op di askLine.
     await tty.send(KEY.ctrlA)
+    // Home tetap bisa lewat Escape-sequence (ESC[H).
+    await tty.send(KEY.home)
     await tty.send("halo ")
     await tty.send(KEY.ctrlE)
     await tty.send("!")
@@ -227,6 +230,17 @@ describe("askLine: editing baris", () => {
     await tty.send(KEY.paste("teks hasil paste"))
     await tty.send(KEY.enter, 30)
     expect(await p).toBe("teks hasil paste")
+  })
+
+  test("paste dua baris dengan \\r tak menambah submit bertingkat", async () => {
+    tty = installFakeTty()
+    const p = askLine({ prompt: "> " })
+    await tty.ready()
+    // CR di tengah payload paste HARUS dibaca literal (bukan Enter/submit).
+    // Kalau jadi submit, promise resolve lebih awal dengan "baris1" saja.
+    await tty.send(KEY.paste("baris1\rbaris2"))
+    await tty.send(KEY.enter, 30)
+    expect(await p).toBe("baris1\nbaris2")
   })
 })
 

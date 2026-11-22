@@ -93,7 +93,7 @@ Mode `--json` memakai envelope lifecycle dan summary yang dijelaskan di atas ser
 
 | Kendali | Default | Catatan |
 |---|---|---|
-| `--max-steps <n>` | 200 (`LIMITS.DEFAULT_MAX_STEPS`) | Batas langkah tool per run, dengan auto-escalation; angka 50 adalah hard-cap sub-agent (`SUB_AGENT_MAX_STEPS`), bukan default runtime ini — teks bantuan CLI masih menyebut 50 (usang) |
+| `--max-steps <n>` | 200 (`LIMITS.DEFAULT_MAX_STEPS`) | Batas langkah tool per run, dengan auto-escalation; angka 50 adalah hard-cap sub-agent (`SUB_AGENT_MAX_STEPS`), bukan default runtime ini — bantuan CLI kini memakai angka yang sama dari `LIMITS.DEFAULT_MAX_STEPS` |
 | `--timeout <ms>` | 900000 (15 menit) | Hard deadline per run; `0` = Infinity |
 | `--ratelimit <rpm>` | — | Token bucket request LLM per menit |
 | `--budget <usd>` | — | Warn 80%; lewat → one-shot `exit(1)`, TUI break loop; `exec` menegakkan sama seperti one-shot |

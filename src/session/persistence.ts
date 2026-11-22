@@ -2,6 +2,8 @@ import { Database } from "bun:sqlite"
 import { createHash, randomUUID } from "node:crypto"
 import { existsSync } from "node:fs"
 import { isSqliteContention } from "../lib/db-path.ts"
+// [Audit F-04 2026-11-22] Instrumentasi durasi; nonaktif = no-op O(1).
+import { perfCount, perfEnabled } from "../lib/perf-debug.ts"
 import { scrubSecrets } from "../policy/scrub.ts"
 import { type DomainEvent, DURABILITY, EVENT_SCHEMA_VERSION } from "../presentation/events.ts"
 
@@ -597,12 +599,21 @@ export async function appendPresentationEvents(
       stats.written++
     }
   })
+  const __t = perfEnabled() ? performance.now() : 0
   try {
-    await withBusyRetry(() => txn())
+    try {
+      await withBusyRetry(() => txn())
+    } finally {
+      db.close()
+    }
+    return stats
   } finally {
-    db.close()
+    perfCount(
+      "persist.appendPresentationEvents",
+      perfEnabled() ? performance.now() - __t : 0,
+      durable.length,
+    )
   }
-  return stats
 }
 
 // SQLITE_BUSY / database-is-locked bisa muncul saat Pool(3) sub-agent menulis
@@ -867,10 +878,15 @@ export async function saveSession(
       process.stderr.write(`[warn] persistence: TTL purge failed: ${(e as Error).message}\n`)
     }
   })
+  const __t = perfEnabled() ? performance.now() : 0
   try {
-    await withBusyRetry(() => txn())
+    try {
+      await withBusyRetry(() => txn())
+    } finally {
+      db.close()
+    }
   } finally {
-    db.close()
+    perfCount("persist.saveSession", perfEnabled() ? performance.now() - __t : 0, messages.length)
   }
 }
 
@@ -3121,6 +3137,7 @@ export function shrinkThreadHistory(
   }
   const db = open(cwd)
   const now = Date.now()
+  const __t = perfEnabled() ? performance.now() : 0
   try {
     return db.transaction(() => {
       assertWriterEpochInTxn(db, sessionId, opts.expectedEpoch as number)
@@ -3236,6 +3253,11 @@ export function shrinkThreadHistory(
       return { oldHead, newHead }
     })()
   } finally {
+    perfCount(
+      "persist.shrinkThreadHistory",
+      perfEnabled() ? performance.now() - __t : 0,
+      newMessages.length,
+    )
     db.close()
   }
 }

@@ -19,6 +19,8 @@ import {
 } from "#minicore/core/tokens.ts"
 import type { Message, UserMessage } from "#minicore/core/types.ts"
 import { LIMITS } from "../constants.ts"
+// [Audit F-02/F-03 2026-11-22] Instrumentasi durasi; nonaktif = no-op O(1).
+import { perfCount, perfEnabled } from "../lib/perf-debug.ts"
 // [Area B · PROMPT 06] Binding persetujuan ↔ operasi yang dieksekusi.
 import { ApprovalBindingStore, verifyApprovalBinding } from "../policy/approval-binding.ts"
 import {
@@ -84,11 +86,16 @@ export function createLiveAuthorizedTools(
     for (const t of tools ?? []) authorized.add(t.name)
   }
   refresh()
+  // E-11: refresh per-call dihapus. Array `tools` dimutasi IN-PLACE oleh
+  // `setWorkMode`/`setPermissionMode`, dan KEDUA setter sudah memanggil
+  // `authorized.refresh()` (lihat bawah, ~:889/:912). Menjalankan refresh lagi
+  // di sini membuat O(tools) copy per pemanggilan tool — bukan kerja nyata.
   return {
-    // Refresh per-call: jamin live walau urutan wiring setter mode berubah
-    // (composition root memanggil ctl.set* SEBELUM setTool* di cli/setup.ts).
     hasAuthorizedTool: (name: string): boolean => {
-      refresh()
+      // Dirty-flag murah O(1): array bisa bertambah/berkurang di luar setter
+      // mode (mis. discovery MCP). Size beda = refresh; kalau sama, setter mode
+      // sudah menjamin isi set mutakhir.
+      if ((tools?.length ?? 0) !== authorized.size) refresh()
       return authorized.has(name)
     },
     refresh,
@@ -933,11 +940,16 @@ export async function createMinicodeSession(
   let runSeq = 0
   let stateOwner = 0
   const computeLiveSystem = (): string => {
-    const pm = livePermissionModeForSystem()
-    const wm = liveWorkModeForSystem()
-    const contextWindow = contextWindowForModel(currentContextModel())
-    const capacityHint = `\n\n# Harness context capacity\nThe harness currently budgets ${contextWindow} tokens for the selected model. This is the configured/resolved session limit, not a guarantee from the provider. It is independent of the Windows operating system and shell. System instructions, tool schemas, history, and output share this budget; compaction starts before the full window is exhausted. Preserve durable task progress before compaction.`
-    return baseSystem + workModeHint(wm) + permissionModeHint(pm, wm) + capacityHint
+    const __t = perfEnabled() ? performance.now() : 0
+    try {
+      const pm = livePermissionModeForSystem()
+      const wm = liveWorkModeForSystem()
+      const contextWindow = contextWindowForModel(currentContextModel())
+      const capacityHint = `\n\n# Harness context capacity\nThe harness currently budgets ${contextWindow} tokens for the selected model. This is the configured/resolved session limit, not a guarantee from the provider. It is independent of the Windows operating system and shell. System instructions, tool schemas, history, and output share this budget; compaction starts before the full window is exhausted. Preserve durable task progress before compaction.`
+      return baseSystem + workModeHint(wm) + permissionModeHint(pm, wm) + capacityHint
+    } finally {
+      perfCount("session.computeLiveSystem", perfEnabled() ? performance.now() - __t : 0)
+    }
   }
   // [CTX] Kalibrasi dipisahkan per identitas model agar berpindah ke model
   // lain tidak membawa rasio tokenizer/provider dari sesi sebelumnya.
@@ -982,15 +994,20 @@ export async function createMinicodeSession(
   let lastProviderInputTokens: number | undefined
   let lastRequestMessageCount = 0
   const contextWindowForModel = (model?: string): number => {
-    // Eskalasi adaptif menang atas resolusi statis: ia adalah bukti dari
-    // endpoint bahwa jendela lebih besar daripada tebakan. Tetap tunduk pada
-    // nilai eksak operator? TIDAK: operator yang memasang flag eksplisit sudah
-    // dihormati di `contextWindowBase`, namun bila flag itu TERBUKTI kurang
-    // (overflow nyata terjadi), menaikkan satu anak tangga lebih benar daripada
-    // mengulang kegagalan yang sama.
-    const escalated = escalatedWindows.get(escalationKey(model))
-    if (escalated !== undefined) return escalated
-    return contextWindowBase(model)
+    const __t = perfEnabled() ? performance.now() : 0
+    try {
+      // Eskalasi adaptif menang atas resolusi statis: ia adalah bukti dari
+      // endpoint bahwa jendela lebih besar daripada tebakan. Tetap tunduk pada
+      // nilai eksak operator? TIDAK: operator yang memasang flag eksplisit sudah
+      // dihormati di `contextWindowBase`, namun bila flag itu TERBUKTI kurang
+      // (overflow nyata terjadi), menaikkan satu anak tangga lebih benar daripada
+      // mengulang kegagalan yang sama.
+      const escalated = escalatedWindows.get(escalationKey(model))
+      if (escalated !== undefined) return escalated
+      return contextWindowBase(model)
+    } finally {
+      perfCount("session.contextWindowForModel", perfEnabled() ? performance.now() - __t : 0)
+    }
   }
   // Batas output model: dipakai sebagai reserve output (bukan angka tetap 20k).
   // Dicari dari metadata provider (`maxOutputTokens`, diisi dari `/models` bila
@@ -1114,10 +1131,16 @@ export async function createMinicodeSession(
         hiddenWireTools && hiddenWireTools.size > 0
           ? rawTools.filter((t) => !hiddenWireTools.has(t.name))
           : rawTools
-      const localInputTokens =
-        estimateMessages(messages, minicodeEstimator) +
-        estimateSystem(system, minicodeEstimator) +
-        estimateTools(tools, minicodeEstimator)
+      const __estT = perfEnabled() ? performance.now() : 0
+      let localInputTokens = 0
+      try {
+        localInputTokens =
+          estimateMessages(messages, minicodeEstimator) +
+          estimateSystem(system, minicodeEstimator) +
+          estimateTools(tools, minicodeEstimator)
+      } finally {
+        perfCount("session.estimateLocalInput", perfEnabled() ? performance.now() - __estT : 0)
+      }
       let inputTokens =
         estimateMessages(messages, estimator) +
         estimateSystem(system, estimator) +
@@ -1375,7 +1398,16 @@ export async function createMinicodeSession(
     systemForContext: computeLiveSystem,
     permissions: withEffectBarrier,
     permissionMode: livePermissionMode,
-    estimator: calibratedEstimator,
+    // [Audit F-02] Bungkus estimator kernel dengan timer tanpa mengubah
+    // identitas/perilaku fungsi (kernel hanya memanggilnya).
+    estimator: (text: string): number => {
+      const __t = perfEnabled() ? performance.now() : 0
+      try {
+        return calibratedEstimator(text)
+      } finally {
+        perfCount("session.estimator.kernel", perfEnabled() ? performance.now() - __t : 0)
+      }
+    },
     recovery: recoveryWithTelemetry,
     executor: parallelExecutor({
       getAuthorizationVersion: () => authorizationVersion,
@@ -1419,10 +1451,16 @@ export async function createMinicodeSession(
           ? `${d.provider}::${d.model}`
           : d.model
         : currentContextModel()
-    const fallbackLocal =
-      estimateSystem(computeLiveSystem(), minicodeEstimator) +
-      estimateTools(liveToolSchemas(), minicodeEstimator) +
-      estimateMessages(core.state.history, minicodeEstimator)
+    const __fbT = perfEnabled() ? performance.now() : 0
+    let fallbackLocal = 0
+    try {
+      fallbackLocal =
+        estimateSystem(computeLiveSystem(), minicodeEstimator) +
+        estimateTools(liveToolSchemas(), minicodeEstimator) +
+        estimateMessages(core.state.history, minicodeEstimator)
+    } finally {
+      perfCount("session.estimateFallback", perfEnabled() ? performance.now() - __fbT : 0)
+    }
     const localEstimatedTokens = lastRequestLocalEstimate?.tokens ?? fallbackLocal
     // Anchor input nyata (nilai terbesar per turn, toleran pada laporan
     // progresif-kumulatif gateway) untuk lantai admission request berikutnya.

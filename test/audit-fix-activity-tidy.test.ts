@@ -1,6 +1,7 @@
-// v0.33 — transkrip audit yang rapi: SEMUA aktivitas child disatukan menjadi
-// SATU baris agregat `✦ N sub agent · M tool · K gagal`. Tidak ada baris `↳`,
-// tidak perlu /expand — detail tetap ada di journal/presentation events.
+// Transkrip audit yang rapi: SEMUA aktivitas child disatukan menjadi SATU
+// baris agregat `✦ N sub agent · M tool · K gagal`. Tidak ada baris `↳`.
+// Detail per-tool dan rekap kategori kini hidup di chat (dulu di sidebar):
+// satu data, satu tampilan, tanpa duplikasi.
 import { expect, test } from "bun:test"
 import type {
   UiPresentationActivity,
@@ -116,10 +117,9 @@ test("turn.started mengosongkan agregat — toolCallId dipakai ulang tak menumpu
   ).toContain("✦ 1 sub agent · 1 tool · 0 failed")
 })
 
-test("sidebar aktif: chat hanya narasi, semua aktivitas pindah ke sidebar bawah", () => {
+test("mode normal: chat memuat ✦, subagent dan read (tak ada lagi pemindahan ke sidebar)", () => {
   setSessionLocale("en")
-  const { transcript, setSnapshot, emit, screen } = setup()
-  transcript.setSidebarActive(true)
+  const { setSnapshot, emit, screen } = setup()
   const parent = child("parent-1", "delegate_task", undefined, "failed")
   const kid = child("kid-1", "read_file", "jail.ts", "failed")
   setSnapshot({ activities: [parent, kid], turns: [] })
@@ -132,18 +132,17 @@ test("sidebar aktif: chat hanya narasi, semua aktivitas pindah ke sidebar bawah"
     status: "failed",
     message: "step limit reached (14/14)",
   })
+  // Rekap kategori ditulis di akhir turn (bukan lagi slot live di ekor).
+  emit({ type: "turn.completed", seq: 3, turnId: 1 })
   const chat = screen()
-  // Tidak boleh ada baris per-tool (› / ✦ / ↳) di chat — cuma indeks ringkas.
-  expect(chat).not.toContain("delegate_task")
-  expect(chat).not.toContain("✦")
-  expect(chat).not.toContain("↳")
-  // v0.33: rekap kategori TAMPIL di chat sebagai indeks + jeda antar narasi.
+  // Agregat dan rekap kategori keduanya hidup di chat: tidak ada lagi guard
+  // yang mengalihkan baris ke permukaan lain.
+  expect(chat).toContain("✦")
   expect(chat).toContain("subagent")
   expect(chat).toContain("read")
-  // Sidebar HANYA log detail — tak mengulang rekap kategori.
-  const side = transcript.sidebarActivity(20, 40).join("\n")
-  expect(side).toContain("read jail.ts")
-  expect(side).toContain("agent")
+  expect(chat).not.toContain("↳")
+  // Rekap kategori menggantikan daftar target per-tool.
+  expect(chat).not.toContain("jail.ts")
 })
 
 test("kegagalan dikelompokkan per alasan di satu baris", () => {

@@ -135,3 +135,11 @@ test("A4/A5: supported CSI/SS3 remains valid at every split", () => {
   ]
   for (const [sequence, key] of samples) everySplit(sequence, [key])
 })
+
+test("bracketed paste dengan CR di tengah = satu char literal di setiap split", () => {
+  // CR di payload paste tak boleh jadi `enter` (submit bertingkat), walau
+  // terminator ESC[201~ terbelah di batas chunk mana pun.
+  everySplit("\x1b[200~baris1\rbaris2\x1b[201~", [{ type: "char", ch: "baris1\rbaris2" }])
+  // Ctrl+V (0x16) = ignore, bukan submit — paste lewat terminal.
+  everySplit("a\u0016b", [{ type: "char", ch: "a" }, { type: "ignore" }, { type: "char", ch: "b" }])
+})

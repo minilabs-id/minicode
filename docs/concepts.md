@@ -12,7 +12,19 @@ Minicode itu apa, kenapa dibangun begitu, dan kenapa beberapa hal sengaja tidak 
 
 ## Loop ReAct
 
-Setiap prompt berjalan sebagai loop `Thought → Action → Observation` sampai jawaban final, batas `--max-steps` (default 50), atau `--timeout` (default 1 jam). Model menerima system prompt berisi `# Environment` (cwd + platform), repo-map ringkas, dan memory yang relevan — lalu memilih tool, melihat hasilnya, dan memilih langkah berikutnya. Tidak ada grafik alur tersembunyi: di jalur non-interaktif jejak aksi tampil sebagai ledger di stderr; di TUI interaktif chat hanya memuat narasi, rekap kategori (mis. `3 command · 2 read · 5 subagent`), dan jawaban akhir, sementara rincian per-tool pindah ke sidebar kanan (Activity/Live/Log).
+Setiap prompt berjalan sebagai loop `Thought → Action → Observation` sampai jawaban final, batas `--max-steps` (default 200; angka 50 adalah cap sub-agent, bukan default sesi), atau `--timeout` (default 1 jam). Model menerima system prompt berisi `# Environment` (cwd + platform), repo-map ringkas, dan memory yang relevan — lalu memilih tool, melihat hasilnya, dan memilih langkah berikutnya. Tidak ada grafik alur tersembunyi: di jalur non-interaktif jejak aksi tampil sebagai ledger di stderr; di TUI interaktif chat memuat narasi, rekap kategori (mis. `3 command · 2 read · 5 subagent`), baris tool ringkas, dan jawaban akhir. Sejak v0.34 tidak ada panel samping — rincian ada di chat dan jurnal. Sejak
+v0.35 rekap tool menjadi baris committed statis di footer tiap narasi
+(`tool → narasi → └ rekap(tool sebelum narasi)`, rekap akhir turn kumulatif),
+dan label aktivitas `› …` memakai locale OS — narasi/model tetap memakai
+bahasa user (`/lang`). Sejak v0.36 composer TUI dibatasi maksimal 2 baris
+(draft panjang = jendela geser, tanpa menggeser transkrip), dropdown `/`
+menjadi overlay dalam frame yang sama tanpa mengurangi `viewH`. Sejak v0.37
+bracketed paste aktif (`?2004h`/`?2004l` di luar frame), `Ctrl+A` = select-all
+transkrip bila composer kosong & dropdown tertutup, resize menstabilkan
+auto-scroll/drag/kursor/anchor, gema prompt di-wrap sekali selebar chat, dan
+lebar prompt progresif `min(chatCols, 100 + floor(max(0, chatCols-100)/4))`
+dengan prefix `minicode › ` bila `w−14 ≥ 24`, else `› `, lanjutan `· ` — composer
+2 baris dan dropdown overlay tidak dicabut.
 
 ## Shell-first: non-interaktif polos, interaktif fullscreen
 
@@ -24,9 +36,10 @@ ditulis sendiri) dan membagi dua jalur secara tegas:
   terminal biasa yang bisa di-pipe, di-grep, dan tersimpan di scrollback Anda
   sendiri.
 - **Interaktif** (TTY mampu): satu tampilan **TUI fullscreen** alternate-screen
-  — transkrip ala shell + status bar satu baris + popup komposit + sidebar kanan
-  adaptif (Thinking + Activity/Live/Log) bila `cols ≥ 100` dan `rows ≥ 20`; keluar =
-  buffer utama kembali persis (transkrip tidak di-dump ke scrollback).
+  — transkrip ala shell + status bar satu baris + popup komposit. Sejak v0.34 chat
+  berupa kolom tengah (maksimal 50% lebar terminal, mulai `cols ≥ 120` dan
+  `rows ≥ 20`); di bawah ambang chat memakai lebar penuh. Keluar = buffer utama
+  kembali persis (transkrip tidak di-dump ke scrollback).
 - Warna hanya saat TTY; `NO_COLOR` selalu menang; output program tetap bersih dari cursor-control saat di-pipe.
 
 Detail lengkap + kontrak FROZEN-nya di [Kontrak Terminal](TERMINAL_CONTRACT.md).
@@ -77,11 +90,15 @@ istilah teknis English — tabel ini mengunci maknanya.
 | **Hook** | Skrip `pre/post-run` dari `~/.minicode/hooks` + `.minicode/hooks`; mati default, `MINICODE_HOOKS=1` |
 | **Env scrub** | `sanitizeSpawnEnv` menghapus kata-kunci kredensial dari env subprocess |
 | **Secret scrubber** | Redaksi `sk-`/`ghp_`/`AKIA`/PEM/JWT/Bearer sebelum teks ke LLM |
-| **Ledger** | Jejak aksi agent: di jalur non-interaktif berupa baris `  › name target` / `  › name: …` di stderr; di TUI interaktif rinciannya pindah ke sidebar kanan (Activity/Live/Log), chat hanya rekap kategori |
+| **Ledger** | Jejak aksi agent: di jalur non-interaktif berupa baris `  › name target` / `  › name: …` di stderr; di TUI interaktif baris ringkas dan rekap kategori keduanya ada di chat |
 | **Scrollback** | Riwayat layar terminal; jalur non-interaktif minicode append-only di sana (interaktif pakai alternate screen) |
 | **Transient** | UI muncul-sekali yang menghapus dirinya (spinner, garis status turn, micro-toast retry `retry n/total · Ns` dengan TTL 4 dtk) — vs transkrip yang menetap |
-| **Sidebar kanan** | Panel adaptif di TUI (Thinking + Activity/Live/Log); aktif bila `cols ≥ 100` dan `rows ≥ 20`, lebar 30–50%, tinggi Thinking:Activity 60:40 — bagian dari frame `paint()` yang sama, bukan scrollback |
-| **Rekap kategori** | Ringkasan per-tool di chat (mis. `3 command · 2 read · 5 subagent`) yang menggantikan ledger per-tool, baris `Tool:`, `/expand`, dan buffer terlipat |
+| **Kolom chat tengah** | Sejak v0.34 chat dibatasi maksimal 50% lebar terminal dan di-padding ke tengah bila `cols ≥ 120` dan `rows ≥ 20`; di bawah ambang chat penuh. Footer/composer mengikuti kolom ini, dalam satu frame `paint()`. Sejak v0.36 lebar prompt/kursor dihitung terpisah via `composerWidth()` (bukan `chatWidth()` penuh) |
+| **Rekap kategori** | Sejak v0.35: baris committed statis di footer tiap narasi (`tool → narasi → └ rekap(tool sebelum narasi)`, mis. `└ 2 command · 118 read · 1 other`); rekap akhir turn kumulatif seluruh tool. Menggantikan rekap live dua baris/`flushActivityFold` net-nol/`liveSummaryRows` arsip v0.33/v7.x, ledger per-tool, baris `Tool:`, `/expand`, dan buffer terlipat |
+| **Label aktivitas tool** | Prefix `› …` (nama/status tool) yang memakai **locale OS** via `Intl` (id/en) di semua permukaan (TUI, one-shot/`exec`, ACP via `simple.ts`) — dibedakan dari narasi/jawaban model yang tetap memakai `/lang`. Sumber tunggal: `src/ui/render/tool-label.ts` |
+| **Composer (v0.36–v0.37)** | Area ketik TUI, tinggi **maksimal 2 baris**; draft panjang memakai jendela geser tanpa menambah baris / menggeser transkrip. `composerWidth()`/`chatWidth()` satu sumber di `chat-column.ts`; cap v0.37 = `min(chatCols, 100 + floor(max(0, chatCols-100)/4))` (100→100, 200→125, 300→150, 500→200); prefix `minicode › ` bila `w−14 ≥ 24` / else `› `, lanjutan `· ` |
+| **Bracketed paste & select-all (v0.37)** | `?2004h`/`?2004l` di TUI/`askLine`/`askSecret`/output-window, ditulis di luar frame (I1 utuh); CR paste bukan submit. `Ctrl+A` = `selectAll` bila composer kosong & dropdown tertutup (else Home); `Ctrl+C` menyalin juga saat drag aktif; resize merebase anchor walau seleksi aktif |
+| **Dropdown overlay (v0.36)** | Menu `/` digambar di dalam frame `paint()` yang sama (satu `stdout.write`, I1), menimpa baris transkrip bawah tanpa mengurangi `viewH` — bukan `paintRegion()` terpisah; klik di area dropdown memilih item menu |
 | **Micro-toast retry** | Satu notifikasi footer `retry n/total · Ns` (TTL 4 dtk, counter langsung) untuk retry — menggantikan toast panjang |
 | **Delegation scope** | `file`/`dir`/`subtree`/`repo` → budget 12/18/26/36 langkah; `plan` ×1,5 di-clamp ke [8,50] (repo+plan = 50); eskalasi `[8,12,20,32,50]` bila mentok — `maxSteps` eksplisit mematikan eskalasi; tanpa scope fallback 5/15 |
 | **Composition root** | `cli/index.ts` + `cli/setup.ts`: satu tempat wiring DI (provider, RAG, session, tools) |

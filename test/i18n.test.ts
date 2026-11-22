@@ -10,6 +10,7 @@ import {
   setSessionLocale,
   t,
 } from "../src/ui/i18n/locale.ts"
+import { systemLocale, tSystem } from "../src/ui/render/tool-label.ts"
 
 afterEach(() => {
   resetLocaleState()
@@ -124,5 +125,25 @@ describe("t()", () => {
       (k) => id[k] === en[k] && !NEUTRAL.has(k),
     )
     expect(same).toEqual([])
+  })
+})
+
+describe("jalur bahasa terpisah: narasi vs sistem", () => {
+  afterEach(() => resetLocaleState())
+
+  test("t() mengikuti sesi /lang, tSystem() mengikuti sistem/OS", () => {
+    const sys = systemLocale()
+    setSessionLocale("en")
+    expect(t("form.required")).toBe("required")
+    expect(tSystem("form.required")).toBe((sys === "id" ? id : en)["form.required"])
+    setSessionLocale("id")
+    expect(t("form.required")).toBe("wajib diisi")
+    expect(tSystem("form.required")).toBe((sys === "id" ? id : en)["form.required"])
+  })
+
+  test("kunci msg.* hadir di dua kamus (parity dijaga tsc + test)", () => {
+    const keys = Object.keys(en).filter((k) => k.startsWith("msg."))
+    expect(keys.length).toBeGreaterThan(0)
+    for (const k of keys) expect(k in id).toBe(true)
   })
 })

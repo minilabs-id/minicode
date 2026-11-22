@@ -54,7 +54,7 @@ Subcommands are routed in `cli/router.ts` (`stats`, `sessions`, `mcp`, `config`,
 | `--timeout <ms>` | Hard deadline per prompt (default 3600000 = 1 hour; `0` = Infinity; the `exec` path stays at 15 minutes). An idle session does not consume the next prompt's deadline. |
 | `--cwd <path>` | Workspace root for file tools and the jail |
 | `--allow-local-config` | Trust `.minicode/config.json` + the local allowlist (default: ignored) |
-| `--max-steps <n>` | Tool step limit (default 50) |
+| `--max-steps <n>` | Tool step limit (default 200; 50 is the sub-agent cap, not the global default) |
 | `--context-window <n>` | Context window size (tokens) |
 | `--session <id>` | Session ID (random by default, sanitised) |
 | `--work-mode <m>` | `DISCUSS` \| `BUILD` (default: `DISCUSS`). **Work Mode**: `DISCUSS` = read-only investigation & planning, `BUILD` = implementation. Approval is only `AUTO`/`ASK` (default `AUTO`). See [TUI](repl.md) for `/mode` |
@@ -72,7 +72,7 @@ after the system prompt, tools, and history are counted.
 
 In the TUI, **Tab** cycles Work Mode (`Discuss` -> `Build`) and **Shift+Tab** toggles Permission Mode (`Auto` <-> `Ask`). `/mode auto|ask` changes approval; `/mode discuss|build` changes the operating mode. The footer shows Work Mode on the left and Permission Mode in cyan on the right, near context usage; on narrow terminals the labels are condensed.
 
-The adaptive right sidebar (Thinking + Activity/Live/Log) — its activation threshold, per-pane wheel, `Alt+PgUp/PgDn`, `Ctrl+PgUp/PgDn`, and the `Ctrl+O` Live detail modal — is documented in [TUI — Slash Commands & Keyboard](repl.md).
+Since v0.34 the right sidebar is gone: the chat is a centred middle column (at most 50% of terminal width, footer/composer centred with it). Tool lines, the `✦` aggregate, findings, and the `+ thinking` marker live in the chat; the old pane shortcuts (`Alt/Ctrl+PgUp/PgDn`, `Ctrl+O`) are unbound. Since v0.37 bracketed paste is active, `Ctrl+A` = select-all with an empty composer and closed dropdown (else `Home`), `Ctrl+C` copies even while a drag is active, resize stabilises auto-scroll/drag/cursor/anchor, and the prompt cap is progressive `min(chatCols, 100 + floor(max(0, chatCols-100)/4))` (the 2-row composer stays). The shortcuts that remain are listed in [TUI — Slash Commands & Keyboard](repl.md).
 
 ## When to use what
 

@@ -68,9 +68,125 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms))
 }
 
+/**
+ * E-28: perakitan frame LSP berbasis chunk-list. Dulu tiap chunk stdout
+ * `Buffer.concat` ke seluruh sisa buffer → O(n²) untuk pesan besar. Sekarang
+ * chunk hanya digabung SATU kali saat frame lengkap, dan referensi chunk lama
+ * dilepas setelah dikonsumsi.
+ *
+ * `Content-Length` juga dibatasi: sebelumnya header bisa menyatakan miliaran
+ * byte dan decoder menunggu/mengalokasi tanpa batas (OOM).
+ */
+const LSP_MAX_MESSAGE_BYTES = 8 * 1024 * 1024
+const LSP_MAX_HEADER_BYTES = 16 * 1024
+const EMPTY_BUFFER = Buffer.alloc(0)
+
+export class LspFrameAssembler {
+  #chunks: Buffer[] = []
+  #head = 0
+  #buffered = 0
+
+  get pendingBytes(): number {
+    return this.#buffered
+  }
+
+  reset(): void {
+    this.#chunks.length = 0
+    this.#head = 0
+    this.#buffered = 0
+  }
+
+  push(chunk: Buffer): unknown[] {
+    if (chunk.length > 0) {
+      this.#chunks.push(chunk)
+      this.#buffered += chunk.length
+    }
+    const out: unknown[] = []
+    for (;;) {
+      const window = Math.min(this.#buffered, LSP_MAX_HEADER_BYTES)
+      if (window === 0) break
+      const head = this.#peek(window)
+      const sep = head.indexOf("\r\n\r\n")
+      if (sep === -1) {
+        if (this.#buffered >= LSP_MAX_HEADER_BYTES) {
+          // Header tak wajar besar (atau koneksi mengirim sampah) → buang state
+          // daripada menahan memori tak terbatas.
+          this.reset()
+        }
+        break
+      }
+      const header = head.subarray(0, sep).toString("utf8")
+      const m = /Content-Length:\s*(\d+)/i.exec(header)
+      if (!m) {
+        this.#consume(sep + 4)
+        continue
+      }
+      const len = Number(m[1])
+      if (!Number.isFinite(len) || len < 0 || len > LSP_MAX_MESSAGE_BYTES) {
+        process.stderr.write(
+          `[lsp] content-length ${m[1]} rejected (limit ${LSP_MAX_MESSAGE_BYTES})\n`,
+        )
+        this.reset()
+        break
+      }
+      const total = sep + 4 + len
+      if (this.#buffered < total) break
+      const frame = this.#consume(total)
+      const body = frame.subarray(sep + 4).toString("utf8")
+      try {
+        out.push(JSON.parse(body))
+      } catch {
+        // Format protokol: pesan tak valid dibuang, bukan menggagalkan stream.
+      }
+    }
+    return out
+  }
+
+  #peek(n: number): Buffer {
+    const first = this.#chunks[this.#head]!
+    if (first.length >= n) return first.subarray(0, n)
+    const out = Buffer.allocUnsafe(n)
+    let off = 0
+    for (let i = this.#head; i < this.#chunks.length && off < n; i++) {
+      const c = this.#chunks[i]!
+      const take = Math.min(c.length, n - off)
+      c.copy(out, off, 0, take)
+      off += take
+    }
+    return out
+  }
+
+  #consume(n: number): Buffer {
+    const parts: Buffer[] = []
+    let remaining = n
+    while (remaining > 0) {
+      const c = this.#chunks[this.#head]!
+      if (c.length <= remaining) {
+        parts.push(c)
+        this.#chunks[this.#head] = EMPTY_BUFFER
+        this.#head++
+        remaining -= c.length
+      } else {
+        parts.push(c.subarray(0, remaining))
+        this.#chunks[this.#head] = c.subarray(remaining)
+        remaining = 0
+      }
+    }
+    this.#buffered -= n
+    if (this.#head >= this.#chunks.length) {
+      this.#chunks.length = 0
+      this.#head = 0
+    } else if (this.#head > 32 && this.#head * 2 > this.#chunks.length) {
+      this.#chunks.splice(0, this.#head)
+      this.#head = 0
+    }
+    return parts.length === 1 ? parts[0]! : Buffer.concat(parts, n)
+  }
+}
+
 class LspConnection {
   private proc: ChildProcess | null = null
-  private buf: Buffer | null = null
+  private frames = new LspFrameAssembler()
   private pending = new Map<
     number,
     {
@@ -368,29 +484,16 @@ class LspConnection {
     this.proc = null
     this.started = false
     this.starting = undefined
-    this.buf = null
+    this.frames.reset()
   }
 
   private handleData(chunk: Buffer) {
-    this.buf = this.buf ? Buffer.concat([this.buf, chunk]) : chunk
-    for (;;) {
-      if (!this.buf) break
-      const sep = this.buf.indexOf("\r\n\r\n")
-      if (sep === -1) break
-      const header = this.buf.slice(0, sep).toString("utf8")
-      const m = /Content-Length:\s*(\d+)/i.exec(header)
-      if (!m) {
-        this.buf = this.buf.slice(sep + 4)
-        continue
+    for (const msg of this.frames.push(chunk)) {
+      if (msg && typeof msg === "object" && !Array.isArray(msg)) {
+        try {
+          this.dispatch(msg as Record<string, unknown>)
+        } catch {}
       }
-      const len = Number(m[1])
-      const total = sep + 4 + len
-      if (this.buf.length < total) break
-      const body = this.buf.slice(sep + 4, total).toString("utf8")
-      this.buf = this.buf.slice(total)
-      try {
-        this.dispatch(JSON.parse(body))
-      } catch {}
     }
   }
 

@@ -13,6 +13,7 @@
 
 import { describe, expect, test } from "bun:test"
 import { stripSgr } from "../src/ui/render/sanitize.ts"
+import { humanToolLabel } from "../src/ui/render/tool-label.ts"
 import { UiSessionState } from "../src/ui/session-state.ts"
 import { TRANSCRIPT_CAP, Transcript } from "../src/ui/tui/transcript.ts"
 import { createFakeBus } from "./helpers/tui-harness.ts"
@@ -135,15 +136,16 @@ describe("thinking: satu baris per turn, bukan per segmen", () => {
     expect(h.tailRows().some((line) => line.includes("thinking"))).toBe(true)
   })
 
-  test("detail penuh tetap bisa diambil lewat /expand", () => {
+  test("penalaran diringkas jadi satu baris `+ thinking · N` di transkrip", () => {
     const h = harness()
     h.emit({ type: "turn.started" })
     reasoning(h, "baris-detail-penting\nbaris-kedua")
     h.emit({ type: "turn.completed", summary: {} })
-    // v0.33: /expand dihapus — detail ada di riwayat sidebar thinking.
-    const stored = h.tr.sidebarThinking(20, 80).join("\n")
-    expect(stored).toContain("baris-detail-penting")
-    expect(stored).toContain("baris-kedua")
+    // Narasi thinking hidup di chat: satu baris ringkas berisi total baris
+    // penalaran turn. Detail mentah tetap di jurnal presentasi, bukan transkrip.
+    const thinking = h.rows().filter((line) => line.includes("thinking"))
+    expect(thinking).toHaveLength(1)
+    expect(thinking[0]).toContain("2")
   })
 })
 
@@ -182,7 +184,7 @@ describe("tool gagal: satu baris, alasan tidak hilang", () => {
     // hilang (regresi lama: barisnya ditelan saat hitungan dipindah ke grup).
     expect(rows.filter((line) => line.includes("pola tidak ditemukan")).length).toBe(1)
     const failedRow = rows.find((line) => line.includes("pola tidak ditemukan"))!
-    expect(failedRow).toContain("grep")
+    expect(failedRow).toContain(humanToolLabel("grep"))
     expect(failedRow).toContain("failed")
     expect(failedRow).toContain("pola tidak ditemukan")
     // Tak ada lagi baris grup "execute · 3 ok" — tiap tool dicatat apa adanya.

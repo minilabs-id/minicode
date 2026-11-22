@@ -88,7 +88,14 @@ function leasePath(cwd?: string): string {
  * Residual yang tersisa (mesin multi-user Windows tanpa izin mengubah ACL)
  * didokumentasikan di docs/security.md.
  */
+/** Seam uji: amati pemanggilan hardening (tersedia juga di non-Windows). */
+let aclProbe: ((path: string) => void) | null = null
+export function __setDiscoveryAclProbeForTest(fn: ((path: string) => void) | null): void {
+  aclProbe = fn
+}
+
 function hardenAcl(path: string): void {
+  aclProbe?.(path)
   if (process.platform !== "win32") return
   const user = process.env.USERNAME
   if (!user) return
@@ -100,18 +107,27 @@ function hardenAcl(path: string): void {
   } catch {}
 }
 
-/** Tulis atomik (tmp + rename) supaya pembaca tak pernah melihat file separuh. */
-function writeAtomic(path: string, value: unknown, mode = 0o600): void {
+/**
+ * Tulis atomik (tmp + rename) supaya pembaca tak pernah melihat file separuh.
+ *
+ * E-20: `rename` mengganti inode, jadi ACL lama TIDAK melekat ke berkas baru.
+ * Karena itu hardening ACL harus menjadi keputusan EKSPLISIT per pemanggil:
+ * - endpoint = bootstrap secret, sekali/start → hardenAcl: true;
+ * - lease = hanya incarnation/pid/updatedAt, BUKAN secret dan ditulis tiap
+ *   heartbeat → hardenAcl: false (jangan panggil icacls berulang kali).
+ * Mode 0600 dipertahankan untuk keduanya.
+ */
+function writeAtomic(path: string, value: unknown, opts: { hardenAcl: boolean }): void {
   const tmp = `${path}.${process.pid}.tmp`
-  writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode })
+  writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
   renameSync(tmp, path)
-  if (mode <= 0o600) hardenAcl(path)
+  if (opts.hardenAcl) hardenAcl(path)
 }
 
 export function writeEndpoint(ep: DaemonEndpoint, cwd?: string): string {
   const p = endpointPath(cwd)
   mkdirSync(resolve(p, ".."), { recursive: true, mode: 0o700 })
-  writeAtomic(p, ep, 0o600)
+  writeAtomic(p, ep, { hardenAcl: true })
   return p
 }
 
@@ -142,7 +158,7 @@ export function readEndpoint(cwd?: string): DaemonEndpoint | null {
 export function writeLease(l: DaemonLease, cwd?: string): string {
   const p = leasePath(cwd)
   mkdirSync(resolve(p, ".."), { recursive: true, mode: 0o700 })
-  writeAtomic(p, l, 0o600)
+  writeAtomic(p, l, { hardenAcl: false })
   return p
 }
 

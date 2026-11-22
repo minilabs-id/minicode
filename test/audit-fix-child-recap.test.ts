@@ -29,6 +29,7 @@ import {
 } from "../cli/tui.ts"
 import type { DomainEvent } from "../src/presentation/events.ts"
 import { resetLocaleState, setSessionLocale } from "../src/ui/i18n/locale.ts"
+import { tSystem } from "../src/ui/render/tool-label.ts"
 import { createFakeBus, installFakeTty, KEY } from "./helpers/tui-harness.ts"
 
 let tty: ReturnType<typeof installFakeTty> | null = null
@@ -376,7 +377,7 @@ test("integrasi: induk abort setelah anak selesai → recap tak bocor ke turn be
     await tty.send(KEY.esc)
     // Tunggu abort benar-benar diproses (toast muncul SETELAH host.abort()) —
     // kalau gate dilepas lebih dulu, turn selesai sebelum sinyal abort terbaca.
-    await tty.waitForScreen((f) => f.some((line) => line.includes("abort sent")))
+    await tty.waitForScreen((f) => f.some((line) => line.includes(tSystem("msg.abortedHint"))))
     h.release()
     await waitFor(() => h.resets === 1, "turn 1 selesai")
     await new Promise((r) => setTimeout(r, 0))

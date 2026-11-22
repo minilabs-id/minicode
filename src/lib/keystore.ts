@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process"
+import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { readlinkSync } from "node:fs"
 import { chmod, mkdir, open, readdir, readFile, unlink } from "node:fs/promises"
@@ -29,11 +29,28 @@ import { resolveTrustedExecutable } from "./trusted-exec.ts"
 // store dibaca-modifikasi-ditulis, jadi dua penulis konkuren tanpa kunci
 // berarti credential yang baru ditulis lenyap diam-diam (lost update).
 
+export interface SecretRunnerResult {
+  status: number | null
+  stdout: string
+}
+
+/**
+ * E-3: runner wajib ASYNC. `Promise.all` atas `spawnSync` tidak pernah paralel —
+ * ia hanya menjadwalkan satu blok sinkron demi satu. Runner async membuat
+ * `Promise.allSettled` di providers/build.ts benar-benar konkuren.
+ *
+ * Secret SELALU lewat `input` (= stdin), tidak pernah di `args` (= argv).
+ * Test seam boleh mengembalikan objek sinkron ataupun Promise; pemanggil
+ * selalu `await` sehingga dua-duanya didukung.
+ */
 export type SecretRunner = (
   cmd: string,
   args: string[],
   input?: string,
-) => { status: number | null; stdout: string }
+) => SecretRunnerResult | Promise<SecretRunnerResult>
+
+const SECRET_RUNNER_TIMEOUT_MS = 15_000
+const SECRET_RUNNER_MAX_OUTPUT = 1_000_000
 
 /** Penulis store (seam uji: mensimulasikan "gagal tulis"). */
 export type StoreWriter = (path: string, data: string) => Promise<void>
@@ -65,22 +82,56 @@ export function __resetKeystoreForTest(): void {
   lockTimingOverride = null
 }
 
-function defaultRunner(
-  cmd: string,
-  args: string[],
-  input?: string,
-): { status: number | null; stdout: string } {
-  try {
-    const r = spawnSync(resolveTrustedExecutable(cmd), args, {
-      input,
-      encoding: "utf8",
-      timeout: 15000,
-      windowsHide: true,
+function defaultRunner(cmd: string, args: string[], input?: string): Promise<SecretRunnerResult> {
+  return new Promise((resolveOut) => {
+    let child: ReturnType<typeof spawn>
+    try {
+      // Secret tidak pernah masuk argv — hanya ditulis ke stdin di bawah.
+      child = spawn(resolveTrustedExecutable(cmd), args, {
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
+      })
+    } catch {
+      resolveOut({ status: null, stdout: "" })
+      return
+    }
+    let stdout = ""
+    let timedOut = false
+    let settled = false
+    const finish = (r: SecretRunnerResult): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolveOut(r)
+    }
+    const timer = setTimeout(() => {
+      timedOut = true
+      try {
+        child.kill("SIGKILL")
+      } catch {}
+    }, SECRET_RUNNER_TIMEOUT_MS)
+    timer.unref?.()
+    try {
+      child.stdout?.on("data", (d: Buffer) => {
+        if (stdout.length < SECRET_RUNNER_MAX_OUTPUT) stdout += d.toString()
+      })
+      child.stderr?.resume()
+      child.stdin?.on("error", () => {})
+    } catch {}
+    child.on("error", () => finish({ status: null, stdout: "" }))
+    child.on("close", (code) => {
+      finish({
+        status: timedOut ? null : typeof code === "number" ? code : null,
+        stdout,
+      })
     })
-    return { status: typeof r.status === "number" ? r.status : null, stdout: r.stdout ?? "" }
-  } catch {
-    return { status: null, stdout: "" }
-  }
+    try {
+      if (input !== undefined) child.stdin?.write(input, "utf8")
+      child.stdin?.end()
+    } catch {
+      finish({ status: null, stdout: "" })
+    }
+  })
 }
 
 function storePath(): string {
@@ -571,19 +622,19 @@ function dpapiAvailable(): boolean {
   return true
 }
 
-function dpapiProtect(plaintext: string): string | null {
+async function dpapiProtect(plaintext: string): Promise<string | null> {
   const run = runnerOverride ?? defaultRunner
   const exe = process.platform === "win32" ? "powershell" : "pwsh"
-  const r = run(exe, DPAPI_PROTECT_ARGS, plaintext)
+  const r = await run(exe, DPAPI_PROTECT_ARGS, plaintext)
   if (r.status !== 0) return null
   const out = r.stdout.trim()
   return out ? out : null
 }
 
-function dpapiUnprotect(blob: string): string | null {
+async function dpapiUnprotect(blob: string): Promise<string | null> {
   const run = runnerOverride ?? defaultRunner
   const shell = process.platform === "win32" ? "powershell" : "pwsh"
-  const r = run(shell, DPAPI_UNPROTECT_ARGS, blob)
+  const r = await run(shell, DPAPI_UNPROTECT_ARGS, blob)
   if (r.status !== 0) return null
   // powershell mengakhiri output dengan newline — hanya itu yang dibuang,
   // isi secret utuh (bisa mengandung newline di tengah).
@@ -613,7 +664,7 @@ export async function setSecret(key: string, value: string): Promise<"dpapi" | "
   // (non-Windows) = plain jujur berlabel.
   let blob: string | null = null
   if (useDpapi) {
-    blob = dpapiProtect(value)
+    blob = await dpapiProtect(value)
     if (!blob) return null
   }
   return await withStoreLock(async (): Promise<"dpapi" | "plain" | null> => {
@@ -651,7 +702,7 @@ export async function getSecret(key: string): Promise<string | null> {
     const entry = store.entries[key]
     if (entry) {
       if (entry.alg === "dpapi") {
-        if (dpapiAvailable()) value = dpapiUnprotect(entry.enc)
+        if (dpapiAvailable()) value = await dpapiUnprotect(entry.enc)
       } else {
         value = entry.enc
       }

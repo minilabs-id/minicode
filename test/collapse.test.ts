@@ -15,6 +15,7 @@ import {
 } from "../src/ui/render/collapse.ts"
 import { setReasoningVisible } from "../src/ui/render/reasoning.ts"
 import { stripAnsi } from "../src/ui/render/theme.ts"
+import { humanToolLabel } from "../src/ui/render/tool-label.ts"
 import { createFakeBus, type FakeTty, installFakeTty } from "./helpers/tui-harness.ts"
 
 let tty: FakeTty | undefined
@@ -56,8 +57,8 @@ const done = (name: string, args: Record<string, unknown>, content: string, isEr
 
 describe("collapse: thinking section", () => {
   test("default hidden: thinking tidak dicetak, buffer /expand sudah dihapus", () => {
-    // v0.33: /expand dihapus — thinking penuh ada di SidebarModel (TUI) dan
-    // journal. Printer linear cukup menyembunyikannya, tanpa buffer collapsed.
+    // v0.34: /expand dihapus — thinking penuh ada di jurnal. Printer linear
+    // cukup menyembunyikannya, tanpa buffer collapsed.
     const { bus, detach, err } = attach()
     bus.emit("turn:started", { turn: 1 })
     bus.emit("provider:extension", { kind: "reasoning", data: { text: "pemikiran rahasia\n" } })
@@ -113,7 +114,7 @@ describe("collapse: tool section", () => {
     detach()
     expect(err()).toContain("bash")
     expect(err()).not.toContain("file1")
-    // v0.33: buffer /expand mati — detail ada di journal/sidebar, bukan sini.
+    // v0.34: buffer /expand mati — detail di jurnal + chat (sidebar dihapus), bukan sini.
     expect(collapsedSectionsSnapshot().some((s) => s.text.includes("file3"))).toBe(false)
   })
 
@@ -145,7 +146,7 @@ describe("collapse: tool section", () => {
     bus.emit("turn:started", { turn: 1 })
     bus.emit("execution:completed", done("read_file", { path: "x.ts" }, "gagal membaca", true))
     detach()
-    expect(err()).toContain("› read_file: gagal membaca")
+    expect(err()).toContain(`› ${humanToolLabel("read_file")}: gagal membaca`)
     expect(err()).not.toContain("+ read_file")
   })
 

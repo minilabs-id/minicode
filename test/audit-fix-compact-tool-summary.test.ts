@@ -6,6 +6,7 @@ import { describe, expect, test } from "bun:test"
 import type { UiPresentationEvent } from "../src/ui/contract.ts"
 import { setSessionLocale } from "../src/ui/i18n/locale.ts"
 import { stripAnsi } from "../src/ui/render/theme.ts"
+import { humanToolLabel } from "../src/ui/render/tool-label.ts"
 import { UiSessionState } from "../src/ui/session-state.ts"
 import { Transcript } from "../src/ui/tui/transcript.ts"
 import { createFakeBus } from "./helpers/tui-harness.ts"
@@ -37,12 +38,12 @@ function setup(opts: { minimizeActivity?: boolean; activityPanel?: boolean } = {
 }
 
 /**
- * Baris ringkas = baris bermargin kiri yang diawali angka kategori.
- * v7.42: tanda `+` dihapus, jadi deteksi `/^\s+\d+\s+\p{L}/u` (spasi,
- * angka, spasi, huruf pertama label) — bukan lagi `/^\s+\+\s/`.
+ * Baris ringkas = margin kiri + `└ ` + angka kategori. `└` membedakan rekap
+ * dari baris ledger biasa (`› label target`), yang kini memakai label
+ * manusiawibahasa SISTEM dan tak punya angka kategori.
  */
 function summaryLines(lines: string[]): string[] {
-  return lines.filter((l) => /^\s+\d+\s+\p{L}/u.test(l))
+  return lines.filter((l) => /^\s*└\s+\d+\s+\p{L}/u.test(l))
 }
 
 describe("compact tool summary per turn", () => {
@@ -73,18 +74,16 @@ describe("compact tool summary per turn", () => {
 
     const lines = screen()
     const summaries = summaryLines(lines)
+    // Satu baris: rekap kumulatif identik dengan segmen terakhir jadi tidak diduplikasi.
     expect(summaries).toHaveLength(1)
-    // v7.42: format rekap tanpa `+` (angka lebih terang, label lebih gelap).
+    // Format `└ 2 command · 2 edit · 2 read · 1 thought` (tanpa `+`).
     expect(summaries[0]).toContain("2 command")
     expect(summaries[0]).toContain("2 edit")
     expect(summaries[0]).toContain("2 read")
     expect(summaries[0]).toContain("1 thought")
     // Kategori yang tak muncul tidak dicetak (nol disembunyikan).
     expect(summaries[0]).not.toContain("other")
-    // Ringkasan berdiri sendiri: satu blank sebelum & sesudahnya.
-    const idx = lines.indexOf(summaries[0]!)
-    expect(lines[idx - 1]).toBe("")
-    expect(lines[idx + 1]).toBe("")
+    expect(lines.filter((l) => l.includes("└")).length).toBe(1)
     void transcript
   })
 
@@ -103,13 +102,14 @@ describe("compact tool summary per turn", () => {
       emit({ type: "turn.completed", seq: turnId * 10 + 2, turnId })
     }
     const summaries = summaryLines(screen())
+    // Tiap turn menutup dengan satu baris (kumulatif identik tak diduplikasi).
     expect(summaries).toHaveLength(2)
     expect(summaries[0]).toContain("1 command")
     expect(summaries[1]).toContain("1 read")
   })
 
-  test("detail tetap tersedia di sidebar walau transkrip hanya satu baris", () => {
-    const { transcript, emit } = setup()
+  test("detail per-tool tetap tampil di chat di samping rekap satu baris", () => {
+    const { emit, screen } = setup()
     emit({ type: "turn.started", seq: 1, turnId: 1 })
     emit({
       type: "tool.completed",
@@ -131,10 +131,42 @@ describe("compact tool summary per turn", () => {
     })
     emit({ type: "turn.completed", seq: 4, turnId: 1 })
 
-    // v0.33: /expand dihapus — detail lengkap pindah ke sidebar aktivitas.
-    const detail = transcript.sidebarActivity(20, 80).join("\n")
-    expect(detail).toContain("write a.ts")
-    expect(detail).toContain("read b.ts")
+    // Narasi detail hidup di chat: baris `› nama target` tetap ada, dan rekap
+    // kategori menjadi separator satu baris (bukan pengganti detail).
+    const chat = screen().join("\n")
+    expect(chat).toContain(`› ${humanToolLabel("write_file")} a.ts`)
+    expect(chat).toContain(`› ${humanToolLabel("read_file")} b.ts`)
+    expect(summaryLines(screen())).toHaveLength(1)
+  })
+
+  test("rekap kumulatif 2 command · 118 read · 1 other dari NAMA INTERNAL", () => {
+    const { transcript, emit } = setup()
+    emit({ type: "turn.started", seq: 1, turnId: 1 })
+    let seq = 2
+    const push = (name: string): void => {
+      emit({
+        type: "tool.completed",
+        seq: seq++,
+        turnId: 1,
+        toolCallId: `c${seq}`,
+        name,
+        status: "completed",
+      })
+    }
+    for (let i = 0; i < 2; i++) push("bash")
+    for (let i = 0; i < 118; i++) push("read_file")
+    push("mystery_tool") // tak dikenal → other (dihitung dari rawName, bukan label)
+    emit({ type: "turn.completed", seq, turnId: 1 })
+
+    const summaries = summaryLines(transcript.view(120, 300, 0).map(stripAnsi))
+    const cumulative = summaries.at(-1)!
+    // Baris terakhir = akumulator KUMULATIF, format satu baris `└ …`.
+    expect(cumulative).toMatch(/^ {3}└ /)
+    expect(cumulative).toContain("2 command")
+    expect(cumulative).toContain("118 read")
+    expect(cumulative).toContain("1 other")
+    // Label manusiawi (bahasa sistem) TIDAK boleh masuk ke hitungan kategori.
+    expect(cumulative).not.toContain(humanToolLabel("read_file"))
   })
 
   test("turn tanpa tool tidak menghasilkan baris ringkas", () => {
@@ -170,6 +202,7 @@ describe("compact tool summary per turn", () => {
     const summaries = summaryLines(transcript.view(120, 20, 0).map(stripAnsi))
     expect(summaries).toHaveLength(1)
     expect(summaries[0]).toContain("1 command")
+    // Kategori = token teknis (identik di en/id), bukan label aktivitas tool.
     expect(summaries[0]).not.toContain("perintah")
     setSessionLocale("en")
   })

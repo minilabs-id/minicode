@@ -83,7 +83,7 @@ The `submit_result` tool produces final structured JSON, called at most once per
 
 | Control | Default | Note |
 |---|---|---|
-| `--max-steps <n>` | 200 (`LIMITS.DEFAULT_MAX_STEPS`) | Tool step limit per run, with auto-escalation; 50 is only the sub-agent hard cap (`SUB_AGENT_MAX_STEPS`), not this runtime default — the CLI help still says 50 (stale) |
+| `--max-steps <n>` | 200 (`LIMITS.DEFAULT_MAX_STEPS`) | Tool step limit per run, with auto-escalation; 50 is only the sub-agent hard cap (`SUB_AGENT_MAX_STEPS`), not this runtime default — the CLI help now derives the same number from `LIMITS.DEFAULT_MAX_STEPS` |
 | `--timeout <ms>` | 900000 (15 minutes) | Hard deadline per run; `0` = Infinity |
 | `--ratelimit <rpm>` | — | LLM request token bucket per minute |
 | `--budget <usd>` | — | Warn at 80%; exceeded -> one-shot `exit(1)`, TUI breaks the loop; `exec` enforces it the same way as one-shot |

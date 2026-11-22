@@ -276,8 +276,36 @@ interface StoredDispatch {
   record: DispatchRecord
 }
 
+// E-12: history dulu `[...prev.history, entry]` tanpa batas → tiap transisi
+// menyalin array yang makin panjang (O(n²) total). Sekarang ring buffer N.
+const DISPATCH_MAX_HISTORY = 32
+// Store dulu tak punya eviksi → satu entri per dispatch sepanjang hidup proses.
+// Saat penuh, record TERMINAL tertua dibuang (non-terminal dipertahankan karena
+// dedupe masih bergantung padanya).
+const DISPATCH_MAX_ENTRIES = 1024
+const TERMINAL_DISPATCH_STATES = new Set<DispatchState>([
+  "ADMITTED",
+  "REJECTED",
+  "EXPIRED",
+  "AUTHORITY_LOST",
+  "BLOCKED",
+  "FAILED",
+  "STALE",
+  "CAPABILITY_DENIED",
+  "BUDGET_EXCEEDED",
+  "DUPLICATE",
+  "UNCERTAIN_DUPLICATE",
+])
+
 export function createDispatchBridge(deps: DispatchBridgeDeps): DispatchBridge {
   const store = new Map<string, StoredDispatch>()
+  const evictTerminal = (): void => {
+    if (store.size <= DISPATCH_MAX_ENTRIES) return
+    for (const [id, entry] of store) {
+      if (store.size <= DISPATCH_MAX_ENTRIES) break
+      if (TERMINAL_DISPATCH_STATES.has(entry.record.state)) store.delete(id)
+    }
+  }
   const m = { planned: 0, admitted: 0, rejected: 0, duplicates: 0, stale: 0 }
   const now = deps.now ?? Date.now
   const emit = (record: DispatchRecord): void => {
@@ -310,9 +338,11 @@ export function createDispatchBridge(deps: DispatchBridgeDeps): DispatchBridge {
       ...(partial.generation !== undefined ? { generation: partial.generation } : {}),
       ...(partial.supersedes ? { supersedes: partial.supersedes } : {}),
       reason: transition.reason,
-      history: Object.freeze([...(prev?.record.history ?? []), entry]),
+      // Ring buffer: salinan selalu ≤ DISPATCH_MAX_HISTORY entri.
+      history: Object.freeze([...(prev?.record.history ?? []), entry].slice(-DISPATCH_MAX_HISTORY)),
     })
     store.set(dispatchId, { record })
+    evictTerminal()
     emit(record)
     return record
   }
@@ -382,6 +412,7 @@ export function createDispatchBridge(deps: DispatchBridgeDeps): DispatchBridge {
             ]),
           })
           store.set(request.dispatchId, { record: dup })
+          evictTerminal()
           emit(dup)
           return dup
         }

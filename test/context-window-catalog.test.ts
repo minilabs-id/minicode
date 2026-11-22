@@ -3,7 +3,9 @@
 import { describe, expect, test } from "bun:test"
 import type { MinicodeConfig } from "../src/config.ts"
 import {
+  __overlayScanCount,
   __resetContextWindowOverlay,
+  __resetOverlayScanCount,
   __setContextWindowOverlay,
   findContextWindowFromOverlay,
   resolveContextWindow,
@@ -173,6 +175,112 @@ describe("models.dev overlay (context_length)", () => {
     __setContextWindowOverlay({ "deepseek-v4-flash": 999_999 })
     expect(findContextWindowFromOverlay("deepseek-v4-flash")).toBe(999_999)
     expect(findContextWindowFromOverlay("p::deepseek-v4-flash-free")).toBe(999_999)
+    __resetContextWindowOverlay()
+  })
+})
+
+// F-07: memo per modelId + invalidasi saat overlay dimuat ulang. Resolusi harus
+//-identik dengan algoritma lama (oracle di bawah), termasuk hasil `undefined`.
+describe("F-07 memo overlay models.dev", () => {
+  const oracle = (map: Record<string, number>, model: string): number | undefined => {
+    if (!map || Object.keys(map).length === 0) return undefined
+    const m = model.toLowerCase()
+    if (map[m] !== undefined) return map[m]
+    let best: { k: string; v: number } | undefined
+    for (const seg of m.split(/[/:]/)) {
+      if (!seg) continue
+      for (const [k, v] of Object.entries(map)) {
+        if (
+          seg === k ||
+          seg.startsWith(`${k}.`) ||
+          seg.startsWith(`${k}-`) ||
+          seg.startsWith(`${k}_`)
+        ) {
+          if (!best || k.length > best.k.length) best = { k, v }
+        }
+      }
+    }
+    return best?.v
+  }
+
+  test("hasil resolusi identik dengan algoritma lama (miss & hit)", () => {
+    const overlay: Record<string, number> = {
+      deepseek: 131_072,
+      "deepseek-v4-flash": 999_999,
+      "qwen3-coder": 262_144,
+      "gpt-5-mini.2026": 400_000,
+      kimi_k2: 1_000_000,
+    }
+    __setContextWindowOverlay(overlay)
+    try {
+      const models = [
+        "deepseek",
+        "DeepSeek",
+        "deepseek-v4-flash",
+        "deepseek-v4-flash-free",
+        "p::deepseek-v4-flash-free",
+        "vendor/deepseek-v4-flash:free",
+        "qwen3-coder-plus",
+        "gpt-5-mini.2026-preview",
+        "kimi_k2-thinking",
+        "unknown-model",
+        "p::unknown/also-unknown",
+        "",
+      ]
+      for (const model of models) {
+        // Panggil dua kali: cache miss lalu cache hit — keduanya harus cocok.
+        expect(findContextWindowFromOverlay(model)).toBe(oracle(overlay, model))
+        expect(findContextWindowFromOverlay(model)).toBe(oracle(overlay, model))
+      }
+    } finally {
+      __resetContextWindowOverlay()
+    }
+  })
+
+  test("memo benar-benar melewati scan overlay pada cache hit (bukan hanya hasil sama)", () => {
+    const overlay: Record<string, number> = {}
+    for (let i = 0; i < 1000; i++) overlay[`model-${i}`] = 131_072
+    __setContextWindowOverlay(overlay)
+    try {
+      __resetOverlayScanCount()
+      expect(findContextWindowFromOverlay("model-42")).toBe(131_072)
+      expect(__overlayScanCount()).toBe(1)
+      for (let i = 0; i < 50; i++) {
+        expect(findContextWindowFromOverlay("model-42")).toBe(131_072)
+      }
+      // Hit langsung return sebelum OBJECT_KEYS/ENTRIES disentuh.
+      expect(__overlayScanCount()).toBe(1)
+
+      // Model baru = scan baru; setelah itu stabil lagi.
+      expect(findContextWindowFromOverlay("model-77")).toBe(131_072)
+      expect(__overlayScanCount()).toBe(2)
+    } finally {
+      __resetContextWindowOverlay()
+    }
+  })
+
+  test("memo dibatalkan saat overlay di-set ulang atau di-reset", () => {
+    __setContextWindowOverlay({ "model-x": 100_000 })
+    expect(findContextWindowFromOverlay("model-x")).toBe(100_000)
+    expect(findContextWindowFromOverlay("model-x")).toBe(100_000) // cache hit
+
+    __setContextWindowOverlay({ "model-x": 200_000 })
+    expect(findContextWindowFromOverlay("model-x")).toBe(200_000) // nilai baru
+
+    __setContextWindowOverlay({ "model-y": 300_000 })
+    expect(findContextWindowFromOverlay("model-x")).toBeUndefined()
+    expect(findContextWindowFromOverlay("model-y")).toBe(300_000)
+
+    __resetContextWindowOverlay()
+    expect(findContextWindowFromOverlay("model-y")).toBeUndefined()
+  })
+
+  test("hasil undefined ikut di-cache lalu ikut dibatalkan saat overlay berubah", () => {
+    __setContextWindowOverlay({ known: 50_000 })
+    expect(findContextWindowFromOverlay("missing")).toBeUndefined()
+    expect(findContextWindowFromOverlay("missing")).toBeUndefined() // hit dari cache undefined
+    __setContextWindowOverlay({ missing: 60_000 })
+    expect(findContextWindowFromOverlay("missing")).toBe(60_000)
     __resetContextWindowOverlay()
   })
 })

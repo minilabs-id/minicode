@@ -40,6 +40,7 @@ export type PromptKey =
   | { type: "left" }
   | { type: "right" }
   | { type: "home" }
+  | { type: "selectAll" } // Ctrl+A (0x01) — pilih seluruh baris; ditangani host TUI (app.ts)
   | { type: "end" }
   | { type: "up" }
   | { type: "down" }
@@ -316,6 +317,7 @@ export function applyKey(
     case "ctrl-r": // reverse-i-search — ditangani askLine (input.ts) sebelum applyKey
     case "ctrl-t": // toggle expand/minimize reasoning — ditangani host TUI (app.ts)
     case "ctrl-n": // tambah model — ditangani view yang membutuhkan (model-manager); di prompt teks diabaikan
+    case "selectAll": // pilih seluruh baris — ditangani host TUI (app.ts), no-op di prompt teks
     case "shift-tab": // toggle permission mode — ditangani host TUI (app.ts)
     case "ignore":
       return { state, action: "none" }
@@ -568,8 +570,11 @@ function trailingPasteEndPrefix(buf: number[]): number {
 /** Pemetaan byte ASCII/control → key; null bila printable biasa. */
 function asciiKey(b: number): DecodedKey | null {
   switch (b) {
+    // Ctrl+A (0x01) = select-all, BUKAN home. Home tetap lewat Escape-sequence
+    // (ESC[H / ESC[1~ / ESC[7~) — lihat decodeKey di bawah. Host TUI (app.ts)
+    // yang memakai seleksi ini; prompt teks mengabaikannya (no-op).
     case 0x01:
-      return { key: { type: "home" }, width: 0 }
+      return { key: { type: "selectAll" }, width: 0 }
     case 0x05:
       return { key: { type: "end" }, width: 0 }
     case 0x0f:
@@ -601,6 +606,10 @@ function asciiKey(b: number): DecodedKey | null {
     case 0x17:
       return { key: { type: "ctrl-w" }, width: 0 }
     default:
+      // Ctrl+V (0x16) sengaja jadi `ignore`: paste DILAKUKAN terminal lewat
+      // bracketed paste (ESC[200~ … ESC[201~), bukan dengan membaca Ctrl+V.
+      // Jangan diubah jadi submit/char — terminal yang tak mengirim bracketed
+      // paste cukup mengabaikan kombinasi ini (tidak crash, tidak mengirim).
       if (b < 0x20) return { key: { type: "ignore" }, width: 0 }
       return null
   }
@@ -1070,7 +1079,8 @@ export function decodeKey(s: string, i: number): DecodedKey | null {
     if (s[i + 1] === "\r") return { key: { type: "ctrl-j" }, width: 2 }
     return { key: { type: "esc" }, width: 1 }
   }
-  if (code === 0x01) return { key: { type: "home" }, width: 1 } // Ctrl+A
+  // Ctrl+A (0x01) = select-all (host TUI app.ts), bukan home. Home = ESC[H/1~/7~.
+  if (code === 0x01) return { key: { type: "selectAll" }, width: 1 }
   if (code === 0x05) return { key: { type: "end" }, width: 1 } // Ctrl+E
   // Ctrl+O (15) & Ctrl+R (18) sebagai key types sendiri
   if (code === 0x0f) return { key: { type: "ctrl-o" }, width: 1 }
@@ -1086,8 +1096,10 @@ export function decodeKey(s: string, i: number): DecodedKey | null {
   if (code === 0x04) return { key: { type: "ctrl-d" }, width: 1 }
   if (code === 0x15) return { key: { type: "ctrl-u" }, width: 1 }
   if (code === 0x17) return { key: { type: "ctrl-w" }, width: 1 }
-  // Kontrol C0 lain yang tidak punya arti di sini (Ctrl+L, Ctrl+K, Ctrl+Z,
-  // dst.) DIBUANG, bukan diteruskan sebagai karakter.
+  // Kontrol C0 lain yang tidak punya arti di sini (Ctrl+L, Ctrl+K, Ctrl+V,
+  // Ctrl+Z, dst.) DIBUANG, bukan diteruskan sebagai karakter. Ctrl+V (0x16)
+  // khusus: paste = urusan terminal via bracketed paste, bukan byte Ctrl+V —
+  // jangan pernah dijadikan submit.
   //
   // Sebelumnya semuanya jatuh ke cabang "char" di bawah dan masuk ke baris
   // input sebagai byte tak tampak — Ctrl+L+Ctrl+K+Ctrl+T pada "teks"

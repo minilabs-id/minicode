@@ -15,6 +15,7 @@ import { saveSession } from "../src/session/persistence.ts"
 import { TaskStore } from "../src/task/store.ts"
 import { readTraceRows } from "../src/telemetry/trace.ts"
 import { resetLocaleState, setSessionLocale, t } from "../src/ui/i18n/locale.ts"
+import { tSystem } from "../src/ui/render/tool-label.ts"
 import { UiSessionState } from "../src/ui/session-state.ts"
 import { captureOutput } from "./helpers/capture.ts"
 import { createFakeBus, installFakeTty, KEY } from "./helpers/tui-harness.ts"
@@ -196,8 +197,8 @@ describe("handleBuiltinCommand: /init & /sessions", () => {
 })
 
 describe("TUI slash commands (CMD-02..CMD-09)", () => {
-  // v0.33: VIEW_ACTIONS HANYA ["thinking"] — expand dihapus (riwayat penuh
-  // ada di sidebar). compact/fold/minimize juga tak ada. Picker wajib berisi
+  // v0.34: VIEW_ACTIONS HANYA ["thinking"] — expand dihapus (riwayat penuh
+  // di jurnal/chat; sidebar dihapus). compact/fold/minimize juga tak ada. Picker wajib berisi
   // SATU item, bukan lima seperti sebelum rewrite.
   test("/view picker hanya menawarkan aksi thinking yang valid", async () => {
     const session = makeFakeTuiSession(makeTmp("minicode-view-picker-"))
@@ -217,7 +218,7 @@ describe("TUI slash commands (CMD-02..CMD-09)", () => {
       }
       expect(tty.promptListeners()).toBe(1)
       await tty.send(KEY.enter)
-      const receipt = t("tui.thinkingSet", { v: t("state.expanded") })
+      const receipt = tSystem("tui.thinkingSet", { v: tSystem("state.expanded") })
       // v7.30: kwitansi /view tinggal di footer (toast), bukan baris transkrip.
       await tty.waitForScreen((f) => (f[f.length - 1] ?? "").includes(receipt))
       expect(tty.promptListeners()).toBe(1)
@@ -342,19 +343,23 @@ describe("TUI slash commands (CMD-02..CMD-09)", () => {
       await tty.send(KEY.enter)
       // v7.30: kwitansi-kwitansi ini di footer (toast), bukan baris transkrip.
       await tty.waitForScreen((f) =>
-        (f[f.length - 1] ?? "").includes(t("tui.thinkingSet", { v: t("state.expanded") })),
+        (f[f.length - 1] ?? "").includes(
+          tSystem("tui.thinkingSet", { v: tSystem("state.expanded") }),
+        ),
       )
 
       await tty.send("/view thinking salah")
       await tty.send(KEY.enter)
       await tty.waitForScreen((f) =>
-        (f[f.length - 1] ?? "").includes(t("tui.toggleUse", { cmd: "thinking" })),
+        (f[f.length - 1] ?? "").includes(tSystem("tui.toggleUse", { cmd: "thinking" })),
       )
 
       await tty.send("/view thinking OFF")
       await tty.send(KEY.enter)
       await tty.waitForScreen((f) =>
-        (f[f.length - 1] ?? "").includes(t("tui.thinkingSet", { v: t("state.minimized") })),
+        (f[f.length - 1] ?? "").includes(
+          tSystem("tui.thinkingSet", { v: tSystem("state.minimized") }),
+        ),
       )
 
       // compact/fold/minimize sengaja ditolak: renderer flat tak membaca
@@ -362,14 +367,14 @@ describe("TUI slash commands (CMD-02..CMD-09)", () => {
       for (const cmd of ["compact", "fold", "minimize"]) {
         await tty.send(`/view ${cmd} ON`)
         await tty.send(KEY.enter)
-        await tty.waitForScreen((f) => (f[f.length - 1] ?? "").includes(t("tui.viewUse")))
+        await tty.waitForScreen((f) => (f[f.length - 1] ?? "").includes(tSystem("tui.viewUse")))
       }
-      expect(tty.screen()[tty.screen().length - 1]).toContain(t("tui.viewUse"))
+      expect(tty.screen()[tty.screen().length - 1]).toContain(tSystem("tui.viewUse"))
       // Kwitansi kontrol mati TIDAK boleh muncul lagi.
       const screen = tty.screen().join("\n")
-      expect(screen).not.toContain(t("tui.compactLine", { v: t("state.compact") }))
-      expect(screen).not.toContain(t("tui.activityFold", { v: t("state.folded") }))
-      expect(screen).not.toContain(t("tui.sectionsMin"))
+      expect(screen).not.toContain(tSystem("tui.compactLine", { v: tSystem("state.compact") }))
+      expect(screen).not.toContain(tSystem("tui.activityFold", { v: tSystem("state.folded") }))
+      expect(screen).not.toContain(tSystem("tui.sectionsMin"))
       expect(session.uiState!.sectionMinimized("tool")).toBe(toolBefore)
       expect(session.uiState!.sectionMinimized("answer")).toBe(answerBefore)
 
@@ -390,12 +395,12 @@ describe("TUI slash commands (CMD-02..CMD-09)", () => {
       await tty.ready()
       await tty.waitForOutput((o) => o.includes("00.00.00"))
 
-      // v0.33: /expand dihapus; riwayat penuh ada di sidebar. Perintah ini
-      // kini ditolak dengan petunjuk aksi /view yang tersisa.
+      // v0.34: /expand dihapus; riwayat penuh di jurnal/chat (sidebar dihapus).
+      // Perintah ini kini ditolak dengan petunjuk aksi /view yang tersisa.
       await tty.send("/view expand")
       await tty.send(KEY.enter)
-      await tty.waitForScreen((f) => (f[f.length - 1] ?? "").includes(t("tui.viewUse")))
-      expect(tty!.screen().join("\n")).not.toContain(t("tui.expandEmpty"))
+      await tty.waitForScreen((f) => (f[f.length - 1] ?? "").includes(tSystem("tui.viewUse")))
+      expect(tty!.screen().join("\n")).not.toContain(tSystem("tui.expandEmpty"))
 
       await tty.send("/exit")
       await tty.send(KEY.enter)

@@ -3,6 +3,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { promptAsk, promptAskText } from "../src/ui/approval/prompt.ts"
 import { glyphs, stripAnsi } from "../src/ui/render/theme.ts"
+import { tSystem } from "../src/ui/render/tool-label.ts"
 import { displayWidth } from "../src/ui/render/width.ts"
 import { IDLE_CANCEL_MS, IDLE_WARN_MS } from "../src/ui/screens/form.ts"
 import { windowWidth } from "../src/ui/screens/window.ts"
@@ -364,7 +365,7 @@ describe("ask_user modal: hint & echo", () => {
     // Layar menciut di bawah 10 baris -> tampilkan peringatan dan tahan Enter buta.
     tty.resize(50, 8)
     await tty.send("", 40)
-    expect(latest.toLowerCase()).toContain("too small")
+    expect(latest.toLowerCase()).toContain(tSystem("msg.tooSmall").toLowerCase())
     await tty.send(KEY.enter, 30) // harus tetap belum resolve!
 
     // Dibesarkan kembali -> modal penuh kembali, wheel memilih Always + Enter.

@@ -3,11 +3,13 @@
 // Output command TIDAK dicetak ke transkrip — chat tetap utuh dan tidak
 // bergeser. Mendukung scroll (↑↓/PgUp/PgDn/Home/End/wheel/j/k/Space) serta
 // salin cepat (`c`) untuk /help full, /status, /context, /history, /expand, dll.
+import { clipboardByteLength, MAX_CLIPBOARD_BYTES } from "../assistant/simple.ts"
 import { t } from "../i18n/locale.ts"
 import { createDecoderState, createKeyStreamPump, type DecodedKey } from "../input/prompt-engine.ts"
 import type { HintItem } from "../render/hint.ts"
 import { sanitizeAnsiLine } from "../render/sanitize.ts"
 import { c, glyphs, stripAnsi } from "../render/theme.ts"
+import { tSystem } from "../render/tool-label.ts"
 import { wrapByWidth } from "../render/width.ts"
 import { type AltScreen, openAltScreen } from "../runtime/screen.ts"
 import { canRenderModal, type DialogSpec, dialogBox } from "./dialog.ts"
@@ -122,6 +124,7 @@ export async function runOutputWindow(opts: OutputWindowOptions): Promise<boolea
   let wrapped: string[] = []
   let scroll = 0
   let done = false
+  let bracketedPasteOn = false
   let copyNotice: string | null = null
   let copyTimer: ReturnType<typeof setTimeout> | null = null
   let onData!: (chunk: Buffer) => void
@@ -176,14 +179,16 @@ export async function runOutputWindow(opts: OutputWindowOptions): Promise<boolea
     ]
     const body = wrapped.slice(scroll, scroll + budget)
     // Konfirmasi salin jadi baris isi, BUKAN footer: footer wajib tetap
-    // windowFooter supaya frame identik dengan jendela lain. Baris terakhir
-    // dikorbankan agar total isi tidak melebihi anggaran (tanpa clip "more").
+    // windowFooter supaya frame identik dengan jendela lain. NOTICE DI DEPAN:
+    // dialogBox memotong ekor body bila isi panjang (clipped → baris terakhir
+    // tak tampil), jadi meletakkannya di akhir membuat konfirmasi hilang tepat
+    // pada output besar — justru saat payload terlalu besar perlu dilaporkan.
     const bodyWithNotice =
       copyNotice == null
         ? body
         : [
+            copyNotice === tSystem("msg.copied") ? c.success(copyNotice) : c.warning(copyNotice),
             ...body.slice(0, Math.max(0, budget - 1)),
-            copyNotice === t("tui.selectionCopied") ? c.success(copyNotice) : c.warning(copyNotice),
           ]
     const box = dialogBox(
       outputWindowSpec({
@@ -212,6 +217,9 @@ export async function runOutputWindow(opts: OutputWindowOptions): Promise<boolea
     try {
       pump.dispose()
     } catch {}
+    // Bracketed paste dimatikan di semua jalur tutup via writer output yang
+    // sama (process.stdout dipakai screen.paintRegion).
+    if (bracketedPasteOn) process.stdout.write("\x1b[?2004l")
     idle.dispose()
     try {
       process.stdin.removeListener("data", onData)
@@ -243,8 +251,16 @@ export async function runOutputWindow(opts: OutputWindowOptions): Promise<boolea
         return true
       }
       if (k.type === "char" && (k.ch === "c" || k.ch === "C") && opts.onCopy) {
-        const okCopy = opts.onCopy(source.map((l) => stripAnsi(l)).join("\n"))
-        copyNotice = okCopy ? t("tui.selectionCopied") : t("tui.selectionCopyFailed")
+        const text = source.map((l) => stripAnsi(l)).join("\n")
+        // Guard byte SAMA dengan /copy (cli/tui.ts): payload OSC 52 raksasa
+        // bisa menggantung terminal. Laporkan "terlalu besar", bukan "gagal/
+        // butuh TTY" yang keliru, dan jangan panggil onCopy sama sekali.
+        if (clipboardByteLength(text) > MAX_CLIPBOARD_BYTES) {
+          copyNotice = tSystem("msg.copyTooLarge")
+        } else {
+          const okCopy = opts.onCopy(text)
+          copyNotice = okCopy ? tSystem("msg.copied") : tSystem("msg.copyFailed")
+        }
         clearCopyTimer()
         copyTimer = setTimeout(() => {
           copyTimer = null
@@ -295,6 +311,10 @@ export async function runOutputWindow(opts: OutputWindowOptions): Promise<boolea
   try {
     process.stdin.setRawMode(true)
     process.stdin.resume()
+    // Aktifkan bracketed paste sejak jendela tampil; dekoder prompt-engine
+    // menerima ESC[200~ … ESC[201~ sehingga CR di paste tak jadi submit.
+    process.stdout.write("\x1b[?2004h")
+    bracketedPasteOn = true
     process.stdin.on("data", onData)
     process.stdout.on("resize", onResize)
     idle.reset()

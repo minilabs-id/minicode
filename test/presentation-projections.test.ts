@@ -13,6 +13,7 @@ import type {
   UiPresentationSnapshot,
 } from "../src/ui/contract.ts"
 import { resetLocaleState, setSessionLocale } from "../src/ui/i18n/locale.ts"
+import { humanToolLabel } from "../src/ui/render/tool-label.ts"
 import { TRANSCRIPT_CAP, Transcript, type TranscriptMeta } from "../src/ui/tui/transcript.ts"
 import { createFakeBus, installFakeTty } from "./helpers/tui-harness.ts"
 
@@ -79,7 +80,9 @@ describe("P5 transcript projection", () => {
     setSnapshot({ activities: [entry], turns: [] })
     emitPresentation({ type: "tool.completed", toolCallId: entry.toolCallId, status: "completed" })
     emitPresentation({ type: "tool.completed", toolCallId: entry.toolCallId, status: "completed" })
-    expect(transcript.view(100, 4, 0).filter((line) => line.includes("read_file"))).toHaveLength(1)
+    expect(
+      transcript.view(100, 4, 0).filter((line) => line.includes(humanToolLabel("read_file"))),
+    ).toHaveLength(1)
   })
 
   test("terminal status memakai glyph dan kata yang berbeda", () => {
@@ -97,7 +100,7 @@ describe("P5 transcript projection", () => {
     const out = transcript.view(100, 4, 0).join("\n")
     // Status non-sukses dipisah `·` dari target; sukses tidak mencetak kata
     // status sama sekali (lihat test berikutnya).
-    expect(out).toContain("read_file a.ts · denied")
+    expect(out).toContain(`${humanToolLabel("read_file")} a.ts · denied`)
   })
 
   test("retry dan grup anak tetap satu baris ledger induk", () => {
@@ -132,7 +135,7 @@ describe("P5 transcript projection", () => {
       status: "completed",
     })
     const out = transcript.view(100, 4, 0).join("\n")
-    expect(out).toContain("delegate_task ↻ retry 1 child tools")
+    expect(out).toContain(`${humanToolLabel("delegate_task")} ↻ retry 1 child tools`)
     expect(out).not.toContain("read_file a.ts")
   })
 
@@ -437,7 +440,9 @@ describe("P5 transcript projection", () => {
       views.push(transcript.view(120, 20, 0))
     }
     expect(views[1]).toEqual(views[0])
-    expect(views[0]!.join("\n")).toContain("› delegate_task ↻ retry 1 child tools")
+    expect(views[0]!.join("\n")).toContain(
+      `› ${humanToolLabel("delegate_task")} ↻ retry 1 child tools`,
+    )
   })
 
   test("marker verifikasi/provenans identik lewat policy vs fallback (B1)", () => {
@@ -620,7 +625,7 @@ describe("I26: proyeksi presentasi menghormati locale id", () => {
     })
     const view = transcript.view(120, 10, 0).join("\n")
     expect(view).toContain("read_file a.ts … berjalan (3s)")
-    expect(view).toContain("write_file b.ts · ditolak")
+    expect(view).toContain(`${humanToolLabel("write_file")} b.ts · ditolak`)
   })
 
   test("attachSimpleLogger memakai status Indonesia saat locale id aktif", () => {

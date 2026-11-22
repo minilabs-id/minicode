@@ -233,14 +233,43 @@ export interface RecoveryEngine {
   ): boolean
   buildCancelRequest(executionId: string, reason: string): TransitionRequest
   metrics(): { recoveries: number; redispatchPlanned: number; suppressed: number }
+  /** E-12: jumlah entri cache idempotensi yang masih hidup (uji eviksi). */
+  cacheSize(): number
 }
+
+const RECOVERY_CACHE_MAX_ENTRIES = 512
+const RECOVERY_CACHE_TTL_MS = 60 * 60 * 1000
 
 export function createRecoveryEngine(): RecoveryEngine {
   // Idempotensi recovery: incident = executionId + frontier journal.
   // History sama → objek hasil SAMA (tanpa rencana ganda). Single-runtime;
   // konkuren sync → deterministik (tanpa lock terdistribusi — batas tercatat).
-  const cache = new Map<string, RecoveryResult>()
+  // E-12: dulu cache tanpa eviksi → satu entri per insiden sepanjang hidup
+  // proses. Sekarang LRU + TTL; idempotensi tetap untuk insiden yang masih
+  // relevan (jendela TTL jauh lebih panjang dari siklus redispatch).
+  const cache = new Map<string, { value: RecoveryResult; at: number }>()
   const m = { recoveries: 0, redispatchPlanned: 0, suppressed: 0 }
+
+  const cacheGet = (key: string): RecoveryResult | undefined => {
+    const hit = cache.get(key)
+    if (!hit) return undefined
+    if (Date.now() - hit.at > RECOVERY_CACHE_TTL_MS) {
+      cache.delete(key)
+      return undefined
+    }
+    cache.delete(key)
+    cache.set(key, hit)
+    return hit.value
+  }
+  const cacheSet = (key: string, value: RecoveryResult): void => {
+    cache.delete(key)
+    cache.set(key, { value, at: Date.now() })
+    while (cache.size > RECOVERY_CACHE_MAX_ENTRIES) {
+      const oldest = cache.keys().next().value
+      if (oldest === undefined) break
+      cache.delete(oldest)
+    }
+  }
 
   const decide = (
     executionId: string,
@@ -418,11 +447,11 @@ export function createRecoveryEngine(): RecoveryEngine {
       // (defect nyata yang ditangkap test: budget-0 vs budget-null berbagi key).
       const ctxKey = stableCtxKey(ctx)
       const key = `${executionId}:${agg.frontier}:${ctxKey}`
-      const hit = cache.get(key)
+      const hit = cacheGet(key)
       if (hit) return hit
       m.recoveries++
       const result = decide(executionId, agg, ctx, Date.now())
-      cache.set(key, result)
+      cacheSet(key, result)
       return result
     },
 
@@ -460,6 +489,10 @@ export function createRecoveryEngine(): RecoveryEngine {
         redispatchPlanned: m.redispatchPlanned,
         suppressed: m.suppressed,
       }
+    },
+
+    cacheSize(): number {
+      return cache.size
     },
   }
 }

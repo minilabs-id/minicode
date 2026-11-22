@@ -75,9 +75,8 @@ Default tampil:
 - task start/current state yang masih berjalan;
 - meaningful progress, diaggregat parallel operation;
 - tool receipt singkat bila ada efek nyata;
-- finding/result/actionable plan — finding pada human normal tampil di Activity log
-  sidebar bila sidebar aktif (`cols ≥ 100` dan `rows ≥ 20`), atau di transkrip bila
-  jalur linear tanpa sidebar; consumer machine selalu menerima `finding.detected`
+- finding/result/actionable plan — sejak v0.34 finding pada human tampil di chat
+  (sidebar sudah dihapus); consumer machine selalu menerima `finding.detected`
   bertipe, terlepas dari permukaan tampilnya;
 - terminal error dengan next action;
 - cancellation/timeout/partial status.
@@ -298,9 +297,9 @@ Human output harus tetap berguna tanpa warna:
 - Non-TTY: tidak ada ANSI/cursor/alternate screen.
 - ACP setup failure: response JSON error, stdout tetap machine-safe.
 - Parallel tools: setiap call memiliki correlation ID dan terminal state sendiri.
-- Finding dengan sidebar aktif (`cols ≥ 100`, `rows ≥ 20`): tampil di Activity log
-  sidebar dan tetap tersedia sebagai `finding.detected` bertipe; jalur linear tanpa
-  sidebar menaruhnya di transkrip.
+- Finding (v0.34): tampil di chat pada jalur TUI maupun transkrip pada jalur linear
+  dan tetap tersedia sebagai `finding.detected` bertipe; klaim lama "Activity log
+  sidebar bila `cols ≥ 100`, `rows ≥ 20`" sudah dicabut bersama sidebar.
 - Retry: `minicode:retry` hanya menghasilkan satu micro-toast footer
   `retry n/total · Ns` (TTL 4 dtk, counter live), tanpa envelope machine dan tanpa
   baris transkrip baru.

@@ -1,7 +1,9 @@
 // Unit Transcript: koleksi event → baris logis → viewport.
 import { describe, expect, test } from "bun:test"
+import { readFileSync } from "node:fs"
 import type { UiPresentationActivity, UiPresentationSnapshot } from "../src/ui/contract.ts"
 import { glyphs } from "../src/ui/render/theme.ts"
+import { humanToolLabel } from "../src/ui/render/tool-label.ts"
 import { displayWidth } from "../src/ui/render/width.ts"
 import { Transcript } from "../src/ui/tui/transcript.ts"
 import { createFakeBus } from "./helpers/tui-harness.ts"
@@ -99,7 +101,7 @@ describe("Transcript", () => {
     })
     emit("tool.completed", { seq: 1, turnId: 1, toolCallId: "call-1", status: "completed" })
     const out = t.view(60, 2, 0).join("\n")
-    expect(out).toContain("› write_file a.ts")
+    expect(out).toContain(`› ${humanToolLabel("write_file")} a.ts`)
     // Sukses tidak mencetak kata status: baris hijau sudah menyatakannya, dan
     // daftar tool yang panjang jadi derau bila setiap baris berakhir "completed".
     expect(out).not.toContain("completed")
@@ -124,7 +126,7 @@ describe("Transcript", () => {
       message: "boom\nbaris2",
     })
     const out = t.view(60, 2, 0).join("\n")
-    expect(out).toContain("bash")
+    expect(out).toContain(humanToolLabel("bash"))
     expect(out).toContain("failed")
     expect(out).toContain("boom")
     expect(out).not.toContain("baris2")
@@ -136,6 +138,19 @@ describe("Transcript", () => {
     })
     emit("tool.completed", { seq: 1, turnId: 1, toolCallId: "x1", status: "completed" })
     expect(t.view(60, 2, 0).join("")).not.toContain("\x1b[2J")
+  })
+  test("tool in-flight muncul sebagai baris running di transkrip", () => {
+    // Narasi live tak lagi dialihkan: baris `› nama target … running` wajib
+    // terlihat di view() saat tool masih berjalan.
+    const { t } = setupPresentation({
+      activities: [
+        activity({ toolCallId: "call-run", name: "grep", target: "src/", status: "running" }),
+      ],
+      turns: [],
+    })
+    const out = t.view(80, 4, 0).join("\n")
+    expect(out).toContain("grep src/")
+    expect(out).toContain("running")
   })
   test("jawaban model me-render markdown inline (bold/code/heading)", () => {
     const { bus, t } = setup()
@@ -324,9 +339,12 @@ describe("Transcript", () => {
       expect(live).not.toContain("thinking")
       expect(live).not.toContain("mikirmodelrahasia")
       bus.emit("turn:completed", {})
-      expect(t.view(40, 3, 0).join("\n")).not.toContain("thinking")
-      // v0.33: riwayat thinking pindah ke sidebar, bukan /expand.
-      expect(t.sidebarThinking(20, 80).join("\n")).toContain("mikirmodelrahasia")
+      const after = t.view(40, 3, 0).join("\n")
+      // Reasoning tersembunyi tak bocor ke transkrip, baik saat live maupun
+      // setelah turn ditutup. Ia tetap ada di jurnal presentasi.
+      expect(after).not.toContain("thinking")
+      expect(after).not.toContain("mikirmodelrahasia")
+      expect(t.size()).toBe(0)
     } finally {
       setReasoningVisible(prevReasoning)
     }
@@ -369,7 +387,7 @@ describe("P1 operator diagnostics in TUI (renderer flat)", () => {
     expect(t.view(80, 3, 0).join("\n")).not.toContain("unverified")
     // Positif: jalur tool biasa masih hidup dan menampilkan satu baris flat.
     emit("tool.completed", { seq: 3, turnId: 1, toolCallId: "call-v", status: "completed" })
-    expect(t.view(80, 3, 0).join("\n")).toContain("edit a.ts")
+    expect(t.view(80, 3, 0).join("\n")).toContain(`${humanToolLabel("edit")} a.ts`)
   })
 
   test("consequence.decided tidak dirender di renderer flat", () => {
@@ -472,7 +490,7 @@ describe("Transcript.replayHistory (resume)", () => {
       { type: "tool.completed", seq: 4, turnId: 1, toolCallId: "call-1", status: "completed" },
     ])
     const out = t.view(120, 8, 0).join("\n")
-    expect(out).toContain("write_file")
+    expect(out).toContain(humanToolLabel("write_file"))
     expect(out).toContain("a.ts")
   })
 })
@@ -611,5 +629,37 @@ describe("Transcript UI audit regressions (Fase 3.2-3.4)", () => {
     expect(colMid).toBeGreaterThan(colStart)
     expect(colMid).toBeLessThan(colEnd)
     expect(colEnd).toBe(headerRow.displayEnd)
+  })
+
+  test("pushUser menerima lebar chat; wrap tidak memakai process.stdout.columns", () => {
+    const src = readFileSync(new URL("../src/ui/tui/transcript.ts", import.meta.url), "utf8")
+    const at = src.indexOf("pushUser(prompt:")
+    const body = src.slice(at, src.indexOf("\n  /**", at + 1))
+    expect(body).not.toContain("process.stdout.columns")
+
+    const { t } = setup()
+    t.pushUser("x".repeat(120), 60)
+    const rows = t.viewport(60, 10, 0).rows
+    // width = 60-4 = 56, prefix 14 → tiap baris isi 42 char → 120 = 42+42+36.
+    const withX = rows.filter((r) => r.text.includes("x"))
+    expect(withX).toHaveLength(3)
+    expect(withX[0]!.text).toContain("minicode")
+    for (const r of withX.slice(1)) {
+      // Lanjutan tetap menjorok 3 kolom (margin asisten), bukan kolom 0.
+      expect(r.text.startsWith("   ")).toBe(true)
+    }
+  })
+
+  test("selectionRange mengembalikan ujung pertama/terakhir untuk select-all", () => {
+    const { t } = setup()
+    expect(t.selectionRange()).toBeNull()
+    t.pushInfo(["alpha", "beta", "gamma"])
+    const range = t.selectionRange()
+    expect(range).not.toBeNull()
+    expect(t.selectionText(range!.first, range!.last)).toBe("alpha\nbeta\ngamma")
+    // Titik pertama benar-benar awal sumber pertama, titik akhir = ekor terakhir.
+    expect(range!.first.offset).toBe(0)
+    const lastSource = t.viewport(60, 10, 0).rows.find((r) => r.text.includes("gamma"))!
+    expect(range!.last.id).toBe(lastSource.sourceId)
   })
 })

@@ -318,6 +318,17 @@ function forceCloseTurn(
   }
 }
 
+// F-09 (audit performa 2026-11-22) — sengaja TIDAK diganti ring buffer /
+// front-pointer. Alasannya, jujur: array yang dievict (conversation/reasoning/
+// system/diagnostics) adalah array biasa yang dikonsumsi LANGSUNG oleh
+// proyeksi UI, `cloneState` dan replay — memperkenalkan offset tersembunyi
+// menuntut perubahan semua konsumen itu (di luar batas file ini) dan berisiko
+// mengubah urutan tampilan. Biaya aktualnya juga kecil: `trimState` jalan
+// setelah SETIAP event, jadi `excess` hampir selalu 1; dengan `removable`
+// default `() => true`, `findIndex` langsung balik 0 (O(1)) dan satu
+// `splice(0,1)` biayanya O(cap) — sama dengan `copyWithin` sekali jalan.
+// Ring buffer baru menguntungkan bila cap dinaikkan jauh; saat itu evaluasi
+// ulang memakai guard invarian di test/presentation-reducer.test.ts.
 function trimState(state: PresentationState): void {
   const trimArray = <T extends { seq: number }>(
     values: T[],

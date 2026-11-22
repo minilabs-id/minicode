@@ -49,7 +49,7 @@ Gerbang lambat/stokastik (docker sandbox) tinggal di `slow.yml` — kegagalannya
 
 `bun run gate:pack` mengukur ukuran tarball (`npm pack --dry-run`, KiB) dan menolak bila **melebihi 5.000 KiB (4,9 MiB)**. Angka tunggalnya ada di `scripts/pack-budget.ts` — satu sumber untuk gate dan tes, jadi keduanya tak bisa menyimpang. Batas ini **alarm regresi** (menangkap `node_modules`/`test` ikut terbawa), bukan target ukuran yang perlu dikejar.
 
-Batas 5.000 KiB disetujui pemilik pada 2026-11-19 (re-baseline dari 4.608 KiB nach audit total v7.32–v7.41: paket aktual 4.709 KiB / 331 file; margin ~290 KiB). Jangan menaikkan anggaran tanpa bukti baru dan persetujuan pemilik; ukur dulu runtime serta berkas non-runtime yang dapat dipangkas.
+Batas 5.000 KiB disetujui pemilik pada 2026-11-19 (re-baseline dari 4.608 KiB pasca-audit total v7.32–v7.41: paket aktual 4.709 KiB / 331 file; margin ~290 KiB). Jangan menaikkan anggaran tanpa bukti baru dan persetujuan pemilik; ukur dulu runtime serta berkas non-runtime yang dapat dipangkas.
 
 Gerbang lain:
 

@@ -19,6 +19,7 @@ import {
   stalledMsFromMessage,
 } from "../src/app/session.ts"
 import { resetLocaleState, setSessionLocale } from "../src/ui/i18n/locale.ts"
+import { tSystem } from "../src/ui/render/tool-label.ts"
 import { altScreenDepth, resetAltScreenDepth } from "../src/ui/runtime/screen.ts"
 import { TuiApp, type TuiHost, type TuiStatusSnapshot } from "../src/ui/tui/app.ts"
 import { Transcript } from "../src/ui/tui/transcript.ts"
@@ -129,6 +130,22 @@ afterEach(() => {
   else process.env.MINICODE_COLOR = origColor
 })
 
+/**
+ * Pola baris retry locale-independent: teks diambil dari `tSystem()` (bahasa
+ * sistem/OS), detik live diganti `\\d+`. `n`/`total` boleh regex untuk menghitung
+ * kemunculan. Tak ada literal "retry"/"coba" yang di-hardcode di test.
+ */
+function retryPattern(n: string, total: string, flags?: string): RegExp {
+  const template = tSystem("msg.retry", { n: "@@N@@", total: "@@TOTAL@@", s: "@@SECS@@" })
+  // Escape dulu template-nya, baru sisipkan `\\d+`: kalau di-escape setelah
+  // disisip, backslash-nya ikut ter-escape dan tak lagi cocok.
+  const escaped = template.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  return new RegExp(
+    escaped.replace("@@N@@", n).replace("@@TOTAL@@", total).replace("@@SECS@@", "\\d+"),
+    flags,
+  )
+}
+
 function setup(locale?: "en" | "id") {
   tty = installFakeTty({ columns: 72, rows: 16 })
   // installFakeTty mengunci en; setter sesi menang (lihat komentar harness).
@@ -208,28 +225,33 @@ describe("indikator retry di TUI", () => {
 
     const text = h.screenText()
     // v0.33: micro-toast minimalis + detik LIVE, footer tetap ada.
-    expect(text).toContain("retry 5/6")
+    // Pesan mengikuti bahasa SISTEM (tSystem), bukan /lang sesi → pakai pola
+    // yang dibangun dari kamus sistem supaya test locale-independent.
+    expect(retryPattern("5", "6").test(text)).toBe(true)
     expect(text).toContain("test-model") // footer tidak ditimpa toast
-    expect(text).toMatch(/retry 5\/6 · \d+s/)
+    expect(text).toMatch(retryPattern("5", "6"))
     // Data lama harus hilang — ini yang membuktikan "update in place".
-    expect(text).not.toContain("retry 1/6")
-    expect(text).not.toContain("retry 4/6")
+    expect(retryPattern("1", "6").test(text)).toBe(false)
+    expect(retryPattern("4", "6").test(text)).toBe(false)
     // Satu kemunculan saja: tidak ada baris transkrip per retry.
-    expect(text.match(/retry \d\/6/g)?.length ?? 0).toBe(1)
+    expect(text.match(retryPattern("\\d+", "6", "g"))?.length ?? 0).toBe(1)
 
     await h.release()
-    expect(h.screenText()).not.toContain("retry 5/6")
+    expect(retryPattern("5", "6").test(h.screenText())).toBe(false)
     await tty!.send(KEY.ctrlD)
     await runP
   })
 
-  test("teks indikator memakai bahasa Indonesia saat locale id", async () => {
+  test("teks indikator memakai bahasa SISTEM, bukan sesi /lang", async () => {
+    // /lang sesi sengaja dibedakan dari sistem: toast retry tetap memakai
+    // kamus sistem (tSystem). Pola di bawah dibangun dari tSystem sehingga
+    // benar baik sistem en maupun id.
     const h = setup("id")
     const runP = h.app.run()
     await h.enterBusy()
     h.retry(3)
     await new Promise((r) => setTimeout(r, 60))
-    expect(h.screenText()).toMatch(/coba 3\/6 · \d+s/)
+    expect(h.screenText()).toMatch(retryPattern("3", "6"))
     await h.release()
     await tty!.send(KEY.ctrlD)
     await runP
@@ -250,7 +272,7 @@ describe("indikator retry di TUI", () => {
       data: { attempt: Number.NaN, quota: 6, category: "server", stalledMs: 60000, delayMs: 1 },
     })
     await new Promise((r) => setTimeout(r, 60))
-    expect(h.screenText()).not.toContain("retry")
+    expect(retryPattern("\\d+", "6").test(h.screenText())).toBe(false)
     await h.release()
     await tty!.send(KEY.ctrlD)
     await runP
@@ -270,7 +292,7 @@ describe("Esc saat busy vs idle", () => {
     expect(h.abortCalls()).toBe(1)
     // App masih hidup: belum ada EXIT alt-screen.
     expect(tty!.all()).not.toContain("\x1b[?1049l")
-    expect(h.screenText()).toContain("abort sent")
+    expect(h.screenText()).toContain(tSystem("msg.abortedHint"))
     expect(altScreenDepth()).toBe(1)
     expect(h.calls).toEqual(["hold"])
     expect(h.screenText()).toContain("draf") // Esc = abort, bukan editor

@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url"
 import { LIMITS, LSP_SYMBOL_KINDS } from "../constants.ts"
 import { homeDir } from "../lib/db-path.ts"
 import { GIT_SAFE_BASE } from "../lib/git-hardening.ts"
+// [Audit F-03 2026-11-22] Instrumentasi durasi; nonaktif = no-op O(1).
+import { perfCount, perfEnabled } from "../lib/perf-debug.ts"
 import { safeReadFileCapped } from "../lib/safe-open.ts"
 import { resolveTrustedExecutable } from "../lib/trusted-exec.ts"
 import { isRealPathOutsideRoot } from "../policy/jail.ts"
@@ -345,65 +347,70 @@ async function listSourceFiles(cwd: string, limit: number): Promise<string[]> {
  *    itu, bukan dari properti `stdout` yang bisa kosong di lingkungan TTY.
  */
 async function gitListFiles(cwd: string, limit: number): Promise<string[] | null> {
+  const __t = perfEnabled() ? performance.now() : 0
   try {
-    // Audit #10: ls-files memicu fsmonitor repo & bisa menjalankan `git.bat`
-    // repo (Windows cwd-first). Resolve absolut + netralisasi.
-    const result = await new Promise<string | null>((res) => {
-      let settled = false
-      const done = (v: string | null) => {
-        if (settled) return
-        settled = true
-        res(v)
-      }
-      const child = spawn(resolveTrustedExecutable("git"), [...GIT_SAFE_BASE, "ls-files"], {
-        cwd,
-        windowsHide: true,
-        stdio: ["ignore", "pipe", "ignore"],
-      })
-      // Pipe dibaca dari handle yang kita buat sendiri; `child.stdout` bisa
-      // null/terputus pada beberapa kondisi TTY.
-      const out = child.stdout
-      if (!out) {
-        try {
-          child.kill("SIGKILL")
-        } catch {}
-        done(null)
-        return
-      }
-      const chunks: string[] = []
-      const timer = setTimeout(() => {
-        try {
-          child.kill("SIGKILL")
-        } catch {}
-        done(null)
-      }, REPOMAP_GIT_TIMEOUT_MS)
-      out.on("data", (d: Buffer) => chunks.push(d.toString("utf8")))
-      const finish = () => {
-        clearTimeout(timer)
-        done(null)
-      }
-      child.on("error", finish)
-      child.on("close", () => {
-        clearTimeout(timer)
-        if (!chunks.length) {
+    try {
+      // Audit #10: ls-files memicu fsmonitor repo & bisa menjalankan `git.bat`
+      // repo (Windows cwd-first). Resolve absolut + netralisasi.
+      const result = await new Promise<string | null>((res) => {
+        let settled = false
+        const done = (v: string | null) => {
+          if (settled) return
+          settled = true
+          res(v)
+        }
+        const child = spawn(resolveTrustedExecutable("git"), [...GIT_SAFE_BASE, "ls-files"], {
+          cwd,
+          windowsHide: true,
+          stdio: ["ignore", "pipe", "ignore"],
+        })
+        // Pipe dibaca dari handle yang kita buat sendiri; `child.stdout` bisa
+        // null/terputus pada beberapa kondisi TTY.
+        const out = child.stdout
+        if (!out) {
+          try {
+            child.kill("SIGKILL")
+          } catch {}
           done(null)
           return
         }
-        done(chunks.join(""))
+        const chunks: string[] = []
+        const timer = setTimeout(() => {
+          try {
+            child.kill("SIGKILL")
+          } catch {}
+          done(null)
+        }, REPOMAP_GIT_TIMEOUT_MS)
+        out.on("data", (d: Buffer) => chunks.push(d.toString("utf8")))
+        const finish = () => {
+          clearTimeout(timer)
+          done(null)
+        }
+        child.on("error", finish)
+        child.on("close", () => {
+          clearTimeout(timer)
+          if (!chunks.length) {
+            done(null)
+            return
+          }
+          done(chunks.join(""))
+        })
       })
-    })
-    if (!result) return null
-    const files = String(result)
-      .split(String.fromCharCode(10))
-      .map((f) => f.split(String.fromCharCode(92)).join("/"))
-      .filter(Boolean)
-      .filter(isSourceFile)
-      .slice(0, limit)
-    // git yang menjawab tapi semuanya terfilter = repon tanpa sumber git-tracked;
-    // biarkan null supaya walk memutuskan.
-    return files.length ? files : null
-  } catch {
-    return null
+      if (!result) return null
+      const files = String(result)
+        .split(String.fromCharCode(10))
+        .map((f) => f.split(String.fromCharCode(92)).join("/"))
+        .filter(Boolean)
+        .filter(isSourceFile)
+        .slice(0, limit)
+      // git yang menjawab tapi semuanya terfilter = repon tanpa sumber git-tracked;
+      // biarkan null supaya walk memutuskan.
+      return files.length ? files : null
+    } catch {
+      return null
+    }
+  } finally {
+    perfCount("repomap.git-ls-files", perfEnabled() ? performance.now() - __t : 0)
   }
 }
 
@@ -449,17 +456,22 @@ export async function buildRepoMap(
 // isinya benar-benar sama — dan bila sama, petanya pun benar. Cache lama
 // (format mtime) otomatis miss → dibangun ulang sekali, tanpa migrasi.
 async function signature(files: string[], cwd: string): Promise<string> {
-  const h = createHash("sha256")
-  for (const f of files.slice(0, 80)) {
-    try {
-      const abs = resolve(cwd, f)
-      const loaded = await safeReadFileCapped(abs, cwd, MAX_FILE_BYTES)
-      if (loaded.truncated) continue
-      h.update(f)
-      h.update(loaded.text)
-    } catch {}
+  const __t = perfEnabled() ? performance.now() : 0
+  try {
+    const h = createHash("sha256")
+    for (const f of files.slice(0, 80)) {
+      try {
+        const abs = resolve(cwd, f)
+        const loaded = await safeReadFileCapped(abs, cwd, MAX_FILE_BYTES)
+        if (loaded.truncated) continue
+        h.update(f)
+        h.update(loaded.text)
+      } catch {}
+    }
+    return `v2:${h.digest("hex")}`
+  } finally {
+    perfCount("repomap.signature", perfEnabled() ? performance.now() - __t : 0)
   }
-  return `v2:${h.digest("hex")}`
 }
 
 // Coba bangun repo-map via LSP workspace/symbol (lebih akurat dari regex).
@@ -546,54 +558,59 @@ function quickStamp(cwd: string, files: string[]): string {
 }
 
 export async function loadRepoMap(cwd: string = process.cwd()): Promise<string> {
-  const memoKey = resolve(cwd)
-  // Env MINICODE_REPOMAP=regex → skip LSP (paksa regex, lebih cepat)
-  const forceRegex = process.env.MINICODE_REPOMAP === "regex"
-  // Sidik murah dihitung SEBELUM `git ls-files` (yang justru bagian mahalnya),
-  // dengan berkas yang diingat dari panggilan sebelumnya. Bila cocok, tak ada
-  // git/disk yang disentuh sama sekali.
-  const remembered = repomapMemo.get(memoKey)
-  const stamp = quickStamp(cwd, remembered?.files ?? [])
-  if (remembered && stamp && remembered.stamp === stamp) return remembered.map
-  const files = await listSourceFiles(cwd, MAX_FILES)
-  if (files.length === 0) return ""
-  const freshStamp = quickStamp(cwd, files)
-  const sig = await signature(files, cwd)
-  const cp = cachePath(cwd)
-  // Cache hit → langsung pakai (tanpa LSP, cepat)
+  const __t = perfEnabled() ? performance.now() : 0
   try {
-    const cached = JSON.parse(readFileSync(cp, "utf8")) as {
-      sig?: string
-      map?: string
-      lsp?: boolean
+    const memoKey = resolve(cwd)
+    // Env MINICODE_REPOMAP=regex → skip LSP (paksa regex, lebih cepat)
+    const forceRegex = process.env.MINICODE_REPOMAP === "regex"
+    // Sidik murah dihitung SEBELUM `git ls-files` (yang justru bagian mahalnya),
+    // dengan berkas yang diingat dari panggilan sebelumnya. Bila cocok, tak ada
+    // git/disk yang disentuh sama sekali.
+    const remembered = repomapMemo.get(memoKey)
+    const stamp = quickStamp(cwd, remembered?.files ?? [])
+    if (remembered && stamp && remembered.stamp === stamp) return remembered.map
+    const files = await listSourceFiles(cwd, MAX_FILES)
+    if (files.length === 0) return ""
+    const freshStamp = quickStamp(cwd, files)
+    const sig = await signature(files, cwd)
+    const cp = cachePath(cwd)
+    // Cache hit → langsung pakai (tanpa LSP, cepat)
+    try {
+      const cached = JSON.parse(readFileSync(cp, "utf8")) as {
+        sig?: string
+        map?: string
+        lsp?: boolean
+      }
+      if (cached.sig === sig && typeof cached.map === "string") {
+        repomapMemo.set(memoKey, {
+          map: cached.map,
+          at: Date.now(),
+          stamp: freshStamp || stamp,
+          files,
+        })
+        return cached.map
+      }
+    } catch {}
+    // Cache miss → coba LSP dulu (best-effort), fallback ke regex
+    if (!forceRegex) {
+      const lspMap = await buildRepoMapLsp(cwd)
+      if (lspMap) {
+        try {
+          mkdirSync(join(homeDir(), ".minicode"), { recursive: true })
+          writeFileSync(cp, JSON.stringify({ sig, map: lspMap, lsp: true }))
+        } catch {}
+        repomapMemo.set(memoKey, { map: lspMap, at: Date.now(), stamp: freshStamp || stamp, files })
+        return lspMap
+      }
     }
-    if (cached.sig === sig && typeof cached.map === "string") {
-      repomapMemo.set(memoKey, {
-        map: cached.map,
-        at: Date.now(),
-        stamp: freshStamp || stamp,
-        files,
-      })
-      return cached.map
-    }
-  } catch {}
-  // Cache miss → coba LSP dulu (best-effort), fallback ke regex
-  if (!forceRegex) {
-    const lspMap = await buildRepoMapLsp(cwd)
-    if (lspMap) {
-      try {
-        mkdirSync(join(homeDir(), ".minicode"), { recursive: true })
-        writeFileSync(cp, JSON.stringify({ sig, map: lspMap, lsp: true }))
-      } catch {}
-      repomapMemo.set(memoKey, { map: lspMap, at: Date.now(), stamp: freshStamp || stamp, files })
-      return lspMap
-    }
+    const map = await buildRepoMap(cwd, { limit: MAX_FILES })
+    try {
+      mkdirSync(join(homeDir(), ".minicode"), { recursive: true })
+      writeFileSync(cp, JSON.stringify({ sig, map, lsp: false }))
+    } catch {}
+    repomapMemo.set(memoKey, { map, at: Date.now(), stamp: freshStamp || stamp, files })
+    return map
+  } finally {
+    perfCount("repomap.load", perfEnabled() ? performance.now() - __t : 0)
   }
-  const map = await buildRepoMap(cwd, { limit: MAX_FILES })
-  try {
-    mkdirSync(join(homeDir(), ".minicode"), { recursive: true })
-    writeFileSync(cp, JSON.stringify({ sig, map, lsp: false }))
-  } catch {}
-  repomapMemo.set(memoKey, { map, at: Date.now(), stamp: freshStamp || stamp, files })
-  return map
 }

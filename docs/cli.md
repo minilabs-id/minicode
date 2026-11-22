@@ -70,7 +70,7 @@ Batas berubah otomatis saat `/model` mengganti model. MiniCode juga membatasi
 keluaran stream berdasarkan ruang tersisa setelah system prompt, tools, dan
 riwayat dihitung.
 
-Di TUI, **Tab** meng-toggle Work Mode (`Discuss` ↔ `Build`) dan **Shift+Tab** meng-toggle Permission Mode (`Auto` ↔ `Ask`). `/mode auto|ask` mengubah persetujuan; `/mode discuss|build` mengubah operating mode. Footer menampilkan Work Mode di kiri dan Permission Mode berwarna cyan di kanan, dekat penggunaan konteks; pada terminal sempit label dipadatkan. Panel sidebar kanan (Thinking/Activity/Live, pintasan `Alt+PgUp/PgDn`, `Ctrl+PgUp/PgDn`, `Ctrl+O`) dijelaskan di [TUI](repl.md#sidebar-panel-live).
+Di TUI, **Tab** meng-toggle Work Mode (`Discuss` ↔ `Build`) dan **Shift+Tab** meng-toggle Permission Mode (`Auto` ↔ `Ask`). `/mode auto|ask` mengubah persetujuan; `/mode discuss|build` mengubah operating mode. Footer menampilkan Work Mode di kiri dan Permission Mode berwarna cyan di kanan, dekat penggunaan konteks; pada terminal sempit label dipadatkan. Sejak v0.34 sidebar kanan sudah dihapus: chat adalah kolom tengah (maks 50% lebar terminal, footer/composer ter-centre). Baris tool/`✦`/finding dan marker `+ thinking` ada di chat; pintasan pane lama (`Alt/Ctrl+PgUp/PgDn`, `Ctrl+O`) tidak lagi terikat. Sejak v0.37 bracketed paste aktif, `Ctrl+A` = select-all bila composer kosong & dropdown tertutup (else Home), `Ctrl+C` menyalin juga saat drag aktif, resize menstabilkan auto-scroll/drag/kursor/anchor, dan lebar prompt progresif `min(chatCols, 100 + floor(max(0, chatCols-100)/4))` (composer tetap ≤2 baris). Ringkasan pintasan yang masih berlaku ada di [TUI](repl.md).
 
 ## Kapan memakai apa
 
@@ -110,8 +110,9 @@ Kepala tabel penuh ada di [Environment Variables](environment.md); yang paling s
 | `MINICODE_COLOR=0` | Paksa monokrom (identik `NO_COLOR`) |
 | `MINICODE_ASCII=1` | Glyph ASCII untuk konsol tanpa UTF-8 |
 | `MINICODE_STATUSLINE=rich` | Spinner tampilkan token + biaya sesi |
-| `MINICODE_MINIMIZE_ACTIVITY=0` | Tampilkan detail aktivitas per-tool (bukan ringkasan lipat) |
-| `MINICODE_ACTIVITY_PANEL=0` | Matikan panel aktivitas/sidebar |
+| `MINICODE_MINIMIZE_ACTIVITY=0` | Tampilkan detail aktivitas per-tool (bukan ringkasan lipat); toggle fold tetap berlaku di chat |
+| `MINICODE_SHOW_THINKING=1` | Tampilkan marker `+ thinking` di chat (default tersembunyi) |
+| `MINICODE_ACTIVITY_PANEL` | Legacy/deprecate (D3): diterima agar konfigurasi lama tidak error, tetapi tidak lagi mengubah tampilan — sidebar sudah dihapus di v0.34 |
 | `MINICODE_SESSION_SUMMARY=0` | Matikan blok penutup sesi (model/mode/rincian tool/agent/token) |
 | `MINICODE_STARTUP_PROGRESS=0` | Matikan baris progres startup |
 | `MINICODE_SUB_AGENT_POOL_SIZE` | Slot sub-agent paralel (1..16, default 3) |

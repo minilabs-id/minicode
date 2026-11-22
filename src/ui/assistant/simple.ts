@@ -29,6 +29,7 @@ import {
 } from "../render/sanitize.ts"
 import { renderMarkdownTable } from "../render/table-grid.ts"
 import { c, glyphs, stripAnsi } from "../render/theme.ts"
+import { humanToolLabel } from "../render/tool-label.ts"
 import { displayWidth, truncateToWidth } from "../render/width.ts"
 import { formatWrapped } from "../render/wrap.ts"
 import { runWithoutStatus } from "../runtime/statusline.ts"
@@ -351,7 +352,7 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
   const flushThinking = () => {
     flushReasoningTail()
     if (thinkState === "min" && thinkingBuf) {
-      // v0.33: thinking lengkap ada di SidebarModel (TUI); buffer /expand mati.
+      // v0.34: sidebar dihapus; reasoning penuh ada di jurnal, buffer /expand mati.
       thinkingBuf = ""
     }
     thinkState = "off"
@@ -554,7 +555,7 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
       presentedVerifications.add(verification.invocationId)
       const activity = presentationActivity(event.toolCallId)
       if (activity?.parentToolCallId) return
-      const name = sanitizeAnsiLine(activity?.name ?? event.name ?? "tool")
+      const name = humanToolLabel(activity?.name ?? event.name ?? "tool", activity)
       const target = activity?.target ?? event.target
       const targetText = target ? ` ${truncateToWidth(sanitizeAnsiLine(target), 120, "")}` : ""
       const line =
@@ -891,7 +892,7 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
       if (toolPrintsOwnCompletionLine(startName, args)) return
       wErr(
         c.muted(
-          `  ${glyphs.arrow} ${sanitizeAnsiLine(startName)} ${sanitizeAnsiLine(formatArgsPreview(args))}\n`,
+          `  ${glyphs.arrow} ${humanToolLabel(startName)} ${sanitizeAnsiLine(formatArgsPreview(args))}\n`,
         ),
       )
     }),
@@ -922,7 +923,7 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
         ui.setActiveSection(null)
         wErr(
           c.error(
-            `  ${glyphs.arrow} ${sanitizeAnsiLine(name)}${suffix}: ${truncateToWidth(sanitizeAnsi(String(r.content)), 200, "…")}\n`,
+            `  ${glyphs.arrow} ${humanToolLabel(name, activity)}${suffix}: ${truncateToWidth(sanitizeAnsi(String(r.content)), 200, "…")}\n`,
           ),
         )
         return
@@ -937,7 +938,7 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
           ? sanitizeAnsiLine(activity.summary)
           : fallbackToolLabel(name, args, target)
         wErr(c.info(`  + ${label}${suffix}\n`))
-        // v0.33: detail tool pindah ke sidebar — tak ada buffer /expand lagi.
+        // v0.34: sidebar dihapus; detail tool di jurnal/chat, buffer /expand mati.
         return
       }
       if (name === "write_file" && target) {
@@ -969,18 +970,18 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
         }
         wOut(
           c.success(
-            `  ${glyphs.arrow} ${sanitizeAnsiLine(name)} ${sanitizeAnsiLine(target)}${suffix}\n`,
+            `  ${glyphs.arrow} ${humanToolLabel(name, activity)} ${sanitizeAnsiLine(target)}${suffix}\n`,
           ),
         )
         return
       }
       // todo_write: tampilkan daftarnya utuh — ini rencana kerja, bukan noise.
       if (name === "todo_write" || name === "todo_read") {
-        // Nama tool dari event model (tak terpercaya): sanitasi seperti cabang
-        // lain agar ESC[2J/OSC tak lolos via label.
-        const cleanName = sanitizeAnsiLine(name)
+        // Nama tool dari event model (tak terpercaya): humanToolLabel membersihkan
+        // ANSI sekaligus memberi label manusiawi sesuai locale OS.
+        const toolLabel = humanToolLabel(name, activity)
         wErr(
-          c.success(`  ${glyphs.arrow} ${cleanName}${suffix}\n`) +
+          c.success(`  ${glyphs.arrow} ${toolLabel}${suffix}\n`) +
             c.muted(`${sanitizeAnsi(String(r.content))}\n`),
         )
         return
@@ -1022,7 +1023,7 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
 
         wErr(
           c.success(
-            `  ${glyphs.arrow} ${sanitizeAnsiLine(name)}${label ? ` ${label}` : ""}${suffix}\n`,
+            `  ${glyphs.arrow} ${humanToolLabel(name, activity)}${label ? ` ${label}` : ""}${suffix}\n`,
           ),
         )
         return
@@ -1042,7 +1043,7 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
             : ""
         const label = sanitizeAnsiLine(target ?? formatArgsPreview(args))
         wErr(
-          c.success(`  ${glyphs.arrow} ${sanitizeAnsiLine(name)} ${label}\n`) +
+          c.success(`  ${glyphs.arrow} ${humanToolLabel(name, activity)} ${label}\n`) +
             (preview ? `${c.muted(preview) + more}\n` : ""),
         )
         return
@@ -1054,16 +1055,16 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
         : truncateWords(sanitizeAnsiLine(target ?? formatArgsPreview(args)), 120)
       const first = sanitizeAnsi(String(r.content)).trim().split("\n")[0] ?? ""
       const preview = truncateToWidth(first, 80, "")
-      const cleanName = sanitizeAnsiLine(name)
+      const toolLabel = humanToolLabel(name, activity)
       if (!ui.compact && preview) {
         wErr(
           c.success(
-            `  ${glyphs.arrow} ${cleanName}${label ? ` ${label}` : ""}${suffix} ${c.muted(preview)}\n`,
+            `  ${glyphs.arrow} ${toolLabel}${label ? ` ${label}` : ""}${suffix} ${c.muted(preview)}\n`,
           ),
         )
         return
       }
-      wErr(c.success(`  ${glyphs.arrow} ${cleanName}${label ? ` ${label}` : ""}${suffix}\n`))
+      wErr(c.success(`  ${glyphs.arrow} ${toolLabel}${label ? ` ${label}` : ""}${suffix}\n`))
     }),
   )
   offs.push(

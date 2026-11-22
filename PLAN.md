@@ -858,8 +858,9 @@ Agar cakupan jelas dan tidak melebar diam-diam:
 - **Tidak ada framework TUI baru.** Pure ANSI tetap. Ink/blessed akan membuang seluruh `fullscreen.ts` demi masalah yang perbaikannya berukuran satu fungsi.
 - **Mouse support — dikoreksi (klaim lama usang).** Catatan V6 ini sudah tidak
   berlaku: mouse **didukung** sejak v0.30.2 (app-level drag selection; lihat
-  §"TUI mouse selection tanpa mode" di atas) dan sejak v0.33 wheel per-pane di
-  sidebar. Jangan mengutip "tidak ada mouse support" sebagai fakta sekarang.
+  §"TUI mouse selection tanpa mode" di atas). Wheel menggulir chat sejak v0.34
+  (wheel per-pane v0.33 dihapus bersama sidebar). Jangan mengutip "tidak ada
+  mouse support" sebagai fakta sekarang.
 - **Tidak ada tema baru.** Empat preset sudah bekerja; menambah tema tanpa pengguna yang meminta adalah spekulasi.
 - **Tidak ada virtual scroll transcript.** Output append-only ke scrollback terminal; layar interaktif (manager/wizard/picker) transient dan menghapus diri sendiri.
 - **Repo-map tetap regex.** Alasan lengkap (dengan tabel pengukuran) ada di komentar `extractSymbolsAsync` di `src/repo/repomap.ts`. Tree-sitter menambah dua dependensi dan ~1,4 MB wasm per bahasa untuk simbol yang hampir seluruhnya member kelas — bukan yang berguna untuk orientasi.

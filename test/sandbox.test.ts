@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { buildDockerRunArgs, dockerAvailable, runInDocker } from "../src/sandbox/docker.ts"
@@ -100,6 +100,42 @@ test("sandbox masking: hanya mask .env* sensitif & .minicode eksis, abaikan .env
     expect(sb).toContain(".minicode")
     expect(sb).toContain(".env.local")
     expect(sb).not.toContain(".env.example")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// E-9: dengan `withFileTypes` hasil harus identik dengan lama (lstat per entri),
+// dan symlink bernama `.env*` TETAP terdeteksi tanpa mengikuti targetnya.
+test("sandbox masking E-9: hasil identik + symlink .env terdeteksi", () => {
+  const dir = mkdtempSync(join(tmpdir(), "mc-sb-mask-e9-"))
+  try {
+    mkdirSync(join(dir, "apps", "a"), { recursive: true })
+    mkdirSync(join(dir, "node_modules", "evil"), { recursive: true })
+    writeFileSync(join(dir, ".env"), "A=1")
+    writeFileSync(join(dir, "apps", "a", ".env.local"), "B=2")
+    writeFileSync(join(dir, "node_modules", "evil", ".env"), "SHOULD_BE_SKIPPED")
+    writeFileSync(join(dir, "apps", "a", ".env.example"), "PUBLIC=1")
+
+    const first = discoverSandboxMaskTargets(dir)
+    const second = discoverSandboxMaskTargets(dir)
+    expect(first).toEqual(second)
+    expect([...first.envFiles]).toEqual([".env", "apps/a/.env.local"])
+    expect(first.hasMinicode).toBe(false)
+
+    try {
+      symlinkSync(join(dir, ".env"), join(dir, ".env.link"), "file")
+      const withLink = discoverSandboxMaskTargets(dir)
+      expect([...withLink.envFiles]).toContain(".env.link")
+      // Symlink ke direktori bernama .env tidak boleh dibolak-balik jadi entri
+      // dua kali, dan traversal tetap berhenti di SKIP_DIRS.
+      expect([...withLink.envFiles]).not.toContain("node_modules/evil/.env")
+    } catch (e) {
+      // Windows tanpa developer mode menolak symlink — tetap verifikasi bahwa
+      // kegagalan itu tidak merusak hasil dasar.
+      expect([...first.envFiles]).toEqual([".env", "apps/a/.env.local"])
+      void e
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

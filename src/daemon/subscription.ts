@@ -21,7 +21,13 @@ export interface PendingEvent {
  * yang memutuskan (kirim halte), bukan antrean yang membuang diam-diam.
  */
 export class BoundedQueue<T> {
-  #items: T[] = []
+  // E-29: antrean dulu `Array.shift()` pada `takeFirst()` (via drain+re-push)
+  // — O(N) tiap pengambilan, sehingga mengirim N event dari antrean penuh
+  // adalah O(N²). Sekarang ring buffer: `#head` bergeser O(1); kompaksi hanya
+  // bila head sudah melewati setengah kapasitas.
+  #items: (T | undefined)[] = []
+  #head = 0
+  #count = 0
   readonly max: number
 
   constructor(max: number = MAX_QUEUE_PER_CONN) {
@@ -32,24 +38,47 @@ export class BoundedQueue<T> {
   }
 
   push(item: T): boolean {
-    if (this.#items.length >= this.max) return false
-    this.#items.push(item)
+    if (this.#count >= this.max) return false
+    const at = this.#head + this.#count
+    if (at >= this.#items.length) this.#items.push(item)
+    else this.#items[at] = item
+    this.#count++
     return true
+  }
+
+  /** Ambil satu item terdepan O(1), lepas referensinya. */
+  shift(): T | undefined {
+    if (this.#count === 0) return undefined
+    const at = this.#head
+    const item = this.#items[at] as T
+    this.#items[at] = undefined // lepas referensi lama
+    this.#head++
+    this.#count--
+    if (this.#head > 0 && this.#head * 2 > Math.max(1, this.max)) {
+      this.#items = this.#items.slice(this.#head)
+      this.#head = 0
+    } else if (this.#head === this.#items.length) {
+      this.#items = []
+      this.#head = 0
+    }
+    return item
   }
 
   /** Ambil semua isi (urut sisipan) dan kosongkan. */
   drain(): T[] {
-    const out = this.#items
+    const out = this.#items.slice(this.#head, this.#head + this.#count) as T[]
     this.#items = []
+    this.#head = 0
+    this.#count = 0
     return out
   }
 
   get size(): number {
-    return this.#items.length
+    return this.#count
   }
 
   get full(): boolean {
-    return this.#items.length >= this.max
+    return this.#count >= this.max
   }
 }
 
@@ -156,11 +185,7 @@ export class Subscription {
    * satu-satu, hanya yang benar-benar terkirim yang dikeluarkan dari antrean.
    */
   takeFirst(): PendingEvent | undefined {
-    const items = this.queue.drain()
-    if (items.length === 0) return undefined
-    const first = items[0]!
-    for (let i = 1; i < items.length; i++) this.queue.push(items[i]!)
-    return first
+    return this.queue.shift()
   }
 
   /**

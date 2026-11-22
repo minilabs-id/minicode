@@ -93,7 +93,8 @@ describe("§1 enablement contract", () => {
   })
 
   test("the flag is documented in --help, truthfully (6AB corrected the text)", () => {
-    const src = readSrc("cli/index.ts")
+    // HELP kini satu sumber di cli/help.ts (entry tipis memakainya untuk --help).
+    const src = readSrc("cli/help.ts")
     expect(src).toContain('flag: "--enable-scheduler"')
     // [PHASE 6AB] 6AA recorded the original text as the single most misleading fact
     // an operator would meet: it promised "autonomous background task execution"
