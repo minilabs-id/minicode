@@ -1,14 +1,7 @@
-// Label aktivitas tool manusiawi — MURNI, tanpa I/O (tetap bisa dipakai
-// presenter linear `simple.ts` maupun renderer TUI dengan satu sumber angka).
-//
-// KENAPA terpisah dari `t()` di i18n/locale.ts: label aktivitas mengikuti
-// bahasa SISTEM/OS (Intl), sedangkan narasi/model mengikuti bahasa user
-// (`/lang`). Kalau memakai `t()`, ganti /lang ikut mengganti nama tool di
-// footer — itu bukan yang diminta. Dua jalur ini sengaja beda.
-//
-// Kategori rekap (`compactToolCategory` di tui/transcript.ts) TIDAK memakai
-// helper ini: ia menghitung dari NAMA INTERNAL. Fungsi di sini hanya untuk
-// tampilan (`line` ledger), jadi safety net Sanitasi + truncasi ada di ujung.
+// Label aktivitas tool manusiawi — murni, dipakai TUI & printer linear.
+// Sengaja terpisah dari `t()`: label mengikuti locale OS (Intl), narasi
+// mengikuti `/lang`. Kategori rekap di transcript memakai nama internal,
+// bukan helper ini; di sini hanya tampilan + sanitasi/truncasi di ujung.
 import { en } from "../i18n/en.ts"
 import { id } from "../i18n/id.ts"
 import type { Locale, MsgKey } from "../i18n/locale.ts"
@@ -37,16 +30,13 @@ const TOOL_LABEL_KEYS: Readonly<Record<string, MsgKey>> = {
 
 let cachedSystemLocale: Locale | null = null
 
-/**
- * Locale SISTEM/OS — lazy-cache (baca sekali saat pertama dipakai).
- * `id` bila locale mulai "id", sisanya `en`. Sengaja tak membaca env
- * MINICODE_LANG / state.json / sesi /lang: itu jalur bahasa user, bukan OS.
- */
 /** Test-only: paksa hasil deteksi OS agar kedua cabang en/id bisa diuji. */
 export function __setSystemLocaleForTest(locale: Locale | null): void {
   cachedSystemLocale = locale
 }
 
+/** Locale SISTEM/OS lazy-cache: `id` bila mulai "id", else `en`. Sengaja tak
+ * membaca env/state/sesi /lang — itu jalur bahasa user. */
 export function systemLocale(): Locale {
   if (cachedSystemLocale !== null) return cachedSystemLocale
   let raw = ""
@@ -60,14 +50,9 @@ export function systemLocale(): Locale {
   return cachedSystemLocale
 }
 
-/**
- * String UI non-narasi (toast/kwitansi/peringatan/kegagalan) memakai bahasa
- * SISTEM/OS — sama seperti label tool, bukan bahasa sesi `/lang`. Narasi/model
- * tetap lewat `t()` di i18n/locale.ts; jalur ini sengaja terpisah (lihat
- * komentar file). Interpolasi `{nama}` identik dengan `t()` supaya pola
- * pemakaiannya mulus. Sengaja tak impor `t()`/`currentLocale()` — selain
- * menghindari siklus, itu akan mengikuti sesi `/lang`.
- */
+/** Toast/kwitansi/peringatan memakai locale OS, bukan `/lang`. Narasi tetap
+ * lewat `t()`. Interpolasi `{nama}` identik; sengaja tak impor `t()` agar tak
+ * mengikuti sesi. */
 export function tSystem(key: MsgKey, params?: Record<string, string | number>): string {
   const template = (systemLocale() === "id" ? id : en)[key] ?? en[key] ?? key
   if (!params) return template
@@ -83,13 +68,8 @@ export interface HumanToolActivity {
   target?: string
 }
 
-/**
- * Nama tool internal → label manusiawibahasa sistem/OS.
- *
- * `delegate_task` mendapat identitas child (`label` → `summary` → `target`)
- * supaya fan-out sub-agent tetap bisa dibedakan di footer. Semua keluaran
- * disanitasi (nama child tak terpercaya) dan dipotong 40 kolom.
- */
+/** Nama internal → label manusiawi locale OS. `delegate_task` menyisipkan
+ * identitas child (label → summary → target). Sanitasi + potong 40 kolom. */
 export function humanToolLabel(rawName: string, activity?: HumanToolActivity): string {
   const key = TOOL_LABEL_KEYS[rawName]
   const dict = systemLocale() === "id" ? id : en

@@ -1,12 +1,6 @@
-// Ringkasan progres sub-agent — helper MURNI (tanpa I/O, tanpa TTY).
-//
-// v0.34: satu sumber kebenaran untuk agregat `✦` di chat (helper murni).
-// Transkrip memakai `formatAgentProgress()` untuk SATU baris yang ditimpa
-// di tempat. Rencana kotak "aktivitas" sidebar v0.33 tak terwujud — sidebar
-// dihapus total; jangan menambah pane baru untuk angka ini.
-//
-// Angka WAJIB jujur: agent/tools dihitung dari id unik (retry & replay tak
-// boleh menambah), failure dikelompokkan per alasan.
+// Agregat `✦` sub-agent di chat — murni, tanpa I/O/TTY. Satu baris ditimpa
+// di tempat. Sidebar v0.33 tak jadi; jangan tambah pane untuk angka ini.
+// Angka jujur: agent/tools dari id unik, failure dikelompokkan per alasan.
 
 import { t } from "../i18n/locale.ts"
 import { glyphs } from "./theme.ts"

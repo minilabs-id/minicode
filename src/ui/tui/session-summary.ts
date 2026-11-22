@@ -1,16 +1,7 @@
-// v7.44 (audit) — helper murni untuk dua jejak teks baru di layar interaktif:
-//   - baris progres startup (`start 57%\r`), satu baris yang ditimpa sendiri;
-//   - blok penutup sesi di scrollback (logo asli + statistik) setelah
-//     alt-screen ditutup supaya bisa disalin.
-//
-// Semua fungsi di sini TANPA I/O dan TANPA state: waktu (Date), daftar baris
-// logo, dan angka disuntikkan pemanggil. Ini yang membuatnya bisa diuji
-// hermetik tanpa TTY, SQLite, maupun provider — dan mencegah helper diam-diam
-// membaca `process.cwd()`/`Date.now()` (sumber flake lintas-proses).
-//
-// Batas lapisan: modul `src/ui/` hanya boleh impor sesama `src/ui/`, jadi
-// `renderLogoRows()` TIDAK dipanggil di sini — pemanggil (`cli/tui.ts`) yang
-// menyuntik baris logo nyata dari grid pemilik.
+// Helper murni untuk progres startup (`start 57%\r`) dan blok penutup sesi
+// di scrollback. Tanpa I/O/state: waktu, logo, dan angka disuntik pemanggil
+// (mencegah flake lintas-proses). Baris logo datang dari `cli/tui.ts` karena
+// batas lapisan `src/ui/` tak boleh impor grid pemilik.
 
 import { formatUsd } from "../render/money.ts"
 

@@ -24,10 +24,7 @@ type PerfStat = {
 
 const stats = new Map<string, PerfStat>()
 
-/**
- * Catat satu sampel. `ms` = durasi milidetik, `n` = nilai sekunder opsional
- * (mis. ukuran batch). Saat nonaktif ini no-op O(1) tanpa alokasi.
- */
+/** Catat sampel: `ms` durasi, `n` nilai sekunder (mis. ukuran batch). No-op saat nonaktif. */
 export function perfCount(name: string, ms = 0, n = 0): void {
   if (!ENABLED) return
   let s = stats.get(name)
@@ -70,8 +67,7 @@ export function perfReset(): void {
   stats.clear()
 }
 
-// p50/p95 aproksimasi deterministik dari sampel yang tersimpan: ambil elemen
-// terurut pada indeks ceil(q*n)-1. Tanpa sampel → 0 (bukan NaN).
+// p50/p95 deterministik: elemen terurut pada indeks ceil(q*n)-1; kosong → 0.
 function percentile(sorted: readonly number[], q: number): number {
   if (sorted.length === 0) return 0
   const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil(q * sorted.length) - 1))
@@ -82,10 +78,7 @@ function fmt(v: number): string {
   return String(Math.round(v * 100) / 100)
 }
 
-/**
- * Laporan agregat count/p50/p95 per nama, diurutkan oleh nama agar stabil.
- * Menulis ke stderr HANYA saat aktif dan HANYA karena dipanggil eksplisit.
- */
+/** Agregat count/p50/p95 per nama (urut stabil). stderr hanya saat aktif & eksplisit. */
 export function perfReport(): string {
   const lines: string[] = []
   for (const name of [...stats.keys()].sort()) {
