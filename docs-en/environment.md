@@ -40,6 +40,7 @@ The variables that most determine behaviour (the rest are referenced below):
 | `MINICODE_LANG` | `en`/`id` -> UI language (full precedence in the terminal contract, i18n section: `/lang` > this env > state.json > OS locale > en) |
 | `MINICODE_DEBUG_BUS` | `1` -> print one event-bus diagnostic line per turn to stderr (`src/ui/runtime/bus-debug.ts`; diagnostics only, not behaviour) |
 | `MINICODE_DEBUG_STARTUP` | `1` -> print the duration of each session setup stage to stderr (diagnosing slow startup; diagnostics only, not behaviour) |
+| `MINICODE_DEBUG_PERF` | `1` -> enable lightweight timers on compute/persistence paths (`src/lib/perf-debug.ts`): count/p50/p95 via `perfReport()`, diagnostics only; no change to compaction or durability |
 | `MINICODE_MINIMIZE_ANSWER` | `1` -> minimize the model answer section (default: not minimized). Only effective on a TTY and when not `--verbose` |
 | `MINICODE_KEYSTORE_DISABLE` | `1` -> disable the OS keystore entirely (falls back to file storage; for CI/headless without a keychain/DPAPI) |
 | `MINICODE_KEYSTORE_FORCE_DPAPI` | `1`/`true` -> force the DPAPI/Windows path even on non-Windows (portability testing only; not a production setting) |

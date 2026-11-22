@@ -205,6 +205,8 @@ const INVENTORY: Record<string, { max: number; owner: string }> = {
   // operator believe the run stopped when it actually spawned follow-up turns —
   // stdout stays pure JSONL. Declared, not absorbed, per the rule above.
   "cli/commands/exec.ts": { max: 20, owner: "machine" },
+  // [v0.40] entry tipis: --version, help JSON/teks, dan usage error.
+  "cli/entry.ts": { max: 4, owner: "human-cmd" },
   "cli/commands/mcp.ts": { max: 2, owner: "human-cmd" },
   "cli/commands/memory.ts": { max: 11, owner: "human-cmd" },
   // [P14.4] 0 -> 8 for the openwork command's writers, per the terminal

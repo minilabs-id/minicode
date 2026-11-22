@@ -9,7 +9,6 @@ import { join } from "node:path"
 import { attachSimpleLogger } from "../src/ui/assistant/simple.ts"
 import type { UiPresentationEvent } from "../src/ui/contract.ts"
 import { cleanUntrusted, stripSgr } from "../src/ui/render/sanitize.ts"
-import { humanToolLabel } from "../src/ui/render/tool-label.ts"
 
 const ESC = "\x1b"
 const repoRoot = join(import.meta.dir, "..")
@@ -226,7 +225,10 @@ describe("jalur linear: satu baris per tool", () => {
       })
       bus.fire("turn:completed", {})
       detach()
-      const lines = out.split("\n").filter((l) => l.includes(humanToolLabel("read_file")))
+      // Lokal OS bisa memilih label en/id; yang diuji adalah JUMLAH baris ledger,
+      // bukan kosakatanya. Target `package.json` hadir di kedua baris start/hasil,
+      // jadi tetap menjadi penanda yang locale-independen.
+      const lines = out.split("\n").filter((l) => l.includes("package.json"))
       expect(lines.length).toBe(1)
     } finally {
       ;(process.stderr as unknown as { write: (s: string) => boolean }).write = prevErr
