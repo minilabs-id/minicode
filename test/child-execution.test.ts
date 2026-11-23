@@ -3,6 +3,7 @@
 // Hermetic murni: tanpa factory/Pool/session/persistence/scheduler/backend.
 
 import { expect, test } from "bun:test"
+import { LIMITS } from "../src/constants.ts"
 import { createGrant } from "../src/runtime/capability.ts"
 import {
   admitChild,
@@ -84,9 +85,10 @@ test("M7 deadline: min(sisa), clamp, exhausted ditolak", () => {
   expect(b.effectiveDeadlineMs).toBe(10_000)
   expect(admitChild(spec({ parentRemainingDeadlineMs: 0 })).admitted).toBe(false)
   expect(admitChild(spec({ deadlineMs: -5 })).admitted).toBe(false)
-  // Tanpa sisa diketahui: ceiling backend existing (bukan fresh tak terbatas).
+  // Tanpa sisa diketahui: ceiling backend = LIMITS.SUB_AGENT_TIMEOUT_MS
+  // (1 jam sejak keputusan owner 2026-11-23; pakai konstanta agar tak basi).
   const c = admitted({ deadlineMs: 9_999_999_999 })
-  expect(c.effectiveDeadlineMs).toBeLessThanOrEqual(900_000)
+  expect(c.effectiveDeadlineMs).toBeLessThanOrEqual(LIMITS.SUB_AGENT_TIMEOUT_MS)
 })
 
 // Budget: subtractive + reservasi + over-ask + exhausted.

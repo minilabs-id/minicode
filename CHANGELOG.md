@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.43.3] - 2026-11-24
+
+### Changed — kebijakan agen, browser opsional, antre command, spark/caret
+
+- **Kebijakan `.minicode/`:** kini boleh ditulis agen/model lewat file tool &
+  shell, kecuali `.minicode/hooks/**` dan file sensitif. Kunci hook di permission
+  layer bukan boundary keamanan terhadap proses turunan (`node script.js`) —
+  `MINICODE_HOOKS=1` tetap keputusan operator. Catatan resmi di
+  `.audit/decisions-2026-11-23.md`.
+- **Browser opsional `agent-browser`:** skill global `~/.minicode/skills/`,
+  allowlist sempit 15 pola. `eval` diizinkan (Chrome fresh tanpa profil ⇒ cookie
+  aman), `mcp` fallback, `install` butuh konfirmasi ASK, `--auto-connect`
+  dicabut. Chrome lokal diutamakan daripada `agent-browser install`.
+- **Sub-agent diperluas:** pool 3→5, `maxSteps` 50→100→600, budget scope
+  16/24/40/64, ladder `[8,12,20,32,50,75,100,150,250,400,600]`, timeout
+  300 dtk→1 jam (watchdog idle 120 dtk tetap pengaman). Tool `explore` +4
+  (`git_diff`, `lsp_references`, `lsp_symbols`, `read_image`).
+- **Antre command saat busy:** `/model`, `/provider`, `/mode`, `/view`, `/context`,
+  `/lang`, `/status`, `/help`, `/scheduler`, `/copy`, `/sessions`, `/init`,
+  `/shell`, skill — dijalankan setelah turn selesai. Command berisiko
+  (`/exit`, `/clear`, `/undo`, `/redo`, `/update`) tetap ditolak saat busy.
+- **Perbaikan error sub-agent (lanjutan 0.43.0):** jalur `[recovery]` dan
+  `provider:extension` kini lewat `friendlyToolErrorCanonical()`; ringkasan
+  child gagal tak lagi bocor. `boundRecoveryPreview` mengkanonikkan dari teks
+  utuh sebelum dipotong.
+- **UI kecil:** spark footer rotasi 4 warna saat busy; caret DECSCUSR `6 q`→`5 q`
+  (bar berkedip). Geometri composer/ratchet/rekap/I1 tidak berubah.
+- Dokumen kebijakan (ID/EN) & `AGENTS.md` disinkronkan; test basi disesuaikan.
+
 ## [0.43.2] - 2026-11-23
 
 ### Fixed — Auto-update ETARGET saat versi baru baru terbit

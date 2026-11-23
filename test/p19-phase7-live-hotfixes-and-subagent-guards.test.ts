@@ -8,7 +8,7 @@
 //   Live #2 : 10 chunk SSE usage kumulatif → total akhir 200 token (bukan 1550); mid-stream cutoff `--context-window 500`
 //   CTX-03  : `recordTokenCalibrationSample` / `lastDriftRatio` akurat
 //   LOOP-INV-13/15 : subagent ber-NoProgressDetector aktif + ACE verdict pada amplop hasil
-//   LOOP-INV-13/LOOP-04/U6 : burst saturasi pool 8 delegasi → aktif konkuren ≤ MAX=3
+//   LOOP-INV-13/LOOP-04/U6 : burst saturasi pool 8 delegasi → aktif konkuren ≤ MAX=5
 //   LOOP-INV-14 : abort parent → subagent berhenti & slot pool dilepas
 //   Live #3 : circuit-breaker embedding (2nd/3rd/4th call fallback <20ms, 0 jaringan); root wall-clock timeout presisi
 
@@ -305,8 +305,8 @@ describe("7.3 Subagent ACE verdict — envelope.aceVerdict pada sukses & error",
   })
 })
 
-describe("7.3 Burst saturation pool — 8 delegasi serentak, aktif konkuren ≤ 3 (LOOP-INV-13/LOOP-04/U6)", () => {
-  test("8 task serentak di pool MAX=3 → peak concurrency tak pernah > 3", async () => {
+describe("7.3 Burst saturation pool — 8 delegasi serentak, aktif konkuren ≤ 5 (LOOP-INV-13/LOOP-04/U6)", () => {
+  test("8 task serentak di pool MAX=5 → peak concurrency tak pernah > 5", async () => {
     const pool = new Pool(LIMITS.SUB_AGENT_POOL_SIZE)
     let active = 0
     let peak = 0
@@ -320,7 +320,7 @@ describe("7.3 Burst saturation pool — 8 delegasi serentak, aktif konkuren ≤ 
       }),
     )
     await Promise.all(tasks)
-    expect(peak).toBeLessThanOrEqual(3)
+    expect(peak).toBeLessThanOrEqual(5)
     expect(peak).toBeGreaterThan(0)
   })
 })

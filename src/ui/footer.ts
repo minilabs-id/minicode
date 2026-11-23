@@ -108,11 +108,17 @@ export function paintBashStrict(strictBash?: boolean, unrestricted = false): str
   return strictBash ? c.yellow(glyphs.lock) : c.gray(glyphs.lock)
 }
 
-/** Spark glyph: redup saat idle, pulse putih↔abu saat busy (frame genap/ganjil). */
+/** Spark glyph: redup saat idle, rotasi 4 warna saat busy.
+ * `c.*` adalah GETTER runtime (theme.ts) — jangan disimpan di const module
+ * scope (nilai membeku saat import). Simpan NAMA, baca getter saat dipakai.
+ * Kedipan mengikuti `sparkFrame` yang sudah ada; tanpa timer/repaint tambahan. */
+const SPARK_COLOR_KEYS = ["cyan", "magenta", "yellow", "white"] as const
+
 function sparkGlyph(frame: number): string {
   const g = glyphs.thinkingIcon
   if (frame <= 0) return c.faint(g)
-  return frame % 2 === 0 ? c.white(g) : c.gray(g)
+  const key = SPARK_COLOR_KEYS[(frame - 1) % SPARK_COLOR_KEYS.length] ?? "white"
+  return c[key](g)
 }
 
 // Badge job background: jam flat berputar PELAN (fase beda dari spark),

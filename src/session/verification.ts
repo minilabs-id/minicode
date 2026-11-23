@@ -325,12 +325,12 @@ export function hasTruncationMarker(result: unknown): boolean {
 }
 
 /**
- * Batas ringkasan amplop anak (P9.2.1): SAMA dengan batas string parent
- * `slice(0, 2000)` di pemanggil (satuan code-unit UTF-16 — `length`/`slice`
- * JS memang berhitung begitu). Durable menyimpan apa yang dilihat parent,
- * bukan lebih. Bukan limit retensi/transkrip baru.
+ * Batas ringkasan amplop anak (P9.2.1): naik 2_000 → 4_000 mengikuti pagu
+ * teks partial child (`MAX_PARTIAL_CHARS`), supaya amplop durable tak memotong
+ * temuan yang masih muat di output anak. Satuan code-unit UTF-16 (`length`/
+ * `slice` JS memang berhitung begitu). Bukan limit retensi/transkrip baru.
  */
-export const CHILD_RESULT_SUMMARY_MAX = 2_000
+export const CHILD_RESULT_SUMMARY_MAX = 4_000
 
 /**
  * Klasifikasi observasi turn anak dari error terstruktur (P9.2.1).

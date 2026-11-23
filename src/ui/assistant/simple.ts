@@ -853,7 +853,12 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
         }
       } else if (e.kind === "error") {
         const d = e.data as { message?: string; category?: string }
-        ui.setPendingError(formatProviderError(d))
+        // [Audit VALID] event provider:extension bisa membawa detail sub-agent
+        // REFUSED_* mentah; formatProviderError(d) mengembalikan potongan
+        // d.message itu. Kanonikkan lebih dulu; bila tak ada pola kanonik (""),
+        // jangan tampilkan d.message — pakai redaksi kategori generik.
+        const canonical = friendlyToolErrorCanonical(d.message ?? "")
+        ui.setPendingError(canonical || formatProviderError({ category: d.category }))
       } else if (e.kind === "content_filter") {
         wErr(c.warning(t("one.contentBlocked")))
       }

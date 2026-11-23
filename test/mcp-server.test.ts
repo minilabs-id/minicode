@@ -245,14 +245,18 @@ test("mcp-server: argumen invalid ditolak sebelum eksekusi", async () => {
   }
 })
 
-test("mcp-server: allowAll tetap tolak sensitif + owned-state", async () => {
+test("mcp-server: allowAll tolak sensitif & hook; state minicode kini boleh", async () => {
+  // Keputusan owner 2026-11-23: `.minicode/**` boleh ditulis; yang tetap
+  // dikunci hanya `.minicode/hooks/**` dan file sensitif (.env, auth.json).
   const dir = tmpRoot()
   const c = await startServer(["--cwd", dir, "--allow-all"])
   try {
     const e = await call(c, 41, "write_file", { path: ".env", content: "x" })
     expect((e.result as { isError: boolean }).isError).toBe(true)
-    const o = await call(c, 42, "write_file", { path: ".minicode/sessions.db", content: "x" })
-    expect((o.result as { isError: boolean }).isError).toBe(true)
+    const h = await call(c, 42, "write_file", { path: ".minicode/hooks/x.js", content: "x" })
+    expect((h.result as { isError: boolean }).isError).toBe(true)
+    const o = await call(c, 44, "write_file", { path: ".minicode/sessions.db", content: "x" })
+    expect((o.result as { isError: boolean }).isError ?? false).toBe(false)
     const ok = await call(c, 43, "write_file", { path: "biasa.txt", content: "ok" })
     expect((ok.result as { isError: boolean }).isError ?? false).toBe(false)
   } finally {

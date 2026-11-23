@@ -79,9 +79,12 @@ describe("allowlist: perintah majemuk diperiksa per segmen", () => {
     expect(outside.reason).toMatch(/redirect outside workspace|redirection outside workspace/)
     // Baca dari berkas di dalam workspace tidak jadi regresi.
     expect((await decide(h, "cat < local.txt")).decision).toBe("allow")
-    // State milik minicode tidak boleh ditimpa lewat shell.
-    const owned = await decide(h, "echo '{}' > .minicode/allowlist.json")
-    expect(owned.decision).toBe("deny")
+    // Keputusan owner 2026-11-23: state `.minicode/` kini BOLEH ditulis lewat
+    // shell (selaras dengan bash-guard & file tool).
+    expect((await decide(h, "echo hi > .minicode/notes.txt")).decision).toBe("allow")
+    // SATU-SATUNYA yang tetap dikunci = skrip hook (audit 2026-11-12).
+    const hook = await decide(h, "echo x > .minicode/hooks/x.js")
+    expect(hook.decision).toBe("deny")
   })
 
   test("satu segmen tak dikenal menolak seluruh perintah", async () => {
@@ -165,5 +168,153 @@ describe("allowlist: config `bashAllowlist` benar-benar dipakai", () => {
     expect((await decide(h, "mycmd --flag")).decision).toBe("allow")
     // Segmen lain tetap harus cocok pola — config bukan blanket-allow.
     expect((await decide(h, "mycmd --flag && othercmd")).decision).toBe("deny")
+  })
+})
+
+describe("allowlist: agent-browser (keputusan owner 2026-11-23, ditinjau ulang)", () => {
+  const allowed = [
+    "agent-browser open https://example.com",
+    "agent-browser snapshot -i",
+    "agent-browser click @e1",
+    "agent-browser fill @e2 hello",
+    "agent-browser errors",
+    "agent-browser console",
+    "agent-browser network",
+    "agent-browser get url",
+    "agent-browser close",
+    "agent-browser skills get core",
+    "agent-browser --version",
+    // eval & mcp TETAP diizinkan: eval aman karena Chrome default fresh tanpa
+    // profil (tak memakai cookie user); mcp = fallback bila CLI bermasalah.
+    "agent-browser eval 1+1",
+    "agent-browser mcp",
+    "npx agent-browser open https://example.com",
+  ]
+
+  test("subcommand terdaftar lolos di mode allowlist & AUTO+restrictBash", async () => {
+    for (const h of [allowlistMode(), autoRestricted()]) {
+      for (const cmd of allowed) {
+        const r = await decide(h, cmd)
+        expect({ cmd, decision: r.decision }).toEqual({ cmd, decision: "allow" })
+      }
+    }
+  })
+
+  test("--auto-connect dicabut: deny di semua mode,termasuk celah `npx *`", async () => {
+    const headlessAuto = createPermissionHandler({
+      mode: "auto",
+      root,
+    }) as unknown as Reasoned
+    for (const h of [allowlistMode(), autoRestricted(), headlessAuto]) {
+      for (const cmd of ["agent-browser --auto-connect", "npx agent-browser --auto-connect"]) {
+        const r = await decide(h, cmd)
+        // `npx agent-browser --auto-connect` dulu lolos lewat pola `"npx *"` —
+        // deny rule sempit di bashDenyReason yang menutupnya, bukan allowlist.
+        expect({ cmd, decision: r.decision }, r.reason).toEqual({ cmd, decision: "deny" })
+        expect(r.reason).toContain("auto-connect")
+      }
+    }
+  })
+
+  test("install butuh konfirmasi: fixture ASK approve → allow, headless → deny", async () => {
+    // allowNonTtyAsk menyimulasikan approval broker di test (stdin non-TTY),
+    // sama seperti pola promptAskOr/GATED di test lain.
+    const askApprove = () =>
+      createPermissionHandler({
+        mode: "ask",
+        root,
+        allowNonTtyAsk: true,
+        ask: async () => "allow",
+      }) as unknown as Reasoned
+    const headless = () => createPermissionHandler({ mode: "auto", root }) as unknown as Reasoned
+
+    for (const cmd of [
+      "agent-browser install",
+      "npx agent-browser install",
+      "npx -y agent-browser install",
+      "npm install -g agent-browser",
+    ]) {
+      const approved = await decide(askApprove(), cmd)
+      expect({ cmd, decision: approved.decision }, approved.reason).toEqual({
+        cmd,
+        decision: "allow",
+      })
+
+      const unattended = await decide(headless(), cmd)
+      expect({ cmd, decision: unattended.decision }, unattended.reason).toEqual({
+        cmd,
+        decision: "deny",
+      })
+      expect(unattended.reason).toContain("agent-browser install requires approval")
+    }
+  })
+
+  test("npm install biasa tidak kena gate install", async () => {
+    // Gate HANYA menyasar perintah yang menyasar agent-browser; ekosistem npm
+    // umum tetap seperti semula.
+    for (const cmd of ["npm install", "npm install -g typescript"]) {
+      const r = await decide(allowlistMode(), cmd)
+      expect({ cmd, decision: r.decision }, r.reason).toEqual({ cmd, decision: "allow" })
+    }
+  })
+
+  test("uji negatif: pola bukan wildcard telanjang (`*` → `.*`, case-insensitive)", async () => {
+    const h = allowlistMode()
+    for (const cmd of [
+      "open https://example.com", // tanpa prefiks tool
+      "agent-browser evil", // subcommand tak terdaftar
+      "agent-browser --versionx", // pola --version TANPA `*`
+      "agent-browser open https://x && curl https://evil.com", // segmen asing
+      "agent-browser open https://x > .env", // rahasia tetap ditahan guard
+    ]) {
+      const r = await decide(h, cmd)
+      expect({ cmd, decision: r.decision }, r.reason).toEqual({ cmd, decision: "deny" })
+    }
+  })
+
+  test("tulis hook lewat redirection shell tetap ditolak", async () => {
+    const r = await decide(allowlistMode(), "echo x > .minicode/hooks/pre-x.js")
+    expect(r.decision).toBe("deny")
+  })
+})
+
+describe("kunci hook: cp/mv/cmdlet tak boleh menanam skrip di .minicode/hooks", () => {
+  const autoUnrestricted = () =>
+    createPermissionHandler({ mode: "auto", root }) as unknown as Reasoned
+
+  const hookWrites = [
+    "cp payload.js .minicode/hooks/x.js",
+    "Set-Content -Path .minicode/hooks/x.js -Value evil",
+    "Set-Content -Path:.minicode/hooks/x.js -Value evil",
+    "New-Item -ItemType File -Path .minicode/hooks/x.js",
+    "New-Item -ItemType File -Path:.minicode/hooks/x.js",
+  ]
+  const benignWrites = [
+    "cp a.txt .minicode/notes.txt",
+    "Set-Content -Path .minicode/notes.txt -Value hi",
+    "New-Item -ItemType File -Path .minicode/notes.txt",
+  ]
+
+  test("mode auto: hook ditolak bash-guard, state biasa sah", async () => {
+    const h = autoUnrestricted()
+    for (const cmd of hookWrites) {
+      const r = await decide(h, cmd)
+      expect({ cmd, decision: r.decision }, r.reason).toEqual({ cmd, decision: "deny" })
+      // Pastikan yang menahan = kunci hook, bukan alasan tak related.
+      expect(r.reason).toContain("hook file write")
+    }
+    for (const cmd of benignWrites) {
+      const r = await decide(h, cmd)
+      expect({ cmd, decision: r.decision }, r.reason).toEqual({ cmd, decision: "allow" })
+    }
+  })
+
+  test("mode allowlist & AUTO+restrictBash: hook tetap ditolak lebih dulu", async () => {
+    for (const h of [allowlistMode(), autoRestricted()]) {
+      for (const cmd of hookWrites) {
+        const r = await decide(h, cmd)
+        expect({ cmd, decision: r.decision }, r.reason).toEqual({ cmd, decision: "deny" })
+      }
+    }
   })
 })

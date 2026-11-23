@@ -452,10 +452,10 @@ process.stdout.write(JSON.stringify({ found: !!t, status: t?.status ?? null, cou
 // ── 5. LOOP-04: Subagent Pool Saturation <= SUB_AGENT_POOL_SIZE + Parent Abort ──
 
 describe("LOOP-04 - subagent pool saturation and parent abort inheritance", () => {
-  test("burst 10 delegations concurrent count never exceeds SUB_AGENT_POOL_SIZE=3", async () => {
+  test("burst 10 delegations concurrent count never exceeds SUB_AGENT_POOL_SIZE=5", async () => {
     const { Pool } = await import("../src/agents/pool.ts")
     const { LIMITS } = await import("../src/constants.ts")
-    expect(LIMITS.SUB_AGENT_POOL_SIZE).toBe(3)
+    expect(LIMITS.SUB_AGENT_POOL_SIZE).toBe(5)
 
     const pool = new Pool(LIMITS.SUB_AGENT_POOL_SIZE)
     let active = 0
@@ -476,8 +476,8 @@ describe("LOOP-04 - subagent pool saturation and parent abort inheritance", () =
     const results = await Promise.all(jobs)
     expect(results).toHaveLength(10)
     expect(completed).toBe(10)
-    expect(highWaterMark).toBeLessThanOrEqual(3)
-    expect(highWaterMark).toBe(3) // benar-benar jenuh
+    expect(highWaterMark).toBeLessThanOrEqual(5)
+    expect(highWaterMark).toBe(5) // benar-benar jenuh
   })
 
   test("AbortController.abort() cancels queued subagents cleanly", async () => {
@@ -489,7 +489,7 @@ describe("LOOP-04 - subagent pool saturation and parent abort inheritance", () =
     let started = 0
     let abortedCount = 0
 
-    // 3 pekerja aktif + 7 antre
+    // 5 pekerja aktif + 5 antre
     const jobs = Array.from({ length: 10 }, (_, i) =>
       pool
         .run(async () => {
@@ -503,27 +503,27 @@ describe("LOOP-04 - subagent pool saturation and parent abort inheritance", () =
         }),
     )
 
-    // Tunggu 3 pekerja mulai
+    // Tunggu 5 pekerja mulai
     await Bun.sleep(30)
-    expect(started).toBe(3)
+    expect(started).toBe(5)
 
-    // Abort induk saat 3 aktif + 7 antre
+    // Abort induk saat 5 aktif + 5 antre
     ac.abort(new Error("parent aborted"))
 
     const settled = await Promise.allSettled(jobs)
     expect(settled).toHaveLength(10)
     const succeeded = settled.filter((r) => r.status === "fulfilled").length
     const rejected = settled.filter((r) => r.status === "rejected").length
-    expect(succeeded).toBe(3)
-    expect(rejected).toBe(7)
-    expect(abortedCount).toBe(7)
-    // Tidak ada pekerja ke-4 yang mulai setelah abort
-    expect(started).toBe(3)
+    expect(succeeded).toBe(5)
+    expect(rejected).toBe(5)
+    expect(abortedCount).toBe(5)
+    // Tidak ada pekerja ke-6 yang mulai setelah abort
+    expect(started).toBe(5)
   })
 
-  test("SUB_AGENT_POOL_SIZE constant defined in config is exactly 3", async () => {
+  test("SUB_AGENT_POOL_SIZE constant defined in config is exactly 5", async () => {
     const { LIMITS } = await import("../src/constants.ts")
-    expect(LIMITS.SUB_AGENT_POOL_SIZE).toBe(3)
+    expect(LIMITS.SUB_AGENT_POOL_SIZE).toBe(5)
   })
 })
 

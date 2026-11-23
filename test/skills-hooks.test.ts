@@ -13,6 +13,7 @@ import {
   renderSkill,
   skillsToSystemPrompt,
 } from "../src/skills/loader.ts"
+import { withoutGlobalSkills } from "./helpers/without-global-skills.ts"
 
 const tmp = ".tmp-skills-test"
 
@@ -22,21 +23,27 @@ test("skills: load, find, render", async () => {
     `${tmp}/.minicode/skills/review.md`,
     `---\nname: review\ndescription: Review code\n---\nReview this code: {{args}}`,
   )
-  const all = await loadSkills(tmp, { allowLocal: true })
-  expect(all.length).toBe(1)
-  expect(all[0]?.name).toBe("review")
-  const found = await findSkill("review", tmp, { allowLocal: true })
-  expect(found?.description).toBe("Review code")
-  const rendered = await renderSkill(found!, "src/a.ts")
-  expect(rendered).toContain("src/a.ts")
-  expect(skillsToSystemPrompt(all)).toContain("/review")
-  // /name with args via findSkill
-  const foundSlash = await findSkill("/review", tmp, { allowLocal: true })
-  expect(foundSlash?.name).toBe("review")
-  // Tanpa allowLocal, skill repo lokal tak dimuat (fail-closed)
-  invalidateSkillCache()
-  expect((await loadSkills(tmp)).some((s) => s.path.includes(tmp))).toBe(false)
-  await rm(tmp, { recursive: true, force: true })
+  // Hitungan 1 menguji skill lokal fixture; skill global mesin disembunyikan.
+  const restore = withoutGlobalSkills()
+  try {
+    const all = await loadSkills(tmp, { allowLocal: true })
+    expect(all.length).toBe(1)
+    expect(all[0]?.name).toBe("review")
+    const found = await findSkill("review", tmp, { allowLocal: true })
+    expect(found?.description).toBe("Review code")
+    const rendered = await renderSkill(found!, "src/a.ts")
+    expect(rendered).toContain("src/a.ts")
+    expect(skillsToSystemPrompt(all)).toContain("/review")
+    // /name with args via findSkill
+    const foundSlash = await findSkill("/review", tmp, { allowLocal: true })
+    expect(foundSlash?.name).toBe("review")
+    // Tanpa allowLocal, skill repo lokal tak dimuat (fail-closed)
+    invalidateSkillCache()
+    expect((await loadSkills(tmp)).some((s) => s.path.includes(tmp))).toBe(false)
+  } finally {
+    restore()
+    await rm(tmp, { recursive: true, force: true })
+  }
 })
 
 test("RESOURCE-02: skill read stops at the byte cap and marks truncation", async () => {

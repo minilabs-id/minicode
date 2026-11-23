@@ -19,7 +19,13 @@
 // biaya serangan, bukan menghilangkannya.
 
 import { isAbsolute, resolve } from "node:path"
-import { isOwnedState, isRealPathOutsideRoot, isSensitive } from "./jail.ts"
+import {
+  isOwnedHook,
+  isOwnedHookReal,
+  isOwnedState,
+  isRealPathOutsideRoot,
+  isSensitive,
+} from "./jail.ts"
 
 export interface BashVerdict {
   /** true = tolak */
@@ -736,13 +742,9 @@ export function inspectBashCommand(rawCmd: string, cwd?: string, root?: string):
       const t = rawTarget.replace(/^["']|["']$/g, "")
       if (cwd != null) {
         const abs = isAbsolute(t) ? resolve(t) : resolve(cwd, t)
-        if (
-          isRealPathOutsideRoot(abs, containmentRoot!) ||
-          isSensitive(t) ||
-          isSensitive(abs) ||
-          isOwnedState(t) ||
-          isOwnedState(abs)
-        )
+        // Keputusan owner 2026-11-23: `.minicode/` kini boleh ditulis agen, jadi
+        // bukan lagi jail bypass. Yang tetap ditolak = rahasia & luar workspace.
+        if (isRealPathOutsideRoot(abs, containmentRoot!) || isSensitive(t) || isSensitive(abs))
           return { denied: true, reason: "git directory outside workspace" }
       } else if (/^\.\.(?:[\\/]|$)|\b[a-zA-Z]:[\\/]|^\/(?!dev\/null$)|^~(?:[\\/]|$)/.test(t)) {
         return { denied: true, reason: "git directory outside workspace" }
@@ -758,12 +760,13 @@ export function inspectBashCommand(rawCmd: string, cwd?: string, root?: string):
   if (both(ROOT_SCAN)) return { denied: true, reason: "filesystem-root scan" }
 
   // Pembuatan link (symlink/junction/hardlink) yang operannya sensitif /
-  // owned-state: link internal ke `.minicode/` dipakai menembus kunci
-  // owned-state tool tulis (temuan audit 2026-09-22 F-CRIT — `ln -s .minicode
-  // linkdir` + `write_file linkdir/config.json` lolos karena cek owned-state
-  // membaca string argumen, bukan target nyata; pola yang sama menembus
-  // perlindungan berkas sensitif). Kunci UTAMA ada di lapisan permission
-  // (isOwnedStateReal — realpath); blok ini lapisan kedua di sisi shell.
+  // owned-state: temuan audit 2026-09-22 F-CRIT (`ln -s .minicode linkdir`
+  // lalu `write_file linkdir/config.json`). Keputusan owner 2026-11-23
+  // membolehkan tulis ke `.minicode/`, JADI alasan lama "menembus kunci owned"
+  // tak lagi berlaku untuk file biasa. Pembuatan link TETAP ditahan karena
+  // (a) ia primitif bypass jail/rahasia lintas-tool dan (b) kunci hook di
+  // permission.ts bergantung pada realpath yang bisa disamarkan junction.
+  // Blok ini lapisan kedua di sisi shell (lapisan utama: permission.ts).
   //
   // Urutan argumen BEDA antar tool — `ln`: TARGET LINK; `mklink`/`fsutil`:
   // LINK dulu; `New-Item`: parameter bernama (urutan bebas, `-Target` alias
@@ -812,17 +815,22 @@ export function inspectBashCommand(rawCmd: string, cwd?: string, root?: string):
         if (v) return v
       }
     }
-    // New-Item bentuk nilai-menempel (`-Target:.minicode`): token berawalan
-    // `-` luput dari ekstraksi target READER di bawah (bentuk spasi sudah
-    // ditahan di sana — New-Item ∈ READERS). `-Target` alias `-Value`.
+    // New-Item: `-Target`/`-Value` (alias) bisa berbentuk nilai-menempel
+    // (`-Target:.minicode`) ATAU dipisah spasi (`-Target .minicode`). DULU
+    // bentuk spasi ditahan oleh pemeriksaan READER di bawah, tapi keputusan
+    // owner 2026-11-23 membolehkan baca `.minicode/`, jadi ekstraksi di sini
+    // harus menangkap KEDUANYA — kalau tidak, pembuatan link ke hook/rahasia
+    // lolos hanya karena beda spasi.
     const NI_CMD = /(?:^|[;&|\n]\s*)New-Item\b([^\n;|]*)/gi
     const niSegs = [...norm.matchAll(NI_CMD)]
     if (niSegs.length === 0) niSegs.push(...raw.matchAll(NI_CMD))
     for (const m of niSegs) {
       const args = m[1]!
       if (!/-ItemType:?\s*"?(?:SymbolicLink|HardLink|Junction)"?(?:\s|$)/i.test(args)) continue
-      for (const pm of args.matchAll(/-(?:Path|Target|Value):(\S+)/gi)) {
-        const v = denyLinkOperand(pm[1])
+      const targetRe =
+        /-(?:Path|Target|Value):\s*(\S+)|-(?:Path|Target|Value)\s+("[^"]*"|'[^']*'|\S+)/gi
+      for (const pm of args.matchAll(targetRe)) {
+        const v = denyLinkOperand(pm[1] ?? pm[2])
         if (v) return v
       }
     }
@@ -870,20 +878,23 @@ export function inspectBashCommand(rawCmd: string, cwd?: string, root?: string):
       return { denied: true, reason: "redirect target with home expansion (~)" }
     if (cwd != null) {
       const abs = isAbsolute(t) ? resolve(t) : resolve(cwd, t)
-      // Owned-state (.minicode/config dkk) simetris dengan jail file tools:
-      // tulis lewat shell tak boleh lebih longgar dari write_file.
+      // Keputusan owner 2026-11-23: tulis ke `.minicode/` lewat redirection
+      // kini BOLEH, selaras dengan file tool. Jail workspace & rahasia tetap.
+      // SATU-SATUNYA yang masih dilarang = skrip hook (audit 2026-11-12):
+      // hook dieksekusi otomatis saat MINICODE_HOOKS=1, jadi tak boleh ditanam
+      // lewat shell menyiasati kunci hook di permission.ts.
       if (
         isRealPathOutsideRoot(abs, containmentRoot!) ||
         isSensitive(t) ||
         isSensitive(abs) ||
-        isOwnedState(t) ||
-        isOwnedState(abs)
+        isOwnedHook(t) ||
+        isOwnedHook(abs)
       )
         return { denied: true, reason: "redirect outside workspace" }
     } else if (
       /(^|[\\/])\.\.(?:[\\/]|$)|\b[a-zA-Z]:[\\/]|^\/(?!dev\/null$)|^~(?:[\\/]|$)/.test(t) ||
       isSensitive(t) ||
-      isOwnedState(t)
+      isOwnedHook(t)
     ) {
       return { denied: true, reason: "redirect outside workspace" }
     }
@@ -939,6 +950,17 @@ export function inspectBashCommand(rawCmd: string, cwd?: string, root?: string):
         const args = m[2]!.split(/\s+/)
         for (const a of args) {
           if (!a) continue
+          // PowerShell menerima bentuk `-Path: nilai` TANPA spasi
+          // (`Set-Content -Path:.minicode/hooks/x.js`). Token itu diawali `-`
+          // sehingga loop lama melewatinya sebagai flag — hook lolos. Kupas
+          // nilai setelah ':' supaya pemeriksaan hook/jail di bawah tetap
+          // melihat targetnya, sama seperti bentuk `-Path nilai` (spasi).
+          const colonVal = /^-[A-Za-z][A-Za-z0-9]*:(.+)$/.exec(a)
+          if (colonVal) {
+            const cv = colonVal[1]!.trim()
+            if (cv) out.push(cv)
+            continue
+          }
           if (a.startsWith("-")) continue
           // Flag cmd.exe Windows berawalan `/` (mis. `findstr /n /c:err log.txt`,
           // `copy /y`, `fc /b`) bukan path root POSIX — lewati agar tidak ditolak
@@ -978,15 +1000,27 @@ export function inspectBashCommand(rawCmd: string, cwd?: string, root?: string):
       if (isSensitive(t) || isSensitive(resolve(cwd ?? ".", t))) {
         return { denied: true, reason: "sensitive file access" }
       }
-      if (isOwnedState(t) || isOwnedState(resolve(cwd ?? ".", t))) {
-        return { denied: true, reason: "owned state access" }
-      }
+      // Keputusan owner 2026-11-23: baca `.minicode/` lewat shell kini BOLEH
+      // (pembaca tool sudah mengizinkan sejak awal). SATU-SATUNYA yang tetap
+      // dikunci = skrip hook (audit 2026-11-12): READERS mencakup cp/mv/copy/
+      // Set-Content/New-Item/... yang bisa MENANAM hook, jadi pemeriksaan ini
+      // WAJIB paralel dengan blok redirect di atas. String + realpath dipakai
+      // supaya junction/symlink internal tak bisa menyamarkan target hook;
+      // bentuk `-Path`/`-Target` dengan spasi sudah tertangkap oleh ekstraksi
+      // readerTargets di atas (nilainya jadi token tersendiri).
+      // Efek samping `cat .minicode/hooks/x.js` ikut ditahan — fail-closed,
+      // sengaja daripada membedakan pembaca murni dari penulis di loop ini.
       if (cwd != null) {
         const abs = isAbsolute(t) ? resolve(t) : resolve(cwd, t)
+        if (isOwnedHook(t) || isOwnedHook(abs) || isOwnedHookReal(abs, containmentRoot!))
+          return { denied: true, reason: "hook file write" }
         if (isRealPathOutsideRoot(abs, containmentRoot!))
           return { denied: true, reason: "outside workspace" }
-      } else if (/^\.\.(?:[\\/]|$)|\b[a-zA-Z]:[\\/]|^\/(?!dev\/null$)|^~(?:[\\/]|$)/.test(t)) {
-        return { denied: true, reason: "outside workspace" }
+      } else {
+        if (isOwnedHook(t)) return { denied: true, reason: "hook file write" }
+        if (/^\.\.(?:[\\/]|$)|\b[a-zA-Z]:[\\/]|^\/(?!dev\/null$)|^~(?:[\\/]|$)/.test(t)) {
+          return { denied: true, reason: "outside workspace" }
+        }
       }
     }
   }

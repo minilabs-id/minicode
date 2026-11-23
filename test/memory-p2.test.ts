@@ -12,6 +12,7 @@ import { LIMITS } from "../src/constants.ts"
 import { resolveDbPath } from "../src/lib/db-path.ts"
 import { addMemory, getMemoryStats, searchHybrid, splitMemoryChunks } from "../src/memory/vector.ts"
 import { writeTrace } from "../src/telemetry/trace.ts"
+import { withoutGlobalSkills } from "./helpers/without-global-skills.ts"
 
 async function makeCwd(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "minicode-mem-p2-"))
@@ -119,6 +120,7 @@ test("P2.1 display membawa score + tanggal", async () => {
 
 test("P2.3 createRagLayer lapor memoryHits=0 bila tidak ada hit", async () => {
   const cwd = await makeCwd()
+  const restore = withoutGlobalSkills()
   try {
     const r = await createRagLayer({
       cfg: { providers: [] } as never,
@@ -126,8 +128,10 @@ test("P2.3 createRagLayer lapor memoryHits=0 bila tidak ada hit", async () => {
       cwd,
     })
     expect(r.memoryHits).toBe(0)
+    // Tanpa skill global mesin, systemExtra memang tak ada sama sekali.
     expect(r.systemExtra).toBeUndefined()
   } finally {
+    restore()
     await cleanup(cwd)
   }
 })

@@ -41,9 +41,9 @@ const WRITE_TOOLS = [
 const PLAN_EXTRA = ["todo_write", "delegate_task", "submit_result"] as const
 
 describe("work-mode tool visibility — fixture", () => {
-  test("himpunan kontrak baca (EXPLORE=12, LOCAL_READONLY=16, READONLY=18) ada di allTools", () => {
+  test("himpunan kontrak baca (EXPLORE=16, LOCAL_READONLY=16, READONLY=18) ada di allTools", () => {
     const names = new Set(nameOf(allTools))
-    expect(EXPLORE_TOOL_NAMES.length).toBe(12)
+    expect(EXPLORE_TOOL_NAMES.length).toBe(16)
     expect(LOCAL_READONLY_TOOL_NAMES.length).toBe(16)
     expect(READONLY_TOOL_NAMES.size).toBe(18)
     for (const n of EXPLORE_TOOL_NAMES) expect(names.has(n)).toBe(true)

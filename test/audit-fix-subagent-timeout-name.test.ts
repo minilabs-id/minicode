@@ -124,7 +124,7 @@ test("A1 default timeout dinaikkan & lease tetap 2.5x (turunan, bukan angka lepa
   expect(LIMITS.SUB_AGENT_TIMEOUT_MS).toBeGreaterThanOrEqual(300_000)
   expect(LIMITS.SUB_AGENT_TIMEOUT_MS).toBeLessThanOrEqual(LIMITS.MAX_TIMER_DELAY_MS)
   expect(SESSION_LEASE_MS).toBe(Math.ceil(LIMITS.SUB_AGENT_TIMEOUT_MS * 2.5))
-  if (!process.env.MINICODE_SUB_AGENT_POOL_SIZE) expect(LIMITS.SUB_AGENT_POOL_SIZE).toBe(3)
+  if (!process.env.MINICODE_SUB_AGENT_POOL_SIZE) expect(LIMITS.SUB_AGENT_POOL_SIZE).toBe(5)
 })
 
 // ── B. Timeout + partial text ───────────────────────────────────────────────
@@ -169,7 +169,8 @@ test("C1 lima delegate paralel dapat label explore-N unik & timeout masing-masin
   todoSession.id = "audit-sub-c1"
   try {
     const seen: SubAgentSpec[] = []
-    // Factory instan; pool (default 3) mengantre 2 anak tanpa mengubah timeout.
+    // Factory instan; pool (default 5) menjalankan kelima anak paralel tanpa
+    // mengubah timeout.
     setSubAgentSessionFactory(async (spec) => {
       seen.push(spec)
       return {

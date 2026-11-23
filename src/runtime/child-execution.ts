@@ -106,7 +106,10 @@ export interface ChildAdmission {
 }
 
 function modeStepCap(mode: ChildMode): number {
-  // Evidence: SUB_AGENT_BUDGET_EXPLORE/PLAN + hard-cap SUB_AGENT_MAX_STEPS (task.ts).
+  // Evidence: SUB_AGENT_BUDGET_EXPLORE/PLAN (5/15, fallback kontrak lama) +
+  // ceiling LIMITS.SUB_AGENT_MAX_STEPS (kini 100). Angka ceiling sengaja
+  // dibaca dari konstanta, bukan di-hardcode 50, supaya kenaikan hard-cap
+  // otomatis terpakai di sini juga.
   // [T-008] Memakai cap sub-agent SENDIRI, bukan DEFAULT_MAX_STEPS sesi utama:
   // cap delegasi tidak boleh ikut naik saat default sesi utama berubah.
   const cap = mode === "explore" ? LIMITS.SUB_AGENT_BUDGET_EXPLORE : LIMITS.SUB_AGENT_BUDGET_PLAN

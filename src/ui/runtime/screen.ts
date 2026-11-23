@@ -35,12 +35,13 @@ const HIDE_CURSOR = "\x1b[?25l"
 const RESET_REGION = "\x1b[r"
 const SYNC_START = "\x1b[?2026h"
 const SYNC_END = "\x1b[?2026l"
-/** DECSCUSR `6 q` = bar tegak stabil (tak berkedip): SATU-SATUNYA mekanisme
- * penanda kursor di seluruh TUI. Picker/manager TIDAK lagi menggambar caret
+/** DECSCUSR `5 q` = bar tegak BERKEDIP: SATU-SATUNYA mekanisme penanda kursor
+ * di seluruh TUI. Kedipan dilakukan terminal sendiri — tanpa timer/repaint
+ * tambahan, tanpa writer baru. Picker/manager TIDAK lagi menggambar caret
  * glyph blok statis — kursor terminal yang diparkir jadi penanda tunggal. */
-const CARET_BAR = "\x1b[6 q"
+const CARET_BAR = "\x1b[5 q"
 /** DECSCUSR `0 q` = kembalikan bentuk caret terminal ke default saat keluar
- * alt-screen (simetris dengan `6 q` yang dipakai selama sesi). */
+ * alt-screen (simetris dengan `5 q` yang dipakai selama sesi). */
 const CARET_RESET = "\x1b[0 q"
 /** Satu sekuens exit atomik: reset atribut → reset gaya caret → tampilkan
  * kursor → tutup sync update → keluar alt-screen → reset region. Ditulis

@@ -19,9 +19,12 @@ import {
 describe("T-008: tangga batas langkah", () => {
   test("default sesi utama 200, sub-agent 50 (terpisah)", () => {
     expect(DEFAULT_SESSION_MAX_STEPS).toBe(200)
+    // Default kontrak lama tetap 50; hard-cap delegasi naik 100 → 600 (riset +
+    // persetujuan owner). Keduanya sengaja berbeda: default = fallback tanpa
+    // scope, hard-cap = atap eskalasi.
     expect(DEFAULT_SUB_AGENT_MAX_STEPS).toBe(50)
     expect(LIMITS.DEFAULT_MAX_STEPS).toBe(200)
-    expect(LIMITS.SUB_AGENT_MAX_STEPS).toBe(50)
+    expect(LIMITS.SUB_AGENT_MAX_STEPS).toBe(600)
   })
 
   test("tangga menaik ketat dan berakhir di ceiling", () => {

@@ -7,7 +7,7 @@
 //   2. `nextStepLimit` dulu hanya dipakai sesi UTAMA. Setiap delegate membuat
 //      sesi anak baru, jadi anak yang mati `max_steps_exceeded` dan didelegasi
 //      ulang mendapat cap yang SAMA. Kini kegagalan terakhir per kunci
-//      menaikkan cap anak berikutnya (terklem 50), tanpa failure → tanpa naik.
+//      menaikkan cap anak berikutnya (terklem 600), tanpa failure → tanpa naik.
 //
 // Hermetik: tmpdir + fake factory, tanpa provider/jaringan asli.
 
@@ -131,15 +131,15 @@ test("max_steps_exceeded → cap naik di delegasi berikutnya; di ceiling berhent
     expect(seen[0]!.maxSteps).toBe(LIMITS.SUB_AGENT_BUDGET_EXPLORE) // 5 (default)
 
     await delegateTaskTool.execute({ prompt: "steps-key" }, ctxFor(dir))
-    // v0.33: tangga KHUSUS sub-agent [8,12,20,32,50] — bertahap, bukan loncat
-    // 5 → 50 seperti saat memakai tangga sesi utama [200,400,...].
+    // Tangga KHUSUS sub-agent [8,12,20,32,50,75,100,150,250,400,600] — bertahap,
+    // bukan loncat 5 → ceiling seperti tangga sesi utama [200,400,...].
     expect(seen[1]!.maxSteps).toBe(8)
     expect(seen[1]!.maxSteps).toBeGreaterThan(seen[0]!.maxSteps)
 
     await delegateTaskTool.execute({ prompt: "steps-key" }, ctxFor(dir))
     expect(seen[2]!.maxSteps).toBe(12)
 
-    // Terus naik sampai hard-cap 50, lalu BERHENTI (tak naik lagi).
+    // Terus naik sampai hard-cap 600, lalu BERHENTI (tak naik lagi).
     let last = seen[2]!.maxSteps
     for (let i = 0; i < 10; i++) {
       await delegateTaskTool.execute({ prompt: "steps-key" }, ctxFor(dir))

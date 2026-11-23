@@ -412,24 +412,29 @@ test("jail argumen: git paths, lsp file, bash cwd di luar root ditolak", async (
   }
 })
 
-// ── Kunci .minicode/** penuh (audit #13): daftar-nama terbukti rapuh ──
-// Kasus nyata: `write_file .minicode/test-write.txt` lolos karena namanya
-// tak terdaftar. Kini segmen .minicode/ apa pun ditolak untuk tool tulis.
+// ── .minicode/** kini BOLEH ditulis (keputusan owner 2026-11-23) ──
+// Dulu seluruh segmen .minicode/ dikunci untuk tool tulis (audit #13).
+// Sekarang yang masih dikunci HANYA `.minicode/hooks/**` (hook dieksekusi
+// otomatis). State lain (skills, notes, .trash) boleh ditulis agen.
 
-test("allow-all menolak tulis/edit/hapus ke .minicode/<apa-pun>", async () => {
+test("allow-all boleh tulis/edit/hapus ke .minicode kecuali hooks", async () => {
   const root = tmpRoot()
   try {
     expect(await check("allow-all", root, "write_file", { path: ".minicode/notes.md" })).toBe(
-      "deny",
+      "allow",
     )
     expect(await check("allow-all", root, "write_file", { path: ".minicode/.trash/x" })).toBe(
-      "deny",
+      "allow",
     )
-    expect(await check("allow-all", root, "edit", { path: ".minicode/custom.json" })).toBe("deny")
+    expect(await check("allow-all", root, "edit", { path: ".minicode/custom.json" })).toBe("allow")
     expect(await check("allow-all", root, "delete_file", { path: ".minicode/notes.md" })).toBe(
+      "allow",
+    )
+    // Hook tetap ditolak.
+    expect(await check("allow-all", root, "write_file", { path: ".minicode/hooks/pre-x.js" })).toBe(
       "deny",
     )
-    // BACA tetap boleh (observability) — yang dikunci hanya tulis.
+    // BACA tetap boleh (observability).
     expect(await check("allow-all", root, "read_file", { path: ".minicode/notes.md" })).toBe(
       "allow",
     )
@@ -438,7 +443,7 @@ test("allow-all menolak tulis/edit/hapus ke .minicode/<apa-pun>", async () => {
   }
 })
 
-test("move restore dari .trash ke workspace lolos; selain itu dua arah deny", async () => {
+test("move restore & state biasa kini lolos; hooks tetap deny", async () => {
   const root = tmpRoot()
   try {
     // Restore sah: bukan deny (allow-all → allow; mode lain ikut mode check).
@@ -448,25 +453,38 @@ test("move restore dari .trash ke workspace lolos; selain itu dua arah deny", as
         destination: "docs/a.txt",
       }),
     ).toBe("allow")
-    // Menanam ke state: deny.
+    // Menanam ke state biasa: kini allow.
     expect(
       await check("allow-all", root, "move_file", {
         path: "docs/a.txt",
         destination: ".minicode/x.txt",
       }),
-    ).toBe("deny")
-    // Menggeser state keluar (sebar bukti): deny.
+    ).toBe("allow")
+    // Menggeser state biasa keluar: allow.
     expect(
       await check("allow-all", root, "move_file", {
         path: join(".minicode", "sessions.db"),
         destination: "docs/s.db",
       }),
-    ).toBe("deny")
-    // Trash ke trash = tetap state: deny (hanya keluar workspace yang sah).
+    ).toBe("allow")
+    // Trash ke trash = state biasa: allow.
     expect(
       await check("allow-all", root, "move_file", {
         path: join(".minicode", ".trash", "a.txt"),
         destination: join(".minicode", "b.txt"),
+      }),
+    ).toBe("allow")
+    // Hook tetap deny dua arah.
+    expect(
+      await check("allow-all", root, "move_file", {
+        path: "docs/a.txt",
+        destination: join(".minicode", "hooks", "pre-x.js"),
+      }),
+    ).toBe("deny")
+    expect(
+      await check("allow-all", root, "move_file", {
+        path: join(".minicode", "hooks", "pre-x.js"),
+        destination: "docs/a.txt",
       }),
     ).toBe("deny")
   } finally {
@@ -510,7 +528,7 @@ test("allow-all menolak hive kredensial Windows (kasus sesi nyata)", async () =>
 // ── konsistensi list-vs-enforcement: yang terlihat harus boleh ──
 
 test("EXPLORE list vs READONLY permission: over-hiding terdokumentasi", async () => {
-  // 6 tool ini DIIZINKAN permission readonly/plan tetapi DISEMBUNYIKAN dari
+  // 2 tool ini DIIZINKAN permission readonly/plan tetapi DISEMBUNYIKAN dari
   // model oleh EXPLORE_TOOL_NAMES (tool-layer). Aman (fail-closed ke arah
   // menyembunyikan), tetapi inkonsistensi sadar — test ini menguncinya agar
   // perubahan salah satu sisi ketahuan.
@@ -535,7 +553,5 @@ test("EXPLORE list vs READONLY permission: over-hiding terdokumentasi", async ()
     "read_image",
   ]
   const hidden = readonlyAllowed.filter((n) => !EXPLORE_TOOL_NAMES.includes(n))
-  expect(hidden.sort()).toEqual(
-    ["git_diff", "lsp_references", "lsp_symbols", "read_image", "web_fetch", "web_search"].sort(),
-  )
+  expect(hidden.sort()).toEqual(["web_fetch", "web_search"].sort())
 })

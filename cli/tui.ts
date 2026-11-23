@@ -17,7 +17,10 @@
 // - busy = composer hidup; Enter MENYELIPKAN informasi tambahan ke turn aktif
 //   (kernel `Session.steer`, dibaca model di batas step berikutnya). Bila turn
 //   sudah selesai lebih dulu, baris diantrikan sebagai turn berikutnya; Esc =
-//   abort yang juga membuang antrean fallback. Perintah slash butuh idle.
+//   abort yang juga membuang antrean fallback. Slash command aman ditunda ikut
+//   antrean command terpisah dan dijalankan setelah turn (mode/UI mutasi butuh
+//   idle supaya aturan main turn berjalan tak berubah di tengah); hanya command
+//   berdampak destruktif yang tetap ditolak.
 import { readFileSync } from "node:fs"
 import { resolve as resolvePath } from "node:path"
 import { expandMentions } from "../src/app/mentions.ts"
@@ -86,6 +89,22 @@ const WORK_MODE_CYCLE = ["DISCUSS", "EXECUTE"] as const
 // (bukan panel/sidebar terpisah) lewat `tui.thinkingSet`.
 const VIEW_ACTIONS = ["thinking"] as const
 const DRIVER_COMMANDS = ["/view", "/mode", "/lang", "/clear", "/copy", "/undo", "/redo"]
+
+/**
+ * Command yang TETAP ditolak saat turn busy (toast `tui.busyCmd`), walaupun
+ * command lain kini boleh diantrikan. Batasnya sengaja DAMPAK, bukan daftar
+ * putih: command lain (termasuk skill) aman ditunda karena hanya mengubah
+ * mode/UI/readout setelah model selesai bekerja. Yang masuk sini efeknya
+ * merusak bila terjadi di transisi turn:
+ * - exit/quit: keluar mendadak tepat setelah turn → hasil turn belum sempat
+ *   dibaca user; user masih punya Esc-Esc / Ctrl+D untuk abort+quit.
+ * - clear: menghapus transkrip tempat turn baru saja menulis.
+ * - undo/redo: memutar balik workspace (bisa bertabrakan dengan tulisan turn).
+ * - update: install/restart proses tepat pada batas turn.
+ */
+const BUSY_REJECTED_COMMANDS = new Set(["exit", "quit", "clear", "undo", "redo", "update"])
+/** Pengaman anti-infinite-loop: command yang memicu command lain dibatasi. */
+const MAX_DEFERRED_COMMANDS_PER_CYCLE = 32
 
 function fmtCtx(n: number): string | undefined {
   if (!Number.isFinite(n) || n <= 0) return undefined
@@ -838,6 +857,15 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
   // DITUNDA sampai benar-benar dikonsumsi runTurn. Baris yang dibuang saat
   // abort tak pernah digema → tak ada prompt hantu di transkrip.
   const queuedPrompts: { text: string; needsEcho: boolean }[] = []
+  // Antrean slash command yang aman ditunda (FIFO urutan ketikan). Dipisah dari
+  // `queuedPrompts` karena command BUKAN percakapan: tak digema ke transkrip
+  // (konvensi app.ts) dan tak dikirim ke model. `runTurn` menguras teks dulu,
+  // baru command — steer adalah lanjutan isi turn, command adalah aksi sesudahnya.
+  const queuedCommands: string[] = []
+  // Skill/builtin tertentu bisa memanggil runTurn saat dieksekusi. Flag ini
+  // memastikan hanya siklus terluar yang menguras antrean command: pemanggilan
+  // bersarang tetap menyisakan command untuk loop luar (anti rekursi & FIFO utuh).
+  let drainingDeferredCommands = false
   // Baris yang berhasil di-steer digema SEGERA (posisi kronologis benar), tapi
   // dicatat untuk notifikasi pembatalan bila turn di-abort sebelum kernel
   // menerapkannya. Dibersihkan di awal tiap turn.
@@ -1351,7 +1379,10 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
             .splice(0, queuedPrompts.length)
             .filter((q) => q.needsEcho).length
           const droppedSteered = steeredEchoes.splice(0).length
-          const dropped = droppedQueued + droppedSteered
+          // Command yang ditunda ikut dibuang: abort = niat user dibatalkan,
+          // jadi mode/UI tak boleh berubah setelah turn dihentikan.
+          const droppedCommands = queuedCommands.splice(0).length
+          const dropped = droppedQueued + droppedSteered + droppedCommands
           if (dropped > 0) app.showToast(tSystem("tui.queueDropped", { n: String(dropped) }))
           // v7.41 (audit): anak di-abort mengirim STRING error via tool.completed.
           // Ringkasan yang sudah terkumpul di turn ini WAJIB dibuang, kalau tidak
@@ -1434,8 +1465,15 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
    * turn berjalan. Loop (bukan rekursi) supaya backlog panjang tidak menumpuk
    * stack, dan tiap pesan antre tetap jadi turn PENUH sendiri — sehingga model
    * melihat hasil turn sebelumnya utuh sebelum membaca tambahan itu.
+   *
+   * Setelah semua teks selesai, antrean command ditunaikan lewat `submit`
+   * (satu-satunya tempat yang memahami semua slash command saat idle). Command
+   * ditunda sampai DI SINI karena mengubah mode/UI/readout: menjalankannya di
+   * tengah turn akan mengganti aturan main yang dipakai model tanpa pemberitahuan.
+   * `quit` diteruskan ke App lewat nilai balik (mis. bila kelak command yang
+   * ditunda mengembalikan `{ quit: true }`).
    */
-  async function runTurn(prompt: string): Promise<void> {
+  async function runTurn(prompt: string): Promise<{ quit?: boolean } | undefined> {
     let next: string | undefined = prompt
     while (next !== undefined) {
       await runTurnOnce(next)
@@ -1446,6 +1484,28 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
       if (item?.needsEcho) transcript.pushUser(item.text)
       next = item?.text
     }
+    // Hanya siklus terluar yang menguras command; pemanggilan runTurn bersarang
+    // (skill / auto-resume) membiarkan antrean utuh untuk diproses di sini.
+    if (drainingDeferredCommands) return undefined
+    drainingDeferredCommands = true
+    try {
+      let n = 0
+      while (queuedCommands.length > 0 && n < MAX_DEFERRED_COMMANDS_PER_CYCLE) {
+        const cmd = queuedCommands.shift()!
+        n++
+        const res = await submit(cmd)
+        if (res?.quit) return res
+      }
+      // Batas tercapai tapi antrean masih ada → buang sisa dengan kwitansi;
+      // jangan biarkan command "nyangkut" tak tersampaikan diam-diam.
+      if (queuedCommands.length) {
+        const dropped = queuedCommands.splice(0).length
+        app.showToast(tSystem("tui.queueDropped", { n: String(dropped) }))
+      }
+    } finally {
+      drainingDeferredCommands = false
+    }
+    return undefined
   }
 
   /**
@@ -1509,8 +1569,9 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
     // runTurnOnce saat AbortController turn baru dibuat. Kalau tidak, auto-resume
     // job background (yang tak lewat submit) akan mewarisi niat abort lama.
     if (!line.startsWith("/")) {
-      await runTurn(line)
-      return
+      // Teruskan hasil runTurn: command yang ditunda bisa saja mengembalikan
+      // quit, dan App perlu melihatnya lewat nilai balik submit ini.
+      return runTurn(line)
     }
     const spaceIdx = line.indexOf(" ")
     const name = (spaceIdx === -1 ? line.slice(1) : line.slice(1, spaceIdx)).toLowerCase()
@@ -1822,7 +1883,8 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
       return
     }
     transcript.pushUser(line)
-    await runTurn(await renderSkill(skill, args))
+    const skillRes = await runTurn(await renderSkill(skill, args))
+    if (skillRes?.quit) return skillRes
   }
 
   const host: TuiHost = {
@@ -1875,8 +1937,9 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
     // "steer" di opencode) — kernel menambahkannya sebagai pesan user pada
     // batas step berikutnya, jadi model membacanya di turn yang sama. Bila turn
     // ternyata sudah selesai (balapan), jatuh ke antrean turn berikutnya supaya
-    // pesan tidak hilang. Perintah `/slash` ditolak: ia memutasi UI/mode dan
-    // butuh idle.
+    // pesan tidak hilang. Slash command aman ikut antrean command (dijalankan
+    // setelah turn); hanya yang berdampak destruktif yang ditolak — mode/UI
+    // mutasi butuh idle supaya aturan main turn yang berjalan tak berubah.
     enqueue: (raw) => {
       const line = raw.trim()
       if (!line) return false
@@ -1887,9 +1950,17 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
         return false
       }
       if (line.startsWith("/")) {
-        const name = line.split(/\s+/)[0] ?? line
-        app.showToast(tSystem("tui.busyCmd", { cmd: name }))
-        return false
+        const name = (line.split(/\s+/)[0] ?? line).slice(1).toLowerCase()
+        if (BUSY_REJECTED_COMMANDS.has(name)) {
+          app.showToast(tSystem("tui.busyCmd", { cmd: `/${name}` }))
+          return false
+        }
+        // Command BUKAN giliran bicara: jangan pushUser (konvensi app.ts:1313).
+        // Kwitansi cukup toast — hasil/output command punya mekanisme sendiri
+        // saat dijalankan nanti (window / toast dari submit()).
+        queuedCommands.push(line)
+        app.showToast(tSystem("tui.cmdQueued", { cmd: `/${name}` }))
+        return true
       }
       // `?.` menjaga fixture/komposisi lama yang belum punya seam ini (fail-safe:
       // jatuh ke antrean, bukan crash di tengah turn).
@@ -1994,7 +2065,13 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
       // jendela "Esc lagi = quit" wajib dimatikan di sini secara eksplisit.
       disarmAbortQuitIfAvailable(app)
       resumedJobs.add(id)
-      void runTurn(t("tui.bgFinishedAuto", { id, code: code ?? "?" })).catch(() => {})
+      void runTurn(t("tui.bgFinishedAuto", { id, code: code ?? "?" }))
+        .then((res) => {
+          // Auto-resume tak lewat doSubmit, jadi quit dari command yang ditunda
+          // harus diteruskan eksplisit ke App.
+          if (res?.quit) app.requestQuit()
+        })
+        .catch(() => {})
     } catch {}
   })
   // v7.41: Kumpulkan bukti anak delegate_task yang selesai. Handler domain-event

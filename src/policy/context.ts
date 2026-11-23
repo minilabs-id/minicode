@@ -296,8 +296,10 @@ export async function buildSystemPrompt(
       "- For tasks with 3+ steps, maintain the todo list; keep exactly one item in_progress.",
       // Dorong delegasi paralel sejak awal, tapi jangan menaruh angka step di
       // prompt (dulu mematikan eskalasi adaptif). Model mengirim `scope`,
-      // runtime memilih budget; re-delegasi scope sama dilarang (dead air).
-      "- Ask the user only when truly blocked on a decision; delegate only genuinely parallel, scoped research/audit work — at most 2-3 `explore` sub-agents per turn, each with a narrow prompt and an explicit `scope` (file/dir/subtree/repo). Do NOT set `maxSteps` — the runtime derives and escalates the budget. On failure, use the child's partial findings and continue yourself: NEVER re-delegate the same scope, and never tighten the limit. Small tasks: do them directly. (delegation still follows authorization and work-mode rules).",
+      // runtime memilih budget. Re-delegasi scope yang SAMA kini diperbolehkan
+      // justru sebagai mekanisme eskalasi setelah `max_steps_exceeded`; hanya
+      // re-delegasi buta tanpa perubahan/kegagalan yang dilarang.
+      "- Ask the user only when truly blocked on a decision; delegate only genuinely parallel, scoped research/audit work — 2–5 `explore` sub-agents per turn when the scopes are genuinely separate, each with a narrow prompt and an explicit `scope` (file/dir/subtree/repo). Do NOT set `maxSteps` — the runtime derives and escalates the budget. On failure, use the child's partial findings; do NOT blindly re-delegate an unchanged scope — after `max_steps_exceeded`, re-delegating the same scope is exactly how adaptive escalation is used; otherwise continue yourself, and never tighten the limit. Small tasks: do them directly. (delegation still follows authorization and work-mode rules).",
       "- On a tool error or permission denial, read the message and change approach — do not repeat the same call.",
       // Klaim "done" tanpa bukti = pola VERIFY_FAIL di bench; satu baris instruksi.
       "- Verify before claiming done: reproduce or check the result (run the relevant test/command, re-read the edited file) before reporting success. If verification fails, keep working — never declare victory on an unchecked change.",

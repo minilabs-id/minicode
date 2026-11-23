@@ -529,7 +529,7 @@ export const delegateTaskTool: Tool = {
         type: "string",
         enum: ["file", "dir", "subtree", "repo"],
         description:
-          "breadth of the delegated work; runtime derives a step budget (file 6 · dir 10 · subtree 16 · repo 24, plan ×1.5). Omit to infer from prompt.",
+          "breadth of the delegated work; runtime derives a step budget (file 16 · dir 24 · subtree 40 · repo 64, plan ×1.5). Omit to infer from prompt.",
       },
       timeoutMs: {
         type: "number",
@@ -617,12 +617,12 @@ export const delegateTaskTool: Tool = {
     // EKUIVALEN dengan M7 `modeStepCap` — keduanya membaca konstanta yang SAMA
     // (SUB_AGENT_BUDGET_EXPLORE/PLAN); karena 5/15 < DEFAULT_MAX_STEPS, min-nya
     // konstan-fold ke cap mode. Cabang eksplisit TIDAK diklamp ke cap mode
-    // (min(requested, 50)) — M7 justru `min(requested, modeCap)`, jadi lebih
+    // (min(requested, hard-cap 100)) — M7 justru `min(requested, modeCap)`, jadi lebih
     // ketat; menyamakannya = perubahan perilaku observable (butuh ADR owner).
     // Jalur autonomous TIDAK memakai M7: mode-less (readonly tetap) + default 8
     // tak representable tanpa mengarang mode/grant. Kontrak dipin test
     // `test/p9-admission-boundaries.test.ts`; jangan menyeragamkan tanpa ADR.
-    // [T-008] Cap eksplisit sub-agent memakai konstanta SENDIRI (50), bukan
+    // [T-008] Cap eksplisit sub-agent memakai konstanta SENDIRI (100), bukan
     // `DEFAULT_MAX_STEPS` sesi utama (200). Menyamakannya = memperluas
     // kewenangan delegasi diam-diam saat default sesi utama naik.
     // v7.34 — eskalasi cap per-delegasi. Dulu `nextStepLimit` hanya dipakai sesi
@@ -644,8 +644,8 @@ export const delegateTaskTool: Tool = {
     let raised: number | undefined
     try {
       const msEx = priorEntry?.maxStepsExceeded
-      // v0.33: tangga KHUSUS sub-agent ([8,12,20,32,50]) — bukan tangga sesi
-      // utama [200,...] yang bikin anak loncat 5 → 50 dalam satu retry.
+      // v0.33: tangga KHUSUS sub-agent ([8,12,20,32,50,75,100]) — bukan tangga
+      // sesi utama [200,...] yang bikin anak loncat 5 → 100 dalam satu retry.
       // Di ceiling, nextSubAgentStepLimit() returns undefined — jangan jatuh ke
       // fallback 5 (reset). Pertahankan cap lama supaya delegasi berikutnya
       // tetap di batas maksimum, bukan mentok lagi dari nol.

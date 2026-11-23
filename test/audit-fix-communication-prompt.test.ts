@@ -109,15 +109,19 @@ test("komunikasi: baris delegasi di How to work mendorong sub-agent awal & paral
   try {
     const sys = await buildSystemPrompt({ cwd: dir })
     const howto = sectionOf(sys, "# How to work")
-    // v0.33: sadar-budget (5 temuan / 5 step / 300 dtk) + aturan stop saat
-    // delegasi gagal, bukan sekadar "EARLY" tanpa batas.
+    // Sadar-budget + aturan delegasi ulang yang NUANSA: jangan mengulang scope
+    // yang sama secara buta, kecuali setelah `max_steps_exceeded` — itulah
+    // eskalasi adaptif. Bukan sekadar "EARLY" tanpa batas.
     expect(howto).toMatch(/delegate only genuinely parallel, scoped research\/audit work/i)
     // v0.33: prompt TIDAK boleh memuat angka step (dulu ≤5 → maxSteps eksplisit
     // → eskalasi mati). Model mengirim `scope`, runtime yang mengatur budget.
     expect(howto).not.toMatch(/≤\s*5\s*steps/i)
     expect(howto).toMatch(/explicit `scope`/i)
     expect(howto).toMatch(/Do NOT set `maxSteps`/i)
-    expect(howto).toMatch(/NEVER re-delegate the same scope/i)
+    expect(howto).toMatch(/do NOT blindly re-delegate an unchanged scope/i)
+    expect(howto).toMatch(
+      /after `max_steps_exceeded`, re-delegating the same scope is exactly how adaptive escalation is used/i,
+    )
     // fail-safe: aturan wewenang/work-mode tetap disebut, tak dihapus.
     expect(howto).toMatch(/authorization and work-mode rules/i)
   } finally {

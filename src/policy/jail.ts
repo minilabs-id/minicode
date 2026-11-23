@@ -37,23 +37,24 @@ export function isSensitive(p: string): boolean {
 
 // State milik minicode sendiri (temuan audit #04, dikeraskan audit #13):
 // sesi/DB/jejak/checkpoint/jurnal/todo/rencana/allowlist/config yang dikelola
-// tool khusus (bukan file tools). File tool (write/edit/patch/delete/move)
-// DILARANG menyentuh apa pun di bawah `.minicode/` — daftar-nama terbukti
-// rapuh (kasus nyata: `write_file .minicode/test-write.txt` lolos karena
-// namanya tak terdaftar). Kalau tidak, sub-agen (atau prompt-injected call)
-// bisa menanam file eksport-mimikri, menimpa todos/rencana, allowlist
-// ("always" palsu!), config (server MCP jahat!), atau membutakan recovery.
-// BACA tetap boleh (observability/debug). Pola di-anchor ke segmen
-// `.minicode/` agar file user bernama mirip di tempat lain tak kena.
-// Pengecualian: restore dari `.minicode/.trash/` (ditangani di permission.ts,
-// bukan di sini, agar arahnya eksplisit).
+// tool khusus. DULU file tool (write/edit/patch/delete/move) dilarang menyentuh
+// apa pun di bawah `.minicode/`, tapi **keputusan owner 2026-11-23 membaliknya**:
+// agen/model kini BOLEH menulis `.minicode/` (termasuk lewat shell). Kunci tulis
+// di permission.ts dicabut; pemeriksaan jail workspace/rahasia tetap berlaku.
+// `isOwnedState()` SENGAJA dipertahankan: dipakai pembaca (checkpoint, rewind,
+// shadow-git, git, lsp) untuk deteksi & filtrasi, bukan lagi sebagai kunci tulis.
+// Pola di-anchor ke segmen `.minicode/` agar file user bernama mirip di tempat
+// lain tak kena. Restore `.minicode/.trash/` → workspace ditangani di
+// permission.ts (arah eksplisit).
 //
-// `.minicode/hooks/` TIDAK lagi dikecualikan (audit 2026-11-12): hook
-// dieksekusi otomatis lewat scan direktori begitu `MINICODE_HOOKS=1`, jadi
-// carve-out tulis = model/prompt-injection bisa menanam kode lalu menjalankannya
-// di sesi yang sama, di luar permission/jail/sandbox. Skrip hook sekarang
-// dibuat operator di luar sesi (shell manual), bukan lewat file tool.
+// SATU-SATUNYA sudut yang TETAP dikunci: `.minicode/hooks/` (audit 2026-11-12,
+// ditegaskan kembali saat keputusan 2026-11-23 hanya menyebut `.minicode/` umum).
+// Hook dieksekusi otomatis lewat scan direktori begitu `MINICODE_HOOKS=1`, jadi
+// izin menulis = model/prompt-injection bisa menanam kode lalu menjalankannya
+// di sesi yang sama, di luar permission/jail/sandbox. Skrip hook dibuat operator
+// di luar sesi (shell manual), bukan lewat file tool maupun redirection shell.
 const OWNED_STATE_RE = /(?:^|[/\\])\.minicode(?:[/\\]|$)/i
+const OWNED_HOOKS_RE = /(?:^|[/\\])\.minicode[/\\]hooks(?:[/\\]|$)/i
 
 export function isOwnedState(p: string): boolean {
   if (!p) return false
@@ -61,15 +62,26 @@ export function isOwnedState(p: string): boolean {
   return OWNED_STATE_RE.test(p) || OWNED_STATE_RE.test(cleaned)
 }
 /**
+ * Deteksi skrip hook milik minicode (`.minicode/hooks/**`). Dipakai SATU-SATUNYA
+ * untuk kunci tulis yang masih berlaku setelah keputusan owner 2026-11-23 —
+ * lihat komentar OWNED_HOOKS_RE di atas untuk alasannya.
+ */
+export function isOwnedHook(p: string): boolean {
+  if (!p) return false
+  const cleaned = cleanPathForMatch(p)
+  return OWNED_HOOKS_RE.test(p) || OWNED_HOOKS_RE.test(cleaned)
+}
+
+/**
  * Kunci realpath untuk owned-state (temuan audit 2026-09-22 F-CRIT): cek
  * string `isOwnedState` dilewati link internal (junction/symlink →
  * `.minicode/`), jadi TARGET NYATA ikut dicek — pola yang sama dengan
  * `isRealPathOutsideRoot` dan TOCTOU pembaca. Best-effort & sinkron (dipakai
  * lapisan permission): kegagalan realpath (mis. target belum ada) jatuh ke
- * bentuk logis (cek string) agar penulisan file baru tetap presisi dan
- * carve-out hooks/trash (yang dicek string di pemanggil) tak berubah arti.
+ * bentuk logis (cek string) agar penulisan file baru tetap presisi. Dipakai
+ * lapisan tool (git/lsp) untuk deteksi, bukan lagi kunci tulis di permission.ts.
  */
-export function isOwnedStateReal(p: string, root: string): boolean {
+function isOwnedReal(p: string, root: string, owned: (s: string) => boolean): boolean {
   if (!p) return false
   // Mundur ke induk terdekat yang ada: realpath penuh bila target ada,
   // realpath induk + sisa-ekor bila berkasnya baru (`.`/`..` ikut
@@ -79,7 +91,7 @@ export function isOwnedStateReal(p: string, root: string): boolean {
   let tail = ""
   for (let i = 0; i < 64; i++) {
     try {
-      return isOwnedState(resolve(realpathSync(probe), tail))
+      return owned(resolve(realpathSync(probe), tail))
     } catch {
       const parent = dirname(probe)
       if (parent === probe) break
@@ -87,7 +99,16 @@ export function isOwnedStateReal(p: string, root: string): boolean {
       probe = parent
     }
   }
-  return isOwnedState(p)
+  return owned(p)
+}
+
+export function isOwnedStateReal(p: string, root: string): boolean {
+  return isOwnedReal(p, root, isOwnedState)
+}
+
+/** realpath-aware `isOwnedHook`: junction internal tak boleh menyamarkan hook. */
+export function isOwnedHookReal(p: string, root: string): boolean {
+  return isOwnedReal(p, root, isOwnedHook)
 }
 
 /**

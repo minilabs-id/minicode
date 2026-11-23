@@ -8,6 +8,9 @@
 // waitForOutput/waitForScreen. Sejak diff per sel, teks yang tak berubah tidak
 // ditulis ulang, jadi tunggu ISI LAYAR (waitForScreen), bukan byte mentah.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { tmpdir } from "node:os"
+import type { CliSession } from "../cli/setup.ts"
+import { runTui } from "../cli/tui.ts"
 import type {
   UiPresentationActivity,
   UiPresentationEvent,
@@ -2514,5 +2517,178 @@ describe("TuiApp", () => {
     expect(menuNames(screenText())).not.toContain("model")
     await tty!.send(KEY.ctrlD)
     await runP
+  })
+})
+
+/**
+ * Command slash yang diketik saat busy (driver cli/tui.ts + TuiApp).
+ *
+ * Regresi untuk desain antrean ganda: teks tetap lewat steering/queuedPrompts,
+ * command aman masuk `queuedCommands` dan baru dijalankan `submit()` setelah
+ * turn selesai. `workModeControl` palsu dipakai sebagai observer efek command
+ * `/mode` tanpa membuka popup yang memblokir harness.
+ */
+describe("TUI: slash command ditunda sampai turn selesai", () => {
+  type DeferredHarness = {
+    events: string[]
+    session: CliSession
+    release: () => void
+  }
+
+  function deferredHarness(opts: { steerAccepted?: boolean } = {}): DeferredHarness {
+    const bus = createFakeBus()
+    const events: string[] = []
+    let gate: (() => void) | null = null
+    const noop = async () => {}
+    const session = {
+      bus,
+      session: {
+        events: bus,
+        contextTokens: 0,
+        steer: (text: string) => {
+          if (opts.steerAccepted === false) return false
+          events.push(`steer:${text}`)
+          return true
+        },
+      },
+      cfg: { providers: [] },
+      cwd: tmpdir(),
+      sessionId: "deferred-cmd-test",
+      modelRef: {} as { current?: string },
+      permissionMode: "auto",
+      permissions: undefined,
+      workModeControl: {
+        getWorkMode: () => "DISCUSS",
+        setWorkMode: (m: string) => {
+          events.push(`mode:${m}`)
+        },
+      },
+      sessionTools: [],
+      allLoadedSkills: [],
+      allowLocalConfig: false,
+      usage: {
+        get: () => ({ inputTokens: 0, outputTokens: 0, totalTokens: 0, cost: 0 }),
+        getSession: () => ({ inputTokens: 0, outputTokens: 0, totalTokens: 0, cost: 0 }),
+        modelUsed: () => ({}),
+        reset: () => {},
+      },
+      budget: undefined,
+      budgetStrict: false,
+      persistCurrent: noop,
+      runPromptWithVerify: async (prompt: string) => {
+        events.push(`prompt:${prompt}`)
+        await new Promise<void>((resolve) => {
+          gate = resolve
+        })
+      },
+      isWriterStale: () => false,
+      writerStaleNote: () => "",
+      close: noop,
+    } as unknown as CliSession
+    return {
+      events,
+      session,
+      release: () => {
+        const g = gate
+        gate = null
+        g?.()
+      },
+    }
+  }
+
+  async function waitFor(read: () => boolean, what: string): Promise<void> {
+    const deadline = Date.now() + 3000
+    while (Date.now() < deadline) {
+      if (read()) return
+      await new Promise((r) => setTimeout(r, 5))
+    }
+    throw new Error(`${what} tidak terjadi dalam batas waktu`)
+  }
+
+  async function startBusy(h: DeferredHarness, prompt = "pertama"): Promise<void> {
+    tty = installFakeTty({ columns: 80, rows: 24 })
+    await tty.ready()
+    await tty.waitForOutput((o) => o.includes("00.00.00"))
+    await tty.send(prompt)
+    await tty.send(KEY.enter)
+    await waitFor(() => h.events.some((e) => e === `prompt:${prompt}`), "turn pertama mulai")
+  }
+
+  test("command aman masuk antrean saat busy, baru dijalankan setelah turn selesai", async () => {
+    const h = deferredHarness()
+    const runP = runTui(h.session)
+    try {
+      await startBusy(h)
+      await tty!.send("/mode build")
+      await tty!.send(KEY.enter)
+      // Kwitansi antrean = toast; command BUKAN giliran bicara (tak pushUser).
+      await tty!.waitForScreen((f) => f.some((line) => line.includes("/mode queued")))
+      expect(h.events).toEqual(["prompt:pertama"])
+
+      h.release()
+      await waitFor(() => h.events.includes("mode:EXECUTE"), "command dijalankan usai turn")
+      expect(h.events).toEqual(["prompt:pertama", "mode:EXECUTE"])
+    } finally {
+      h.release()
+      await tty!.send(KEY.ctrlD)
+      await runP
+    }
+  })
+
+  test("urutan: teks yang diantre lebih dulu, lalu command FIFO sesuai ketikan", async () => {
+    const h = deferredHarness({ steerAccepted: false })
+    const runP = runTui(h.session)
+    try {
+      await startBusy(h)
+      await tty!.send("info tambahan")
+      await tty!.send(KEY.enter)
+      await tty!.send("/mode build")
+      await tty!.send(KEY.enter)
+      await tty!.send("/mode discuss")
+      await tty!.send(KEY.enter)
+      await tty!.waitForScreen((f) => f.some((line) => line.includes("/mode queued")))
+
+      h.release()
+      await waitFor(() => h.events.includes("prompt:info tambahan"), "teks antre jalan lebih dulu")
+      // Turn teks masih berjalan → command belum boleh mengubah mode.
+      expect(h.events).toEqual(["prompt:pertama", "prompt:info tambahan"])
+
+      h.release()
+      await waitFor(() => h.events.includes("mode:DISCUSS"), "command antre ke-2 jalan")
+      expect(h.events).toEqual([
+        "prompt:pertama",
+        "prompt:info tambahan",
+        "mode:EXECUTE",
+        "mode:DISCUSS",
+      ])
+    } finally {
+      h.release()
+      await tty!.send(KEY.ctrlD)
+      await runP
+    }
+  })
+
+  test("command berdampak destruktif (/exit) tetap ditolak saat busy", async () => {
+    const h = deferredHarness()
+    const runP = runTui(h.session)
+    try {
+      await startBusy(h)
+      await tty!.send("/exit")
+      await tty!.send(KEY.enter)
+      await tty!.waitForScreen((f) => f.some((line) => line.includes("busy · Esc to stop")))
+      expect(h.events).toEqual(["prompt:pertama"])
+
+      h.release()
+      // Tunggu unwind turn (busy→idle) sebelum mengirim prompt berikutnya.
+      await new Promise((r) => setTimeout(r, 30))
+      // Aplikasi tak keluar: prompt berikutnya masih bisa dikirim.
+      await tty!.send("setelah")
+      await tty!.send(KEY.enter)
+      await waitFor(() => h.events.includes("prompt:setelah"), "app masih hidup usai turn")
+    } finally {
+      h.release()
+      await tty!.send(KEY.ctrlD)
+      await runP
+    }
   })
 })

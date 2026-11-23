@@ -163,20 +163,23 @@ export const TOOL_CONTRACTS: readonly ToolContractMetadata[] = [
   // di permission.ts (sumber kebenaran KEDUA yang bisa drift). Sekarang
   // jailTarget:"file" ditetapkan eksplisit di sini — satu flag, satu derivasi.
   pr("read_file", { jailTarget: "file" }),
-  pr("read_image", { allowedInExplore: false, jailTarget: "file" }),
+  // v0.43.2: tool PURE_READ lain juga boleh masuk explore. KENAPA aman:
+  // semuanya read-only dan jailTarget eksplisit ("file"/"cwd") sudah membatasi
+  // path; menyembunyikannya hanya melemahkan eksplorasi tanpa menambah keamanan.
+  pr("read_image", { allowedInExplore: true, jailTarget: "file" }),
   pr("glob", { jailTarget: "cwd" }),
   pr("grep", { jailTarget: "cwd" }),
   pr("git_status", { jailTarget: "cwd" }),
-  pr("git_diff", { allowedInExplore: false, jailTarget: "cwd" }),
+  pr("git_diff", { allowedInExplore: true, jailTarget: "cwd" }),
   pr("git_log", { jailTarget: "cwd" }),
   pr("read_memory"),
   pr("todo_read"),
   pr("mcp_list"),
   pr("lsp_diagnostics", { jailTarget: "file" }),
   pr("lsp_definition", { jailTarget: "file" }),
-  pr("lsp_references", { allowedInExplore: false, jailTarget: "file" }),
+  pr("lsp_references", { allowedInExplore: true, jailTarget: "file" }),
   pr("lsp_hover", { jailTarget: "file" }),
-  pr("lsp_symbols", { allowedInExplore: false, jailTarget: "file" }),
+  pr("lsp_symbols", { allowedInExplore: true, jailTarget: "file" }),
   pr("lsp_workspace_symbols", { jailTarget: "file" }),
   // v7.33: `bash_output` secara historis masuk INTERNAL_WRITE + NO_PROMPT
   // (bookkeeping job bash), meski tier-nya PURE_READ — flag eksplisit menjaga

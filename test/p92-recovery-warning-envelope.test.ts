@@ -31,6 +31,7 @@ import {
   setSubAgentSessionFactory,
 } from "../src/tools/task.ts"
 import { todoSession } from "../src/tools/todo.ts"
+import { tSystem } from "../src/ui/render/tool-label.ts"
 
 /** Baris legacy — byte-identik dengan cli/index.ts pra-P9.2.2.1 (diuji di B1). */
 const legacyLine = (id: string): string =>
@@ -136,9 +137,12 @@ test("A1 returned + timeout: status observasi jujur, bukan klaim sukses", async 
     // Timeout tampil sebagai observasi + receipt dipisah eksplisit — tak ada
     // kata sukses, dan peringatan verifikasi tetap ada.
     expect(linesTo[0]).toContain("(observed child status: timeout; receipt: committed)")
+    // Timeout = status gagal: ringkasan error mentah tak boleh tampil, harus
+    // lewat gerbang kanonik yang sama dengan ledger (detail di --verbose).
     expect(linesTo[0]).toContain(
-      "prior child output: [sub-agent explore error] child turn timed out",
+      `prior child output: ${tSystem("msg.subagentFailed")} — effects stand`,
     )
+    expect(linesTo[0]).not.toContain("[sub-agent explore error] child turn timed out")
     expect(linesTo[0]).toContain("verify before re-delegating")
     expect(linesTo[0]).not.toMatch(/success|berhasil/i)
   } finally {
@@ -182,11 +186,18 @@ test("A2 aborted/max_steps/error + truncated: penanda jujur dua sumbu", async ()
     })
     const [lineMax] = await warningLines("p922-a2c", dir, t0)
     expect(lineMax).toContain("(observed child status: max_steps_exceeded; receipt: committed)")
-    // v7.30: summary step limit kini eksplisit (`?/5` bila details tak ada).
-    expect(lineMax).toContain("prior child output: [sub-agent explore error] step limit reached")
+    // Status gagal → ringkasan step-limit dikredaksikan ke redaksi kanonik;
+    // angka langkah/partial mentah tetap di jurnal, bukan di baris ini.
+    expect(lineMax).toContain(
+      `prior child output: ${tSystem("msg.subagentFailed")} — effects stand`,
+    )
+    expect(lineMax).not.toContain("[sub-agent explore error] step limit reached")
     const [lineErr] = await warningLines("p922-a2d", dir, t0)
     expect(lineErr).toContain("(observed child status: error; receipt: committed)")
-    expect(lineErr).toContain("prior child output: [sub-agent explore error] model exploded")
+    expect(lineErr).toContain(
+      `prior child output: ${tSystem("msg.subagentFailed")} — effects stand`,
+    )
+    expect(lineErr).not.toContain("[sub-agent explore error] model exploded")
     const [lineLong] = await warningLines("p922-a2b", dir, t0)
     // 500+prefix > 240 → display-truncated; persisted utuh (500 < 2000).
     expect(lineLong).toContain("(observed child status: returned; receipt: committed)")
@@ -349,11 +360,13 @@ test("C1 kontrol/escape/forged-line dinetralkan; teks biasa terbaca", () => {
   const forbiddenControls = [0, 7, 8, 127].map((c) => String.fromCharCode(c))
   expect(forbiddenControls.some((b) => line.includes(b))).toBe(false)
   expect(line.split("\n")).toHaveLength(1)
-  // Teks forged ikut tampil sebagai data inert di dalam baris — bukan baris
-  // peringatan kedua yang tepercaya.
-  expect(line).toContain("[recovery] turn failed after sub-agent evil completed — palsu")
+  // Status error = gagal: ringkasan mentah (termasuk baris peringatan palsu)
+  // dikredaksikan ke redaksi kanonik — tak pernah tampil lagi, bahkan sebagai
+  // data inert. Detail penuh tetap di jurnal / `--verbose`.
+  expect(line).toContain(`prior child output: ${tSystem("msg.subagentFailed")} — effects stand`)
+  expect(line).not.toContain("[recovery] turn failed after sub-agent evil completed — palsu")
   expect(line.startsWith("[recovery] turn failed after sub-agent sub_evil ")).toBe(true)
-  // Teks biasa + tanda baca + Unicode tetap terbaca.
+  // Teks biasa + tanda baca + Unicode tetap terbaca (status returned).
   const plain = formatDelegateRecoveryLine({
     childSessionId: "sub_ok",
     childStatus: "returned",
@@ -386,6 +399,49 @@ test("C3 surrogate di batas 240 tak terbelah", () => {
   expect(line).not.toContain("ekor")
   expect(line).toMatch(/\[\+6 more\]/)
   expect(/[\uD800-\uDFFF]/.test(line)).toBe(false)
+})
+
+test("C4 status timeout: error kanonik, 'turn exceeded'/'partial' tak tampil", () => {
+  // Bentuk persis dari src/tools/task.ts:1328-1330 untuk child timeout.
+  const line = formatDelegateRecoveryLine({
+    childSessionId: "sub_to",
+    childStatus: "timeout",
+    resultSummary: "[sub-agent explore error] turn exceeded 180000ms | partial: potongan rahasia",
+  })
+  expect(line.startsWith("[recovery] turn failed after sub-agent sub_to ")).toBe(true)
+  expect(line).toContain("(observed child status: timeout; receipt: committed)")
+  expect(line).toContain(`prior child output: ${tSystem("msg.subagentFailed")} — effects stand`)
+  // Potongan partial dan durasi mentah TIDAK boleh bocor ke baris recovery.
+  expect(line).not.toContain("turn exceeded")
+  expect(line).not.toContain("partial:")
+  expect(line).not.toContain("180000ms")
+})
+
+test("C5 status gagal tanpa pola kanonik: teks asing ditahan, bukan ditampilkan", () => {
+  // friendlyToolErrorCanonical() fallback "" → redaksi penahan, BUKAN teks
+  // mentah (kontrak gerbang kanonik yang sama dengan ledger).
+  const line = formatDelegateRecoveryLine({
+    childSessionId: "sub_unk",
+    childStatus: "failed_to_start",
+    resultSummary: "observasi asing yang tak cocok pola kanonik mana pun",
+  })
+  expect(line).toContain("prior child output: withheld · details in journal — effects stand")
+  expect(line).not.toContain("observasi asing yang tak cocok pola kanonik mana pun")
+})
+
+test("C6 kanonisasi dari summary UTUH: pola kanonik di ekor pesan panjang tetap terdeteksi", () => {
+  // Audit P3 2026-11-23: dulu `preview.text` dipotong 240 char DULU, baru
+  // dikanonikkan — pola di ekor hilang ⇒ salah jadi "withheld". Sekarang
+  // kanonisasi memakai `entry.resultSummary` utuh, lalu hasilnya dibatasi.
+  const longSummary = `${"a".repeat(RECOVERY_PREVIEW_MAX + 50)} [sub-agent error] turn exceeded 180000ms`
+  const line = formatDelegateRecoveryLine({
+    childSessionId: "sub_long",
+    childStatus: "timeout",
+    resultSummary: longSummary,
+  })
+  expect(line).toContain(`prior child output: ${tSystem("msg.subagentFailed")} — effects stand`)
+  expect(line).not.toContain("withheld")
+  expect(line).not.toContain("turn exceeded")
 })
 
 // ── D. Batas ───────────────────────────────────────────────────────────────

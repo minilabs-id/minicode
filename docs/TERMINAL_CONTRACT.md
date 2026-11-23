@@ -162,6 +162,13 @@ saat baris live hilang**, sehingga posisi baris committed berubah di layar.
    masih mengunci `"minicode › "` / `"› "` / `"  · "`. Lebar composer,
    `chat-column.ts`, dan `composerWidth()` **tidak berubah**; gema prompt
    transkrip (v0.37) juga tidak disentuh. I1 (satu write/frame) tetap utuh.
+   **Amendemen bentuk caret (24 Nov 2026):** DECSCUSR berubah `6 q` (bar
+   stabil) → `5 q` (bar **berkedip**). Kedipan dilakukan terminal sendiri —
+   tanpa timer, repaint tambahan, atau `stdout.write` baru. Posisi caret
+   (offset `displayWidth(pf) + 1`) tidak berubah; `0 q` saat exit tetap.
+   **Amendemen spark footer:** glif thinking saat busy kini berputar 4 warna
+   (cyan→magenta→yellow→white) mengikuti `sparkFrame` yang sudah ada; idle
+   tetap `faint`. Tidak ada writer baru, geometri footer tidak berubah.
  8. **Amendemen kerapian rekap (v0.35 butir 1 & v0.42 butir 3).** Rekap kumulatif
     akhir turn kini **menimpa** baris rekap segmen yang baru saja ditulis
     (`replaceEntry()`), bukan menambah baris baru — mencegah dua rekap bertumpuk

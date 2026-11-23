@@ -44,7 +44,7 @@ below. Narration and model answers still use the user's language (`/lang`).
 
 Aliases (work, not advertised in `/help`): `/models` -> `/model`, `/providers` -> `/provider`, `/usage` & `/cost` -> `/status`, `/resume [id]` -> `/sessions [id]`, `/quit`. The old names `/sync`, `/work-mode`, `/history`, `/compact`, `/thinking`, `/expand`, `/minimize`, and `/fold` are retired (no alias) — `/help` and did-you-mean point to their replacements.
 
-Hidden commands (deliberately absent from `/help`/the dropdown, per session): `/unrestric` — the out-of-workspace jail + bash-guard + allowlist bridge is opened, narrow git credentials are forwarded, but sensitive files/MiniCode state are still denied; the gate is operator trust (toggle; the footer shows a red `o`). Details in [Security](security.md).
+Hidden commands (deliberately absent from `/help`/the dropdown, per session): `/unrestric` — the out-of-workspace jail + bash-guard + allowlist bridge is opened, narrow git credentials are forwarded, but sensitive files (`.env`/`auth.json`/daemon credentials) and `.minicode/hooks/**` remain denied — `.minicode/` state itself is writable since 2026-11-23; the gate is operator trust (toggle; the footer shows a red `o`). Details in [Security](security.md).
 
 Did-you-mean: the typo `/sessoons` yields `Did you mean /sessions?` (distance <= 2).
 

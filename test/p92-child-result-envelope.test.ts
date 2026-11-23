@@ -419,8 +419,8 @@ test("B7 pool dibatalkan sebelum jalan → failed_to_start, tanpa percobaan", as
 })
 
 // ── C. Batas + sanitasi ────────────────────────────────────────────────────
-test("C1 teks panjang dipotong 2000 unit kode + truncated akurat", async () => {
-  expect(CHILD_RESULT_SUMMARY_MAX).toBe(2_000)
+test("C1 teks panjang: amplop mengikuti potongan parent + truncated akurat", async () => {
+  expect(CHILD_RESULT_SUMMARY_MAX).toBe(4_000)
   const restore = providerEnv()
   const dir = tmpRoot()
   try {
@@ -433,13 +433,16 @@ test("C1 teks panjang dipotong 2000 unit kode + truncated akurat", async () => {
     expect(r.thrown).toBeNull()
     const term = await delegateTerminal("p92-c1", dir)
     const env = envelopeOf(term)
-    // Batas dalam unit kode UTF-16 (length/slice JS): tak lebih dari 2000.
-    expect(env.resultSummary.length).toBeLessThanOrEqual(2_000)
-    expect(env.truncated).toBe(true)
+    // Batas amplop naik ke 4000, tapi string parent dipotong 2000 char oleh
+    // task.ts (kontrak byte-identik) — jadi jalur return normal tak pernah
+    // mencapai pagu amplop. Pagu 4000 diuji langsung lewat U2 di bawah.
+    expect(env.resultSummary.length).toBeLessThanOrEqual(4_000)
+    expect(env.truncated).toBe(false)
     // Fixture tanpa secret: sanitasi identitas → sama dengan potongan parent.
-    expect(env.resultSummary).toBe(r.out!.slice(0, 2_000))
+    expect(env.resultSummary).toBe(r.out!.slice(0, 4_000))
     expect(env.steps).toBe(3)
-    expect(term.outcome?.truncated).toBe(true)
+    // Flag outcome-level ditulis hanya saat benar-benar terpotong (task.ts).
+    expect(term.outcome?.truncated).toBeFalsy()
   } finally {
     restore()
   }
@@ -460,7 +463,7 @@ test("C2 ringkasan error pendek tetap pendek + truncated salah", async () => {
     expect(r.out).toBe("[sub-agent explore error] boom")
     const env = envelopeOf(await delegateTerminal("p92-c2", dir))
     expect(env.resultSummary).toBe(r.out!)
-    expect(env.resultSummary.length).toBeLessThan(2_000)
+    expect(env.resultSummary.length).toBeLessThan(4_000)
     expect(env.truncated).toBe(false)
   } finally {
     restore()
@@ -497,7 +500,7 @@ test("C3 secret disanitasi di amplop, string parent tak berubah", async () => {
   }
 })
 
-test("C4 hasil raksasa tak lolos batas; alur cleanup tetap jalan", async () => {
+test("C4 hasil raksasa tetap terikat potongan parent; alur cleanup tetap jalan", async () => {
   const restore = providerEnv()
   const dir = tmpRoot()
   try {
@@ -508,8 +511,10 @@ test("C4 hasil raksasa tak lolos batas; alur cleanup tetap jalan", async () => {
     })
     expect(r.thrown).toBeNull()
     const env = envelopeOf(await delegateTerminal("p92-c4", dir))
-    expect(env.resultSummary.length).toBeLessThanOrEqual(2_000)
-    expect(env.truncated).toBe(true)
+    // Sama seperti C1: potongan parent (2000 char) lebih pendek dari pagu
+    // amplop (4000), jadi flag truncated tetap false pada return normal.
+    expect(env.resultSummary.length).toBeLessThanOrEqual(4_000)
+    expect(env.truncated).toBe(false)
     // Cleanup (tutup Run + lepas lease) tetap jalan: delegasi berikut di
     // dir yang sama tak terhalang lease anak sebelumnya.
     const r2 = await delegateAttempt({ dir, parentId: "p92-c4b" })
@@ -530,7 +535,7 @@ test("C5 tak ada transkrip penuh di record terminal", async () => {
       runImpl: async () => ({ finalText: "w".repeat(5_000), usage: { steps: 1 } }),
     })
     const term = await delegateTerminal("p92-c5", dir)
-    // Record terminal bounded: ringkasan ≤2000 + metadata kecil, bukan gema
+    // Record terminal bounded: ringkasan ≤4000 + metadata kecil, bukan gema
     // 5000 char teks anak di field mana pun.
     const serialized = JSON.stringify(term)
     expect(serialized.length).toBeLessThan(20_000)
@@ -758,8 +763,8 @@ test("U1 classifyChildStatus: kind terstruktur jujur, sisanya error", () => {
 })
 
 test("U2 buildChildResultEnvelope: batas, flag, null jujur", () => {
-  const exact = "q".repeat(2_000)
-  const over = "q".repeat(2_001)
+  const exact = "q".repeat(4_000)
+  const over = "q".repeat(4_001)
   expect(
     buildChildResultEnvelope({ childStatus: "returned", summary: exact, runId: "r", steps: 0 }),
   ).toEqual({
@@ -775,7 +780,7 @@ test("U2 buildChildResultEnvelope: batas, flag, null jujur", () => {
     runId: null,
     steps: null,
   })
-  expect(cut.resultSummary.length).toBe(2_000)
+  expect(cut.resultSummary.length).toBe(4_000)
   expect(cut.truncated).toBe(true)
   expect(cut.runId).toBeNull()
   // Langkah non-finite/tipe-salah → null (jangan difabrikasi).

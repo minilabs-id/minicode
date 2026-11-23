@@ -43,7 +43,7 @@ bahasa user (`/lang`).
 
 Alias (jalan, tidak diiklankan di `/help`): `/models` → `/model`, `/providers` → `/provider`, `/usage` & `/cost` → `/status`, `/resume [id]` → `/sessions [id]`, `/quit`. Nama lama `/sync`, `/work-mode`, `/history`, `/compact`, `/thinking`, `/expand`, `/minimize`, dan `/fold` sudah pensiun (tidak ada alias) — `/help` dan pesan did-you-mean menuntun ke penggantinya.
 
-Perintah tersembunyi (sengaja tak tampil di `/help`/dropdown, per-sesi): `/unrestric` — jembatan jail luar workspace + bash-guard + allowlist dibuka, kredensial git sempit diteruskan, tetapi file sensitif/state minicode tetap ditolak; gerbang = kepercayaan operator (toggle; footer menampilkan `○` merah). Detail di [Keamanan](security.md).
+Perintah tersembunyi (sengaja tak tampil di `/help`/dropdown, per-sesi): `/unrestric` — jembatan jail luar workspace + bash-guard + allowlist dibuka, kredensial git sempit diteruskan, tetapi file sensitif (`.env`/`auth.json`/kredensial daemon) dan `.minicode/hooks/**` tetap ditolak — state `.minicode/` sendiri boleh ditulis sejak 2026-11-23; gerbang = kepercayaan operator (toggle; footer menampilkan `○` merah). Detail di [Keamanan](security.md).
 
 Did-you-mean: typo `/sessoons` → `Did you mean /sessions?` (jarak ≤ 2).
 

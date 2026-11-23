@@ -483,7 +483,9 @@ describe("audit #13 chain 18: allow-local-config boundary intact", () => {
       const cfgOptIn = await loadConfig(dir, { allowLocal: true })
       expect(cfgOptIn.providers.some((p) => p.id === "evil")).toBe(true)
       const h = createPermissionHandler({ mode: "auto", root: dir, allowLocalConfig: true })
-      const denyOwned = await h.check(
+      // Keputusan owner 2026-11-23: `.minicode/**` kini writable — sessions.db
+      // adalah state biasa, bukan lagi kunci tulis. Opt-in lokal tak mengubahnya.
+      const allowOwned = await h.check(
         {
           id: "1",
           name: "write_file",
@@ -491,7 +493,29 @@ describe("audit #13 chain 18: allow-local-config boundary intact", () => {
         } as never,
         {} as never,
       )
-      expect(denyOwned).toBe("deny")
+      expect(allowOwned).toBe("allow")
+      // Yang TETAP dikunci walau `.minicode/**` writable: skrip hook (audit
+      // 2026-11-12) & file sensitif. Jangan melemahkan guard ini.
+      const denyHook = await h.check(
+        {
+          id: "3",
+          name: "write_file",
+          args: { path: ".minicode/hooks/pre-tool.sh", content: "x" },
+        } as never,
+        {} as never,
+      )
+      expect(denyHook).toBe("deny")
+      for (const sensitive of [".env", ".minicode/auth.json", "credentials.json"]) {
+        const verdict = await h.check(
+          {
+            id: `s-${sensitive}`,
+            name: "write_file",
+            args: { path: sensitive, content: "x" },
+          } as never,
+          {} as never,
+        )
+        expect(verdict, sensitive).toBe("deny")
+      }
       const denyRm = await h.check(
         { id: "2", name: "bash", args: { cmd: "rm -rf /" } } as never,
         {} as never,

@@ -366,7 +366,7 @@ test("A2 autonomous: claim atomik TaskStore tetap ada; M7 tidak dipakai", async 
 
 // ── B. Kontrak eksekusi berbeda ──────────────────────────────────────────────
 // Invarian: fallback delegate == cap mode M7 (konstanta sama); eksplisit tetap
-// min(req,50); autonomous tetap readonly + default 8; tak ada M7 di autonomous.
+// min(req,600); autonomous tetap readonly + default 8; tak ada M7 di autonomous.
 test("B1 delegate fallback cap == konstanta mode (ekuivalen M7 modeStepCap)", async () => {
   const restore = providerEnv()
   try {
@@ -385,11 +385,12 @@ test("B1b v0.33: scope eksplisit → budget adaptif; fallback tanpa scope tetap 
   try {
     todoSession.id = "p91-b1b"
     const file = await delegate(tmpRoot(), { prompt: "x", mode: "explore", scope: "file" })
-    expect(file.maxSteps).toBe(12)
+    expect(file.maxSteps).toBe(16)
     const repo = await delegate(tmpRoot(), { prompt: "x", mode: "explore", scope: "repo" })
-    expect(repo.maxSteps).toBe(36)
+    expect(repo.maxSteps).toBe(64)
     const planRepo = await delegate(tmpRoot(), { prompt: "x", mode: "plan", scope: "repo" })
-    expect(planRepo.maxSteps).toBe(50)
+    // plan = ceil(64 × 1,5) = 96 — di bawah hard-cap 600, jadi tak di-clamp.
+    expect(planRepo.maxSteps).toBe(96)
     // Kontrak lama tak berubah bila caller tak mengirim scope.
     const fallback = await delegate(tmpRoot(), { prompt: "x" })
     expect(fallback.maxSteps).toBe(LIMITS.SUB_AGENT_BUDGET_EXPLORE)
@@ -398,7 +399,7 @@ test("B1b v0.33: scope eksplisit → budget adaptif; fallback tanpa scope tetap 
   }
 })
 
-test("B2 delegate cap eksplisit TIDAK diklamp mode (≠ M7), clamp hard-cap 50", async () => {
+test("B2 delegate cap eksplisit TIDAK diklamp mode (≠ M7), clamp hard-cap 600", async () => {
   const restore = providerEnv()
   try {
     todoSession.id = "p91-b2"
@@ -408,7 +409,7 @@ test("B2 delegate cap eksplisit TIDAK diklamp mode (≠ M7), clamp hard-cap 50",
     expect(wide.maxSteps).toBe(40)
     expect(wide.maxSteps).not.toBe(LIMITS.SUB_AGENT_BUDGET_EXPLORE)
     const over = await delegate(tmpRoot(), { prompt: "x", mode: "plan", maxSteps: 999 })
-    // [T-008] clamp memakai cap delegasi SENDIRI (50), bukan default sesi utama
+    // [T-008] clamp memakai cap delegasi SENDIRI (600), bukan default sesi utama
     // (200). Kewenangan delegasi tidak ikut naik saat default sesi utama naik.
     expect(over.maxSteps).toBe(LIMITS.SUB_AGENT_MAX_STEPS)
   } finally {

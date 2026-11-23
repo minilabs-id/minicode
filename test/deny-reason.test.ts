@@ -92,7 +92,7 @@ describe("app handler reasons", () => {
     rmSync(root, { recursive: true, force: true })
   })
 
-  test("jail: outside vs sensitive vs owned dibedakan", async () => {
+  test("jail: outside/sensitive tetap deny, owned kini allow", async () => {
     const h = handler("allow-all")
     const outside = await reasoned(h, "write_file", { path: join(tmpdir(), "x-out.txt") })
     expect(outside.decision).toBe("deny")
@@ -100,18 +100,20 @@ describe("app handler reasons", () => {
     const sens = await reasoned(h, "read_file", { path: join(root, ".env") })
     expect(sens.decision).toBe("deny")
     expect(sens.reason).toBe("jail: sensitive file")
+    // Keputusan owner 2026-11-23: agen/model BOLEH menulis `.minicode/`.
     const owned = await reasoned(h, "write_file", { path: join(root, ".minicode", "x.txt") })
-    expect(owned.decision).toBe("deny")
-    expect(owned.reason).toBe("jail: owned state")
+    expect(owned.decision).toBe("allow")
+    expect(owned.reason).toBeUndefined()
   })
 
-  test("jail: owned state via link internal ikut deny (temuan F-CRIT)", async () => {
-    // Gagal-di-kode-lama: junction/symlink → `.minicode/` lolos karena cek
-    // owned-state membaca string argumen, bukan target nyata (`write_file
-    // linkdir/config.json` → allow, lalu tulis mendarat di state). Kunci
-    // ganda: string mentah DAN target realpath dicek (permission.ts), dengan
-    // carve-out trash yang dipertahankan. `.minicode/hooks/` TIDAK lagi
-    // dikecualikan (audit 2026-11-12).
+  test("jail: state via link internal kini allow; hooks tetap deny", async () => {
+    // DULU (temuan F-CRIT): junction/symlink → `.minicode/` lolos karena cek
+    // owned-state membaca string argumen, bukan target nyata. Sekarang sesuai
+    // keputusan owner 2026-11-23, `.minicode/` memang BOLEH ditulis — jadi
+    // direct dan via-link sama-sama allow. SATU-SATUNYA yang tetap dikunci:
+    // `.minicode/hooks/**` (audit 2026-11-12), karena hook dieksekusi otomatis
+    // saat MINICODE_HOOKS=1. Kunci hook memakai string + realpath supaya
+    // junction tak bisa menyamarkan target hook.
     const rootDir = mkdtempSync(join(tmpdir(), "mc-ownedlink-"))
     try {
       mkdirSync(join(rootDir, ".minicode"), { recursive: true })
@@ -136,23 +138,21 @@ describe("app handler reasons", () => {
         }
       }
       const direct = await g("write_file", { path: join(rootDir, ".minicode", "config.json") })
-      expect(direct.decision).toBe("deny")
-      expect(direct.reason).toBe("jail: owned state")
+      expect(direct.decision).toBe("allow")
       if (linked) {
-        // Pola serangan: argumen jinak, target nyata = state.
+        // Argumen jinak, target nyata = state → kini sah (owner 2026-11-23).
         const viaLink = await g("write_file", { path: join(rootDir, "linkdir", "config.json") })
-        expect(viaLink.decision).toBe("deny")
-        expect(viaLink.reason).toBe("jail: owned state")
-        // edit/delete/move ikut jalur kunci yang sama.
+        expect(viaLink.decision).toBe("allow")
+        // edit/move ikut jalur yang sama.
         const viaEdit = await g("edit", { path: join(rootDir, "linkdir", "config.json") })
-        expect(viaEdit.decision).toBe("deny")
+        expect(viaEdit.decision).toBe("allow")
         const viaMove = await g("move_file", {
           path: join(rootDir, "linkdir", "x"),
           destination: join(rootDir, "linkdir", "y"),
         })
-        expect(viaMove.decision).toBe("deny")
-        // Symlink internal ke target JINAK tidak over-block (kontrak target
-        // di safe-open.ts: hanya `.minicode/` yang dikunci, bukan symlink).
+        expect(viaMove.decision).toBe("allow")
+        // Symlink internal ke target jinak tidak over-block (kontrak target
+        // di safe-open.ts: bukan symlink yang dilarang, melainkan jail & hook).
         // Symlink FILE butuh privilege di Windows → bila gagal, uji via
         // junction ke direktori JINAK (inti test — blokir link → state —
         // sudah diuji di atas via junction ke `.minicode/`).
@@ -175,9 +175,10 @@ describe("app handler reasons", () => {
           const benign = await g("write_file", { path: benignPath })
           expect(benign.decision).toBe("allow")
         }
-        // Audit 2026-11-12: skrip hooks TIDAK boleh ditulis lewat tool. Hook
-        // dieksekusi otomatis saat opt-in, jadi izin menulis = model bisa
-        // menanam kode yang berjalan di luar permission/jail/sandbox.
+        // Audit 2026-11-12, dipertahankan setelah keputusan 2026-11-23: skrip
+        // hooks TIDAK boleh ditulis lewat tool. Hook dieksekusi otomatis saat
+        // opt-in, jadi izin menulis = model bisa menanam kode yang berjalan di
+        // luar permission/jail/sandbox.
         const hook = await g("write_file", {
           path: join(rootDir, ".minicode", "hooks", "pre-x.js"),
         })

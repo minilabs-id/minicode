@@ -1,11 +1,24 @@
 # AGENTS.md
 
+## Standar kerja pemilik (ditetapkan 2026-11-23)
+
+- **Respons ringkas.** Jangan pakai tabel besar atau rangkasan panjang sebagai
+  jawaban default. Sampaikan intinya, lalu berhenti. Yang panjang ditaruh di
+  artefak `.audit/` bila memang perlu, bukan di balasan.
+- **Perubahan = tuning / perbaikan kecil.** Skop pengembangan ke depan dijaga
+  sempit. Kalau suatu perbaikan **berdampak besar ke UI** (geometri, composer,
+  caret, ratchet, rekap, layout, warna, writer, I1), **wajib konfirmasi dulu**
+  kepada pemilik — jangan langsung kerjakan.
+- **Gate/rilis hanya atas aba-aba pemilik.** Jangan menjalankan `gate:fast`
+  berulang sebagai kebiasaan. Verifikasi lokal cukup `tsc` + test terarah
+  sampai pemilik memberi perintah gate/rilis.
+
 Petunjuk untuk agent yang bekerja di repo ini. Peta struktur hidup:
 [docs/architecture.md](docs/architecture.md).
 Kontrak terminal FROZEN: [docs/TERMINAL_CONTRACT.md](docs/TERMINAL_CONTRACT.md) —
 baca sebelum menyentuh output/rendering apa pun; perubahan perilaku wajib
 update dokumen + test peta proteksinya. "FROZEN" bukan berarti tak pernah
-berubah: kontrak diperbarui di v0.33, lalu v0.34/v0.35/v0.36. **ARSIP v0.33:**
+berubah: kontrak diperbarui di v0.33, lalu v0.34/v0.35/v0.36/v0.43. **ARSIP v0.33:**
 sidebar kanan sudah dihapus di v0.34; I36/I37 = jendela output command &
 recovery/approval, bukan invariant sidebar. Baca versi terbaru di dokumen
 (entri v0.36 paling atas), jangan mengandalkan ingatan.
@@ -23,10 +36,9 @@ sub-milestone (`P2.x`), Quality Remediation (`Stage 1`–`10`), dan hotfix
 
 ## Status checkout
 
-HEAD checkout ini adalah `643f4b3` (garis rilis v0.33). Working tree adalah
-**rilis 0.43.0 belum di-commit**: `CHANGELOG.md` dan `package.json` mencatat
-0.43.0; kontrak terminal memakai entri v0.43 paling atas (baris live tool
-transien sebagai overlay satu-frame, history committed kebal) di atas arsip
+HEAD checkout ini adalah `42a35a6` (garis rilis v0.43). Working tree adalah
+**kandidat rilis 0.43.2 belum di-commit** (rilis ditahan owner): `CHANGELOG.md` dan `package.json` mencatat
+0.43.2; kontrak terminal memakai entri v0.43 paling atas (bukan overlay: tail live maks 3 baris, ratchet `scrollBack` naik-saja, history committed tidak bergeser balik) di atas arsip
 v0.42–v0.34. Angka gate historis v0.33 di bawah bukan hasil checkout ini;
 hasil kandidat ada di `.audit/FINAL-STATE.md` §9/§11. Jangan menganggap angka
 historis sebagai hasil checkout ini. `PLAN.md` adalah

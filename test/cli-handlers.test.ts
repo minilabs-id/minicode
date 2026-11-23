@@ -17,6 +17,7 @@ import { dispatch } from "../cli/router.ts"
 import { __resetPricingOverlay } from "../src/policy/pricing.ts"
 import { stripAnsi } from "../src/ui/render/theme.ts"
 import { type FakeTty, installFakeTty } from "./helpers/tui-harness.ts"
+import { withoutGlobalSkills } from "./helpers/without-global-skills.ts"
 
 // `pricing status` memuat overlay models.dev ke state modul pricing, dan
 // findPrice() memakai state itu sebagai default. Tanpa reset, berkas test lain
@@ -247,9 +248,16 @@ describe("skills", () => {
   }
 
   test("tanpa skill memberi petunjuk lokasi berkas", async () => {
-    const r = await runDispatch(["skills", "list", "--cwd", tmp])
-    expect(r.code).toBe(0)
-    expect(r.out).toContain(".minicode/skills")
+    // Handler hanya mencetak petunjuk saat katalog kosong. Skill global mesin
+    // (mis. agent-browser) bukan bagian dari fixture ini, jadi disembunyikan.
+    const restore = withoutGlobalSkills()
+    try {
+      const r = await runDispatch(["skills", "list", "--cwd", tmp])
+      expect(r.code).toBe(0)
+      expect(r.out).toContain(".minicode/skills")
+    } finally {
+      restore()
+    }
   })
 
   test("list menampilkan skill dalam tabel sejajar", async () => {

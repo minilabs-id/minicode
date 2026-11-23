@@ -297,33 +297,43 @@ test("matriks jail: berkas sensitif ditolak di semua mode", async () => {
   }
 })
 
-test("matriks jail: tulis state .minicode/ ditolak di mode permisif", async () => {
+test("matriks jail: state .minicode/ BOLEH ditulis, hook tetap dikunci", async () => {
   const root = mkdtempSync(join(tmpdir(), "mc-matrix-owned-"))
   try {
-    // Mode di mana tool tulis file memang diizinkan tanpa kunci owned-state —
-    // deny di sini membuktikan kunci .minicode/ (bukan efek mode ketat).
+    // Keputusan owner 2026-11-23: blok owned-state lama DICABUT — `.minicode/`
+    // kini ditulis agen seperti workspace biasa. Matriks ini mengunci perilaku
+    // baru supaya regresi ke "deny lama" ketahuan. Jail workspace & isSensitive
+    // (mis. `.minicode/auth.json`) tetap dijaga di test jail lain.
     for (const mode of ["auto", "allow-all", "allowlist"] as const) {
       expect(
         await decideArgs(mode, root, "write_file", {
           path: ".minicode/allowlist.json",
           content: "x",
         }),
-      ).toBe("deny")
+      ).toBe("allow")
       expect(
         await decideArgs(mode, root, "edit", {
           path: ".minicode/allowlist.json",
           oldString: "a",
           newString: "b",
         }),
-      ).toBe("deny")
+      ).toBe("allow")
       expect(await decideArgs(mode, root, "delete_file", { path: ".minicode/sessions.db" })).toBe(
-        "deny",
+        "allow",
       )
-      // Menggeser state keluar workspace = menyebar bukti; tetap deny.
+      // Menggeser state ke dalam workspace juga sah (masih di dalam jail).
       expect(
         await decideArgs(mode, root, "move_file", {
           path: ".minicode/sessions.db",
           destination: "docs/s.db",
+        }),
+      ).toBe("allow")
+      // SATU-SATUNYA yang tetap dikunci: skrip hook — dieksekusi otomatis saat
+      // MINICODE_HOOKS=1, jadi menanamnya = kode jalan di luar permission.
+      expect(
+        await decideArgs(mode, root, "write_file", {
+          path: ".minicode/hooks/pre-x.js",
+          content: "x",
         }),
       ).toBe("deny")
     }

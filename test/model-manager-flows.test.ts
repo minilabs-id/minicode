@@ -129,7 +129,7 @@ describe("model-manager: alur interactive", () => {
 
   test("kursor diparkir di ujung baris search pada jendela berjudul", async () => {
     // Jendela command seragam: border + judul + baris search.
-    // Benar: tepat di ujung filter; caret bar terminal (DECSCUSR `6 q`)
+    // Benar: tepat di ujung filter; caret bar terminal (DECSCUSR `5 q`)
     // satu-satunya penanda — tak ada lagi glyph blok statis `█`.
     tty = installFakeTty({ columns: 100, rows: 24 })
     const p = runModelManager({ cwd: workspace, currentModel: "prov::m1" })

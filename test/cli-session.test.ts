@@ -295,13 +295,18 @@ describe("cli: sesi one-shot dasar", () => {
     const { run: r } = await runWithProvider([{ kind: "status", status: 400, body }], ["apa saja"])
     expect(r.code).toBe(1)
     expect(r.stderr).toContain("Request was rejected by provider")
-    // Detail spesifik tetap disampaikan — satu kalimat, bukan seluruh JSON.
-    expect(r.stderr).toContain("tidak menerima tools")
+    // Saran actionable tetap ada: arahkan ke /model.
+    expect(r.stderr).toContain("/model")
+    // Redaksi baru sengaja menjatuhkan detail satu-kalimat (metadata.raw)
+    // demi jalur kanonik yang bebas JSON. Pastikan tak ada yang bocor.
+    expect(r.stderr).not.toContain("tidak menerima tools")
+    expect(r.stderr).not.toContain("Provider returned error")
+    expect(r.stderr).not.toContain('"error"')
     expect(r.stderr).not.toContain("remedy_hint")
     expect(r.stderr).not.toContain("metadata")
   })
 
-  test("rate limit (429) di-retry lalu dilaporkan sebagai batas laju", async () => {
+  test("rate limit (429) di-retry lalu memakai redaksi kanonik tanpa body JSON", async () => {
     // Backoff bawaan kernel: 1s + 2s + 4s sebelum menyerah, jadi test ini
     // memang lambat. Batasnya dinaikkan eksplisit alih-alih memperpendek
     // backoff — perilaku retry itu yang ingin dipastikan tetap ada.
@@ -310,7 +315,10 @@ describe("cli: sesi one-shot dasar", () => {
       ["apa saja"],
     )
     expect(r.code).toBe(1)
-    expect(r.stderr).toContain("Provider is rate-limiting requests")
+    expect(r.stderr).toContain("Request failed · retry or check the endpoint")
+    // Body `{"error":{"message":"too many requests"}}` tak boleh ikut tampil.
+    expect(r.stderr).not.toContain("too many requests")
+    expect(r.stderr).not.toContain('"error"')
   }, 30_000)
 })
 

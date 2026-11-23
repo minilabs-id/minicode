@@ -28,7 +28,7 @@ import {
   composerWidth as composerWidthFromChat,
 } from "../render/chat-column.ts"
 import { appendWrapped, shaveWrapped } from "../render/composer-wrap.ts"
-import { formatError } from "../render/errors.ts"
+import { formatError, friendlyToolErrorCanonical } from "../render/errors.ts"
 import { listRow } from "../render/list.ts"
 import { ASSISTANT_LEFT_MARGIN } from "../render/markdown-layout.ts"
 import { sanitizeAnsi, sanitizeAnsiLine, stripSgr } from "../render/sanitize.ts"
@@ -70,11 +70,11 @@ export interface TuiHost {
   submit(text: string): Promise<{ quit?: boolean } | undefined>
   /**
    * Kirim baris saat turn MASIH berjalan (Enter di composer yang hidup).
-   * Controller mengantrinya sebagai informasi tambahan: dikirim setelah turn
-   * aktif selesai, bukan disuntik ke tengah step provider (kernel tak punya
-   * seam untuk itu). `false` = ditolak (mis. baris `/slash` yang butuh idle),
-   * dan controller sudah menjelaskan alasannya ke transkrip. Absen = perilaku
-   * lama: input beku total saat busy.
+   * Controller mengantrinya: teks jadi informasi tambahan, slash command aman
+   * ditunda sampai turn selesai (mode/UI mutasi butuh idle). `false` = ditolak
+   * (command berdampak destruktif, mis. `/clear`), dan controller sudah
+   * menjelaskan alasannya lewat toast. Absen = perilaku lama: input beku total
+   * saat busy.
    */
   enqueue?(text: string): boolean
   /** Batalkan turn yang berjalan (Esc saat busy). */
@@ -1341,7 +1341,14 @@ export class TuiApp {
       // provider, header `Authorization: Bearer …`, atau escape ANSI. Jalur
       // lama `e.message` mentah membocorkan credential ke layar TUI — kini
       // lewat formatter kanonik (redaksi credential + sanitasi + pemotongan).
-      this.transcript.pushError(formatError(e))
+      // [Audit VALID] sub-agent REFUSED_* (src/tools/task.ts) dilempar sebagai
+      // Error biasa; formatError() jatuh ke fallback `friendlyError()` yang
+      // mengembalikan pesan mentah. Kanonikkan dulu: pola yang dikenali →
+      // redaksi ringkas; bila "" (tak dikenali) → formatError(e) supaya detail
+      // provider/sistem yang aman tidak hilang.
+      const raw = String((e as { message?: unknown } | null)?.message ?? e)
+      const canonical = friendlyToolErrorCanonical(raw)
+      this.transcript.pushError(canonical || formatError(e))
     } finally {
       this.busy = false
       this.editing = true

@@ -194,37 +194,41 @@ export const LIMITS = {
    * 50 terlalu kecil untuk kerja nyata (4 dari 5 `turn.failed` pada sesi
    * 17b6a5ff adalah `exceeded 50 steps`). Default kini 200 dan NAIK satu tangga
    * otomatis saat sesi terbukti mentok — lihat `src/policy/step-escalation.ts`.
-   * Sub-agent tetap 50 default (berjalan paralel, biaya runaway berlipat), juga
-   * dengan eskalasi adaptif. */
+   * Cap sub-agent naik ke 100 atas rekomendasi riset & persetujuan owner;
+   * pagar tetap ada (pool, provider cooldown, watchdog liveness, eskalasi
+   * satu tangga), jadi ini bukan delegasi tanpa batas. */
   DEFAULT_MAX_STEPS: 200,
   EXECUTOR_CONCURRENCY: 6,
   EXECUTOR_WRITE_CONCURRENCY: 1,
   /**
-   * Slot konkuren untuk sub-agen. Default 3 (cocok untuk laptop 4-core).
-   * Env `MINICODE_SUB_AGENT_POOL_SIZE` meng-override (1..16). CATATAN: fan-out
-   * 5 explorer butuh 5 slot agar kelima anak benar-benar jalan paralel —
-   * dengan 3 slot, 2 anak mengantri. Antrian itu sendiri BUKAN penyebab
-   * "turn exceeded ...ms" (clock mulai saat slot didapat), tapi menaikkan
-   * pool ke 5 menghilangkan antrean dan total wall-clock lebih pendek.
+   * Slot konkuren untuk sub-agen. Default 5: fan-out 5 explorer kini benar-
+   * benar jalan paralel, tak ada 2 anak yang mengantri menunggu slot.
+   * Env `MINICODE_SUB_AGENT_POOL_SIZE` masih bisa meng-override (1..16) bila
+   * mesin lebih kecil. Antrian lama (dengan 3 slot) bukan penyebab
+   * "turn exceeded ...ms" — clock mulai saat slot didapat — tapi menghilangkan
+   * antrean membuat total wall-clock fan-out lebih pendek.
    */
-  SUB_AGENT_POOL_SIZE: envBoundedInt("MINICODE_SUB_AGENT_POOL_SIZE", 3, 1, 16),
+  SUB_AGENT_POOL_SIZE: envBoundedInt("MINICODE_SUB_AGENT_POOL_SIZE", 5, 1, 16),
   SUB_AGENT_BUDGET_EXPLORE: 5,
   SUB_AGENT_BUDGET_PLAN: 15,
-  /** [T-008] Cap langkah eksplisit untuk sub-agent tetap 50 walau default sesi
-   * utama naik ke 200. Alasan: sub-agent berjalan PARALEL
-   * (`SUB_AGENT_POOL_SIZE`) dan tiap langkah = panggilan model sendiri; naiknya
-   * biaya runaway berlipat dengan jumlah sub-agent, sedangkan tugas sub-agent
-   * lebih sempit. Terpisah dari `DEFAULT_MAX_STEPS` supaya perubahan default
-   * sesi utama tidak diam-diam memperluas kewenangan delegasi. */
-  SUB_AGENT_MAX_STEPS: 50,
+  /** [T-008] Cap langkah eksplisit sub-agent naik 50 → 100 → 600 (persetujuan
+   * owner) agar sebanding dengan timeout 1 jam (~6 dtk/langkah, rasio lama
+   * 300 dtk/50). Tetap TERPILAH dari `DEFAULT_MAX_STEPS` sesi utama. KENAPA
+   * aman: pagar lain tetap — pool 5, provider cooldown 60 dtk, NoProgress 8,
+   * watchdog idle 120 dtk, ACE consequence, riwayat bound 32. Ini atap
+   * backstop, bukan izin berputar tanpa henti. */
+  SUB_AGENT_MAX_STEPS: 600,
   /**
-   * Timeout satu turn sub-agen. Naik dari 120_000 → 300_000 (5 menit):
-   * 120 detik terlalu ketat untuk explorer paralel di repo besar (5 fan-out
-   * sering kena "turn exceeded 120000ms" dan teks partial terbuang).
-   * Env `MINICODE_SUB_AGENT_TIMEOUT_MS` meng-override dengan validasi yang sama
-   * seperti `src/app/session.ts` (finite, > 0, ≤ batas timer JS).
+   * Timeout satu turn sub-agen. Naik 120_000 → 300_000 → 600_000 → 3_600_000
+   * (1 jam). Audit 2026-11-23: 300 dtk masih kehabisan waktu untuk 4 explorer
+   * paralel dengan ~38–51 tool call (prompt pendek kena ratio 0,6 ⇒ 180 dtk).
+   * Aman karena watchdog liveness (`task.ts:1192-1224`) membunuh anak yang
+   * benar-benar diam dalam 120 dtk — jadi pagu panjang hanya membantu anak
+   * yang sehat tapi lambat, bukan membiarkan proses macet. Pagaru biaya tetap
+   * `SUB_AGENT_MAX_STEPS` (100), bukan timeout. Env
+   * `MINICODE_SUB_AGENT_TIMEOUT_MS` tetap meng-override.
    */
-  SUB_AGENT_TIMEOUT_MS: envBoundedInt("MINICODE_SUB_AGENT_TIMEOUT_MS", 300_000, 1, JS_TIMER_MAX),
+  SUB_AGENT_TIMEOUT_MS: envBoundedInt("MINICODE_SUB_AGENT_TIMEOUT_MS", 3_600_000, 1, JS_TIMER_MAX),
   /**
    * Interval watchdog liveness sub-agent. Tiap ~2 detik watchdog memeriksa
    * apakah anak masih mengirim `step:started`/`step:completed`. KENAPA 2 dtk:
@@ -243,10 +247,11 @@ export const LIMITS = {
    * v7.33: batas teks partial yang diselamatkan saat turn sub-agent timeout.
    * Dipindah dari konstanta lokal `src/tools/task.ts` ke sini supaya satu
    * sumber angka untuk pagu output child (sejajar CHILD_RESULT_SUMMARY_MAX di
-   * session/verification.ts). 1,2k char cukup meninggalkan jejak partial tanpa
-   * menggelembungkan pesan error parent.
+   * session/verification.ts). Naik 1,2k → 4k char supaya jejak partial dari
+   * anak yang mentok/timeout cukup untuk dilanjutkan parent tanpa mengulang
+   * kerja; batas tetap ada agar pesan error parent tak menggelembung.
    */
-  MAX_PARTIAL_CHARS: 1_200,
+  MAX_PARTIAL_CHARS: 4_000,
   /** Network / providers */
   RETRY_AFTER_MAX_MS: 30_000,
   /** F-11: batas TOTAL satu request provider (server hung = turn hung tanpa

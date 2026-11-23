@@ -90,9 +90,9 @@ test("F-09: maxSteps 0/negatif/Infinity → default aman, turn jalan", async () 
 test("F-09b: DEFAULT_MAX_STEPS = 50 di kernel, 200 di host (T-008)", () => {
   expect(DEFAULT_MAX_STEPS).toBe(50)
   expect(LIMITS.DEFAULT_MAX_STEPS).toBe(200)
-  // Cap sub-agent TERPISAH dan tetap 50: naiknya default sesi utama tidak boleh
-  // memperluas kewenangan delegasi.
-  expect(LIMITS.SUB_AGENT_MAX_STEPS).toBe(50)
+  // Cap sub-agent TERPISAH naik 50 → 100 → 600 (riset + persetujuan owner): naiknya
+  // default sesi utama tidak boleh memperluas kewenangan delegasi secara diam-diam.
+  expect(LIMITS.SUB_AGENT_MAX_STEPS).toBe(600)
 })
 
 test("F-09: timeoutMs NaN/negatif → default aman, turn jalan", async () => {

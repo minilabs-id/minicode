@@ -13,7 +13,23 @@
 // stderr operator, bukan prompt.
 import type { ChildStatus } from "../src/session/journal.ts"
 import { isDisplayableChildStatus } from "../src/session/journal.ts"
+import { friendlyToolErrorCanonical } from "../src/ui/render/errors.ts"
 import { sanitizeAnsiLine, stripSgr } from "../src/ui/render/sanitize.ts"
+
+/**
+ * Status anak yang menandakan kegagalan. Ringkasan pada jalur ini BUKAN
+ * observasi sukses melainkan string error mentah dari src/tools/task.ts
+ * (`[sub-agent <mode> error] … | partial: …`) — jadi tak terpercaya.
+ * `returned` sengaja TIDAK termasuk: ringkasannya dibaca apa adanya (test
+ * warisan mengunci teks biasa tetap terbaca pada status sukses).
+ */
+const FAILED_CHILD_STATUSES: ReadonlySet<ChildStatus> = new Set([
+  "aborted",
+  "timeout",
+  "error",
+  "failed_to_start",
+  "max_steps_exceeded",
+])
 
 /**
  * Batas preview per anak (satuan code-unit UTF-16, konsisten dengan batas
@@ -103,6 +119,21 @@ export function formatDelegateRecoveryLine(entry: DelegateRecoveryEntry): string
   if (!isDisplayableChildStatus(entry.childStatus) || typeof entry.resultSummary !== "string")
     return legacy
   const preview = boundRecoveryPreview(entry.resultSummary, entry.truncated === true)
+  // Ringkasan child gagal adalah ERROR TAK TERPERCAYA (potongan partial, stack,
+  // atau baris peringatan palsu). Wajib lewat gerbang kanonik yang SAMA dengan
+  // ledger/UI — jangan pernah cetak teks mentahnya ke stderr operator. Detail
+  // penuh tetap tersimpan di jurnal / `--verbose`, bukan di baris ini.
+  // Urutan mengikat: KANONIKASI dulu dari ringkasan UTUH (bukan `preview.text`
+  // yang sudah dipotong 240 char), baru batasi hasilnya. Kalau kanonisasi
+  // dilakukan setelah potong, pola kanonik yang letaknya di ekor pesan panjang
+  // tak terdeteksi → salah jadi "withheld" (audit P3, 2026-11-23).
+  let body = preview.text
+  if (FAILED_CHILD_STATUSES.has(entry.childStatus)) {
+    const red = friendlyToolErrorCanonical(entry.resultSummary)
+    // Pola kanonik tak dikenali → jangan tampilkan teks asing sama sekali
+    // (kontrak friendlyToolErrorCanonical: fallback "").
+    body = red !== "" ? red.slice(0, RECOVERY_PREVIEW_MAX) : "withheld · details in journal"
+  }
   // `receipt: committed` akurat di sini karena pembaca (committedDelegatesSince)
   // hanya menghasilkan baris committed; ditulis eksplisit agar status observasi
   // anak TAK PERNAH dibaca sebagai vonis sukses eksekusi. Sufiks verifikasi
@@ -110,6 +141,6 @@ export function formatDelegateRecoveryLine(entry: DelegateRecoveryEntry): string
   return (
     `[recovery] turn failed after sub-agent ${entry.childSessionId} ` +
     `(observed child status: ${entry.childStatus}; receipt: committed) — ` +
-    `prior child output: ${preview.text} — effects stand; verify before re-delegating`
+    `prior child output: ${body} — effects stand; verify before re-delegating`
   )
 }

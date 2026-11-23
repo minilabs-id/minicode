@@ -2,7 +2,7 @@
 
 Folder ini berisi catatan audit dan rencana kerja. Tidak termasuk `files[]` paket npm, jadi tidak ikut tarball.
 
-## Indeks (setelah evaluasi 2026-11-22)
+## Indeks (diperbarui 2026-11-23)
 
 | Berkas | Isi | Status |
 |---|---|---|
@@ -10,6 +10,7 @@ Folder ini berisi catatan audit dan rencana kerja. Tidak termasuk `files[]` pake
 | [`NO-SIDEBAR-CENTERED-PLAN.md`](NO-SIDEBAR-CENTERED-PLAN.md) | Rencana eksekusi v0.34: hapus sidebar, chat kolom tengah maksimal 50% | aktif (sudah dieksekusi; catatan kandidat) |
 | [`2026-11-21-audit-kode-working-tree.md`](2026-11-21-audit-kode-working-tree.md) | Bukti kode untuk temuan E-23/E-9/E-27/E-11/E-20/E-19 yang masih terbuka | aktif (sumber bukti) |
 | [`2026-11-22-audit-performa.md`](2026-11-22-audit-performa.md) | Audit performa read-only: temuan F-01…F-09 (deep snapshot `session.state`, estimasi token berulang, IO per step, persistensi, render, gap bench) + guard yang harus dijaga | aktif (analisis kode; belum ada angka runtime baru) |
+| [`2026-11-23-audit-rilis-043-working-tree.md`](2026-11-23-audit-rilis-043-working-tree.md) | Audit read-only working tree 0.43.0: kunci hook via skrip, allowlist `agent-browser`, endpoint daemon, pin MCP fail-open, test/dokumen basi | aktif (prediksi; test belum dijalankan) |
 | [`AUDIT-CONSOLIDATED.md`](AUDIT-CONSOLIDATED.md) | Arsip besar pra-v0.34. Bagian 9–14, 22, 26–27, 30 **sudah superseded** oleh penghapusan sidebar | arsip, jangan dipakai sebagai status |
 
 ## Yang sudah dibersihkan

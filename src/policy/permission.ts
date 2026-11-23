@@ -18,11 +18,10 @@ import {
 import { inspectBashCommand } from "./bash-guard.ts"
 import {
   isCwdOutsideRoot,
-  isOwnedState,
-  isOwnedStateReal,
+  isOwnedHook,
+  isOwnedHookReal,
   isRealPathOutsideRoot,
   isSensitive,
-  isTrashRestore,
 } from "./jail.ts"
 import { scrubSecrets } from "./scrub.ts"
 // Tokenizer sadar-platform (POSIX: `\`/`'`; win32: `^`, `'` literal).
@@ -261,6 +260,43 @@ const DEFAULT_BASH_ALLOWLIST = [
   // Subsumes `node --version` (versi lama) sehingga entri itu tak lagi khusus.
   "node *",
   "bun --version",
+  // Agent-browser (keputusan owner 2026-11-23, ditinjau ulang hari yang sama):
+  // pola SEMPIT per subcommand, bukan wildcard telanjang — `agent-browser`
+  // saja tak boleh lolos. Regex matchBashAllowlist mengubah `*` → `.*`
+  // case-insensitive, jadi subcommand yang tak terdaftar tetap ditolak.
+  //
+  // `eval` & `mcp` TETAP diizinkan: eval aman karena default Chrome fresh
+  // tanpa profil (tak memakai cookie user), mcp dipakai sebagai fallback bila
+  // CLI agent-browser bermasalah (CLI tetap primary).
+  //
+  // `--auto-connect` DICABUT dari allowlist: flag itu menyambung ke browser /
+  // profil user, bukan profil fresh. Celah `npx agent-browser --auto-connect`
+  // (pola `"npx *"` mencocokkan seluruh string) ditutup oleh deny rule SEMPIT
+  // di bashDenyReason, BUKAN di sini — lihat isAgentBrowserAutoConnect.
+  //
+  // `install*` TETAP terdaftar di allowlist sebagai bentuk perintah yang
+  // dikenal, TETAPI mengunduh/memasang browser butuh konfirmasi user. Gerbang
+  // ASK ada di check() lewat gateAgentBrowserInstall supaya AUTO (yang bash-
+  // nya hanya lewat deny-list) pun ikut terikat — mencopot pola dari sini
+  // saja TIDAK cukup untuk meminta persetujuan di mode AUTO.
+  "agent-browser open*",
+  "agent-browser snapshot*",
+  "agent-browser click*",
+  "agent-browser fill*",
+  "agent-browser errors*",
+  "agent-browser console*",
+  "agent-browser network*",
+  "agent-browser get*",
+  "agent-browser close*",
+  "agent-browser skills get core",
+  "agent-browser --version",
+  "agent-browser install*",
+  "agent-browser eval*",
+  "agent-browser mcp*",
+  // TIDAK ada entri `npx agent-browser ...`: pola `"npx *"` di atas sudah
+  // mencakup SEMUA bentuk npx (open/eval/mcp/install/...), jadi entri
+  // eksplisit hanya redundan. Kontrak subcommand tetap terlihat lewat deretan
+  // `agent-browser ...` di atas — itulah satu-satunya daftar bermakna.
 ]
 
 // [0.16.x] Allowlist "developer" untuk fallback no-sandbox (restrictBash) —
@@ -530,7 +566,12 @@ function decideBashCommand(cmd: string, list: readonly string[], root: string): 
         isCwdOutsideRoot(target, root) ||
         isRealPathOutsideRoot(target, root) ||
         isSensitive(target) ||
-        isOwnedState(target)
+        // Keputusan owner 2026-11-23: `.minicode/` kini BOLEH ditulis lewat
+        // redirect (selaras dengan bash-guard & file tool). SATU-SATUNYA yang
+        // tetap dikunci = skrip hook (audit 2026-11-12) — string + realpath
+        // supaya junction/symlink internal tak bisa menyamarkannya.
+        isOwnedHook(target) ||
+        isOwnedHookReal(target, root)
       )
         return { ok: false, reason: "redirection outside workspace", command: cmd }
     }
@@ -564,7 +605,16 @@ function decideBashCommand(cmd: string, list: readonly string[], root: string): 
     }
     // `-i`/`--in-place` mengubah pembaca menjadi penulis; pola `sed -n *` punya
     // bentuk yang sama setelah normalisasi, jadi ditolak eksplisit di sini.
-    if (/(^|\s)(-i|--in-place)\b/.test(seg))
+    // Carve-out agent-browser (keputusan owner 2026-11-23): `-i` di sini adalah
+    // flag "interactive elements" milik `snapshot`, BUKAN in-place edit. Sengaja
+    // dipersempit ke subcommand `snapshot` saja — carve-out `\bagent-browser\b`
+    // yang lama membebaskan SEMUA segmen agent-browser (click/fill/eval/...),
+    // padahal hanya snapshot yang memakai `-i` sebagai flag jinak. Tool lain
+    // (sed/perl/...) tetap kena aturan lama — korpus gate:bash tak berubah.
+    if (
+      /(^|\s)(-i|--in-place)\b/.test(seg) &&
+      !/^\s*(?:npx\s+)?agent-browser\s+snapshot\b/i.test(seg)
+    )
       return { ok: false, reason: "in-place edit", command: cmd }
     const matched = list.filter((pat) => matchBashAllowlist(seg, pat))
     if (matched.length === 0) return { ok: false, reason: "no matching pattern", command: seg }
@@ -824,6 +874,50 @@ export function createPermissionHandler(
     return promptAskOr(call, () => deny(call, "network read requires approval"), signal)
   }
 
+  // [AGENT-BROWSER-AUTO-CONNECT] Owner 2026-11-23 mencabut `--auto-connect`:
+  // flag itu menyambung ke browser/profil user (cookie asli), bukan profil
+  // fresh seperti default. Deteksi SEMPIT — harus menyebut agent-browser DAN
+  // flag auto-connect — supaya `npm install*` umum tak tersentuh. Dipakai di
+  // bashDenyReason (semua mode, termasuk celah `npx *` yang mematch seluruh
+  // string `npx agent-browser --auto-connect` lewat allowlist).
+  function isAgentBrowserAutoConnect(cmd: string): boolean {
+    return /\bagent-browser\b[\s\S]*--auto-connect\b/i.test(cmd)
+  }
+
+  // [AGENT-BROWSER-INSTALL-GATE] Owner 2026-11-23: `install` mengunduh/masang
+  // browser → butuh KONFIRMASI USER, bukan allow bebas atau deny permanen.
+  // Menyangar 3 bentuk: `agent-browser install` (boleh diawali npx, mis.
+  // `npx -y agent-browser install`) dan `npm install|i|add ... agent-browser`
+  // (global maupun lokal). `npm install*` biasa TIDAK terkena — harus ada
+  // token `agent-browser`. Deteksi sengaja agak longgar (false positive =
+  // prompt ekstra, fail-safe); yang penting jangan sampai lolos tanpa tanya.
+  function isAgentBrowserInstall(cmd: string): boolean {
+    const c = cmd.trim()
+    if (!/\bagent-browser\b/i.test(c)) return false
+    if (/\bagent-browser\s+install(?:\s|$)/i.test(c)) return true
+    if (/\bnpm\s+(?:install|i|add|in)\b[\s\S]*\bagent-browser\b/i.test(c)) return true
+    return false
+  }
+
+  // Gerbang ASK untuk install. Mengembalikan null bila perintah bukan install
+  // (pemanggil lalu lanjut ke handler mode normal). Bila install: jalankan
+  // bash-guard LEBIH DULU supaya persetujuan tak membuka perintah berbahaya
+  // yang disisipkan (mis. `agent-browser install && rm -rf /`), lalu arahkan
+  // ke promptAskOr — TTY + ask wajib, headless/tanpa ask ⇒ deny (fail-closed),
+  // persetujuan "always" tercatat seperti jalur gated lain.
+  async function gateAgentBrowserInstall(
+    call: ToolCall,
+    args: Record<string, unknown> | null,
+    signal: AbortSignal | undefined,
+  ): Promise<"allow" | "deny" | null> {
+    if (call.name !== "bash") return null
+    const cmd = (args?.cmd as string) ?? ""
+    if (!isAgentBrowserInstall(cmd)) return null
+    const br = bashDenyReason(cmd, bashEffectiveCwd(args))
+    if (br) return deny(call, `bash-guard: ${br}`)
+    return promptAskOr(call, () => deny(call, "agent-browser install requires approval"), signal)
+  }
+
   // Alasan deny per-call untuk seam kernel describeDenial (audit #14):
   // check() TETAP mengembalikan "deny" polos (kontrak Decision + semua
   // assertion tak berubah); alasannya dibaca kernel tepat setelah deny via
@@ -925,6 +1019,12 @@ export function createPermissionHandler(
   }
   function bashDenyReason(cmd: string, effectiveCwd: string): string | null {
     if (!cmd.trim()) return "empty command"
+    // [AGENT-BROWSER-AUTO-CONNECT] Deny rule sempit, jalan di SEMUA mode
+    // (allowlist / ask / auto / allow-all) sebelum allowlist dipertimbangkan.
+    // Menutup celah `npx agent-browser --auto-connect`: pola `"npx *"` tetap
+    // mencocokkannya di allowlist setelah entri eksplisit dicabut.
+    if (isAgentBrowserAutoConnect(cmd))
+      return "agent-browser --auto-connect is not allowed (use a fresh browser profile)"
     try {
       const v = inspectBashCommand(cmd, effectiveCwd, root)
       return v.denied ? (v.reason ?? "blocked command") : null
@@ -1197,14 +1297,19 @@ export function createPermissionHandler(
           if (isSensitive(p)) return deny(call, "jail: sensitive file")
         }
       }
-      // Tool TULIS file dilarang menyentuh `.minicode/` di SEMUA mode (termasuk
-      // allow-all): cek nama saja lolos (`test-write.txt`), dan sub-agen/injeksi
-      // bisa menimpa todos, allowlist, config MCP, atau jurnal recovery.
-      // Baca & tool khusus (todo/memory/config/undo) dikecualikan; juga restore
-      // .trash/ → workspace dan skrip hooks (eksekusi tetap via allowlist owned).
-      // Kunci ganda: target NYATA dicek (junction/symlink internal → .minicode/),
-      // best-effort realpath agar symlink internal sah tetap ditulis (safe-open.ts).
-      // Daftar tool dari kontrak (satu sumber dengan jail path).
+      // KEPUTUSAN OWNER 2026-11-23: `.minicode/` kini BOLEH ditulis agen/model,
+      // termasuk lewat file tool (write/edit/patch/move/delete). Blok owned-state
+      // lama dicabut — cek NAMA tak pernah cukup (`test-write.txt` dulu lolos),
+      // tapi sekarang memang tidak ada lagi daftar nama yang perlu dijaga.
+      // Pemeriksaan jail workspace (`isRealPathOutsideRoot`) & rahasia
+      // (`isSensitive`, termasuk `.minicode/auth.json`) di atas TETAP berlaku.
+      // Model tetap harus hati-hati: jangan menimpa sessions.db/config sembarangan.
+      //
+      // SATU-SATUNYA kunci yang dipertahankan: `.minicode/hooks/**` (audit
+      // 2026-11-12) — hook dieksekusi otomatis via scan direktori saat
+      // MINICODE_HOOKS=1, jadi menanam skrip = kode jalan di luar permission.
+      // Operator membuat hook di luar sesi. Kunci ganda (string + realpath)
+      // menutup junction `linkdir → .minicode` yang menyamarkan target hook.
       if (FILE_WRITE_TOOL_NAMES.has(call.name)) {
         const rawTargets =
           call.name === "move_file"
@@ -1213,30 +1318,21 @@ export function createPermissionHandler(
                 (earlyArgs?.destination as string) ?? (earlyArgs?.to as string) ?? "",
               ] as const)
             : ([(earlyArgs?.path as string) ?? ""] as const)
-        // Carve-out restore .trash/ → workspace: cek string dulu agar jalur sah
-        // tak ditahan kunci realpath. Hooks tak dikecualikan (auto-dieksekusi saat opt-in).
-        if (call.name === "move_file") {
-          const f = rawTargets[0] ?? ""
-          const t = rawTargets[1] ?? ""
-          if (isTrashRestore(f, t)) {
-            // lanjut ke mode check di bawah (ask/auto tetap berlaku)
-          } else if (
-            (f !== "" && isOwnedState(f)) ||
-            (t !== "" && isOwnedState(t)) ||
-            rawTargets.some((p) => p !== "" && isOwnedStateReal(p, root))
-          ) {
-            return deny(call, "jail: owned state")
-          }
-        } else {
-          const p = rawTargets[0] ?? ""
-          if (p !== "" && (isOwnedState(p) || isOwnedStateReal(p, root))) {
-            return deny(call, "jail: owned state")
-          }
+        if (rawTargets.some((p) => p !== "" && (isOwnedHook(p) || isOwnedHookReal(p, root)))) {
+          return deny(call, "jail: owned state")
         }
       }
 
       const mode = state.mode
       if (mode === "unrestricted") return "allow"
+      // [AGENT-BROWSER-INSTALL-GATE] Jalan SEBELUM cabang mode (termasuk AUTO
+      // yang bash-nya hanya lewat deny-list) supaya install selalu butuh
+      // konfirmasi. Mode `unrestricted` sengaja dikecualikan di atas — itu
+      // sesi full-trust, bukan permukuan agen yang diatur kebijakan ini.
+      // Mengembalikan null = bukan install → lanjut ke handler mode normal
+      // (bash-guard + allowlist tetap berjalan, tak ada prompt ganda).
+      const installVerdict = await gateAgentBrowserInstall(call, earlyArgs, signal)
+      if (installVerdict !== null) return installVerdict
       if (mode === "allow-all") {
         // allow-all tetap menolak bash berbahaya — izin penuh bukan berarti
         // mengizinkan `rm -rf /` atau fork bomb. Yang dicek di sini FULL

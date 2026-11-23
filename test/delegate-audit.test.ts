@@ -96,7 +96,7 @@ test("delegate: explore = 12 read-only tepat; plan = 32 tanpa denylist", async (
     await delegateTaskTool.execute({ prompt: "x" }, ctxFor(dir, "auto"))
     const exploreNames = seen[0]!.tools.map((t) => t.name).sort()
     expect(exploreNames).toEqual([...EXPLORE_TOOL_NAMES].sort())
-    expect(EXPLORE_TOOL_NAMES).toHaveLength(12)
+    expect(EXPLORE_TOOL_NAMES).toHaveLength(16)
     seen.length = 0
     await delegateTaskTool.execute({ prompt: "x", mode: "plan" }, ctxFor(dir, "auto"))
     const planNames = new Set(seen[0]!.tools.map((t) => t.name))
@@ -218,11 +218,11 @@ test("delegate: budget/timeout/cwd/journal plumbing", async () => {
     const seen: SubAgentSpec[] = []
     setSubAgentSessionFactory(fakeFactory(seen))
     await delegateTaskTool.execute(
-      { prompt: "x", mode: "plan", maxSteps: 100 },
+      { prompt: "x", mode: "plan", maxSteps: 999 },
       ctxFor(dir, "auto"),
     )
     const spec = seen[0]!
-    // [T-008] Cap sub-agent memakai konstanta SENDIRI (50). Permintaan 100
+    // [T-008] Cap sub-agent memakai konstanta SENDIRI (600). Permintaan 999
     // di-clamp ke cap delegasi, BUKAN ke DEFAULT_MAX_STEPS sesi utama (200) —
     // memakai default sesi utama berarti memperluas kewenangan delegasi.
     expect(spec.maxSteps).toBe(LIMITS.SUB_AGENT_MAX_STEPS)
@@ -496,7 +496,12 @@ test("delegate: committedDelegatesSince untuk peringatan retry", async () => {
 
 // ── 5. Owned-state guard ──
 
-test("delegate: file tool tak boleh tulis state minicode (semua mode)", async () => {
+test("delegate: file tool kini BOLEH tulis state minicode, kecuali hooks", async () => {
+  // Keputusan owner 2026-11-23: `.minicode/` boleh ditulis agen/model
+  // (termasuk lewat file tool & shell). Yang masih dikunci: `.minicode/hooks/**`
+  // — hook dieksekusi otomatis (scan direktori) saat MINICODE_HOOKS=1, jadi
+  // menulis skrip hook lewat tool = model menanam kode di luar
+  // permission/jail/sandbox. Operator membuat skrip hook di luar sesi.
   const restoreEnv = cleanEnv()
   const dir = tmpRoot()
   try {
@@ -517,26 +522,18 @@ test("delegate: file tool tak boleh tulis state minicode (semua mode)", async ()
         ".minicode/allowlist.json",
         ".minicode/config.json",
         ".minicode/turn.active.json",
+        ".minicode/skills/agent-browser.md",
       ]
       for (const t of targets) {
-        if ((await check("write_file", { path: t, content: "x" })) !== "deny")
-          throw new Error(`${mode} write_file ${t} tidak ditolak`)
-        if ((await check("edit", { path: t, oldString: "a", newString: "b" })) !== "deny")
-          throw new Error(`${mode} edit ${t} tidak ditolak`)
-        if ((await check("delete_file", { path: t })) !== "deny")
-          throw new Error(`${mode} delete_file ${t} tidak ditolak`)
-        if ((await check("move_file", { path: "a.txt", destination: t })) !== "deny")
-          throw new Error(`${mode} move→ ${t} tidak ditolak`)
-        if ((await check("move_file", { path: t, destination: "b.txt" })) !== "deny")
-          throw new Error(`${mode} move ${t}→ tidak ditolak`)
+        expect(await check("write_file", { path: t, content: "x" })).toBe("allow")
+        expect(await check("edit", { path: t, oldString: "a", newString: "b" })).toBe("allow")
+        expect(await check("delete_file", { path: t })).toBe("allow")
+        expect(await check("move_file", { path: "a.txt", destination: t })).toBe("allow")
+        expect(await check("move_file", { path: t, destination: "b.txt" })).toBe("allow")
       }
-      // BACA tetap boleh; file user biasa tetap bisa tulis.
+      // BACA & file user biasa tetap boleh.
       expect(await check("read_file", { path: ".minicode/todos/s.json" })).toBe("allow")
       expect(await check("write_file", { path: "MEMORY.md", content: "x" })).toBe("allow")
-      // Audit 2026-11-12: `.minicode/hooks/` BUKAN lagi carve-out. Hook
-      // dieksekusi otomatis (scan direktori) saat MINICODE_HOOKS=1, jadi
-      // menulis skrip hook lewat tool = model menanam kode yang jalan di luar
-      // permission/jail/sandbox. Operator membuat skrip hook di luar sesi.
       expect(await check("write_file", { path: ".minicode/hooks/pre-x.js", content: "x" })).toBe(
         "deny",
       )

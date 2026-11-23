@@ -64,7 +64,7 @@ test("non-TTY = null-screen: ok false, paint/close nol byte", () => {
   s.setCursorVisible(false)
   s.close()
   expect(tty.all()).toBe("")
-  expect(tty.all()).not.toContain("\x1b[6 q")
+  expect(tty.all()).not.toContain("\x1b[5 q")
   expect(tty.all()).not.toContain("\x1b[0 q")
   expect(tty.allErr()).toBe("")
 })
@@ -189,31 +189,31 @@ test("paint: satu chunk stdout per frame (ConPTY menagih tiap write)", () => {
   s.close()
 })
 
-test("caret bar DECSCUSR `6 q` — satu mekanisme, re-assert saat show", () => {
+test("caret bar DECSCUSR `5 q` — satu mekanisme, re-assert saat show", () => {
   tty = installFakeTty({ columns: 80, rows: 24 })
   const s = openAltScreen()
   tty.clear()
-  // show mengirim ulang `6 q` di DALAM write yang sudah ada (tanpa writer baru).
+  // show mengirim ulang `5 q` di DALAM write yang sudah ada (tanpa writer baru).
   s.setCursorVisible(true)
-  expect(tty.all()).toContain("\x1b[6 q")
+  expect(tty.all()).toContain("\x1b[5 q")
   expect(tty.chunks()).toHaveLength(1)
   tty.clear()
   // hide tak mengubah gaya caret — simetris: hanya show yang re-assert.
   s.setCursorVisible(false)
-  expect(tty.all()).not.toContain("\x1b[6 q")
+  expect(tty.all()).not.toContain("\x1b[5 q")
   s.close()
 })
 
-test("paint(cursor): caret bar `6 q` dikirim dalam satu frame (urutan = moveCursor)", () => {
+test("paint(cursor): caret bar `5 q` dikirim dalam satu frame (urutan = moveCursor)", () => {
   tty = installFakeTty({ columns: 40, rows: 5 })
   const s = openAltScreen()
   tty.clear()
   s.paint(["baris"], { row: 1, col: 3 })
   const out = tty.all()
-  expect(out).toContain("\x1b[6 q")
+  expect(out).toContain("\x1b[5 q")
   // Urutan: sembunyi → posisi → caret bar → tampil (sama dengan moveCursor).
-  expect(out.indexOf("\x1b[?25l")).toBeLessThan(out.indexOf("\x1b[6 q"))
-  expect(out.indexOf("\x1b[6 q")).toBeLessThan(out.indexOf("\x1b[?25h"))
+  expect(out.indexOf("\x1b[?25l")).toBeLessThan(out.indexOf("\x1b[5 q"))
+  expect(out.indexOf("\x1b[5 q")).toBeLessThan(out.indexOf("\x1b[?25h"))
   expect(tty.chunks()).toHaveLength(1)
   s.close()
 })

@@ -15,7 +15,7 @@
 // Semua fixture di sini berada di direktori sementara; tidak ada penulisan
 // di luar workspace sintetis itu.
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { inspectBashCommand } from "../src/policy/bash-guard.ts"
@@ -77,6 +77,8 @@ const SAFE: [string, string][] = [
   ["cat << EOF", "heredoc — bukan path"],
   ["cmd 2>&1", "redirect ke fd — bukan path"],
   ["echo done", "tanpa redirect"],
+  // Keputusan owner 2026-11-23: state .minicode/ kini boleh ditulis lewat shell.
+  ["echo x > .minicode/notes.txt", "state minicode kini sah ditulis"],
 ]
 
 describe("bash-guard: target redirect berkutip tak boleh melewati jail", () => {
@@ -137,5 +139,72 @@ describe("bash-guard: target redirect berkutip tak boleh melewati jail", () => {
     // jaringan, bukan deterministik. Tanpa cwd (heuristik) jalurnya deterministik
     // dan tetap menutup kasus ini.
     expect(inspectBashCommand('echo x >"//server/share/evil.txt"').denied).toBe(true)
+  })
+
+  test("redirect ke .minicode/ kini sah, kecuali skrip hook", () => {
+    // Keputusan owner 2026-11-23 mencabut kunci owned-state umum, termasuk
+    // untuk shell. Satu-satunya yang tetap ditolak = `.minicode/hooks/**`
+    // (audit 2026-11-12): hook jalan otomatis saat MINICODE_HOOKS=1.
+    const ws = makeWorkspace()
+    expect(inspectBashCommand("echo x > .minicode/config.json", ws).denied).toBe(false)
+    expect(inspectBashCommand('echo x > ".minicode/hooks/pre-x.js"', ws).denied).toBe(true)
+    expect(inspectBashCommand("echo x > .minicode/hooks/pre-x.js").denied).toBe(true)
+  })
+
+  test("READERS (cp/mv/Set-Content/New-Item) tak boleh menanam hook lewat .minicode/", () => {
+    // Audit 2026-11-23: kunci hook hanya ada di blok redirect, jadi `cp payload
+    // .minicode/hooks/x.js` lolos di mode auto. Sekarang sama dengan redirect.
+    const ws = makeWorkspace()
+    const attacks = [
+      "cp payload.js .minicode/hooks/x.js",
+      "copy payload.js .minicode/hooks/x.js",
+      "mv payload.js .minicode/hooks/x.js",
+      "Set-Content -Path .minicode/hooks/x.js -Value evil",
+      "Set-Content -Path:.minicode/hooks/x.js -Value evil",
+      "New-Item -ItemType File -Path .minicode/hooks/x.js",
+      "New-Item -ItemType File -Path:.minicode/hooks/x.js",
+    ]
+    for (const cmd of attacks) {
+      expect(inspectBashCommand(cmd, ws).denied, `bypass: ${cmd}`).toBe(true)
+      // Tanpa cwd juga harus tertahan (heuristik string).
+      expect(inspectBashCommand(cmd).denied, `bypass tanpa cwd: ${cmd}`).toBe(true)
+    }
+  })
+
+  test("READERS ke .minicode/ biasa tetap sah (tanpa over-block hook)", () => {
+    const ws = makeWorkspace()
+    const benign = [
+      "cp a.txt .minicode/notes.txt",
+      "mv a.txt .minicode/notes.txt",
+      "Set-Content -Path .minicode/notes.txt -Value hi",
+      "New-Item -ItemType File -Path .minicode/notes.txt",
+    ]
+    for (const cmd of benign) {
+      expect(inspectBashCommand(cmd, ws).denied, `over-block: ${cmd}`).toBe(false)
+    }
+  })
+
+  test("hook lewat junction/symlink internal tetap tertahan di READERS", () => {
+    const ws = makeWorkspace()
+    const hookDir = join(ws, ".minicode", "hooks")
+    mkdirSync(hookDir, { recursive: true })
+    const link = join(ws, "linkdir")
+    let linked = false
+    try {
+      // Junction bebas-privilege lintas-OS (Windows & POSIX).
+      symlinkSync(hookDir, link, "junction")
+      linked = true
+    } catch {
+      linked = false
+    }
+    if (!linked) return // lingkungan tanpa dukungan link: kasus diuji di jail-realpath
+    for (const cmd of [
+      "cp payload.js linkdir/x.js",
+      "Set-Content -Path linkdir/x.js -Value evil",
+    ]) {
+      expect(inspectBashCommand(cmd, ws).denied, `bypass link: ${cmd}`).toBe(true)
+    }
+    // Nama jinak di luar link tidak ikut terblokir.
+    expect(inspectBashCommand("cp a.txt notes.txt", ws).denied).toBe(false)
   })
 })
