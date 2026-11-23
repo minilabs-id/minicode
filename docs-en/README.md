@@ -1,6 +1,6 @@
 # MiniCode Documentation
 
-MiniCode is a terminal coding agent built on the MiniCore kernel. The interactive path uses a fullscreen TUI with the chat as a centred middle column (at most 50% of terminal width, footer/composer centred with it; full width below the threshold) — there is no right sidebar. Tool lines, the `✦` agent aggregate, findings, and the `+ thinking` marker appear in the chat; one-shot and automated paths write to the scrollback or to a machine-readable stream according to their contract. Since v0.35 the tool recap is a static committed row `└ …` at the footer of each narration (cumulative at the end of a turn), and the `› …` activity label uses the OS locale via `Intl` — narration/model answers still use the user's `/lang` language. Since v0.36 the TUI composer is at most 2 rows tall (a long draft uses a sliding window, without shifting the transcript), the `/` dropdown is an overlay inside the same frame without reducing `viewH`, and prompt/cursor width uses `composerWidth() = min(100, chatWidth())` with an adaptive prefix `minicode › `/`› ` plus `· ` for continuation rows (that v0.36 cap/threshold is superseded by v0.37). Since v0.37 bracketed paste is active (`?2004h`/`?2004l` outside the frame), `Ctrl+A` selects the whole transcript when the composer is empty and the dropdown is closed, resize stabilises auto-scroll/drag/cursor/anchor, the echoed prompt is wrapped once to the chat width, and the prompt cap is progressive `min(chatCols, 100 + floor(max(0, chatCols-100)/4))` (prefix `minicode › ` when `w−14 ≥ 24`) — the 2-row composer and one-frame dropdown are not revoked.
+MiniCode is a terminal coding agent built on the MiniCore kernel: the interactive path uses a fullscreen TUI with a centred chat column and no right sidebar; one-shot/automated paths write to the scrollback or a machine-readable stream. Current behaviour (static recap, OS-locale activity labels, two-row composer, bracketed paste, diagnostic auto-update) is recorded in the [Terminal Contract](TERMINAL_CONTRACT.md).
 
 ## Start here
 
@@ -11,7 +11,8 @@ MiniCode is a terminal coding agent built on the MiniCore kernel. The interactiv
 ## Limits worth knowing
 
 - Prompts and context are sent to the provider you configure. Configured MCP and LSP servers may also receive data or perform external effects.
-- The path jail, bash guard, WorkMode, PermissionMode, and tool access policy constrain execution; they do not guarantee that model output is correct.
+- The path jail, bash guard (platform-aware shell tokenizer + mutation-verb denylist), WorkMode, PermissionMode, and tool access policy constrain execution; they do not guarantee that model output is correct.
+- `fetchPinnedUrl` pins addresses to prevent SSRF on pricing, DNS strict/noCache is used during compaction, the verifier caps `maxBuffer` at 32 MB and classifies infrastructure failures, and undo/restore is fail-closed (a failed `rm` is recorded as `skipped`).
 - Operational limits and contracts are described in the active guides in this directory. Dated audit reports have been trimmed from the documentation baseline.
 
 ## Documentation map

@@ -52,7 +52,16 @@ describe("/help: kelengkapan & ukuran", () => {
 
   test("contains only the supported command surface", async () => {
     const teks = (await run("/help")).join("\n")
-    for (const cmd of ["/help", "/provider", "/model", "/status", "/sessions", "/init", "/exit"])
+    for (const cmd of [
+      "/help",
+      "/provider",
+      "/model",
+      "/status",
+      "/sessions",
+      "/init",
+      "/update",
+      "/exit",
+    ])
       expect(teks, cmd).toContain(cmd)
     for (const cmd of ["/undo", "/redo", "/clear", "/copy", "/mode", "/view"])
       expect(teks, cmd).toContain(cmd)
@@ -92,7 +101,17 @@ describe("/help: kelengkapan & ukuran", () => {
 describe("BUILTIN_COMMANDS: setiap perintah yang ditangani terdaftar", () => {
   // Perintah yang berfungsi tapi tidak terdaftar tidak muncul di /help DAN tidak
   // bisa dilengkapi dengan Tab — user tidak punya cara menemukannya.
-  const DITANGANI = ["help", "init", "exit", "model", "provider", "context", "sessions", "status"]
+  const DITANGANI = [
+    "help",
+    "init",
+    "exit",
+    "model",
+    "provider",
+    "context",
+    "sessions",
+    "status",
+    "update",
+  ]
 
   test("tidak ada perintah yang hilang dari daftar", () => {
     const terdaftar = new Set(BUILTIN_COMMANDS.map((b) => b.name))

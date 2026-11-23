@@ -3573,20 +3573,18 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     }
   }
 
-  // [PHASE 6AB] The operator projection. Created here, unconditionally and cheaply
-  // (a few counters and an empty array - no I/O, no store handle, no Scheduler), so
-  // the OFF case can still ANSWER "is the scheduler on?" with a truthful OFF rather
-  // than by absence. It holds no reference to the Scheduler, the store or the UI:
-  // it is fed events and probed against the handle.
+  // [PHASE 6AB] Proyeksi operator dibuat tanpa syarat & murah (counter + array
+  // kosong; tanpa I/O/store/Scheduler) agar kondisi OFF tetap menjawab "scheduler
+  // aktif?" dengan OFF yang jujur, bukan lewat ketiadaan. Tak memegang referensi
+  // Scheduler/store/UI — hanya diberi event & handle.
   const schedulerObservability = new SchedulerObservability()
 
   // ── [P1 M14] RUNTIME COMPOSITION ───────────────────────────────────────────
   //
-  // [DESIGN DECISION] One call, behind one MODE that defaults to `off`, with its
-  // dependencies in a THUNK — the same shape as the Scheduler below, on purpose.
-  // The alternative ("just construct it here and ignore it") satisfies the letter
-  // of "gated" while opening a SQLite handle and constructing a host, a kernel
-  // and a supervisor on every single run.
+  // [DESIGN DECISION] Satu panggilan di balik MODE default `off`, dependensi dalam
+  // THUNK (bentuk sama seperti Scheduler). Alternatif "construct lalu abaikan"
+  // memenuhi huruf "gated" tapi membuka handle SQLite & membangun host/kernel/
+  // supervisor di setiap run.
   //
   // [DESIGN DECISION] The journal path comes from the canonical SessionId
   // (P2.1: satu sid untuk semua komponen). Tak ada lagi path ganda
@@ -3595,9 +3593,9 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   // Bila sesi resume tak punya runtime journal, jurnal dibuat fresh
   // AT THAT PATH — tak pernah di path turunan id baru.
   //
-  // [P1 M15] Placed BEFORE the Scheduler composition on purpose: the runner must
-  // already exist when the scheduler's deps thunk asks for it, and fail-closed
-  // journal open must abort startup before any autonomous machinery is built.
+  // [P1 M15] Sengaja SEBELUM komposisi Scheduler: runner harus ada saat thunk deps
+  // scheduler memintanya, dan jurnal fail-closed menggagalkan startup sebelum
+  // mesin otonom dibangun.
   const runtimeCwd = cwd ?? process.cwd()
   // [P13.3] Holder fakta lapisan task. Runtime dibuat lebih dulu daripada
   // scheduler, jadi nilainya baru ada setelah schedulerconstructed — holder ini
@@ -3643,17 +3641,13 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
 
   // ── [PHASE 6U] AUTONOMOUS SCHEDULER COMPOSITION ────────────────────────────
   //
-  // [DESIGN DECISION] One call, one function, behind one boolean that defaults to
-  // false. Everything that makes autonomous execution possible — the TaskStore
-  // handle, the session factory, the scheduler, the trigger, the cancellation
-  // subscription — lives INSIDE the `deps` thunk, which
-  // `createProductionScheduler` does not invoke when the gate is shut. So the
-  // default configuration cannot open a database handle, cannot allocate a
-  // provider chain, cannot subscribe to a deletion channel, and cannot start
-  // autonomous work even by accident.
-  //
-  // The gate is read from `schedulerEnabled`, which only `cli/index.ts` sets, and
-  // only from an explicit `--enable-scheduler` token.
+  // [DESIGN DECISION] Satu panggilan di balik boolean default false. Semua yang
+  // memungkinkan eksekusi otonom (handle TaskStore, session factory, scheduler,
+  // trigger, subscription pembatalan) ada DI DALAM thunk `deps`, yang tidak
+  // dipanggil saat gate tertutup. Konfigurasi default tak bisa membuka DB,
+  // mengalokasikan provider, berlangganan kanal hapus, atau memulai kerja otonom.
+  // Gate dari `schedulerEnabled` (di-set hanya oleh cli/index.ts dari token
+  // eksplisit `--enable-scheduler`).
   const productionScheduler: ProductionSchedulerHandle = await createProductionScheduler(
     schedulerGateFor(schedulerEnabled),
     async () => {
@@ -3662,19 +3656,17 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       const store = new TaskStore(cwd, { authority: "SCHEDULER" })
       const autonomousCwd = cwd ?? process.cwd()
 
-      // [DESIGN DECISION] The REAL tool objects, filtered to the 6S allow-list —
-      // not freshly constructed look-alikes and not the whole session tool set. The
-      // jailing inside the real `read_file` is part of the security boundary, and a
-      // re-implemented tool would be a second implementation to keep correct.
-      // `AUTONOMOUS_TOOL_NAMES` is the 6S matrix's own output, so this cannot widen.
+      // [DESIGN DECISION] Objek tool ASLI, difilter ke allow-list 6S — bukan tiruan
+      // baru dan bukan seluruh tool sesi. Jail di `read_file` asli bagian dari batas
+      // keamanan; implementasi ulang = implementasi kedua yang rawan salah.
+      // `AUTONOMOUS_TOOL_NAMES` = output matriks 6S, jadi tak bisa melebar.
       const autonomousTools = AUTONOMOUS_TOOL_NAMES.map((name) =>
         sessionTools.find((t) => t.name === name),
       ).filter((t): t is NonNullable<typeof t> => t !== undefined)
 
-      // [P13.3 Stage C] Retry safety is DERIVED from the tool scope the bridge
-      // actually receives, not asserted here. Every autonomous tool must still
-      // be classified READ_ONLY by the 6S matrix; one unknown/mutating name and
-      // the whole scope becomes UNPROVEN (which means HOLD, never retry).
+      // [P13.3] Retry safety DITURUNKAN dari scope tool yang benar-benar diterima
+      // bridge, bukan ditegas di sini. Satu nama asing/mutasi → UNPROVEN (= HOLD,
+      // bukan retry).
       const { retrySafetyForToolScope } = await import("../src/task/continuity.ts")
       const retrySafety = retrySafetyForToolScope(autonomousTools.map((t) => t.name))
 
@@ -3764,13 +3756,10 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
           execGeneration: store.getExecutionLineage(sessionId, taskId)?.execGeneration ?? 0,
           sessionIncarnation: store.getSessionIncarnation(sessionId),
         }),
-        // [P13.3 Stage C] ONE evidence source for automatic continuation:
-        // canonical runtime view + admission for `background`, TaskStore and
-        // journal readability, and the read-only tool scope proven above.
-        //
-        // We do NOT infer safety from a missing completion marker, and we do not
-        // redispatch an old runtime execution: a successful reconcile leads to a
-        // FRESH claim (new exec_generation) and a new autonomous turn.
+        // [P13.3] Satu sumber bukti kontinuitas otomatis: runtime kanonik + admission
+        // `background`, keterbacaan TaskStore/journal, dan scope tool read-only di atas.
+        // Ketiadaan marker BUKAN bukti aman; eksekusi lama tak di-redispatch — reconcile
+        // sukses menghasilkan claim BARU (exec_generation baru) & turn otonom baru.
         continuity: {
           evidence: ({ authorityHeld, incarnationMatches, ownsSession }) => {
             try {

@@ -69,6 +69,25 @@ bun run vendor:check   # provenance MiniCore (soft; vendor host-editable sejak v
 - Jalur non-interaktif shell-first (append-only scrollback); sesi interaktif SELALU TUI alternate-screen (invariant terminal #1, tanpa opsi linear).
 - Ubah struktur/dependensi antarlapisan → wajib update `docs/architecture.md`.
 
+## Auto-update (v0.41) — batas untuk contributor
+
+- Jalur update hanya untuk salinan ter-install; checkout source tidak disentuh.
+- Injeksi `withUpdate` **HANYA** di composition root (`cli/index.ts`, `cli/setup.ts`)
+  dan hanya untuk TUI interaktif. Jalur non-TTY/one-shot/`exec`/ACP wajib tetap
+  fail-closed: tanpa injeksi → pesan "not available", tak ada spawn npm dari
+  pipe/CI.
+- Handoff terminal (`releaseTerminal`/`reacquireTerminal`) adalah operasi **di luar
+  frame `paint()`** — I1 (satu `stdout.write` per frame) tidak boleh dilanggar.
+  Sequence `?2004l`/`?2004h` dipancarkan sekali per transisi, bukan tiap repaint.
+- Redaksi diagnostik hanya tiga kategori (ANSI, token/kredensial, URL berkredensial)
+  plus satu baris ≤300 char — jangan dipakai sebagai pembersih rahasia umum atau
+  jalur teks masuk ke prompt/model.
+- Urutan verifikasi signature tetap fail-closed. Instruksi manual: lihat
+  [instalasi manual](getting-started.md). Windows: runner
+  `npm_execpath`/`npm.cmd`, timeout 60 dtk.
+- Guard internal `MINICODE_AUTO_UPDATE_DONE=1` mencegah loop restart; jangan diset
+  manual di luar jalur update.
+
 ## Aturan kode
 
 - Kernel upstream `vendor/minicore/src/core/*` beku. Overlay host yang disetujui tersimpan di `scripts/vendor-overlays/` dan diterapkan oleh `bun run vendor:minicore`; jangan edit tree vendor atau `VENDOR.md` manual. Butuh seam baru? Buktikan dulu tidak bisa sebagai Tool/Provider/Policy, tambahkan test, lalu pin melalui generator.

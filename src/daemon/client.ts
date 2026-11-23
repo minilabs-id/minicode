@@ -1,10 +1,7 @@
-// P2.12 — klien IPC minimal (dipakai CLI `minicode daemon …` dan test).
-//
-// Sengaja ada di `src/`, bukan `cli/`: test butuh klien tanpa menjalankan
-// seluruh CLI, dan modul non-ui tidak boleh mengimpor `cli/`. Klien ini juga
-// PEMBUKTI liveness sesungguhnya — `discover()` hanya menghasilkan "suspect",
-// dan status "alive" hanya boleh lahir dari probe koneksi yang berhasil di
-// sini (recency != liveness).
+// Klien IPC minimal (CLI `minicode daemon` + test). Sengaja di `src/`, bukan
+// `cli/`: modul non-ui tak boleh impor `cli/`. Satu-satunya pembuktian liveness
+// — `discover()` hanya "suspect"; `alive` lahir dari probe koneksi di sini
+// (recency ≠ liveness).
 
 import { connect, type Socket } from "node:net"
 import { type DiscoveryResult, discover, readEndpoint } from "./discovery.ts"
@@ -33,12 +30,8 @@ export interface ProbeResult {
   discovery: DiscoveryResult
 }
 
-/**
- * Probe kehidupan daemon: baca endpoint -> coba TCP connect.
- *
- * SATU-SATUNYA tempat yang boleh menyata `alive: true`. Semua pemanggil lain
- * memakai hasil di sini, bukan umur file.
- */
+/** Probe daemon: endpoint → TCP connect. Satu-satunya tempat yang boleh
+ * menyatakan `alive: true` (bukan berdasar umur berkas). */
 export async function probeDaemon(cwd?: string, timeoutMs = 800): Promise<ProbeResult> {
   const discovery = discover(cwd)
   if (!discovery.endpoint) {
@@ -101,13 +94,8 @@ export class DaemonClient {
   #closed = false
   welcome: Extract<ServerMessage, { t: "welcome" }> | null = null
   #pendingControl = new Map<string, (msg: ServerMessage) => void>()
-  /**
-   * [Area C · PROMPT 06] Fase stream per-sesi, dilacak dari wire.
-   *
-   * Sumber: `subscribed.phase` (fase awal) lalu `tail_marker.phase` (fase
-   * live). Tanpa pelacakan ini, konsumen tak bisa menampilkan badge
-   * replay→live tanpa harus menebak dari urutan pesan.
-   */
+  /** Fase stream per-sesi dari wire (`subscribed.phase`, lalu
+   * `tail_marker.phase`) — badge replay→live tanpa menebak urutan pesan. */
   readonly #phases = new Map<string, DaemonStreamPhase>()
 
   private constructor(sock: Socket) {
@@ -115,8 +103,7 @@ export class DaemonClient {
     sock.on("data", (chunk: string | Buffer) => {
       let msgs: unknown[]
       try {
-        // Beberapa runtime memuntahkan data sebagai string bila encoding
-        // diset; framing butuh byte mentah agar tidak salah hitung panjang.
+        // Framing butuh byte mentah; runtime dengan encoding bisa mengirim string.
         msgs = this.#decoder.push(typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk)
       } catch (e) {
         this.#emit({ kind: "protocol-error", message: String((e as Error).message ?? e) })
@@ -126,7 +113,7 @@ export class DaemonClient {
       for (const raw of msgs) {
         if (!raw || typeof raw !== "object" || !("t" in raw)) continue
         const msg = raw as ServerMessage
-        // [Area C] Latch fase stream per-sesi (sumber: wire, bukan tebakan).
+        // Latch fase stream per-sesi (dari wire, bukan tebakan).
         if (msg.t === "subscribed") this.#phases.set(msg.sid, msg.phase)
         else if (msg.t === "tail_marker") this.#phases.set(msg.sid, msg.phase)
         if (msg.t === "control_result") {
@@ -223,28 +210,19 @@ export class DaemonClient {
     this.#send({ t: "subscribe", sid, from, consumer: this.welcome?.consumer ?? "" })
   }
 
-  /**
-   * [Area C · PROMPT 06] Fase stream terakhir yang diketahui untuk satu sesi
-   * (`replay` sebelum `tail_marker`, `live` sesudahnya). `undefined` = belum
-   * subscribe / belum ada fase yang dilaporkan.
-   */
+  /** Fase terakhir satu sesi (`replay` sebelum tail_marker, `live` sesudahnya);
+   * `undefined` = belum subscribe. */
   phaseOf(sid: string): DaemonStreamPhase | undefined {
     return this.#phases.get(sid)
   }
 
   /**
-   * Mapping EKPLISIT dari kosakata wire daemon ke kosakata provenance
-   * TAMPILAN (`live`/`replay`, lowercase — `src/presentation/projection.ts`).
+   * Mapping eksplisit fase wire → provenance tampilan (`live`/`replay`). Kedua
+   * kosakata sengaja terpisah (wire = asal event; tampilan = status rebuild),
+   * jadi mapping ditulis eksplisit meski nilainya kebetulan sama.
    *
-   * Dua kosakata itu sengaja terpisah (lihat catatan di `protocol.ts`):
-   * provenance wire = "dari mana event dibaca"; provenance tampilan = "status
-   * rebuild terhadap watershed". Yang dipetakan di sini adalah FASE stream,
-   * yang happens punya nilai yang sama — tapi mappingnya tetap ditulis
-   * eksplisit supaya tak ada perbandingan diam-diam antar kosakata.
-   *
-   * Badge yang dirender memakai penanda provenans yang SUDAH ada di lapisan
-   * presentasi (`provenanceMark`): fase "replay" → " [replay]", fase "live" →
-   * tanpa badge (live tak pernah diberi badge).
+   * Badge memakai `provenanceMark` dari lapisan presentasi: replay → " [replay]",
+   * live → tanpa badge.
    */
   streamProvenance(sid: string): "live" | "replay" | undefined {
     const phase = this.#phases.get(sid)
@@ -287,8 +265,7 @@ export class DaemonClient {
   }
 
   ping(id: string): Promise<ServerMessage> {
-    // Pasang penunggu SEBELUM mengirim: balasan bisa datang lebih cepat dari
-    // penambahan listener bila urutannya dibalik.
+    // Pasang penunggu sebelum kirim: balasan bisa mendahului listener.
     const waiter = this.next((m) => m.t === "pong" && m.id === id)
     this.#send({ t: "ping", id })
     return waiter
@@ -298,9 +275,8 @@ export class DaemonClient {
     if (this.#closed) return
     this.#send({ t: "goodbye" })
     this.#closed = true
-    // [Area C] Fase stream tak boleh bertahan hidup setelah socket tutup —
-    // consumer yang masih memegang klien tak boleh menampilkan "replay"
-    // untuk stream yang sudah mati.
+    // Hapus fase saat socket tutup: klien tak boleh menampilkan "replay" untuk
+    // stream mati.
     this.#phases.clear()
     try {
       this.#sock.end()

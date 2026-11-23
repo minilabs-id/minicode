@@ -19,6 +19,12 @@ export const id: Record<MsgKey, string> = {
   "msg.tooSmall": "Layar terlalu kecil — besarkan jendela",
   "msg.scheduler": "Penjadwal: {line}",
   "msg.staleWriter": "Riwayat tidak tersimpan · mulai ulang sesi",
+  // v0.42: redaksi ringkas untuk kegagalan tool di lapisan tampil. Memakai
+  // tSystem() (locale OS), bukan /lang — ini kwitansi/peringatan sistem.
+  "msg.duplicateAction": "Sudah dijalankan · verifikasi state dulu",
+  "msg.cmdFailed": "Perintah gagal · {target} · detail di --verbose",
+  "msg.toolFailed": "Gagal baca terminal · coba lagi",
+  "msg.guardError": "Perintah ditolak · coba lagi",
   "form.idleWarning": "diam — dibatalkan dalam {s} dtk (tekan sembarang tombol untuk lanjut)",
   "appr.title": "Perlu persetujuan",
   "appr.tool": "Tool:",
@@ -186,7 +192,7 @@ export const id: Record<MsgKey, string> = {
   "st.provider": "  Penyedia: {v}",
   "st.tools": "  Tool:     {v}",
   "st.workMode": "  WorkMode: {v} (lapis intent)",
-  "st.permissionMode": "  Izin:     {v} (otoritas allow/deny)",
+  "st.permissionMode": "  Mode izin: {v} (otoritas allow/deny)",
   "st.context": "  Konteks:  ~{v} tok (estimasi jendela)",
   "help.desc.context": "Lihat atau atur jendela konteks",
   "ctx.title": "Jendela konteks",
@@ -229,7 +235,7 @@ export const id: Record<MsgKey, string> = {
   "state.folded": "dilipat",
   "help.cHead": "Perintah:",
   "help.cKeys":
-    "Tombol: Tab WorkMode · Shift+Tab izin · ↑↓ riwayat · Mouse wheel/PgUp/PgDn gulir · Ctrl+R cari · Ctrl+D keluar",
+    "Tombol: Tab WorkMode · Shift+Tab mode izin · ↑↓ riwayat · Mouse wheel/PgUp/PgDn gulir · Ctrl+R cari · Ctrl+D keluar",
   "help.cMore": "  /help tombol = semua pintasan",
   "help.gGeneral": "Umum",
   "help.gModel": "Model",
@@ -265,12 +271,12 @@ export const id: Record<MsgKey, string> = {
   "shell.unavailable": "Shell interaktif butuh terminal interaktif",
   "shell.failed": "Shell gagal: {msg}",
   "help.desc.exit": "Keluar",
-  "help.desc.mode": "Mode kerja dan izin",
+  "help.desc.mode": "WorkMode dan mode izin",
   "help.desc.view": "Aksi tampilan: thinking",
   "tui.modeTitle": "Mode",
-  "tui.modeWork": "Mode kerja",
-  "tui.modePermission": "Izin",
-  "tui.permissionUnavailable": "Kontrol izin tidak tersedia di sesi ini",
+  "tui.modeWork": "WorkMode",
+  "tui.modePermission": "Mode izin",
+  "tui.permissionUnavailable": "Kontrol mode izin tidak tersedia di sesi ini",
   "tui.viewTitle": "Tampilan",
   "tui.viewUse": "pakai: /view thinking",
   "help.desc.lang": "Tampilkan atau set bahasa UI",
@@ -280,7 +286,7 @@ export const id: Record<MsgKey, string> = {
   "help.desc.copy": "Salin 1–10 turn terakhir ke clipboard (OSC 52)",
   "help.desc.scheduler": "Picu / periksa / hentikan scheduler",
   "help.desc.thinking": "Alihkan tampilan thinking",
-  "undo.none": "Tidak ada turn user untuk di-undo.",
+  "undo.none": "Tidak ada turn pengguna untuk di-undo.",
   "undo.filesDenied": "Pemulihan berkas membutuhkan BUILD dan izin tulis; tidak ada perubahan.",
   "undo.usage": "Pemakaian: /undo [n|list] — n = nomor turn (1–{max}).",
   "undo.range": "Turn {n} tidak ditemukan (1–{max}).",
@@ -371,7 +377,7 @@ export const id: Record<MsgKey, string> = {
   "tui.bgFinishedAuto":
     "job background {id} selesai dengan exit code {code}. Lanjutkan pekerjaan yang tadi tanpa menunggu saya: ambil output job lewat bash_output bila relevan, verifikasi hasilnya, lalu selesaikan tugas yang tersisa.",
   "tui.childRecap":
-    "{n} sub-agent selesai: {summary}. Evaluasi temuannya dan laporkan secara singkat ke user — jangan mendelegasi lagi untuk rekap ini.",
+    "{n} sub-agent selesai: {summary}. Evaluasi temuannya dan laporkan secara singkat ke pengguna — jangan mendelegasi lagi untuk rekap ini.",
   "tui.langLine": "lang: {v}",
   "tui.compactLine": "output tool: {v}",
   "tui.modelSet": "model: {v}",
@@ -402,6 +408,18 @@ export const id: Record<MsgKey, string> = {
   "cmd.restart": "  Restart untuk memakai model baru.",
   "cmd.nothingUpdated":
     "  Tidak ada yang diperbarui — periksa API key dan jaringan di atas, lalu coba /provider sync.",
+  // /update — handoff TUI: lepas terminal dulu, lalu cek → install → restart.
+  // Toast progres pakai tSystem() (locale OS), readout pakai t() (/lang).
+  "help.desc.update": "Periksa dan pasang versi terbaru",
+  "out.titleUpdate": "Pembaruan",
+  "cmd.updateChecking": "Memeriksa pembaruan…",
+  "cmd.updateAvailable": "Pembaruan tersedia: v{v}",
+  "cmd.updateLatest": "Sudah memakai versi terbaru.",
+  "cmd.updateInstalling": "Memasang pembaruan…",
+  "cmd.updateDone": "Pembaruan terpasang — memulai ulang.",
+  "cmd.updateFailed": "Pembaruan gagal{msg}",
+  "cmd.updateUnavailable": "Pembaruan butuh terminal interaktif",
+  "cmd.updateOptedOut": "Pemeriksaan pembaruan dinonaktifkan untuk sesi ini.",
   "cmd.initExists": "AGENTS.md sudah ada - tidak ditimpa.",
   "cmd.initCreated": "AGENTS.md dibuat: {t}",
   "cmd.initInDiscuss":
@@ -410,7 +428,7 @@ export const id: Record<MsgKey, string> = {
   "cmd.initBodyMap": "## Struktur (repo-map)",
   "cmd.initBodyEmpty": "(repo-map kosong)",
   "cmd.initBodyConv":
-    "## Konvensi\n- Ikuti gaya kode existing.\n- Jalankan typecheck/test sebelum selesai.",
+    "## Konvensi\n- Ikuti gaya kode yang ada.\n- Jalankan typecheck/test sebelum selesai.",
   "cmd.noSessions": "Tidak ada sesi.",
   "ask.search": "(cari-balik)`{q}': ",
   "ask.searchFail": "(gagal cari-balik)`{q}': ",
@@ -492,4 +510,17 @@ export const id: Record<MsgKey, string> = {
   "summary.model": "Model",
   "summary.usage": "Pemakaian",
   "summary.tokens": "token",
+  // Pesan CLI subcommand — en sengaja sama persis dengan teks lama (test exit).
+  "cli.bunRequired":
+    "minicode membutuhkan Bun >= 1.1.13 (AbortSignal.any tidak tersedia; terdeteksi {v})",
+  "cli.usage": 'penggunaan: minicode "prompt"  |  minicode (mode interaktif)',
+  "cli.providerNotFound": 'penyedia "{id}" tidak ditemukan - lihat: minicode providers',
+  "cli.noMatches": '(tidak ada yang cocok untuk "{q}")',
+  "cli.noProvidersHint": "(belum ada penyedia - jalankan `minicode config add` dulu)",
+  "cli.mcpNoPins": "belum ada pin skema MCP untuk workspace ini",
+  "cli.pricingFetching": "mengambil harga dari models.dev…",
+  "cli.purgeSessions": "[purge] {n} sesi dihapus (lebih tua dari {days} hari)",
+  "cli.purgeOrphans": "[purge] {n} jurnal yatim dihapus",
+  "cli.daemonUnknownSub": "subcommand daemon tidak dikenal: {v}",
+  "cli.daemonRunFailed": "[daemon] run ter-host gagal: {msg}",
 }

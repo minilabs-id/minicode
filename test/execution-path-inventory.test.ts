@@ -308,11 +308,15 @@ export const EXECUTION_PATHS: Readonly<Record<string, RegisteredPath>> = {
     note: "Restart setelah update. Mewarisi argv pemanggil. Bukan eksekusi user work.",
   },
   // v7.32: handoff /shell ke shell asli operator — bukan eksekusi work model.
+  // /update: restart setelah install memakai SAME sink waitChildExit + spawn
+  // stdio:inherit dengan env guard MINICODE_AUTO_UPDATE_DONE=1. Satu berkas,
+  // satu bukti (waitChildExit); tidak ada threshold yang dinaikkan.
   "cli/tui.ts": {
     cls: "external-integration",
-    entry: "withShell handoff (/shell): releaseTerminal → spawn(stdio:inherit) → reacquireTerminal",
+    entry:
+      "handoff (/shell, /update): releaseTerminal → spawn(stdio:inherit) → reacquireTerminal / restart+exit",
     proof: "waitChildExit",
-    note: "Shell interaktif yang diminta operator lewat slash command. stdio:inherit di terminal nyata; bukan jalur runtime dan bukan tool model.",
+    note: "Shell interaktif + restart update yang diminta operator lewat slash command. stdio:inherit di terminal nyata; bukan jalur runtime dan bukan tool model.",
   },
 }
 

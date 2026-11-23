@@ -1,96 +1,155 @@
-# Kontrak Terminal MiniCode (TUI fullscreen — v0.37, bracketed paste + select-all + resize stabilizer + echo prompt sekali-wrap + geometri prompt progresif; v0.36: composer ≤2 baris & dropdown overlay; v0.35: rekap committed statis & label aktivitas OS; v0.34: sidebar dihapus, chat kolom tengah)
+# Kontrak Terminal MiniCode (TUI fullscreen — v0.42: baris live tool committed monoton + teks gagal ringkas; v0.41: auto-update diagnostik + `/update` TUI + handoff terminal aman; v0.37: bracketed paste + select-all + resize stabilizer + echo prompt sekali-wrap + geometri prompt progresif; v0.36: composer ≤2 baris & dropdown overlay; v0.35: rekap committed statis & label aktivitas OS; v0.34: sidebar dihapus, chat kolom tengah)
 
-> **Status & presedensi (dibaca dulu).** Entri v7.22 di bawah ini adalah
-> **catatan sejarah** dan sebagian besar sudah **ditimpa oleh v7.29+** (lihat
-> entri v7.29–v7.37): warna kini NYALA by default di TTY (`MINICODE_COLOR=0`
-> memaksa monokrom), zero-state KOSONG tanpa logo maupun hint, dan — sejak
-> v7.37 — ringkasan status/aktivitas **dipotong per segmen narasi** (bukan
-> satu baris akumulatif di ekor). v7.29 yang mengosongkan kolom chat untuk
-> status sudah ditimpa. Jangan baca klaim v7.22/v7.29/v7.36 sebagai perilaku
-> saat ini. Entri **v0.37 (paling atas)** adalah keadaan produk saat ini:
-> bracketed paste aktif di TUI, `askLine`/`askSecret`, dan output-window
-> (`?2004h` saat masuk / `?2004l` saat keluar — sequence di luar frame, jadi
-> I1 tetap satu `write` per frame); `Ctrl+A` (key `selectAll`) memilih seluruh
-> baris logis transkrip bila composer kosong & dropdown tertutup, tetapi tetap
-> `Home` bila ada draft/menu, dan `Ctrl+C` menyalin seleksi juga saat drag
-> masih aktif (drag di-finalisasi dulu); resize menghentikan auto-scroll,
-> membatalkan drag, mereset kolom preferensi kursor, dan merebase anchor gulir
-> walau seleksi aktif, dengan dropdown ditutup saat transisi busy/abort; gema
-> prompt user disimpan satu baris logis lalu di-wrap sekali selebar kolom chat;
-> lebar prompt progresif
-> `composerWidth() = min(chatCols, 100 + floor(max(0, chatCols-100)/4))`
-> dengan prefix `minicode › ` bila `w−14 ≥ 24` (`w ≥ 38`), else `› `, lanjutan
-> `· `. v0.36 TETAP berlaku pada composer ≤2 baris dan dropdown overlay dalam
-> frame yang sama — keduanya tidak dicabut; yang ditimpa v0.37 hanya cap lama
-> `min(100, chatWidth())` dan ambang prefix ≥60 kolom. v0.35 tetap berlaku
-> kecuali pada poin-poin itu — rekap tool = baris committed statis dan label
-> aktivitas `› …` memakai locale OS di semua permukaan; v0.34 tetap berlaku
-> kecuali pada poin-poin itu — sidebar kanan DIHAPUS TOTAL, chat menjadi
-> kolom tengah (maks 50% lebar terminal), baris tool/`✦`/finding/`+ thinking`
-> kembali ke chat, dan shortcut pane dihapus. v0.34 **mencabut v0.33 butir 1–6**;
-> v0.33 tetap diarsipkan di bawah sebagai sejarah.
+> **Status & presedensi (dibaca dulu).** `v0.x` = versi produk, `v7.x` = versi
+> kontrak terminal — dua namespace, bukan peringkat numerik.
 >
-> **Aturan presedensi:** entri teratas / tanggal rilis terbaru menang. `v0.x`
-> = versi produk, `v7.x` = versi kontrak terminal — dua namespace, bukan
-> peringkat numerik; v0.37 (entri teratas) meng-override klausa v0.36, v0.35,
-> v0.34, v0.33, dan v7.x yang bertentangan (khusus I1, I14, I17, I19, dan
-> butir echo prompt). Entri lama tetap dipertahankan sebagai sejarah,
-> bukan gambaran tampilan saat ini.
+> **Aturan presedensi:** entri teratas / tanggal rilis terbaru menang; v0.42
+> meng-override klausa v0.41/v0.37/v0.36/v0.35/v0.34/v0.33 dan v7.x yang
+> bertentangan (baris live tool committed monoton & rekap tanpa `└`; v0.41 —
+> I1 handoff terminal di luar frame; I14 — `/update`; I27 — output auto-update;
+> I17/I19 & echo prompt dari v0.37). Arsip v0.33 dan v7.x tidak dihapus maupun
+> direnomor, tetap dipertahankan sebagai sejarah, bukan gambaran tampilan kini
+> — klaim v7.22/v7.29/v7.36 yang bertentangan tidak berlaku (warna nyala by
+> default di TTY dengan `MINICODE_COLOR=0` untuk monokrom; zero-state KOSONG
+> tanpa logo; ringkasan dipotong per segmen narasi sejak v7.37).
+>
+> **Pointer per versi** (rincian di entri `## Perubahan v…` di bawah):
+>
+> - **v0.42** — baris live tool (root/anak) di-commit permanen sejak muncul
+>   (id per `toolCallId`/`runId`), ditimpa ringkas saat terminal → tinggi tak
+>   pernah menyusut (jitter "naik lalu turun" hilang); rekap tanpa marker `└`
+>   (amendemen v0.35, arsip tetap); teks kegagalan tool ringkas ≤120 kolom via
+>   `friendlyToolError()` + `tSystem()` (locale OS) — detail di jurnal/verbose.
+> - **v0.41** — auto-update diagnostik (alasan diredaksi, satu baris ≤300 char);
+>   `/update` hanya di TUI lewat handoff alt-screen → install → restart dengan
+>   `MINICODE_AUTO_UPDATE_DONE=1` → exit; non-TTY/one-shot/ACP fail-closed;
+>   opt-out `NO_UPDATE_CHECK=1` / `MINICODE_AUTO_UPDATE=0|false|off` / `CI=1`;
+>   marker `└` pada rekap dicabut (format jadi baris kategori tanpa prefix simbol).
+> - **v0.37** — bracketed paste `?2004h`/`?2004l` di luar frame (I1 utuh);
+>   `Ctrl+A` = select-all bila composer kosong & dropdown tertutup, else Home;
+>   `Ctrl+C` menyalin saat drag aktif; resize menstabilkan auto-scroll/drag/
+>   kursor/anchor; echo prompt di-wrap sekali; lebar prompt progresif
+>   `min(chatCols, 100 + floor(max(0, chatCols-100)/4))`.
+> - **v0.36** — composer ≤2 baris dan dropdown `/` overlay dalam frame yang sama;
+>   cap `min(100, chatWidth())` & ambang prefix ≥60 kolom ditimpa v0.37.
+> - **v0.35** — rekap tool = baris committed statis `└ …`; label `› …` memakai
+>   locale OS, narasi/model tetap memakai `/lang`.
+> - **v0.34** — sidebar kanan dihapus; chat kolom tengah (`cols ≥ 120 && rows ≥
+>   20` → `floor(cols/2)`, maks 50%); shortcut pane dihapus; I1 tidak berubah.
 
-> **Ringkasan keadaan saat ini (v0.37 — entri teratas; basis v0.34/v0.35/v0.36
-> tetap berlaku kecuali pada poin yang ditimpa):** bracketed paste menyala di
-> semua permukaan input aktif (`?2004h`/`?2004l` di luar frame); `Ctrl+A` =
-> select-all transkrip bila composer kosong & dropdown tertutup (Home bila ada
-> draft/menu), `Ctrl+C` menyalin seleksi juga saat drag aktif; resize membekukan
-> auto-scroll, membatalkan drag, mereset kursor, dan merebase anchor gulir walau
-> seleksi aktif, dropdown ditutup saat busy/abort; gema prompt adalah satu baris
-> logis yang di-wrap sekali selebar kolom chat; lebar prompt
-> `min(chatCols, 100 + floor(max(0, chatCols-100)/4))` (100→100, 200→125,
-> 300→150, 500→200), prefix `minicode › ` bila `w−14 ≥ 24`, else `› `, lanjutan
-> `· `. Composer tetap ≤2 baris dan dropdown tetap overlay satu frame (v0.36
-> tidak dicabut).
->
-> **Ringkasan basis v0.34 (masih berlaku — meng-override v0.33 butir 1–6 dan
-> seluruh klausa v7.x yang bertentangan; sebagian ditimpa v0.35/v0.36/v0.37):**
-> warna NYALA by default di TTY
-> (`MINICODE_COLOR=0`/`NO_COLOR` → monokrom), bukan "FULL MONOKROM"/
-> `FORCE_MONO`; zero-state KOSONG tanpa logo/hint; **tanpa sidebar kanan** —
-> chat adalah kolom tengah, lebar maksimal 50% terminal (`cols ≥ 120 && rows
-> ≥ 20` → `chatCols = floor(cols/2)` dengan padding kiri/kanan; di bawah
-> ambang itu chat penuh lebar), footer/composer ikut ter-centre; popup/modal
-> tetap full-screen ter-centre pada `cols` (I20 tidak berubah). Reasoning
-> memakai marker `+ thinking` di chat (`MINICODE_SHOW_THINKING` mengontrol);
-> detail tool, agregat `✦`, dan finding kembali ke chat. `MINICODE_ACTIVITY_PANEL`
-> kini legacy/deprecate (D3), `MINICODE_MINIMIZE_ACTIVITY` tetap fold. Shortcut
-> pane (`Alt/Ctrl+PgUp/PgDn`, wheel per-pane, `Ctrl+O` detail Live) DIHAPUS;
-> `Ctrl+T` tanpa binding; `/expand` dan `/view compact|fold|minimize` tetap
-> dihapus. Satu frame / satu `stdout.write` (I1) tidak berubah. Entri v0.33
-> dan v7.x di bawah adalah arsip sejarah — jangan dibaca sebagai perilaku kini.
->
-> **Pointer v0.37 (entri teratas):** bracketed paste `?2004h`/`?2004l` (di luar
-> frame, I1 utuh) di TUI/`askLine`/`askSecret`/output-window; `Ctrl+A` =
-> select-all bila composer kosong & dropdown tertutup, else Home; `Ctrl+C`
-> menyalin juga saat drag aktif; resize menstabilkan auto-scroll/drag/kursor/
-> anchor gulir dan menutup dropdown saat busy/abort; echo prompt satu baris
-> logis, di-wrap sekali selebar chat; lebar prompt progresif
-> `min(chatCols, 100 + floor(max(0, chatCols-100)/4))`, prefix `minicode › `
-> bila `w−14 ≥ 24`, else `› `, lanjutan `· `. Rincian di entri
-> `## Perubahan v0.37` di bawah.
->
-> **Pointer v0.36 (geometri/penulisan; cap & ambang prefix-nya ditimpa v0.37):**
-> composer dibatasi **maksimal 2 baris** (draft panjang = jendela geser, tanpa
-> menambah baris / menggeser transkrip); dropdown `/` digambar overlay di DALAM
-> frame yang sama tanpa mengurangi `viewH` (tanpa `paintRegion` terpisah);
-> lebar prompt = `composerWidth() = min(100, chatWidth())` dan prefix
-> `minicode › ` bila lebar prompt ≥60 kolom — **dua angka ini sudah diganti
-> v0.37**; composer ≤2 baris dan dropdown overlay tetap berlaku. Rincian di
-> entri `## Perubahan v0.36` di bawah.
+## Perubahan v0.42 (baris live tool committed monoton, rekap tanpa `└`, teks gagal ringkas)
 
-> **Pointer v0.35:** rekap tool kini baris committed statis —
-> footer tiap narasi `tool → narasi → └ rekap(tool sebelum narasi)`, rekap akhir
-> turn kumulatif (`└ 2 command · 118 read · 1 other`) — dan label aktivitas
-> `› …` memakai locale OS di semua permukaan, sedangkan narasi/model tetap
-> memakai bahasa user (`/lang`). Rincian di entri `## Perubahan v0.35` di bawah.
+Entri teratas ini merapikan dua perilaku permukaan TUI/printer linear:
+**baris aktivitas live tool** tidak lagi hidup di luar `lines[]`, dan **teks
+kegagalan tool** lewat redaksi kanonik yang sama dengan error provider. Arsip
+v0.41/v0.37/v0.36/v0.35/v0.34/v0.33 dan entri v7.x **tidak dihapus maupun
+direnomor** — aturan presedensi "entri teratas menang" tetap berlaku. Cakupan =
+lapisan tampilan (transkrip TUI & printer linear); kontrak output mesin/JSONL
+dan jurnal/verbose **tidak berubah**.
+
+1. **Commit-in-place / never-shrink by id (baris live tool).** Saat baris live
+   tool — root maupun anak — pertama kali muncul, ia ditulis sebagai **entri
+   committed permanen** dengan id stabil (`toolCallId`, atau `runId`/
+   `childSessionId` bila call id absen), bukan baris tail sementara. Kata
+   `running` (`berjalan` bila locale id) dipertahankan sampai status terminal.
+   Saat tool terminal, **entri yang SAMA** ditimpa (`replaceEntry`) dengan baris
+   ringkas `› nama target` yang identik dengan jalur ledger terminal — tidak
+   ada baris kedua, dedup `presentedTerminals` tetap berlaku.
+2. **Anak yang diagregasi tetap tak menyusut.** Bila child sudah punya baris
+   sendiri, baris itu tetap ada (ditimpa ringkas); bila tidak, ia tak pernah
+   dibuat baris sendiri. Agregat induk `✦ N sub agent · M tool · K failed`
+   sengaja **tidak diubah**. Rekap `└`/tanpa-marker, dedup `lastRecapText`, dan
+   kategori dari `rawName` juga tidak disentuh. Tidak ada state/indikator UI
+   baru — peta id adalah bookkeeping internal seperti `delegateRowIds`.
+3. **Amendemen rekap tanpa marker `└` (dari v0.35).** Baris rekap tetap hanya
+   margin kiri + angka kategori (mis. `2 command · 118 read · 1 other`), tanpa
+   prefix simbol maupun penggantinya. Urutan `tool → narasi → rekap → tool`,
+   dedup `lastRecapText`, rekap kumulatif akhir turn, kategori dari `rawName`,
+   sanitasi, dan lebar tidak berubah. Entri v0.35 beserta arsipnya tidak
+   dihapus maupun direnomor; contoh `└ …` di sana adalah sejarah yang ditimpa
+   amendemen ini.
+4. **Teks kegagalan tool ringkas & teredaksi.** Jalur `tool.failed` tidak lagi
+   mem-bypass `formatError()` kanonik. Fungsi murni `friendlyToolError()` di
+   `errors.ts` memakai redaksi/sanitasi yang sudah ada dan menghasilkan **satu
+   baris ≤120 kolom**. Prioritas: `duplicate idempotency key` → "Sudah
+   dijalankan · verifikasi state dulu"; `exit N`/kode exit → "Perintah gagal ·
+   `<target>` · detail di --verbose"; `EIO` → "Gagal baca terminal · coba lagi";
+   `bash-guard internal error` → "Perintah ditolak · coba lagi"; selain itu →
+   `friendlyError()` yang dipotong 120 kolom. Nama/target tool tetap tampil di
+   baris ledger. Kunci baru `msg.duplicateAction`, `msg.cmdFailed`,
+   `msg.toolFailed`, `msg.guardError` memakai `tSystem()` (locale OS), bukan
+   `/lang`, dengan paritas en/id. **Detail penuh tetap di jurnal dan
+   `--verbose`** — hanya lapisan tampilan yang diringkas.
+
+Peta proteksi: `test/tui-transcript.test.ts` (commit-in-place & never-shrink),
+`test/presentation-projections.test.ts`, `test/activity-panel.test.ts`,
+`test/errors-usage.test.ts` (redaksi & paritas i18n). Angka gate tidak ditaruh
+di entri kontrak; hasil kandidat ada di `.audit/FINAL-STATE.md` dan harus
+dijalankan ulang bila ada perubahan setelahnya.
+
+## Perubahan v0.41 (auto-update diagnostik, slash `/update` TUI, handoff terminal aman)
+
+Entri teratas ini memperjelas **I1** (handoff terminal = operasi di luar frame),
+**I14** (slash command baru `/update`), dan **kontrak output auto-update** pada
+I27 (dulu output npm disembunyikan; kini alasan kegagalan diredaksi ditampilkan).
+Arsip v0.37/v0.36/v0.35/v0.34/v0.33 dan entri v7.x **tidak dihapus dan tidak
+direnomor** — aturan presedensi "entri teratas menang" tetap berlaku. Cakupan =
+jalur auto-update pada salinan ter-install; checkout source tidak disentuh, dan
+jalur non-interaktif (one-shot/`exec`/pipe/ACP) tetap fail-closed tanpa install.
+
+1. **Auto-update diagnostik, bukan pesan generik (kontrak output auto-update,
+   I27 — diperjelas).** Kegagalan install kini menyebut **langkah** yang gagal
+   dan **alasan**nya. Sebelum ditampilkan, teksnya **diredaksi**: sekuens ANSI
+   dibuang, token/kredensial dibuang, dan URL yang memuat kredensial dibuang;
+   hasilnya dipotong menjadi **satu baris ≤300 char**. Ini menggantikan klausa
+   lama "Output npm saat auto-update disembunyikan (`stdio: pipe` dibuang)":
+   alasan kini terlihat, tetapi **batas redaksinya hanya tiga kategori itu**
+   (ANSI, token, URL berkredensial) plus batas panjang/baris — bukan pembersih
+   rahasia umum. Instruksi manual berubah dari `npm update -g minicode-ai`
+   menjadi `npm install -g minicode-ai@<versi>` dengan **versi eksak terverifikasi**;
+   `npm update` sengaja tidak dipakai karena melewati verifikasi signature.
+2. **Handoff terminal untuk `/update` (I1 — diperjelas).** Menjalankan `/update`
+   di TUI memakai handoff yang aman: **release alt-screen/raw-mode → install →
+   spawn restart dengan `MINICODE_AUTO_UPDATE_DONE=1` → exit**. Bila sudah
+   latest, opt-out, atau gagal, terminal **di-reacquire** dan hasil ditampilkan
+   (bukan restart). Sequence release/re-acquire — termasuk `?2004l`/`?2004h`
+   bracketed paste — adalah **operasi lifecycle di luar frame `paint()`**, seperti
+   handoff `/shell` (v7.32), sehingga **I1 (satu `stdout.write` per frame) tetap
+   utuh**: sequence dipancarkan sekali per transisi, bukan tiap repaint, dan bukan
+   sel grid/diff.
+3. **Slash command `/update` hanya di TUI (I14 — command baru).** `/update`
+   tersedia **hanya di TUI interaktif** (lewat injeksi `withUpdate`) dan tampil
+   di `/help`/dropdown. Jalur non-TTY/one-shot/`exec`/pipe/ACP **fail-closed**:
+   injeksi `withUpdate` absen, sehingga perintah menjawab "not available" dan
+   **tidak pernah spawn npm dari pipe/CI**.
+4. **Windows & verifikasi signature.** Runner npm memilih `npm_execpath` bila
+   tersedia, lalu `npm.cmd` di Windows (bukan `npm` mentah). Timeout runner
+   dinaikkan ke **60 detik**. Urutan verifikasi signature/provenance **tetap
+   fail-closed** — versi eksak dipasang sementara, `npm audit signatures`
+   diverifikasi, script install dimatikan, hanya graph tanpa dependency runtime
+   yang diterima; pada kegagalan verifikasi update dibatalkan (lihat pula
+   `getting-started.md`).
+5. **Opt-out yang dihormati.** `NO_UPDATE_CHECK=1`, `MINICODE_AUTO_UPDATE=0|
+   false|off`, dan `CI=1` mematikan pemeriksaan/pemasangan otomatis. Guard internal
+   `MINICODE_AUTO_UPDATE_DONE=1` menandai proses restart hasil update agar tidak
+   memicu pemeriksaan/install berulang (loop).
+6. **Amendemen rekap tool: marker `└` dicabut.** Baris rekap kini hanya memuat
+   margin kiri + angka kategori (mis. `2 command · 118 read · 1 other`), tanpa
+   prefix simbol dan tanpa penggantinya. Urutan `tool → narasi → rekap → tool`,
+   dedup `lastRecapText`, rekap kumulatif akhir turn, kategori dari `rawName`,
+   sanitasi, dan lebar tidak berubah. Entri v0.35 beserta arsipnya **tidak
+   dihapus maupun direnomor**; contoh `└ …` di sana adalah sejarah dan ditimpa
+   oleh amendemen ini (aturan presedensi "entri teratas menang").
+
+Modul pendukung: jalur update di `cli/` (composition root: injeksi `withUpdate`
+hanya untuk TUI), helper diagnostik/redaksi dan runner npm pada lapisan update,
+serta handoff terminal `releaseTerminal`/`reacquireTerminal` (dipakai bersama
+`/shell`). Peta proteksi yang menjaga kontrak ini: test untuk redaksi (ANSI/token/
+URL kredensial, satu baris ≤300 char), test handoff `/update` (alt-screen dilepas,
+restart dengan `MINICODE_AUTO_UPDATE_DONE=1`, re-acquire pada latest/opt-out/gagal),
+dan test fail-closed non-TTY (tanpa injeksi `withUpdate`, tak ada spawn npm).
+Angka gate tidak ditaruh di entri kontrak; hasil kandidat ada di `.audit/FINAL-STATE.md`
+dan harus dijalankan ulang bila ada perubahan setelahnya.
 
 ## Perubahan v0.37 (bracketed paste, select-all, resize stabilizer, echo prompt sekali-wrap, geometri prompt progresif)
 
@@ -1591,6 +1650,12 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
    `paint()`** — bukan sel grid, bukan diff per-repaint. Jadi "satu `write`
    per frame" tetap utuh: sequence dipancarkan sekali per lifecycle permukaan,
    bukan tiap repaint. Lihat entri `## Perubahan v0.37` butir 1.
+   **Amendemen v0.41 (I1 — handoff terminal di luar frame):** handoff `/update`
+   melepas alt-screen/raw-mode, memasang, lalu spawn restart dengan
+   `MINICODE_AUTO_UPDATE_DONE=1` (atau meng-reacquire bila latest/opt-out/gagal).
+   Sequence release/re-acquire — termasuk `?2004l`/`?2004h` — ditulis sekali per
+   transisi di LUAR frame `paint()`, sama seperti handoff `/shell` (v7.32), jadi
+   "satu `write` per frame" tetap utuh. Lihat entri `## Perubahan v0.41` butir 2.
 2. stdout/stderr contract seperti tabel di atas (TTY & non-TTY deterministic).
 3. Satu kepemilikan layar (`App`); popup satu lifecycle (`suspend`/`resume` +
    `paintRegion`).
@@ -1680,6 +1745,10 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
       di-finalisasi lebih dulu, bukan no-op/abort. Klik pasca-resize memetakan
       ke **geometri baru**, bukan koordinat lama. Lihat entri
       `## Perubahan v0.37` butir 2–3.
+      **Amendemen v0.41 (I14 — `/update`):** slash command baru `/update` hanya
+      tersedia di TUI interaktif lewat injeksi `withUpdate`; non-TTY/one-shot/
+      `exec`/pipe/ACP menjawab "not available" (fail-closed, tak ada spawn npm
+      dari pipe/CI). Lihat entri `## Perubahan v0.41` butir 3.
 15. (Dihapus bersama jendela info — nomor dipertahankan.)
 16. Popup komposit: region tanpa clear + union-clear anti-hantu + clearRegion
     saat tutup + suspend/resume berpasangan; layar tak mampu = tolak bersuara
@@ -1846,7 +1915,14 @@ Non-TTY (pipe/redirect/CI/file): **0 cursor control, 0 alternate screen,
      RAG, tool, kernel, resume) memanggil `update`; diagnostik startup
      (resume/recovery/context/dll) DITUNDA saat REPL dan di-flush ke transcript
      TUI (`ctx.startupNotices`), sedangkan non-interaktif tetap mencetak langsung.
-     Output npm saat auto-update disembunyikan (`stdio: pipe` dibuang).
+     **Amendemen v0.41 (kontrak output auto-update):** klausa lama "Output npm
+      saat auto-update disembunyikan (`stdio: pipe` dibuang)" ditimpa — kini
+      alasan kegagalan install ditampilkan setelah **diredaksi** (ANSI, token, dan
+      URL berkredensial dibuang; satu baris ≤300 char), menyebut langkah & alasan,
+      bukan pesan generik. Batas redaksi = tiga kategori itu + panjang/baris; bukan
+      pembersih rahasia umum. Instruksi manual = `npm install -g minicode-ai@<versi>`
+      (versi eksak terverifikasi; `npm update` tidak dipakai). Lihat entri
+      `## Perubahan v0.41` butir 1.
 28. Kontrak exit code: **0** sukses/help, **1** gagal runtime/lookup, **2**
      salah pakai (argumen hilang/malformed, subcommand asing). Flag sebagai
      positional id = salah pakai (exit 2). `exec --json` yang gagal di fase

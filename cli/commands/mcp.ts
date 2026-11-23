@@ -1,5 +1,6 @@
 import { resolve as resolvePath } from "node:path"
 import { configureMcpSchemaPins, mcpSchemaPinRegistry } from "../../src/mcp/client.ts"
+import { t } from "../../src/ui/i18n/locale.ts"
 import { sanitizeAnsiLine } from "../../src/ui/render/sanitize.ts"
 import { guardSubcommand, positionalSubArg } from "../args.ts"
 
@@ -53,7 +54,7 @@ export async function handleMcp(
     if (getArg("--json") !== undefined || args.includes("--json")) {
       out(JSON.stringify({ pins }))
     } else if (pins.length === 0) {
-      out("no MCP schema pins recorded for this workspace")
+      out(t("cli.mcpNoPins"))
     } else {
       for (const p of pins) {
         out(`${sanitizeAnsiLine(p.serverId)}.${sanitizeAnsiLine(p.toolName)}  ${p.hash}`)

@@ -157,6 +157,7 @@ test("commands: consolidated registry has no retired slash handlers", async () =
     "lang",
     "help",
     "init",
+    "update",
     "exit",
   ]) {
     expect(names).toContain(name)

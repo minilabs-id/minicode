@@ -10,6 +10,7 @@ import {
   loadSession,
   purgeExpired,
 } from "../../src/session/persistence.ts"
+import { t } from "../../src/ui/i18n/locale.ts"
 import { sanitizeAnsiLine } from "../../src/ui/render/sanitize.ts"
 import { renderTable } from "../../src/ui/render/table.ts"
 import { c } from "../../src/ui/render/theme.ts"
@@ -130,8 +131,8 @@ export async function handleSessions(
         }
       } catch {}
       const ttl = getSessionTtlDays()
-      out(`[purge] removed ${removed} sessions (older than ${ttl} days)`)
-      if (orphans > 0) out(`[purge] removed ${orphans} orphan journals`)
+      out(t("cli.purgeSessions", { n: removed, days: ttl }))
+      if (orphans > 0) out(t("cli.purgeOrphans", { n: orphans }))
     } finally {
       db.close()
     }

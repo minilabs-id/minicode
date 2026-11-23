@@ -1,5 +1,87 @@
 # Changelog
 
+## [0.42.0] - 2026-11-23
+
+### Changed — Baris live tool committed monoton, rekap tanpa `└`, teks gagal ringkas
+
+- **Baris live tool committed monoton:** baris aktivitas root/anak kini ditulis
+  permanen sejak pertama muncul (id per `toolCallId`/`runId`) dengan kata
+  `running` dipertahankan sampai terminal. Saat terminal, entri SAMA ditimpa
+  baris ringkas `› nama target` — tinggi transkrip tak pernah menyusut, sehingga
+  jitter "naik lalu turun" saat ekor menempel composer hilang. Child yang
+  diagregasi ke induk tetap punya baris (ditimpa ringkas); agregat `✦` tidak
+  diubah. Tidak ada state/indikator UI baru.
+- **Rekap tanpa marker `└` (amendemen v0.35):** ditegaskan kembali di kontrak
+  v0.42; arsip v0.35 tidak dihapus maupun direnomor.
+- **Teks kegagalan tool ringkas:** `tool.failed` lewat `friendlyToolError()`
+  kanonik — satu baris ≤120 kolom, teredaksi, `tSystem()` (locale OS). Prioritas:
+  idempotency duplikat, `exit N`, `EIO`, `bash-guard internal error`, lalu
+  `friendlyError()`. Nama/target tetap tampil; detail penuh tetap di jurnal dan
+  `--verbose`. Kontrak output mesin/JSONL tidak berubah.
+- Kunci i18n baru `msg.duplicateAction`, `msg.cmdFailed`, `msg.toolFailed`,
+  `msg.guardError` dengan paritas en/id.
+
+### Dokumentasi
+
+- `TERMINAL_CONTRACT.md`: entri `## Perubahan v0.42` di paling atas; blok
+  presedensi dan pointer per versi dirapikan.
+- **Tidak ada angka gate di entri ini.** Ini bukan klaim rilis hijau.
+
+## [0.41.0] - 2026-11-23
+
+### Changed — Auto-update diagnostik, slash `/update` TUI, handoff terminal aman
+
+- **Auto-update diagnostik:** kegagalan install kini menyebut **langkah & alasan**
+  yang sudah diredaksi — sekuens ANSI, token/kredensial, dan URL yang memuat
+  kredensial dibuang; hasil dipotong menjadi **satu baris ≤300 char** — bukan
+  pesan generik. **Batas redaksi hanya tiga kategori itu plus panjang/baris**,
+  bukan pembersih rahasia umum. Klausa lama "output npm disembunyikan
+  (`stdio: pipe` dibuang)" pada I27 ditimpa.
+- **Instruksi manual berubah:** `npm install -g minicode-ai@<versi>` dengan
+  **versi eksak terverifikasi**. `npm update -g minicode-ai` tidak dipakai lagi
+  karena melewati verifikasi signature.
+- **Windows:** runner npm memilih `npm_execpath` / `npm.cmd`; timeout dinaikkan
+  ke **60 detik**. Urutan verifikasi signature/provenance tetap fail-closed.
+- **Slash command `/update`:** hanya di TUI interaktif. Handoff aman: release
+  alt-screen → install → spawn restart dengan `MINICODE_AUTO_UPDATE_DONE=1` →
+  exit; bila sudah latest/opt-out/gagal, terminal di-reacquire dan hasil
+  ditampilkan. Non-TTY/one-shot/`exec`/pipe/ACP fail-closed — injeksi
+  `withUpdate` absen, pesan "not available", tidak pernah spawn npm dari
+  pipe/CI.
+- **Opt-out yang dihormati:** `NO_UPDATE_CHECK=1`, `MINICODE_AUTO_UPDATE=0|
+  false|off`, `CI=1`, dan guard internal `MINICODE_AUTO_UPDATE_DONE`.
+- **Rekap tool tanpa marker `└`:** baris rekap kini hanya margin kiri + angka
+  kategori (mis. `2 command · 118 read · 1 other`), tanpa prefix simbol maupun
+  penggantinya. Urutan `tool → narasi → rekap → tool`, dedup `lastRecapText`,
+  rekap kumulatif akhir turn, kategori dari `rawName`, sanitasi, dan lebar tetap
+  sama. Entri v0.35/arsip di kontrak tidak dihapus; amendemen ada di entri v0.41.
+
+### Catatan migrasi (jujur)
+
+- **Manual update berubah perintahnya.** Jika Anda sebelumnya menjalankan
+  `npm update -g minicode-ai`, ganti dengan
+  `npm install -g minicode-ai@<versi>` memakai versi eksak yang sudah diverifikasi
+  signature/provenance. `npm update` melewati verifikasi itu, jadi sengaja tidak
+  dipakai.
+- **Klausa yang diperjelas/ditimpa:** I1 (handoff terminal di luar frame), I14
+  (`/update`), dan I27 (output auto-update diredaksi, bukan disembunyikan).
+  Arsip tidak dihapus maupun direnomor; rincian presedensi dan arsip v0.37→v7.x
+  ada di [TERMINAL_CONTRACT.md](docs/TERMINAL_CONTRACT.md) entri v0.41.
+- **Perilaku yang tidak berubah:** verifikasi signature fail-closed, checkout
+  source tidak disentuh, dan jalur non-interaktif (one-shot/`exec`/pipe/ACP)
+  tidak pernah memasang/update.
+- **Tidak ada angka gate di entri ini.** Ini **bukan klaim rilis hijau**. Hasil
+  gate kandidat akan dicatat di `.audit/FINAL-STATE.md` setelah dijalankan pada
+  kandidat final yang sama; jangan membaca entri ini sebagai bukti lulus gate.
+
+### Dokumentasi
+
+- `TERMINAL_CONTRACT.md`: entri `## Perubahan v0.41` di paling atas; blok
+  presedensi dan pointer per versi dirapikan, amendemen I1/I14/I27.
+- `environment.md`, `getting-started.md`, `repl.md`, `cli.md`, `README.md`,
+  `contributing.md` dan padanan `docs-en/` diselaraskan (env/opt-out, manual
+  command, baris `/update`, batas handoff & redaksi).
+
 ## [0.40.0] - 2026-11-22
 
 ### Rilis — versi publik untuk kandidat v0.34–v0.37

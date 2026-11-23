@@ -7,6 +7,7 @@ import {
   pricingOverlayMeta,
   syncPricing,
 } from "../../src/policy/pricing.ts"
+import { t } from "../../src/ui/i18n/locale.ts"
 import { formatError } from "../../src/ui/render/errors.ts"
 import { sanitizeAnsiLine } from "../../src/ui/render/sanitize.ts"
 import { c } from "../../src/ui/render/theme.ts"
@@ -27,7 +28,7 @@ export async function handlePricing(args: string[]): Promise<never> {
   const sub = (positionalSubArg(args, 1) ?? "status").toLowerCase()
 
   if (sub === "sync") {
-    process.stderr.write("fetching prices from models.dev…\n")
+    process.stderr.write(`${t("cli.pricingFetching")}\n`)
     try {
       const res = await syncPricing()
       console.log(

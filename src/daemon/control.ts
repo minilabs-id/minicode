@@ -1,9 +1,6 @@
-// P2.12 — API kontrol: cakupan, idempotensi, dan penolakan stale.
-//
-// Kenapa satu tempat: sembilan operasi kontrol punya aturan yang sama
-// (scope → idempotensi → stale → eksekusi). Menyebar aturan itu ke handler
-// masing-masing membuat satu operasi melompati validasi yang operasi lain
-// patuhi — dan celah persis di situ yang dicari penyerang lokal.
+// API kontrol: cakupan, idempotensi, penolakan stale. Aturan terpusat
+// (scope → idempotensi → stale → eksekusi) agar tak ada operasi yang
+// melompati validasi — celah yang dicari penyerang lokal.
 
 import type { RuntimeView } from "../runtime/runtime-status.ts"
 import { absentRuntimeView } from "../runtime/runtime-status-provider.ts"
@@ -21,22 +18,15 @@ export interface HostedSessionInfo {
   runId: string | null
   runStatus: string | null
   presentationHead: number
-  /** P0.2 (Q5): WorkMode efektif sesi yang di-host (bila diketahui host). */
+  /** WorkMode efektif sesi yang di-host (bila diketahui). */
   workMode?: "DISCUSS" | "BUILD"
-  /**
-   * P2.3: hasil recovery run terakhir yang durable (mis. UNKNOWN setelah
-   * restart). Operator dapat membedakan LIVE vs reconstructed/interrupted
-   * tanpa membaca log. Absen = belum ada run.
-   */
+  /** Hasil recovery run terakhir yang durable; operator membedakan LIVE vs
+   * reconstructed/interrupted tanpa baca log. Absen = belum ada run. */
   recoveryStatus?: string | null
 }
 
-/**
- * Aksi yang dilakukan host atas sesi. Dipasang dari composition root (cli/)
- * karena `src/**` non-ui tidak boleh mengimpor `cli/` — dan sebaliknya.
- * Tanpa aksi terpasang, operasi yang butuh aksi menolak (fail-closed), bukan
- * pura-pura berhasil.
- */
+/** Aksi host atas sesi, dipasang composition root (batas lapisan `src`/`cli`).
+ * Tanpa aksi, operasi menolak (fail-closed), bukan pura-pura berhasil. */
 export interface ControlActions {
   listSessions(): HostedSessionInfo[]
   sessionStatus(sid: string): HostedSessionInfo | null
@@ -59,11 +49,8 @@ export interface ControlDeps {
   /** false = tekanan penyimpanan; op mutasi ditolak, op baca tetap jalan. */
   storageOk: () => boolean
   shuttingDown: () => boolean
-  /**
-   * Status runtime kanonik (P13.1) — SATU model yang sama dengan yang dipakai
-   * CLI. Opsional supaya host tanpa runtime (atau test lama) tetap compiles;
-   * bila absen, daemon menyajikan view ABSENT kanonik, bukan status karangan.
-   */
+  /** Status runtime kanonik (sama dengan CLI); opsional untuk host tanpa
+   * runtime. Absen → view ABSENT kanonik, bukan status karangan. */
   runtimeStatus?: () => RuntimeView
 }
 
@@ -87,18 +74,9 @@ function refuse(
   return { ok: false, refusal: { code, message, ...(detail ? { detail } : {}) } }
 }
 
-/**
- * Cache idempotensi. Terbatas ukuran + TTL — idempotensi tak boleh menjadi
- * ingatan yang tumbuh tanpa batas mengikuti jumlah permintaan konsumen.
- *
- * Dua perilaku yang sengaja berbeda:
- *   - kunci sama + payload sama  -> kembalikan hasil ASLI (retry aman)
- *   - kunci sama + payload beda  -> tolak IDEMPOTENT_REPLAY
- * Alasan yang kedua: mengembalikan hasil lama untuk pekerjaan berbeda akan
- * menyembunyikan bug konsumen yang memakai ulang kunci; mengeksekusi ulang
- * berarti pekerjaan terjadi dua kali. Dua-duanya lebih buruk daripada menolak
- * dengan jelas.
- */
+/** Cache idempotensi terbatas (ukuran + TTL). Kunci sama + payload sama →
+ * hasil asli; kunci sama + payload beda → IDEMPOTENT_REPLAY (menolak lebih
+ * aman daripada menyembunyikan bug konsumen atau menjalankan kerja dua kali). */
 export class IdempotencyStore {
   readonly #byKey = new Map<string, { fingerprint: string; outcome: ControlOutcome; at: number }>()
   readonly max: number
@@ -166,13 +144,8 @@ function stableString(v: unknown): string {
   )
 }
 
-/**
- * Jalankan satu operasi kontrol urut: scope → idempotensi → stale → aksi.
- *
- * Urutan itu penting: mengecek idempotensi SEBELUM scope akan membocorkan
- * "operasi ini pernah dijalankan" kepada konsumen yang tak punya izin
- * menjalankannya.
- */
+/** Urutan scope → idempotensi → stale → aksi wajib: idempotensi sebelum scope
+ * membocorkan riwayat operasi ke konsumen tanpa izin. */
 export function dispatchControl(
   req: ControlRequest,
   deps: ControlDeps,
@@ -208,8 +181,7 @@ export function dispatchControl(
   }
 
   const outcome = runOp(op, req, deps)
-  // Hanya hasil sukses yang diingat: kegagalan bisa bersifat sementara
-  // (tekanan disk, lease lepas) dan wajib bisa dicoba ulang dengan idem sama.
+  // Hanya hasil sukses diingat; kegagalan sementara wajib bisa dicoba ulang.
   if (outcome.ok) idem.remember(key, fp, outcome)
   telemetry.inc(outcome.ok ? "control.executed" : "control.refused")
   return outcome
@@ -232,8 +204,7 @@ function runOp(op: ControlOp, req: ControlRequest, deps: ControlDeps): ControlOu
           shuttingDown: deps.shuttingDown(),
           storageOk: deps.storageOk(),
           actions: deps.actions !== null,
-          // P13.1: status runtime KANONIK ikut piggyback di op yang sudah ada.
-          // Tidak ada endpoint health terpisah — satu model, satu sumber.
+          // Status runtime kanonik ikut op ini (tanpa endpoint health terpisah).
           runtime: deps.runtimeStatus ? deps.runtimeStatus() : absentRuntimeView(),
         },
         replayed: false,
@@ -245,10 +216,8 @@ function runOp(op: ControlOp, req: ControlRequest, deps: ControlDeps): ControlOu
         return refuse("PROTOCOL_ERROR", "host tidak terpasang - tak ada yang bisa dihentikan")
       const reason = sanitizeLabel(String(args.reason ?? "control"), 120)
       const actions = deps.actions
-      // TUNDAA satu putaran event loop: berhenti secara langsung akan menutup
-      // koneksi operator SEBELUM frame control_result sempat terkirim, sehingga
-      // pemanggil CLI melihat "socket tertutup" untuk perintah yang sebenarnya
-      // berhasil. Keputusan tetap dibuat sekarang; hanya eksekusinya yang nanti.
+      // Tunda satu putaran: shutdown langsung memutus koneksi sebelum
+      // control_result terkirim → CLI melihat gagal padahal perintah sukses.
       setImmediate(() => actions.shutdown(reason))
       return { ok: true, result: { accepted: true, reason }, replayed: false }
     }
@@ -280,12 +249,12 @@ function runOp(op: ControlOp, req: ControlRequest, deps: ControlDeps): ControlOu
       if (decisionRaw !== "accept" && decisionRaw !== "deny") {
         return refuse("PROTOCOL_ERROR", 'args.decision harus "accept" atau "deny"')
       }
-      // [RC-2] Cek kepemilikan session SEBELUM mutasi DB: baca baris tanpa menulis,
-      // tolak mismatch SESSION_MISMATCH tanpa membangunkan waiter/mengubah state.
+      // Cek kepemilikan sebelum mutasi DB: baca tanpa tulis, tolak mismatch
+      // tanpa membangunkan waiter.
       const existing = deps.approvals.read(approvalId)
       if (existing && existing.sid !== sid) {
-        // Approval milik sesi lain: menolaknya menggagalkan keputusan yang
-        // sebenarnya valid, jadi jangan — laporkan kecocokan yang salah saja.
+        // Jangan menolak approval milik sesi lain: itu menggagalkan keputusan
+        // yang sebenarnya valid — laporkan mismatch saja.
         return refuse("SESSION_MISMATCH", "approval bukan milik sesi yang disebut", {
           actual: existing.sid,
         })
@@ -305,9 +274,8 @@ function runOp(op: ControlOp, req: ControlRequest, deps: ControlDeps): ControlOu
       const info = deps.actions.sessionStatus(sid)
       if (!info)
         return refuse("SESSION_MISMATCH", `sesi ${sanitizeLabel(sid, 64)} tidak di-host daemon ini`)
-      // Pagaran epoch: konsumen yang menyebut epoch harus cocok dengan dunia
-      // sekarang. Epoch beda = otoritas penulis telah pindah; perintah dari
-      // penampil lama tidak boleh menyentuh sesi yang kini milik penulis lain.
+      // Epoch beda = otoritas penulis pindah; perintah penampil lama tak boleh
+      // menyentuh sesi milik penulis lain.
       if (typeof args.expectedEpoch === "number") {
         const actual = readWriterEpoch(sid)
         if (actual !== args.expectedEpoch) {
@@ -329,8 +297,7 @@ function runOp(op: ControlOp, req: ControlRequest, deps: ControlDeps): ControlOu
           `run ${sanitizeLabel(runId, 64)} sudah ${info.runStatus} — tak bisa diulang`,
         )
       }
-      // LEASE_LOST: daemon mem-host sesi ini tetapi penulisnya sudah basi —
-      // perintah akan diabaikan oleh sesi yang sudah menyerahkan otoritas.
+      // LEASE_LOST: penulis sesi sudah basi, perintah akan diabaikan.
       if (!info.hosted) {
         return refuse("LEASE_LOST", "sesi bukan milik daemon ini (penulis di proses lain)")
       }

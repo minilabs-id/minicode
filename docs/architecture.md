@@ -43,11 +43,12 @@ diam-diam); host lalu menjalankannya sebagai turn berikutnya.
 Sejak v0.35 rekap tool **bukan state live**: ia ditulis sebagai **baris
 committed statis** di transkrip, bukan baris transient yang berubah-ubah saat
 tool masuk. Urutan footer tiap narasi adalah
-`tool → narasi → └ rekap(tool sebelum narasi)` — baris `└` mendarat tepat
+`tool → narasi → rekap(tool sebelum narasi)` — baris rekap mendarat tepat
 setelah narasi dan menghitung tool yang terjadi **sebelum** narasi itu. Rekap
 **AKHIR turn** bersifat kumulatif untuk **semua** tool selama turn (bukan
 potongan per segmen yang di-reset), dengan format satu baris
-`└ 2 command · 118 read · 1 other`. Klausa lama — rekap dua baris saat live,
+`2 command · 118 read · 1 other` (sejak v0.41 tanpa prefix simbol). Klausa lama
+— rekap dua baris saat live,
 `flushActivityFold` net-nol, `liveSummaryRows()` mengikuti ekor, dan jeda
 antar narasi sebagai baris melayang — adalah **arsip v0.33/v7.x yang ditimpa
 v0.35**; rincian presedensi ada di [Kontrak Terminal](TERMINAL_CONTRACT.md).
@@ -55,7 +56,7 @@ v0.35**; rincian presedensi ada di [Kontrak Terminal](TERMINAL_CONTRACT.md).
 Alur ringkas:
 
 ```text
-tool selesai ─► narasi model ─► └ rekap(tool sebelum narasi)   [committed, statis]
+tool selesai ─► narasi model ─► rekap(tool sebelum narasi)     [committed, statis]
                                       │
                                       └─ akhir turn: kumulatif seluruh tool turn
 ```

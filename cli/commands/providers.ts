@@ -1,6 +1,7 @@
 import { loadConfig, type MinicodeConfig } from "../../src/config.ts"
 import { refreshProviderModels } from "../../src/providers/provision.ts"
 import { readTraceRows } from "../../src/telemetry/trace.ts"
+import { t } from "../../src/ui/i18n/locale.ts"
 import { sanitizeAnsiLine } from "../../src/ui/render/sanitize.ts"
 import { renderTable } from "../../src/ui/render/table.ts"
 import { c } from "../../src/ui/render/theme.ts"
@@ -108,14 +109,14 @@ export async function handleProviders(
     if (pid) {
       const p = cfg.providers.find((x) => x.id === pid)
       if (!p) {
-        err(`provider "${sanitizeAnsiLine(pid)}" not found - see: minicode providers`)
+        err(t("cli.providerNotFound", { id: sanitizeAnsiLine(pid) }))
         process.exit(1)
       }
       const list = p.models.filter(match)
-      if (!list.length) out(`  (no matches for "${sanitizeAnsiLine(filter)}")`)
+      if (!list.length) out(`  ${t("cli.noMatches", { q: sanitizeAnsiLine(filter) })}`)
       for (const [i, m] of list.entries()) out(`  [${i}] ${sanitizeAnsiLine(m)}`)
     } else {
-      if (cfg.providers.length === 0) out("(no providers yet)")
+      if (cfg.providers.length === 0) out(t("prov.empty"))
       let shown = 0
       for (const p of cfg.providers) {
         const list = p.models.filter(match)
@@ -125,15 +126,15 @@ export async function handleProviders(
         )
         shown += list.length
         for (const m of list.slice(0, 10)) out(`  ${sanitizeAnsiLine(m)}`)
-        if (filter && list.length > 10) out(`  … +${list.length - 10} more`)
-        if (!filter && p.models.length > 10) out(`  … +${p.models.length - 10} more`)
+        if (filter && list.length > 10) out(`  ${t("ask.more", { n: list.length - 10 })}`)
+        if (!filter && p.models.length > 10) out(`  ${t("ask.more", { n: p.models.length - 10 })}`)
       }
-      if (filter && shown === 0) out(`  (no matches for "${sanitizeAnsiLine(filter)}")`)
+      if (filter && shown === 0) out(`  ${t("cli.noMatches", { q: sanitizeAnsiLine(filter) })}`)
     }
     process.exit(0)
   }
   if (firstArg === "sync") {
-    out("Syncing model list from providers…")
+    out(t("cmd.syncing"))
     const { updated, failed } = await refreshProviderModels({ cwd: cwdArg, allowLocal })
     for (const r of updated)
       out(`  ${c.green("ok")} ${sanitizeAnsiLine(r.id)}: ${r.from} -> ${r.to} model`)
@@ -141,9 +142,8 @@ export async function handleProviders(
       out(`  ${c.red("failed")} ${sanitizeAnsiLine(f.id)}: ${sanitizeAnsiLine(f.reason)}`)
     if (!updated.length && !failed.length) {
       const cfgHere = await loadConfig(cwdArg, { allowLocal })
-      if (cfgHere.providers.length === 0)
-        out("  (no providers yet - run `minicode config add` first)")
-      else out("  (no changes — check API key and network, then retry)")
+      if (cfgHere.providers.length === 0) out(`  ${t("cli.noProvidersHint")}`)
+      else out(t("cmd.noChanges"))
     }
     process.exit(0)
   }

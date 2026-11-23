@@ -1,24 +1,9 @@
-// P13.3 Stage C — klasifikasi kontinuitas task durable (MURNI, tanpa I/O).
-//
-// Kenapa modul ini ada: Scheduler sudah punya rekonsiliasi berbasis lineage,
-// tetapi "tidak ada completion marker" BUKAN bukti "tidak ada efek samping".
-// Reconcile otomatis yang lama menganggap setiap generasi tanpa marker aman
-// dijalankan ulang. Itu benar untuk lineage, tetapi salah untuk eksekusi yang
-// bisa menulis berkas atau menjalankan perintah: attempt baru dapat MENGULANG
-// efek eksternal yang sudah terjadi sebelum proses mati.
-//
-// Modul ini memisahkan dua pertanyaan yang dulu tercampur:
-//   1. Apakah generasi ini stranded?      -> TaskStore (predikat lineage atomik)
-//   2. Apakah aman menjalankannya ULANG?  -> kebijakan di berkas ini
-//
-// Hanya SAFE_TO_RETRY yang boleh kembali ke siklus claim/dispatch otomatis.
-// REQUIRES_VERIFIER dan HOLD sama-sama MENAHAN record. Bedanya: yang pertama
-// secara prinsip bisa dibuktikan aman oleh verifier yang belum tersedia;
-// yang kedua kehilangan bukti/otoritas yang wajib ada lebih dulu.
-//
-// TIDAK ADA I/O DI SINI. Database, runtime, jam, dan environment tidak dibaca;
-// semua fakta masuk lewat argumen. Dengan begitu keputusan bisa diuji
-// deterministik dan tidak ada sumber kebenaran kedua di samping TaskStore.
+// Klasifikasi kontinuitas task durable (murni, tanpa I/O).
+// "Tanpa completion marker" BUKAN bukti aman retry: eksekusi bisa menulis berkas
+// atau menjalankan perintah, sehingga attempt baru mengulang efek eksternal.
+// Scheduler memisahkan "stranded?" (TaskStore) dari "boleh dijalankan ulang?" (di sini).
+// Hanya SAFE_TO_RETRY kembali ke siklus otomatis; REQUIRES_VERIFIER/HOLD menahan record.
+// Semua fakta masuk lewat argumen agar keputusan deterministik, tanpa sumber kebenaran kedua.
 
 import { classifyTool } from "./autonomous-policy.ts"
 import type { TaskStatus } from "./model.ts"
@@ -91,12 +76,8 @@ export interface ContinuityGate {
 }
 
 /**
- * Marker kompletion = attempt untuk generasi BERJALAN sudah mencatat akhir.
- *
- * Sengaja `>=`, bukan `===`: attempt yang lebih baru dari exec adalah korupsi
- * dan diperlakukan sebagai "sudah ada tanda" (menahan), bukan alasan menulis
- * ulang. Scheduler memeriksa relasi mustahil itu secara eksplisit sebelum
- * memanggil fungsi ini.
+ * Marker kompletion = attempt generasi berjalan sudah mencatat akhir.
+ * `>=` sengaja, bukan `===`: attempt lebih baru dari exec = korupsi, ditahan (bukan retry).
  */
 export function hasCompletionMarker(generations: {
   readonly execGeneration: number
@@ -148,9 +129,7 @@ export function classifyContinuity(
     mayReconcile: false,
   })
 
-  // Terminal dan operator states tidak pernah menjadi target. Ini pengulangan
-  // yang disengaja dari kontrak TaskStore: klasifikasi tidak boleh melonggarkan
-  // RECONCILABLE_STATUSES hanya karena dipanggil dari tempat lain.
+  // Status terminal/operator tidak pernah jadi target (pengulangan sengaja kontrak TaskStore).
   if (facts.status !== "IN_PROGRESS" && facts.status !== "VERIFYING") {
     return hold("not-in-flight")
   }
@@ -160,9 +139,7 @@ export function classifyContinuity(
   if (facts.executionOwner !== "scheduler") return hold("not-scheduler-owned")
   if (facts.execGeneration <= 0) return hold("no-claim")
 
-  // [Owner decision 2] Completion marker ada -> attempt sudah berakhir. Tanpa
-  // marker pun, ketiadaan itu bukan bukti tidak ada efek; karena itu marker
-  // hanya menahan lebih awal, tidak pernah menjadi izin.
+  // Marker menahan lebih awal; ketiadaannya bukan bukti tidak ada efek, bukan izin retry.
   if (hasCompletionMarker(facts)) return hold("attempt-completed")
 
   if (!evidence.resume) {

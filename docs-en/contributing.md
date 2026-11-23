@@ -68,6 +68,26 @@ bun run vendor:check   # MiniCore provenance (soft; vendor host-editable since v
 - The non-interactive path is shell-first (append-only scrollback); interactive sessions are ALWAYS the alternate-screen TUI (terminal invariant #1, no linear option).
 - Changing cross-layer structure/dependencies -> must update `docs/architecture.md`.
 
+## Auto-update (v0.41) — boundaries for contributors
+
+- The update path only applies to an installed copy; source checkouts are untouched.
+- The `withUpdate` injection lives **only** in the composition root
+  (`cli/index.ts`, `cli/setup.ts`) and only for the interactive TUI. Non-TTY/
+  one-shot/`exec`/ACP paths must stay fail-closed: without the injection, answer
+  "not available" and never spawn npm from a pipe/CI.
+- The terminal handoff (`releaseTerminal`/`reacquireTerminal`) is an operation
+  **outside the `paint()` frame** — I1 (one `stdout.write` per frame) must not be
+  broken. The `?2004l`/`?2004h` sequences are emitted once per transition, not on
+  every repaint.
+- Diagnostic redaction covers only three categories (ANSI, tokens/credentials,
+  credential-bearing URLs) plus one line of at most 300 characters — do not use
+  it as a general secret scrubber or as a text path back into a prompt/model.
+- The signature-verification order stays fail-closed. Manual instruction: see
+  [manual installation](getting-started.md). Windows: `npm_execpath`/`npm.cmd`
+  runner, 60-second timeout.
+- The internal guard `MINICODE_AUTO_UPDATE_DONE=1` prevents a restart loop; do not
+  set it manually outside the update path.
+
 ## Code rules
 
 - The upstream kernel `vendor/minicore/src/core/*` is frozen. Approved host overlays live in `scripts/vendor-overlays/` and are applied by `bun run vendor:minicore`; do not edit the vendor tree or `VENDOR.md` by hand. Need a new seam? First prove it cannot be a Tool/Provider/Policy, add a test, then pin it through the generator.

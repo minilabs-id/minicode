@@ -25,6 +25,7 @@ import {
   resolveRuntimeMode,
 } from "../../src/runtime/production-execution.ts"
 import { listSessionRuns } from "../../src/session/persistence.ts"
+import { t } from "../../src/ui/i18n/locale.ts"
 import {
   allowLocalSubcommand,
   displayWorkMode,
@@ -89,7 +90,9 @@ export async function handleDaemon(
     return
   }
 
-  process.stderr.write(`unknown daemon subcommand: ${sanitizeLabel(action, 40)}\n${DAEMON_HELP}\n`)
+  process.stderr.write(
+    `${t("cli.daemonUnknownSub", { v: sanitizeLabel(action, 40) })}\n${DAEMON_HELP}\n`,
+  )
   void HELP
   process.exit(2)
 }
@@ -428,7 +431,7 @@ export async function startDaemonHostedRuntime(opts: {
         .runPromptWithVerify(prompt, ctl.signal)
         .catch((e) => {
           if (!ctl.signal.aborted) {
-            process.stderr.write(`[daemon] hosted run failed: ${(e as Error).message}\n`)
+            process.stderr.write(`${t("cli.daemonRunFailed", { msg: (e as Error).message })}\n`)
           }
         })
         .finally(() => {

@@ -6,7 +6,10 @@
 import { type ChildProcess, spawn } from "node:child_process"
 import {
   checkForUpdateFresh,
+  formatUpdateError,
   formatUpdateMessage,
+  getLastUpdateFailure,
+  type InstallResult,
   installUpdate,
   isInstalledCopy,
   shouldAutoUpdate,
@@ -14,6 +17,16 @@ import {
   verifyInstalledVersion,
 } from "../src/policy/update-check.ts"
 import { c } from "../src/ui/render/theme.ts"
+
+function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message
+  if (typeof err === "string") return err
+  try {
+    return String(err)
+  } catch {
+    return "unknown"
+  }
+}
 
 /**
  * Tunggu proses anak sampai benar-benar selesai — SATU-SATUNYA cara menunggu
@@ -85,15 +98,27 @@ export async function maybeAutoUpdate(
   opts?.onNotice?.(`${c.yellow(formatUpdateMessage(version, latest))}\n`)
   opts?.onNotice?.(c.dim("Menginstall pembaruan otomatis…\n"))
   let ok = false
+  let thrown: unknown
   try {
     ok = installUpdate(latest)
-  } catch {
+  } catch (err) {
+    thrown = err
     ok = false
   }
   if (!ok) {
+    // installUpdate mencatat langkah + detail yang sudah diredaksi. Pakai itu,
+    // bukan stderr mentah — user butuh tahu apakah E401, EACCES, atau timeout.
+    const failure = getLastUpdateFailure() ?? {
+      step: "npm install",
+      result: {
+        status: null,
+        error: thrown ? errorMessage(thrown) : "instalasi gagal tanpa detail",
+      } satisfies InstallResult,
+    }
+    const reason = formatUpdateError(failure.step, failure.result)
     opts?.onNotice?.(
       c.yellow(
-        `Auto-update gagal — lanjut versi ${version}. Update manual: npm update -g minicode-ai\n`,
+        `Auto-update gagal pada ${reason} — lanjut versi ${version}. Update manual: npm install -g minicode-ai@${latest}\n`,
       ),
     )
     return

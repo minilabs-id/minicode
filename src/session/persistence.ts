@@ -3263,46 +3263,28 @@ export function shrinkThreadHistory(
 }
 
 /**
- * [PHASE 6Q] THE CANONICAL SESSION DELETION OPERATION.
- * 6N F6 found that there were two session-teardown paths and only one of them
- * cleaned up tasks: `deleteSession` did (6K D4) and `purgeExpired` did not, so a
- * TTL-purged session orphaned its task rows AND their execution lineage forever.
- * 6O ADR-9 concluded the second deletion architecture *is* the bug.
+ * Operasi penghapusan sesi kanonik; `deleteSession` dan `purgeExpired` memanggilnya.
  *
- * This is the one operation. `deleteSession` and `purgeExpired` both call it.
+ * Urutan WAJIB:
+ *   1  bump incarnation sesi → invalidasi semua eksekusi in-flight lintas-proses
+ *   2  hapus baris TaskStore (tasks.db)
+ *   3  hapus baris sisi-sesi (sessions.db)
  *
- * ORDERING, and why it is not negotiable:
+ * Langkah 1 lebih dulu menutup celah lintas-proses: eksekusi yang masih berjalan
+ * mendapati incarnation berpindah, completion-nya DITOLAK — tak bisa menandai sesi
+ * terhapus maupun rekreasi id yang sama (task id tak terbedakan).
+ * Task sebelum sesi karena residu gagal tak simetris: gagal hapus task menyisakan
+ * sesi terlihat & bisa retry; gagal hapus sesi lebih dulu menyisakan task
+ * EXECUTABLE tanpa sesi (residu berbahaya).
  *
- *   1  bump the session incarnation   <- invalidate every in-flight execution
- *   2  delete TaskStore rows          <- tasks.db
- *   3  delete session-side rows       <- sessions.db
- *
- * Step 1 first is what closes 6N F2 across process boundaries: an execution that
- * is still running against this session id now finds a moved incarnation and its
- * completion is REFUSED, so it can never stamp a marker onto a session that has
- * been deleted - or onto a later RECREATION of the same id, whose task ids are
- * indistinguishable from the deleted ones.
- *
- * Steps 2 and 3 preserve the 6K conclusion verbatim: tasks first, because the two
- * failure residues are not symmetric. A task-delete failure leaves the session
- * visible and the deletion visibly incomplete, so it is retryable and nothing is
- * orphaned. A session-first failure would leave task rows that are still
- * EXECUTABLE with no session to reconcile them - the dangerous residue.
- *
- * NOT ATOMIC, and deliberately not pretending to be: `tasks.db` and `sessions.db`
- * are separate persistence domains and no transaction spans them. The requirement
- * is not imaginary atomicity but that every reachable partial state is safe,
- * visible and retryable. Those residues are:
- *
- *   fail at 1  -> nothing deleted; the session is intact and still usable. Safe.
- *   fail at 2  -> incarnation already moved, so any in-flight execution is
- *                 already invalidated; task rows remain but the session is still
- *                 there. Visible, retryable, and NOT executable by a stale claim.
- *   fail at 3  -> tasks are gone (so nothing executable survives), session rows
- *                 remain. Visible, retryable, no autonomous work can exist.
- *
- * IDEMPOTENT: every step is safe to repeat, and repeating advances the
- * incarnation again, which can only ever invalidate MORE stale executions.
+ * TIDAK ATOMIK (dua DB terpisah, tanpa transaksi lintas-domain). Syaratnya bukan
+ * atomicitas bayangan, melainkan setiap state parsial aman, terlihat, retryable:
+ *   gagal di 1 → sesi utuh.
+ *   gagal di 2 → incarnation berpindah (eksekusi invalid), task & sesi tersisa;
+ *                retryable, tak ada stale claim.
+ *   gagal di 3 → task hilang (tak ada yang executable), sesi tersisa; retryable.
+ * IDEMPOTEN: mengulang langkah aman dan incarnation naik lagi → hanya invalidasi
+ * lebih banyak eksekusi basi.
  */
 async function deleteSessionCompletely(id: string, cwd?: string): Promise<void> {
   const { TaskStore } = await import("../task/store.ts")
@@ -3310,18 +3292,12 @@ async function deleteSessionCompletely(id: string, cwd?: string): Promise<void> 
 
   // 1. Invalidate in-flight executions BEFORE removing anything they could write.
   tasks.bumpSessionIncarnation(id)
-  // [PHASE 6U] Tell live local executions to STOP, before their rows disappear.
-  //
-  // [DESIGN DECISION] The incarnation bump above is the AUTHORITATIVE barrier: it
-  // is durable, cross-process, and nothing can write after it. This notification
-  // is strictly an OPTIMISATION layered in front of it — it makes a running
-  // autonomous turn stop now instead of running to completion against a session
-  // that no longer exists.
-  //
-  // Ordering is deliberate and matches 6Q's: invalidate durably FIRST, then
-  // signal, then delete. A subscriber that somehow still writes is refused by the
-  // bump regardless of what this notification did, so a broken subscriber cannot
-  // turn into a resurrected session.
+  // [PHASE 6U] Beri tahu eksekusi lokal hidup untuk BERHENTI sebelum barisnya hilang.
+  // Bump incarnation di atas = penghalang AUTHORITATIVE (durable, lintas-proses,
+  // tak ada yang bisa menulis setelahnya). Notifikasi ini murni OPTIMISASI:
+  // menghentikan turn otonom sekarang, bukan menunggu selesai melawan sesi hilang.
+  // Urutan sengaja: invalidasi durable dulu, lalu sinyal, lalu hapus. Subscriber
+  // yang tetap menulis ditolak oleh bump apa pun isi notifikasi ini.
   const { notifySessionInvalidated } = await import("../task/session-ownership.ts")
   notifySessionInvalidated(id)
 
@@ -3386,34 +3362,20 @@ async function deleteSessionCompletely(id: string, cwd?: string): Promise<void> 
 export async function deleteSession(id: string, cwd?: string) {
   // [PHASE 6K] TaskStore rows FIRST, and NOT best-effort.
   //
-  // Phase 6J (D4, HIGH): this function deleted session-side state and never
-  // touched `tasks.db` at all - `deleteTask`/`deleteSessionTasks` had zero
-  // production callers. Deleting a session and recreating it with the same id
-  // therefore resurrected the old task rows *with their execution lineage*, and
-  // a Scheduler on the recreated session dispatched that deleted work.
+  // Fase 6J: fungsi ini dulu hanya menghapus state sisi-sesi, tak menyentuh
+  // tasks.db — sesi dihapus lalu dibuat ulang dengan id sama menghidupkan lagi
+  // baris task beserta lineage-nya, dan Scheduler men-dispatch kerja terhapus.
   //
-  // ORDERING (6K §8, two databases, so NOT atomic): tasks are removed BEFORE
-  // session-side state. The two stores are separate files, so no single
-  // transaction spans them. The ordering is chosen because the two possible
-  // residues are not symmetric:
+  // URUTAN (dua DB, TIDAK atomik): task dihapus LEBIH DULU. Residu tak simetris:
+  //   gagal hapus task → sesi masih ada, terlihat incomplete & retryable. BENIGN.
+  //   gagal hapus sesi → sesi tanpa task; retry no-op untuk task lalu selesai. KONVERGEN.
+  // Urutan terbalik menghasilkan residu berbahaya (task hidup tanpa sesi) pada
+  // kegagalan pertama.
   //
-  //   task delete fails first -> the session still exists, so the delete is
-  //                              visibly incomplete and retryable, and nothing
-  //                              is orphaned. BENIGN.
-  //   session delete fails after -> the session exists with no tasks. Also
-  //                              benign: a retry is a no-op for tasks and then
-  //                              completes the session delete. CONVERGES.
-  //
-  // The reverse order would produce the dangerous residue (tasks surviving a
-  // deleted session) on the first failure. That is why tasks go first.
-  //
-  // It is NOT swallowed: if task deletion fails we deliberately leave the
-  // session intact and propagate, because continuing would delete the session
-  // and leave exactly the executable orphans this fix exists to prevent.
-  // [PHASE 6Q] The canonical operation owns the incarnation bump + TaskStore
-  // cleanup + session-row deletion, so this function cannot drift from the
-  // ordering or the failure semantics proved there. This replaces the inline
-  // TaskStore block that 6K added.
+  // TIDAK ditelan: gagal hapus task → sesi sengaja dibiarkan utuh dan error
+  // dipropagasi, karena melanjutkan menciptakan orphan executable.
+  // Operasi kanonik memiliki bump incarnation + cleanup TaskStore + hapus baris
+  // sesi, sehingga urutan/semantika gagal tak bisa menyimpang.
   await deleteSessionCompletely(id, cwd)
   // Lifecycle: jurnal ikut hapus sesi (best-effort; tak boleh gagalkan hapus).
   try {

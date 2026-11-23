@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { createEventBus } from "#minicore/core/events.ts"
 import { costFor, createUsageCollector } from "../src/policy/usage.ts"
 import { resetLocaleState, setSessionLocale } from "../src/ui/i18n/locale.ts"
@@ -7,7 +7,9 @@ import {
   formatError,
   friendlyError,
   friendlyFromCategory,
+  friendlyToolError,
 } from "../src/ui/render/errors.ts"
+import { __setSystemLocaleForTest } from "../src/ui/render/tool-label.ts"
 import { displayWidth } from "../src/ui/render/width.ts"
 
 // Pesan error dwibahasa — kunci en (paritas highlight.test.ts).
@@ -363,4 +365,47 @@ test("formatError: ProviderError (category) & AgentError (kind) tetap dipetakan"
   expect(provider.toLowerCase()).toContain("rate")
   const agent = formatError({ kind: "timeout", message: "run exceeded" } as unknown)
   expect(agent.toLowerCase()).toContain("timeout")
+})
+
+// ── v0.42: redaksi ringkas kegagalan tool (tSystem / locale OS) ───────────────
+describe("friendlyToolError", () => {
+  afterEach(() => __setSystemLocaleForTest(null))
+
+  test("prioritas: duplicate > exit > EIO > bash-guard > default", () => {
+    __setSystemLocaleForTest("en")
+    expect(friendlyToolError("duplicate idempotency key abc-123")).toBe(
+      "Already run · verify state before retrying",
+    )
+    expect(friendlyToolError("failed: exit 1\nerror: boom", "bash")).toBe(
+      "Command failed · bash · details in --verbose",
+    )
+    expect(friendlyToolError("read failed: EIO: something")).toBe("Terminal read failed · retry")
+    expect(friendlyToolError("bash-guard internal error: boom")).toBe("Command blocked · retry")
+    expect(friendlyToolError("boom")).toBe("boom")
+  })
+
+  test("redaksi id memakai locale OS, bukan /lang", () => {
+    __setSystemLocaleForTest("id")
+    setSessionLocale("en") // sesi beda — tak boleh mengubah hasil tSystem
+    expect(friendlyToolError("duplicate idempotency key")).toBe(
+      "Sudah dijalankan · verifikasi state dulu",
+    )
+    expect(friendlyToolError("exit 7", "git_push")).toBe(
+      "Perintah gagal · git_push · detail di --verbose",
+    )
+  })
+
+  test("murni, satu baris ≤120 kolom, rahasia teredaksi", () => {
+    __setSystemLocaleForTest("en")
+    const long = friendlyToolError(
+      `exit 2 ${"x".repeat(200)} Authorization: Bearer ${SENTINEL_BEARER}`,
+      "bash",
+    )
+    expect(displayWidth(long)).toBeLessThanOrEqual(120)
+    expect(long).not.toContain("\n")
+    expect(long).toContain("Command failed")
+    const secret = friendlyToolError(`boom Authorization: Bearer ${SENTINEL_BEARER}`)
+    expect(secret).not.toContain(SENTINEL_BEARER)
+    expect(secret).toContain("[redacted]")
+  })
 })

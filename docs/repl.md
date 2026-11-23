@@ -39,6 +39,7 @@ bahasa user (`/lang`).
 | `/view [thinking]` | Hanya menerima `thinking`: tanpa argumen = picker satu aksi (`thinking`), `thinking` = tampil/sembunyikan baris `+ thinking` di chat. Aksi lama `compact`/`minimize`/`fold`/`expand` DITOLAK — reasoning penuh tetap di jurnal, bukan panel samping |
 | `/exit` | Keluar (satu-satunya jalan keluar; `/quit` alias). Setelah keluar, blok penutup ke scrollback: wordmark `minicode` + Session/Model/Mode + Usage (token in/out, biaya, durasi) + rincian tool per kategori + jumlah agent. Matikan dengan `MINICODE_SESSION_SUMMARY=0` |
 | `/scheduler [status\|run\|stop]` | Kendali Scheduler produksi. **Nonaktif secara bawaan** di setiap sesi (perlu flag `--enable-scheduler`); tanpa flag, perintahnya menjawab "not enabled". Tetap tampil di `/help` supaya operator yang mengaktifkan flag bisa menemukannya. |
+| `/update` (v0.41) | Perbarui MiniCode ke **versi eksak terverifikasi**. **Hanya TUI interaktif**: handoff aman — alt-screen dilepas → install → spawn restart dengan `MINICODE_AUTO_UPDATE_DONE=1` → exit; bila sudah latest/opt-out/gagal, terminal di-reacquire dan hasil ditampilkan. Non-TTY/one-shot/`exec`/pipe/ACP menjawab "not available" (fail-closed, tak pernah spawn npm dari pipe/CI). Instruksi manual: lihat [instalasi manual](getting-started.md). |
 
 Alias (jalan, tidak diiklankan di `/help`): `/models` → `/model`, `/providers` → `/provider`, `/usage` & `/cost` → `/status`, `/resume [id]` → `/sessions [id]`, `/quit`. Nama lama `/sync`, `/work-mode`, `/history`, `/compact`, `/thinking`, `/expand`, `/minimize`, dan `/fold` sudah pensiun (tidak ada alias) — `/help` dan pesan did-you-mean menuntun ke penggantinya.
 
@@ -71,6 +72,7 @@ Did-you-mean: typo `/sessoons` → `Did you mean /sessions?` (jarak ≤ 2).
 | `ctrl+c` | Salin selection (TUI), **termasuk saat drag masih aktif** — drag di-finalisasi dulu menjadi seleksi (bukan no-op/abort, sejak v0.37); tanpa selection = no-op. Abort turn pakai `Esc` (`Esc` dua kali dalam 1,5 dtk, atau `Ctrl+D` baris-kosong, saat abort macet) |
 | `paste` (multi-baris) | Bracketed paste aktif sejak v0.37: `?2004h` saat masuk, `?2004l` saat keluar — TUI, `askLine`/`askSecret`, dan output-window. Sequence ditulis **di luar frame** (I1: satu `write` per frame tetap utuh). CR di dalam paste dibaca sebagai newline draft, **bukan submit** — tidak ada submit bertingkat |
 | `ctrl+d` | Keluar saat baris kosong; saat busy baris-kosong = abort turn lalu keluar |
+| `/update` (handoff, v0.41) | Handoff terminal untuk auto-update di TUI: alt-screen dilepas → install → restart dengan `MINICODE_AUTO_UPDATE_DONE=1` → exit. Bila latest/opt-out/gagal terminal di-reacquire & hasil ditampilkan. Non-TTY/one-shot/ACP: "not available", tanpa spawn npm. Kegagalan install menyebut langkah & alasan yang diredaksi (ANSI/token/URL kredensial dibuang, ≤300 char), bukan pesan generik |
 | `resize` (v0.37) | Menghentikan **auto-scroll**, membatalkan status **drag**, mereset **kolom preferensi kursor**, dan **merebase anchor gulir** walau seleksi aktif — selection tidak melompat ke baris lama. Dropdown `/` ditutup saat transisi busy/abort. Klik pasca-resize memetakan ke geometri **baru**, bukan koordinat lama |
 | `enter` saat turn berjalan | **Selipkan sebagai informasi tambahan (steer)**: baris masuk ke konteks turn AKTIF pada batas step berikutnya — sebelum request model selanjutnya — jadi model membacanya di turn yang sama tanpa pekerjaan yang sedang berjalan dibatalkan (transkrip menandai `diselipkan ke turn yang berjalan`). Bila turn ternyata sudah selesai lebih dulu, baris jatuh ke antrean turn berikutnya (`diantrikan #n`) supaya tidak hilang. Baris `/perintah` ditolak dengan alasan karena perintah UI butuh idle. `Esc` membatalkan turn sekaligus membuang antrean fallback (dengan pemberitahuan) |
 
@@ -126,11 +128,12 @@ Rekap tool bukan state live. Ia ditulis sebagai **baris committed statis** yang
 jadi footer tiap narasi:
 
 ```text
-tool → narasi → └ rekap(tool sebelum narasi)
-└ 2 command · 118 read · 1 other
+tool → narasi → rekap(tool sebelum narasi)
+2 command · 118 read · 1 other
 ```
 
-Baris `└` menghitung tool yang terjadi **sebelum** narasi itu. Rekap **akhir
+Baris rekap menghitung tool yang terjadi **sebelum** narasi itu (sejak v0.41 tanpa
+prefix simbol). Rekap **akhir
 turn** = kumulatif semua tool selama turn (bukan potongan per segmen).
 Klausa lama — rekap dua baris saat live, `flushActivityFold` net-nol,
 `liveSummaryRows()` mengikuti ekor, dan jeda antar narasi sebagai baris

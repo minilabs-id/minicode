@@ -4,6 +4,7 @@ Variabel yang paling menentukan perilaku (sisanya referensi di bawah):
 
 - **Batas otonomi di mesin sendiri:** `MINICODE_SANDBOX` + `MINICODE_SANDBOX_STRICT=1` (tolak bash bila isolasi tak ada) + `MINICODE_BUDGET_STRICT=1` (cost tak dikenal = over budget).
 - **Privasi/minim jejak:** `MINICODE_TELEMETRY=0` (tanpa traces), `MINICODE_AUTO_MEMORY=0` (tanpa auto-simpan memori).
+- **CI/otomasi:** `CI=1` → auto-update fail-closed (tanpa pemasangan, tanpa spawn npm); lihat v0.41.
 - **Repo asing:** JANGAN set `MINICODE_ALLOW_LOCAL_CONFIG=1` kecuali workspace milik Anda.
 - **Konsol lawas/aksesibilitas:** `MINICODE_ASCII=1`, `MINICODE_A11Y=1`, `MINICODE_BELL=0`, `NO_COLOR`, `MINICODE_COLOR=0`.
 
@@ -13,8 +14,10 @@ Variabel yang paling menentukan perilaku (sisanya referensi di bawah):
 |---|---|
 | `MINICODE_TIMEOUT_MS` | Default timeout (ms) bila `--timeout` tidak diset; `0` = Infinity. Ini batas **total** satu prompt (default 1 jam untuk sesi interaktif) |
 | `MINICODE_DEBUG` | `1` → tampilkan stack trace lengkap saat proses gagal fatal (default: hanya satu baris sebabnya) |
-| `NO_UPDATE_CHECK` | `1` → lewati pemeriksaan pembaruan saat startup |
-| `MINICODE_AUTO_UPDATE` | `0`/`false`/`off` → nonaktifkan pemeriksaan dan pemasangan pembaruan otomatis |
+| `NO_UPDATE_CHECK` | `1` → lewati pemeriksaan pembaruan saat startup (dihormati sejak v0.41) |
+| `MINICODE_AUTO_UPDATE` | `0`/`false`/`off` → nonaktifkan pemeriksaan dan pemasangan pembaruan otomatis; nilai lain = aktif |
+| `CI` | `1` → perlakukan sebagai CI: auto-update fail-closed (tanpa pemasangan, tanpa spawn npm) — lihat v0.41 |
+| `MINICODE_AUTO_UPDATE_DONE` | Guard internal: `1` ditetapkan pada proses restart hasil `/update` agar tidak memicu pemeriksaan/install berulang (loop). Jangan diset manual |
 | `MINICODE_PERMISSION` | `allowlist` → tool-access policy bash (profil warisan) |
 | `MINICODE_TOOL_SCOPE` | `explore` → subset read-only 12 tool (sama `--tool-scope explore`) |
 | `MINICODE_WORK_MODE` | `DISCUSS` \| `BUILD` → operating mode (sama `--work-mode`; default `DISCUSS`; `BUILD` dipetakan ke `EXECUTE` internal; flag menang atas env; nilai tak dikenal gagal ke `DISCUSS` dengan peringatan) |
@@ -32,6 +35,25 @@ Variabel yang paling menentukan perilaku (sisanya referensi di bawah):
 | `MINICODE_VERIFY_CMD` | Custom verify command (ganti `detectVerifyCommand`) |
 | `MINICODE_ACE_ENABLED` | `0`/`false`/`off`/`no` → nonaktifkan ACE-Lite consequence engine (rollback instan ke baseline murni, tanpa self-heal loop). Default `true`. Hard-safety/tamper-guard & permission policy TETAP aktif — sakelar ini hanya mematikan evaluasi consequence, bukan batas keamanan |
 | `MINICODE_BASH_ALLOWLIST` | Kustom allowlist bash (koma-pisah, ganti DEFAULT) |
+
+## Auto-update (v0.41)
+
+Kegagalan install auto-update kini menyebut **langkah & alasan** yang sudah
+diredaksi, bukan pesan generik. Redaksi membuang sekuens ANSI, token/kredensial,
+dan URL yang memuat kredensial, lalu memotong hasil menjadi **satu baris ≤300
+char**. **Batas redaksi hanya tiga kategori itu plus panjang/baris** — bukan
+pembersih rahasia umum; teks diagnostik ini untuk manusia, bukan untuk dimasukkan
+kembali ke prompt/model.
+
+Opt-out yang dihormati: `NO_UPDATE_CHECK=1`, `MINICODE_AUTO_UPDATE=0|false|off`,
+dan `CI=1`. Guard internal `MINICODE_AUTO_UPDATE_DONE=1` menandai proses restart
+hasil update agar tidak memicu pemeriksaan/install berulang (loop).
+
+Instruksi manual: lihat [instalasi manual](getting-started.md).
+
+Di Windows runner npm memilih `npm_execpath` / `npm.cmd` dengan timeout 60 dtk;
+urutan verifikasi signature tetap fail-closed. Slash command `/update` hanya ada
+di TUI interaktif; non-TTY/one-shot/ACP menjawab "not available" tanpa spawn npm.
 
 ## Bahasa, diagnosis & kunci
 

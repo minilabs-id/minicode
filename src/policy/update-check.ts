@@ -1,28 +1,70 @@
-// Update notifier — cek versi terbaru di npm, cache 24 jam, tampil sekali.
-// Tanpa dependensi, tanpa blocking startup (fire-and-forget, timeout 2 dtk).
-// Hormat offline: gagal fetch = diam. Hormat NO_UPDATE_CHECK=1 / CI=1.
+// Notifier update — cek versi npm, cache 24 jam, tampil sekali; fire-and-forget 2 dtk.
+// Diam saat offline/gagal fetch; hormati NO_UPDATE_CHECK=1 / CI=1.
+// Runner npm mengumpulkan stderr/error/timedOut per langkah; detail wajib lewat
+// formatUpdateError (satu baris, diredaksi) agar E401/EACCES/timeout tidak generik.
 
-import { spawnSync } from "node:child_process"
+import { type SpawnSyncReturns, spawnSync } from "node:child_process"
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { homedir, tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 
 const PKG_NAME = "minicode-ai"
 const CACHE_FILE = join(homedir(), ".minicode", "update-check.json")
 const TTL_MS = 24 * 60 * 60 * 1000
 const FETCH_TIMEOUT_MS = 2000
 /**
- * v0.33: batas MATI per perintah npm saat install/verifikasi update.
- * Dulu 120_000 ms × 3 perintah (verify-install, audit signatures, global
- * install) = hingga 6 menit `spawnSync` memblokir event-loop — TUI tampak
- * hang dan timer abort 1,8 dtk tak pernah sempat berjalan. 20 dtk cukup untuk
- * npm lokal/CI; lebih dari itu = gagal jujur, lanjut versi lama.
+ * Batas mati per perintah npm (root -g, install temp, audit signatures, install -g).
+ * 60 dtk cukup untuk registry lambat/korporat di Windows, jauh di bawah 3×120 dtk
+ * yang membekukan TUI; timeout kini DILAPORKAN, bukan dibungkam.
  */
-const NPM_SPAWN_TIMEOUT_MS = 20_000
+const NPM_SPAWN_TIMEOUT_MS = 60_000
+/** Tail stderr yang disimpan runner — cukup untuk E401/EACCES tanpa membocorkan log penuh. */
+const STDERR_TAIL_CHARS = 400
+/** formatUpdateError selalu memotong sampai sepanjang ini (termasuk elipsis). */
+const MAX_ERROR_LINE = 300
 
 interface Cache {
   checkedAt: number
   latest: string
+}
+
+/** Hasil satu perintah npm. Field baru opsional agar runner lama tetap kompatibel. */
+export interface InstallResult {
+  status: number | null
+  stdout?: string
+  stderr?: string
+  error?: string
+  timedOut?: boolean
+  command?: string
+}
+
+export type InstallRunner = (cmd: string, args: string[], opts?: { cwd?: string }) => InstallResult
+
+/** Detail kegagalan langkah terakhir — diisi installUpdate, dibaca pemanggil. */
+export interface UpdateFailure {
+  step: string
+  result: InstallResult
+}
+
+let lastFailure: UpdateFailure | null = null
+
+export function getLastUpdateFailure(): UpdateFailure | null {
+  return lastFailure
+}
+
+/** Bersihkan state sebelum alur manual dengan runner injection (tanpa installUpdate). */
+export function clearLastUpdateFailure(): void {
+  lastFailure = null
+}
+
+function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message
+  if (typeof err === "string") return err
+  try {
+    return String(err)
+  } catch {
+    return "unknown"
+  }
 }
 
 function shouldSkip(): boolean {
@@ -31,6 +73,14 @@ function shouldSkip(): boolean {
   // Jangan ganggu JSONL pipeline
   if (process.argv.includes("--json") || process.argv.includes("--output-format")) return true
   return false
+}
+
+/** Opt-out yang dipakai runManualUpdate (/update) — sama dengan gate auto-update. */
+export function isUpdateOptedOut(env: NodeJS.ProcessEnv = process.env): boolean {
+  if (env.NO_UPDATE_CHECK === "1") return true
+  if (env.CI === "1") return true
+  const off = (env.MINICODE_AUTO_UPDATE ?? "").trim().toLowerCase()
+  return off === "0" || off === "false" || off === "off"
 }
 
 function semverLt(a: string, b: string): boolean {
@@ -108,15 +158,14 @@ export async function checkForUpdate(currentVersion: string): Promise<string | n
 }
 
 export function formatUpdateMessage(current: string, latest: string): string {
-  return `Update tersedia ${current} → ${latest} — jalankan: npm update -g ${PKG_NAME}`
+  // `npm update` bisa melewati langkah verifikasi signature; selalu pasang
+  // versi eksak yang sudah terverifikasi dari registry yang sama.
+  return `Update tersedia ${current} → ${latest} — jalankan: npm install -g ${PKG_NAME}@${latest}`
 }
 
 // ── Auto-update interaktif ──
-// Saat REPL dibuka di terminal (TTY) dari salinan ter-install (global npm),
-// minicode memeriksa versi terbaru, meng-install bila ada, lalu restart ke
-// versi baru — tanpa update manual. Satu-satunya mutasi adalah `npm install -g`
-// paket sendiri + respawn argv yang sama; gagal install = lanjut dengan versi
-// lama + pesan manual (tak pernah memblokir pemakaian).
+// REPL TTY dari salinan ter-install: cek versi, install, restart argv yang sama.
+// Satu-satunya mutasi `npm install -g` paket sendiri; gagal = lanjut versi lama + pesan manual.
 
 /** Guard env anti-loop restart: di-set saat respawn pasca-update. */
 export const UPDATE_GUARD_ENV = "MINICODE_AUTO_UPDATE_DONE"
@@ -184,11 +233,15 @@ export async function checkForUpdateFresh(
   return isNewer(currentVersion, eff) ? eff : null
 }
 
-export type InstallRunner = (
-  cmd: string,
-  args: string[],
-  opts?: { cwd?: string },
-) => { status: number | null; stdout?: string }
+/** Versi lokal untuk default check() — baca package.json, bukan hardcode. */
+function readCurrentVersion(): string {
+  try {
+    const pkgUrl = new URL("../../package.json", import.meta.url)
+    return (JSON.parse(readFileSync(pkgUrl, "utf8")) as { version?: string }).version ?? "0.0.0"
+  } catch {
+    return "0.0.0"
+  }
+}
 
 const NPM_REGISTRY = "https://registry.npmjs.org/"
 
@@ -200,31 +253,143 @@ export function verifyInstalledVersion(expected: string, readVersion: () => stri
   }
 }
 
+// ── Resolusi executable npm (Windows) ──
+// `spawnSync("npm", {shell:true})` rapuh (cmd.exe, spasi di path, npm.cmd).
+// Panggil npm-cli.js lewat node langsung (tanpa shell) — satu-satunya cara aman.
+
+interface NpmExec {
+  cmd: string
+  prefixArgs: string[]
+  shell: boolean
+}
+
+function quoteShellArg(arg: string): string {
+  // Argumen kita semua konstan SemVer/flag/URL; ini hanya pengaman bila shell
+  // terpaksa dipakai (npm.cmd tanpa npm-cli.js) dan ada spasi di path.
+  if (/^[A-Za-z0-9_@/:=.,+~-]+$/.test(arg)) return arg
+  return `"${arg.replace(/"/g, '\\"')}"`
+}
+
+function resolveNpmExecutable(): NpmExec {
+  const fromEnv = process.env.npm_execpath?.trim()
+  if (fromEnv) {
+    if (/\.[cm]?js$/i.test(fromEnv))
+      return { cmd: process.execPath, prefixArgs: [fromEnv], shell: false }
+    if (/\.(cmd|bat)$/i.test(fromEnv)) {
+      const cli = join(dirname(fromEnv), "npm-cli.js")
+      if (existsSync(cli)) return { cmd: process.execPath, prefixArgs: [cli], shell: false }
+      return { cmd: fromEnv, prefixArgs: [], shell: true }
+    }
+    return { cmd: fromEnv, prefixArgs: [], shell: false }
+  }
+  if (process.platform === "win32") {
+    const cli = join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js")
+    if (existsSync(cli)) return { cmd: process.execPath, prefixArgs: [cli], shell: false }
+    return { cmd: "npm.cmd", prefixArgs: [], shell: true }
+  }
+  return { cmd: "npm", prefixArgs: [], shell: false }
+}
+
+function tailText(s: string, max = STDERR_TAIL_CHARS): string {
+  const clean = String(s ?? "").replace(/\r/g, "")
+  return clean.length > max ? clean.slice(clean.length - max) : clean
+}
+
+function defaultNpmRunner(): InstallRunner {
+  const exec = resolveNpmExecutable()
+  return (cmd, args, opts) => {
+    // runner yang di-inject menerima "npm" — jangan ubah argumen yang mereka lihat.
+    // Mapping ke executable asli terjadi HANYA di sini.
+    const runCmd = cmd === "npm" ? exec.cmd : cmd
+    const runArgs = cmd === "npm" ? [...exec.prefixArgs, ...args] : [...args]
+    const command = [runCmd, ...runArgs].join(" ")
+    const spawnArgs = exec.shell && cmd === "npm" ? runArgs.map(quoteShellArg) : runArgs
+    try {
+      const r: SpawnSyncReturns<string> = spawnSync(runCmd, spawnArgs, {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        shell: exec.shell && cmd === "npm",
+        timeout: NPM_SPAWN_TIMEOUT_MS,
+        ...(opts?.cwd ? { cwd: opts.cwd } : {}),
+      })
+      const timedOut = !!(r.error && (r.error as NodeJS.ErrnoException).code === "ETIMEDOUT")
+      return {
+        status: typeof r.status === "number" ? r.status : null,
+        stdout: String(r.stdout ?? ""),
+        stderr: tailText(String(r.stderr ?? "")),
+        ...(r.error ? { error: r.error.message } : {}),
+        ...(timedOut ? { timedOut: true } : {}),
+        command,
+      }
+    } catch (err) {
+      return { status: null, error: errorMessage(err), command }
+    }
+  }
+}
+
+// ── Redaksi pesan error ──
+// stderr npm = input tak terpercaya (token .npmrc, URL berkredensial, ANSI).
+// formatUpdateError satu-satunya gerbang — jangan pernah tampilkan stderr mentah.
+
+// ESC/BEL sengaja dipakai untuk membuang sekuens ANSI dari stderr npm.
+// biome-ignore lint/suspicious/noControlCharactersInRegex: pola ANSI memang memakai ESC/BEL
+const ANSI_OSC_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g
+// biome-ignore lint/suspicious/noControlCharactersInRegex: pola CSI memang memakai ESC
+const ANSI_CSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]/g
+// biome-ignore lint/suspicious/noControlCharactersInRegex: pola ESC tunggal
+const ANSI_SINGLE_RE = /\x1b[@-_]/g
+const CREDENTIAL_URL_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]*:[^\s"'<>]*@[^\s"'<>]*/gi
+const BARE_CREDENTIAL_RE = /\b[^\s:/@]+:[^\s/@]+@[^\s]+/g
+const BEARER_RE = /\bBearer\s+[^\s,;]+/gi
+const NPM_TOKEN_RE = /\bnpm_[A-Za-z0-9_-]{8,}/g
+const SECRET_KV_RE =
+  /\b(_auth(?:Token)?|password|passwd|pwd|authorization|token|api[_-]?key|secret)\b\s*[:=]\s*("[^"]*"|'[^']*'|[^\s,;]+)/gi
+
+function redactUpdateText(input: string): string {
+  return input
+    .replace(ANSI_OSC_RE, "")
+    .replace(ANSI_CSI_RE, "")
+    .replace(ANSI_SINGLE_RE, "")
+    .replace(CREDENTIAL_URL_RE, "[redacted-url]")
+    .replace(BARE_CREDENTIAL_RE, "[redacted]")
+    .replace(BEARER_RE, "Bearer [redacted]")
+    .replace(NPM_TOKEN_RE, "[redacted-token]")
+    .replace(SECRET_KV_RE, "$1=[redacted]")
+    .replace(/[\r\n]+/g, " ")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim()
+}
+
 /**
- * v0.33: baca versi dari PREFIX GLOBAL npm yang sebenarnya, bukan dari
- * package.json di samping modul yang sedang berjalan. Pemilik melaporkan
- * auto-update "versi tidak cocok" lalu rollback: `import.meta.dir` bisa
- * menunjuk cache/transpilasi, sehingga versi lama terbaca walau `npm install -g`
- * sudah sukses. `npm root -g` adalah sumber kebenaran prefix install.
- * Fail-closed: kegagalan membaca → "0.0.0" (verifikasi gagal, rollback aman).
+ * Satu baris, ≤300 char, aman ditampilkan. Contoh:
+ *   npm audit signatures (exit 1): E401 token [redacted-token] — periksa .npmrc
+ */
+export function formatUpdateError(step: string, r: InstallResult): string {
+  const status = r.timedOut
+    ? "timeout"
+    : typeof r.status === "number"
+      ? `exit ${r.status}`
+      : "exit ?"
+  const parts = [r.error?.trim(), r.stderr?.trim()].filter((s): s is string => !!s)
+  let reason = redactUpdateText(parts.join(" — "))
+  if (!reason) reason = r.timedOut ? "perintah melewati batas waktu" : "npm tidak memberi detail"
+  const line = `${step} (${status}): ${reason}`
+  return line.length > MAX_ERROR_LINE ? `${line.slice(0, MAX_ERROR_LINE - 1)}…` : line
+}
+
+function recordFailure(step: string, r: InstallResult): false {
+  lastFailure = { step, result: r }
+  return false
+}
+
+/**
+ * Versi dibaca dari PREFIX GLOBAL npm (`npm root -g`), bukan package.json modul:
+ * `import.meta.dir` bisa menunjuk cache/transpilasi sehingga versi lama terbaca.
+ * Fail-closed: gagal baca → "0.0.0" (verifikasi gagal, rollback aman).
  */
 export function readGlobalInstalledVersion(runner?: InstallRunner): string {
   try {
-    const run: InstallRunner =
-      runner ??
-      ((cmd, args, opts) => {
-        const r = spawnSync(cmd, args, {
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "pipe"],
-          shell: process.platform === "win32",
-          timeout: NPM_SPAWN_TIMEOUT_MS,
-          ...(opts?.cwd ? { cwd: opts.cwd } : {}),
-        })
-        return {
-          status: typeof r.status === "number" ? r.status : null,
-          stdout: String(r.stdout ?? ""),
-        }
-      })
+    const run = runner ?? defaultNpmRunner()
     const res = run("npm", ["root", "-g"])
     if (res.status !== 0 || !res.stdout) return "0.0.0"
     const root = res.stdout.trim().split(/\r?\n/).pop() ?? ""
@@ -242,33 +407,17 @@ const SEMVER_VERSION_RE =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/
 
 /**
- * Verifikasi versi dari registry (signature + provenance) di prefix sementara,
- * lalu pasang versi persis dari registry yang sama secara global. Skrip paket
- * tidak dijalankan. Npm lama atau paket tanpa bukti registry tepercaya = gagal
- * tertutup; pemanggil tetap melanjutkan versi yang sedang berjalan.
+ * Verifikasi registry (signature + provenance) di prefix sementara lalu pasang versi
+ * persis secara global; skrip paket tidak dijalankan. Npm lama/tanpa bukti tepercaya
+ * = fail-closed. Tiap kegagalan dicatat di `lastFailure` (step + detail teredaksi).
  */
 export function installUpdate(version: string, runner?: InstallRunner): boolean {
-  if (version.length > 128 || !SEMVER_VERSION_RE.test(version)) return false
+  lastFailure = null
+  if (version.length > 128 || !SEMVER_VERSION_RE.test(version))
+    return recordFailure("validasi versi", { status: null, error: "versi target tidak valid" })
   let verifyRoot: string | undefined
   try {
-    const run: InstallRunner =
-      runner ??
-      ((cmd, args, opts) => {
-        // Windows: npm adalah .cmd → butuh shell. Output npm dipipe dan
-        // dibuang — auto-update kini berjalan di belakang bar loading, jadi
-        // progres raw npm malah mengotori baris bar (sebelumnya stdio
-        // inherit menimpa spinner).
-        // spawnSync memblokir event-loop: tanpa batas ketat, 3 perintah npm
-        // bisa membekukan TUI ber menit (laporan hang pemilik 20 Nov). Timeout
-        // = gagal jujur, lanjut versi lama, bukan gantung.
-        const r = spawnSync(cmd, args, {
-          stdio: ["ignore", "pipe", "pipe"],
-          shell: process.platform === "win32",
-          ...(opts?.cwd ? { cwd: opts.cwd } : {}),
-          timeout: NPM_SPAWN_TIMEOUT_MS,
-        })
-        return { status: typeof r.status === "number" ? r.status : null }
-      })
+    const run = runner ?? defaultNpmRunner()
     verifyRoot = mkdtempSync(join(tmpdir(), "minicode-update-verify-"))
     writeFileSync(
       join(verifyRoot, "package.json"),
@@ -289,34 +438,45 @@ export function installUpdate(version: string, runner?: InstallRunner): boolean 
       ],
       { cwd: verifyRoot },
     )
-    if (verifiedInstall.status !== 0) return false
-    const lock = JSON.parse(readFileSync(join(verifyRoot, "package-lock.json"), "utf8")) as {
-      packages?: Record<string, unknown>
+    if (verifiedInstall.status !== 0) return recordFailure("npm install", verifiedInstall)
+    let lock: { packages?: Record<string, unknown> }
+    try {
+      lock = JSON.parse(readFileSync(join(verifyRoot, "package-lock.json"), "utf8")) as {
+        packages?: Record<string, unknown>
+      }
+    } catch (err) {
+      return recordFailure("npm install", {
+        status: verifiedInstall.status,
+        error: `package-lock tidak terbaca: ${errorMessage(err)}`,
+      })
     }
     const installedPackages = Object.keys(lock.packages ?? {}).filter((path) =>
       path.startsWith("node_modules/"),
     )
-    // Global npm install does not consume this local lockfile. Today this CLI
-    // has no runtime dependencies; refuse silent graph drift until updater can
-    // install and verify every locked dependency identically.
+    // Install global tidak memakai lockfile lokal. CLI kini tanpa dependensi runtime;
+    // tolak drift graf dependensi diam-diam sampai updater bisa memasang & memverifikasi semua lock.
     if (installedPackages.length !== 1 || installedPackages[0] !== `node_modules/${PKG_NAME}`)
-      return false
+      return recordFailure("npm install", {
+        status: verifiedInstall.status,
+        error: "graf dependensi tak terduga di package-lock",
+      })
     const signatures = run("npm", ["audit", "signatures", "--registry", NPM_REGISTRY], {
       cwd: verifyRoot,
     })
-    if (signatures.status !== 0) return false
-    return (
-      run("npm", [
-        "install",
-        "-g",
-        "--ignore-scripts",
-        "--registry",
-        NPM_REGISTRY,
-        `${PKG_NAME}@${version}`,
-      ]).status === 0
-    )
-  } catch {
-    return false
+    if (signatures.status !== 0) return recordFailure("npm audit signatures", signatures)
+    // Fail-closed: signature gagal = install gagal. TIDAK ADA fallback npm update.
+    const globalInstall = run("npm", [
+      "install",
+      "-g",
+      "--ignore-scripts",
+      "--registry",
+      NPM_REGISTRY,
+      `${PKG_NAME}@${version}`,
+    ])
+    if (globalInstall.status !== 0) return recordFailure("npm install -g", globalInstall)
+    return true
+  } catch (err) {
+    return recordFailure("npm install", { status: null, error: errorMessage(err) })
   } finally {
     if (verifyRoot && existsSync(verifyRoot)) {
       try {
@@ -324,4 +484,96 @@ export function installUpdate(version: string, runner?: InstallRunner): boolean 
       } catch {}
     }
   }
+}
+
+// ── API manual untuk /update ──
+// Beda dengan maybeAutoUpdate: TIDAK restart, TIDAK process.exit. Pemanggil
+// (TUI) yang memutuskan kapan keluar/mulai ulang setelah menerima hasil ini.
+
+export interface ManualUpdateResult {
+  ok: boolean
+  latest?: string
+  step?: string
+  reason?: string
+  optedOut?: boolean
+  alreadyLatest?: boolean
+}
+
+function notifyPhase(
+  opts: { onPhase?: (phase: "check" | "install" | "verify") => void },
+  phase: "check" | "install" | "verify",
+): void {
+  try {
+    opts.onPhase?.(phase)
+  } catch {}
+}
+
+export async function runManualUpdate(
+  opts: {
+    onPhase?: (phase: "check" | "install" | "verify") => void
+    check?: () => Promise<string | null>
+    install?: (version: string) => boolean
+    getInstalled?: () => string
+  } = {},
+): Promise<ManualUpdateResult> {
+  if (isUpdateOptedOut()) return { ok: false, optedOut: true }
+  clearLastUpdateFailure()
+  notifyPhase(opts, "check")
+  let latest: string | null
+  try {
+    latest = opts.check ? await opts.check() : await checkForUpdateFresh(readCurrentVersion())
+  } catch (err) {
+    return {
+      ok: false,
+      step: "check",
+      reason: formatUpdateError("check", { status: null, error: errorMessage(err) }),
+    }
+  }
+  if (!latest) return { ok: true, alreadyLatest: true }
+
+  notifyPhase(opts, "install")
+  let installed = false
+  let thrown: unknown
+  try {
+    installed = opts.install ? opts.install(latest) : installUpdate(latest)
+  } catch (err) {
+    thrown = err
+    installed = false
+  }
+  if (!installed) {
+    const failure: UpdateFailure = getLastUpdateFailure() ?? {
+      step: "npm install",
+      result: {
+        status: null,
+        error: thrown ? errorMessage(thrown) : "instalasi gagal tanpa detail",
+      },
+    }
+    return {
+      ok: false,
+      step: failure.step,
+      reason: formatUpdateError(failure.step, failure.result),
+    }
+  }
+
+  notifyPhase(opts, "verify")
+  try {
+    const current = opts.getInstalled ? opts.getInstalled() : readGlobalInstalledVersion()
+    if (current !== latest) {
+      return {
+        ok: false,
+        step: "verify",
+        reason: formatUpdateError("verify", {
+          status: null,
+          error: `versi terpasang ${current} tidak cocok dengan target ${latest}`,
+        }),
+      }
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      step: "verify",
+      reason: formatUpdateError("verify", { status: null, error: errorMessage(err) }),
+    }
+  }
+  return { ok: true, latest }
 }

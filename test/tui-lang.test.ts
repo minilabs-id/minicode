@@ -263,6 +263,9 @@ describe("/lang end-to-end", () => {
       // v7.18: hasil command tampil di jendela overlay, bukan transkrip.
       const out = await tty.waitForOutput((o) => o.includes("Commands:"))
       for (const b of BUILTIN_COMMANDS) expect(out, b.name).toContain(`/${b.name}`)
+      // /update adalah builtin baru — eksplisit supaya regressi registry tak
+      // lolos hanya karena loop di atas ikut menyusut.
+      expect(out).toContain("/update")
       for (const n of ["/mode", "/lang", "/view"]) expect(out, n).toContain(n)
       await tty.send(KEY.esc, 90)
       await tty.waitForScreen((f) => f.some((l) => l.includes("minicode ›")))

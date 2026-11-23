@@ -133,23 +133,43 @@ Then the same version is installed from the official registry, the version in
 the installed package is re-read, and minicode restarts itself. A mismatch
 attempts to restore the previous version; if restoration fails, the process
 stops so it never runs a mixed installation. This only applies to an installed
-copy (source checkouts are untouched). Old npm, packages without
-signature/provenance evidence, offline mode, or a failed install block
-auto-update and print manual instructions. One-shot, `exec`, pipe, and CI runs
-only show a notification (no install).
+copy (source checkouts are untouched).
+
+Since v0.41 a failed install no longer prints a generic message: it reports the
+**step and redacted reason** (ANSI sequences, tokens/credentials, and URLs
+carrying credentials are stripped; one line of at most 300 characters). The
+**redaction boundary is only those three categories plus the length/line limit**
+— not a general secret scrubber. On Windows the npm runner picks `npm_execpath` /
+`npm.cmd` with a 60-second timeout; the signature-verification order stays
+fail-closed. Old npm, packages without signature/provenance evidence, or offline
+mode still block auto-update.
+
+In the interactive TUI, the `/update` slash command performs the update through
+a safe terminal handoff: release the alt-screen → install → spawn a restart with
+`MINICODE_AUTO_UPDATE_DONE=1` → exit. If it is already latest, opted out, or the
+update fails, the terminal is re-acquired and the result is shown. The command
+exists **only in the TUI**; one-shot, `exec`, pipe, and ACP are fail-closed — they
+answer "not available" and never spawn npm from a pipe/CI.
 
 > Verification uses npm's capability, not the bundled Sigstore verifier.
 > Verification failure always stops auto-update. Owners can still disable this
 > path (`MINICODE_AUTO_UPDATE=0`) and manage updates manually per their
 > organisation's policy.
 
+The manual instruction uses an **exact verified version** — use
+`npm install -g minicode-ai@<version>`, **not** `npm update -g minicode-ai`
+(`npm update` bypasses signature verification):
+
 ```bash
-bun add -g minicode-ai@<version> # manual, use a reviewed version
+npm install -g minicode-ai@<version>   # manual; npm update is not used
+# Bun equivalent: bun add -g minicode-ai@<version>
 minicode sync          # refresh new models from all providers
 minicode pricing sync  # refresh the price cache from models.dev
 ```
 
-Opt-out: `NO_UPDATE_CHECK=1` or `MINICODE_AUTO_UPDATE=0`.
+Opt-out: `NO_UPDATE_CHECK=1`, `MINICODE_AUTO_UPDATE=0|false|off`, or `CI=1`.
+The internal guard `MINICODE_AUTO_UPDATE_DONE=1` marks the restart produced by
+an update so it does not trigger another check/install.
 
 Contributor clone: `cd minicode && git pull && bun install`.
 

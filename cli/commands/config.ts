@@ -6,6 +6,7 @@ import {
   saveMcpServer,
 } from "../../src/config.ts"
 import { detectAndSave, removeProvider } from "../../src/providers/provision.ts"
+import { t } from "../../src/ui/i18n/locale.ts"
 import { formatError } from "../../src/ui/render/errors.ts"
 import { sanitizeAnsiLine } from "../../src/ui/render/sanitize.ts"
 import { renderTable } from "../../src/ui/render/table.ts"
@@ -368,7 +369,7 @@ ${c.bold(`Context windows — ${sanitizeAnsiLine(provider.id)}`)}
     const res = await detectModels(baseUrl, apiKey).catch((e) => {
       // Host mati total (bukan sekadar tanpa /models) — katakan begitu,
       // jangan "Detected 0 models" yang menyalahkan kredensial.
-      console.error(`${c.red("failed")} ${formatError(e)} — check network and URL`)
+      console.error(`${c.red("failed")} ${formatError(e)} — ${t("err.networkFix")}`)
       process.exit(1)
     })
     console.log(

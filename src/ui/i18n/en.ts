@@ -17,6 +17,12 @@ export const en = {
   "msg.tooSmall": "Terminal too small — enlarge window",
   "msg.scheduler": "Scheduler: {line}",
   "msg.staleWriter": "History not saved · restart session",
+  // v0.42: redaksi ringkas untuk kegagalan tool di lapisan tampil. Memakai
+  // tSystem() (locale OS), bukan /lang — ini kwitansi/peringatan sistem.
+  "msg.duplicateAction": "Already run · verify state before retrying",
+  "msg.cmdFailed": "Command failed · {target} · details in --verbose",
+  "msg.toolFailed": "Terminal read failed · retry",
+  "msg.guardError": "Command blocked · retry",
   "form.idleWarning": "idle — canceling in {s}s (press any key to keep editing)",
   "appr.title": "Approval required",
   "appr.tool": "Tool:",
@@ -396,6 +402,18 @@ export const en = {
   "cmd.restart": "  Restart to use updated models.",
   "cmd.nothingUpdated":
     "  Nothing updated — check API keys and network above, then retry /provider sync.",
+  // /update — handoff TUI: release terminal dulu, lalu cek → install → restart.
+  // Toast progres pakai tSystem() (locale OS), readout pakai t() (/lang).
+  "help.desc.update": "Check for and install a newer version",
+  "out.titleUpdate": "Update",
+  "cmd.updateChecking": "Checking for updates…",
+  "cmd.updateAvailable": "Update available: v{v}",
+  "cmd.updateLatest": "Already running the latest version.",
+  "cmd.updateInstalling": "Installing update…",
+  "cmd.updateDone": "Update installed — restarting now.",
+  "cmd.updateFailed": "Update failed{msg}",
+  "cmd.updateUnavailable": "Update needs an interactive terminal",
+  "cmd.updateOptedOut": "Update checks are disabled for this session.",
   "cmd.initExists": "AGENTS.md already exists - not overwritten.",
   "cmd.initCreated": "AGENTS.md created: {t}",
   "cmd.initInDiscuss": "init unavailable in DISCUSS mode — switch to BUILD (/mode build) first",
@@ -484,4 +502,16 @@ export const en = {
   "summary.model": "Model",
   "summary.usage": "Usage",
   "summary.tokens": "tokens",
+  // Pesan CLI subcommand — en sengaja sama persis dengan teks lama (test exit).
+  "cli.bunRequired": "minicode requires Bun >= 1.1.13 (AbortSignal.any missing; detected {v})",
+  "cli.usage": 'usage: minicode "prompt"  |  minicode (interactive mode)',
+  "cli.providerNotFound": 'provider "{id}" not found - see: minicode providers',
+  "cli.noMatches": '(no matches for "{q}")',
+  "cli.noProvidersHint": "(no providers yet - run `minicode config add` first)",
+  "cli.mcpNoPins": "no MCP schema pins recorded for this workspace",
+  "cli.pricingFetching": "fetching prices from models.dev…",
+  "cli.purgeSessions": "[purge] removed {n} sessions (older than {days} days)",
+  "cli.purgeOrphans": "[purge] removed {n} orphan journals",
+  "cli.daemonUnknownSub": "unknown daemon subcommand: {v}",
+  "cli.daemonRunFailed": "[daemon] hosted run failed: {msg}",
 } as const

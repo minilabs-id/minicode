@@ -137,22 +137,42 @@ itu versi yang sama dipasang dari registry resmi, versi di package terpasang
 dibaca ulang, lalu minicode restart sendiri. Ketidakcocokan mencoba memulihkan
 versi sebelumnya; bila pemulihan gagal, proses berhenti agar tidak berjalan
 dengan instalasi campuran. Berlaku hanya untuk salinan ter-install (checkout
-source tidak disentuh). Npm lama, paket tanpa bukti signature/provenance,
-offline, atau install gagal menahan auto-update dan memberi instruksi manual.
-One-shot, `exec`, pipe, dan CI hanya menampilkan notifikasi (tanpa install).
+source tidak disentuh).
+
+Sejak v0.41, kegagalan install tidak lagi memunculkan pesan generik: ia menyebut
+**langkah & alasan** yang sudah diredaksi (sekuens ANSI, token/kredensial, dan
+URL berkredensial dibuang; satu baris ≤300 char). **Batas redaksi hanya tiga
+kategori itu plus panjang/baris** — bukan pembersih rahasia umum. Di Windows
+runner npm memilih `npm_execpath` / `npm.cmd` dengan timeout 60 dtk; urutan
+verifikasi signature tetap fail-closed. Npm lama, paket tanpa bukti
+signature/provenance, atau offline tetap menahan auto-update.
+
+Di TUI interaktif, slash command `/update` menjalankan pembaruan lewat handoff
+terminal aman: alt-screen dilepas → install → spawn restart dengan
+`MINICODE_AUTO_UPDATE_DONE=1` → exit. Bila sudah latest, opt-out, atau gagal,
+terminal di-reacquire dan hasilnya ditampilkan. Perintah ini **hanya ada di
+TUI**; jalur one-shot, `exec`, pipe, dan ACP fail-closed — menjawab "not
+available" dan tidak pernah spawn npm dari pipe/CI.
 
 > Verifikasi memakai kemampuan npm, bukan verifier Sigstore yang dibundel
 > MiniCode. Gagal-verifikasi selalu menghentikan update otomatis. Pemilik tetap
 > dapat mematikan jalur ini (`MINICODE_AUTO_UPDATE=0`) dan mengelola update
 > manual sesuai kebijakan organisasinya.
 
+Instruksi manual memakai **versi eksak terverifikasi** — gunakan
+`npm install -g minicode-ai@<versi>`, **bukan** `npm update -g minicode-ai`
+(`npm update` melewati verifikasi signature):
+
 ```bash
-bun add -g minicode-ai@<versi> # manual, gunakan versi yang sudah ditinjau
+npm install -g minicode-ai@<versi>   # manual; npm update tidak dipakai
+# ekuivalen Bun: bun add -g minicode-ai@<versi>
 minicode sync          # refresh model baru dari semua provider
 minicode pricing sync  # refresh cache harga dari models.dev
 ```
 
-Opt-out: `NO_UPDATE_CHECK=1` atau `MINICODE_AUTO_UPDATE=0`.
+Opt-out: `NO_UPDATE_CHECK=1`, `MINICODE_AUTO_UPDATE=0|false|off`, atau `CI=1`.
+Guard internal `MINICODE_AUTO_UPDATE_DONE=1` menandai restart hasil update agar
+tak memicu pengecekan/install berulang.
 
 Clone contributor: `cd minicode && git pull && bun install`.
 

@@ -9,6 +9,7 @@
 
 import { t } from "../i18n/locale.ts"
 import { sanitizeAnsiLine } from "./sanitize.ts"
+import { tSystem } from "./tool-label.ts"
 import { truncateToWidth } from "./width.ts"
 
 export interface FriendlyError {
@@ -264,6 +265,39 @@ export function friendlyError(raw: string): FriendlyError {
   if (detail) return { message: sanitizeAnsiLine(redactSecrets(detail)) }
   const safe = sanitizeAnsiLine(redactSecrets(raw))
   return { message: truncateToWidth(safe, 160, "…") }
+}
+
+/**
+ * v0.42 — Redaksi RINGKAS untuk kegagalan tool di LAPISAN TAMPIL (transkrip
+ * TUI & printer linear). Jalur `tool.failed` dulu mem-bypass `formatError()`
+ * kanonik sehingga `failed: exit 1`, idempotency key panjang, atau dump
+ * internal bocor ke baris ledger satu-baris. Detail LENGKAP tetap ada di
+ * jurnal/verbose — yang berubah hanya redaksi di layar.
+ *
+ * Murni & satu baris ≤120 kolom. Kata kunci deteksi sengaja Inggris (body
+ * error tool/proxy berbahasa Inggris apa pun locale UI); terjemahan memakai
+ * `tSystem()` (locale OS), bukan `/lang` — ini kwitansi/peringatan sistem,
+ * bukan narasi percakapan. Semua cabang (termasuk target tak terpercaya)
+ * tetap lewat redaksi → sanitasi → potong per kolom.
+ */
+export function friendlyToolError(message: string, target?: string): string {
+  const raw = String(message ?? "")
+  const low = raw.toLowerCase()
+  const safeTarget = target ? sanitizeAnsiLine(redactSecrets(String(target))).trim() : ""
+  const targetText = safeTarget || "-"
+  let text: string
+  if (low.includes("duplicate idempotency key")) {
+    text = tSystem("msg.duplicateAction")
+  } else if (/\bexit\s+(-?\d+)\b/i.test(raw) || /\bexit\s+code\b/i.test(raw)) {
+    text = tSystem("msg.cmdFailed", { target: targetText })
+  } else if (/\beio\b/i.test(raw)) {
+    text = tSystem("msg.toolFailed")
+  } else if (low.includes("bash-guard internal error")) {
+    text = tSystem("msg.guardError")
+  } else {
+    text = friendlyError(raw).message
+  }
+  return truncateToWidth(sanitizeAnsiLine(redactSecrets(text)), 120, "…")
 }
 
 /** Satu baris siap tampil: pesan + saran. Dipakai renderer TUI & one-shot. */

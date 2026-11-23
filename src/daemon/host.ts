@@ -1,11 +1,6 @@
-// P2.12 — host daemon: siklus hidup, berkas endpoint/lease, dan shutdown
-// berurutan.
-//
-// Kenapa satu tempat mengatur urutan: shutdown yang salah urutan meninggalkan
-// sisa yang mahal — konsumen yang mengira masih terhubung, persetujuan yang
-// menggantung tanpa jawab, lease basi yang membuat daemon baru terlihat hidup
-// padahal sudah mati. Urutan di bawah diekspos sebagai langkah bernomor agar
-// bisa DIUJI, bukan cuma dikomentari.
+// Host daemon: siklus hidup, endpoint/lease, dan shutdown berurutan. Urutan
+// salah menyisakan konsumen "terhubung", approval menggantung, dan lease basi;
+// langkah bernomor diekspos agar bisa diuji, bukan sekadar dikomentari.
 
 import { randomBytes, randomUUID } from "node:crypto"
 import { currentRuntimeView } from "../runtime/runtime-status-provider.ts"
@@ -43,33 +38,16 @@ export interface DaemonHostOptions {
   leaseIntervalMs?: number
   /** TTL default capability yang diterbitkan host. */
   capabilityTtlMs?: number
-  /**
-   * Kanal diagnostik host. Bukan sekadar kenyamanan: test & pengendali
-   * non-interaktif harus bisa menangkap pesan tanpa menempel di stderr
-   * proses, dan satu kanal artinya tak ada tulis yang lolos dari audit.
-   */
+  /** Kanal diagnostik host: test/pengendali non-interaktif menangkap pesan
+   * tanpa menempel di stderr proses; satu kanal = semua tulis diaudit. */
   warn?: (msg: string) => void
-  /**
-   * [P13.2] Penutup sesi yang di-host.
-   *
-   * Seam, bukan dependensi: lapisan daemon tak boleh tahu apa itu "sesi CLI".
-   * Yang diterimanya hanyalah "ada lifecycle yang harus DITUNGGU selesai sebelum
-   * daemon menutup dirinya" — runtime yang di-host menutup jurnalnya dan
-   * membersihkan anak prosesnya DI SINI. Tanpa seam ini, daemon berhenti
-   * sementara sesi yang di-host masih hidup: proses anak Supervisi bisa
-   * tertinggal (yatim) dan jurnal tak pernah ditutup rapi.
-   */
+  /** Seam penutup sesi yang di-host (bukan dependensi `cli/`): daemon hanya
+   * tahu ada lifecycle yang harus ditunggu. Tanpa ini, anak proses bisa yatim
+   * dan jurnal tak ditutup rapi saat daemon berhenti. */
   closeHostedSession?: (() => Promise<void>) | null
-  /**
-   * Seam uji: batas antrean per langganan. `0` meniru socket yang sudah
-   * tertahan sejak awal sehingga overflow deterministik. Produksi memakai
-   * `MAX_QUEUE_PER_CONN` (default server).
-   */
+  /** Seam uji batas antrean per langganan; `0` = overflow deterministik. */
   maxQueuePerSubscription?: number
-  /**
-   * Seam uji: batas antrean per identitas konsumen logis. Dipakai agar satu
-   * konsumen bisa dibuat "tertahan" tanpa ikut menahan konsumen lain.
-   */
+  /** Seam uji batas antrean per konsumen logis (tertahan tanpa efek ke lain). */
   maxQueuePerConsumer?: (consumerId: string) => number | undefined
 }
 
@@ -88,7 +66,7 @@ export class DaemonHost {
   #leaseTimer: ReturnType<typeof setInterval> | null = null
   #closing = false
   #shutdownSteps: ShutdownStep[] = []
-  /** Kegagalan yang tercatat saat shutdown — tak boleh hilang (cleanup tak boleh dilewati diam-diam). */
+  /** Kegagalan shutdown tercatat; cleanup tak boleh dilewati diam-diam. */
   #shutdownErrors: Error[] = []
   #endpointPath: string | null = null
   #port = 0
@@ -97,8 +75,7 @@ export class DaemonHost {
     this.#opts = opts
     this.#warn = opts.warn ?? ((msg) => process.stderr.write(`${msg}\n`))
     this.incarnation = `inc_${randomUUID()}`
-    // Secret HANYA di memori proses ini. Bila bocor ke berkas, siapa pun yang
-    // bisa membaca berkas itu bisa menerbitkan capability admin.
+    // Secret hanya di memori: berkas yang bocor = siapa pun bisa menerbitkan capability admin.
     this.#secret = randomBytes(32)
     this.children = new ChildSupervisor({ telemetry: this.telemetry })
     this.approvals = new ApprovalBroker({
@@ -124,9 +101,8 @@ export class DaemonHost {
         telemetry: this.telemetry,
         storageOk: () => this.resource.state === "ok",
         shuttingDown: () => this.#closing,
-        // P13.1: status runtime kanonik dibaca dari SEAM yang sama dengan CLI
-        // (composition root memasang penyedia). Tanpa runtime terpasang, view
-        // ABSENT kanonik yang disajikan — bukan status karangan.
+        // Status runtime dari seam yang sama dengan CLI; tanpa runtime → view
+        // ABSENT kanonik (bukan status karangan).
         runtimeStatus: () => currentRuntimeView(),
       },
       telemetry: this.telemetry,
@@ -167,8 +143,7 @@ export class DaemonHost {
       incarnation: this.incarnation,
       startedAt: Date.now(),
       workspace: sanitizeLabel(this.#opts.workspace ?? "", 120),
-      // Akar kepercayaan untuk klien menerbitkan capability sendiri —
-      // lihat komentar panjang di `DaemonEndpoint.bootstrap`.
+      // Akar kepercayaan bagi klien menerbitkan capability sendiri (lihat endpoint).
       bootstrap: this.#secret.toString("base64url"),
     }
     this.#endpointPath = writeEndpoint(ep, this.#opts.cwd)
@@ -177,9 +152,8 @@ export class DaemonHost {
     this.#leaseTimer = setInterval(() => this.#beatLease(), interval)
     this.#leaseTimer.unref?.()
 
-    // UNKNOWN untuk persetujuan yang menggantung: dilakukan SEBELUM konsumen
-    // mana pun boleh melihat — kalau tidak, ada jendela di mana konsumen
-    // membaca "pending" yang tak pernah akan dijawab siapa pun.
+    // Tandai approval menggantung = UNKNOWN sebelum konsumen melihat (jangan
+    // biarkan mereka membaca "pending" yang tak akan dijawab).
     const unknown = this.approvalsUnknownOnStart()
     if (unknown > 0) {
       this.#warn(`[daemon] ${unknown} persetujuan tak terjawab dari generasi sebelumnya -> UNKNOWN`)
@@ -220,11 +194,8 @@ export class DaemonHost {
     return this.#shutdownSteps
   }
 
-  /**
-   * Kegagalan shutdown yang tercatat (mis. sesi yang di-host tak bisa
-   * ditutup). Kosong = shutdown bersih. Kegagalan ini juga membuat
-   * `shutdown()` menolak — jadi tak bisa "hilang" tanpa jejak.
-   */
+  /** Kegagalan shutdown tercatat; kosong = bersih. Kegagalan membuat
+   * `shutdown()` menolak agar tak hilang tanpa jejak. */
   get shutdownErrors(): readonly Error[] {
     return [...this.#shutdownErrors]
   }
@@ -243,20 +214,15 @@ export class DaemonHost {
     })
   }
 
-  /**
-   * Shutdown berurutan. Idempoten — dipanggil lagi setelah selesai hanya
-   * mengembalikan langkah yang sama, bukan menjalankan ulang.
-   *
-   * Urutan (dites satu per satu):
-   *  1 mark-closing       -> kontrol baru ditolak SHUTTING_DOWN
-   *  2 halt-consumers     -> konsumen berhenti mengirim pekerjaan
-   *  3 settle-approvals   -> persetujuan menggantung = DENY, tak digantung
-   *  4 close-hosted-session -> lifecycle sesi yang di-host SELESAI (jurnal
-   *                            ditutup, anak proses yang disupervisi dibersihkan)
-   *  5 stop-monitors      -> lease + resource berhenti menulis
-   *  6 close-connections  -> socket ditutup
-   *  7 retire-children    -> anak yang tak teronfirmasi -> lost (bukan finished)
-   *  8 clear-discovery    -> berkas endpoint/lease milik kita dilepas
+  /** Shutdown berurutan, idempoten (dipanggil ulang = langkah sama).
+   *  1 mark-closing         -> kontrol baru ditolak SHUTTING_DOWN
+   *  2 halt-consumers       -> konsumen berhenti mengirim kerja
+   *  3 settle-approvals     -> approval menggantung = DENY
+   *  4 close-hosted-session -> jurnal ditutup, anak proses dibersihkan
+   *  5 stop-monitors        -> lease + resource berhenti
+   *  6 close-connections    -> socket ditutup
+   *  7 retire-children      -> anak tak teronfirmasi = lost
+   *  8 clear-discovery      -> berkas endpoint/lease dilepas
    */
   async shutdown(reason: string): Promise<ShutdownStep[]> {
     if (this.#closing) return [...this.#shutdownSteps]
@@ -269,9 +235,8 @@ export class DaemonHost {
     this.approvals.shutdownAll()
     this.#track("settle-approvals")
 
-    // [P13.2] Sesi yang di-host ditutup dan DITUNGGU: lifecycle-nya (jurnal +
-    // anak proses yang disupervisi) harus selesai sebelum daemon menutup
-    // dirinya. Tanpa ini, proses anak bisa tertinggal (yatim).
+    // Tutup dan tunggu sesi yang di-host (jurnal + anak proses) sebelum daemon
+    // menutup diri; tanpa ini proses anak bisa yatim.
     const closeSession = this.#opts.closeHostedSession
     if (closeSession) {
       try {
@@ -298,9 +263,8 @@ export class DaemonHost {
 
     this.telemetry.inc("shutdown.ordered")
     void reason
-    // Kegagalan sesi yang di-host dilaporkan SETELAH semua langkah cleanup
-    // selesai: sisa cleanup tak boleh dilewati, tapi kegagalannya juga tak
-    // boleh hilang (diam-diam = klaim "semua beres" yang tidak benar).
+    // Laporkan kegagalan sesudah semua cleanup: sisa langkah tak boleh dilewati,
+    // tapi kegagalan juga tak boleh hilang (klaim "beres" yang palsu).
     if (this.#shutdownErrors.length > 0) {
       throw new AggregateError(
         this.#shutdownErrors,

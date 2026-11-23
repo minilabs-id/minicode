@@ -70,7 +70,7 @@ Batas berubah otomatis saat `/model` mengganti model. MiniCode juga membatasi
 keluaran stream berdasarkan ruang tersisa setelah system prompt, tools, dan
 riwayat dihitung.
 
-Di TUI, **Tab** meng-toggle Work Mode (`Discuss` ↔ `Build`) dan **Shift+Tab** meng-toggle Permission Mode (`Auto` ↔ `Ask`). `/mode auto|ask` mengubah persetujuan; `/mode discuss|build` mengubah operating mode. Footer menampilkan Work Mode di kiri dan Permission Mode berwarna cyan di kanan, dekat penggunaan konteks; pada terminal sempit label dipadatkan. Sejak v0.34 sidebar kanan sudah dihapus: chat adalah kolom tengah (maks 50% lebar terminal, footer/composer ter-centre). Baris tool/`✦`/finding dan marker `+ thinking` ada di chat; pintasan pane lama (`Alt/Ctrl+PgUp/PgDn`, `Ctrl+O`) tidak lagi terikat. Sejak v0.37 bracketed paste aktif, `Ctrl+A` = select-all bila composer kosong & dropdown tertutup (else Home), `Ctrl+C` menyalin juga saat drag aktif, resize menstabilkan auto-scroll/drag/kursor/anchor, dan lebar prompt progresif `min(chatCols, 100 + floor(max(0, chatCols-100)/4))` (composer tetap ≤2 baris). Ringkasan pintasan yang masih berlaku ada di [TUI](repl.md).
+Di TUI, **Tab** meng-toggle Work Mode (`Discuss` ↔ `Build`) dan **Shift+Tab** meng-toggle Permission Mode (`Auto` ↔ `Ask`). `/mode auto|ask` mengubah persetujuan; `/mode discuss|build` mengubah operating mode. Footer menampilkan Work Mode di kiri dan Permission Mode berwarna cyan di kanan, dekat penggunaan konteks; pada terminal sempit label dipadatkan. Sejak v0.34 sidebar kanan sudah dihapus: chat adalah kolom tengah (maks 50% lebar terminal, footer/composer ter-centre). Baris tool/`✦`/finding dan marker `+ thinking` ada di chat; pintasan pane lama (`Alt/Ctrl+PgUp/PgDn`, `Ctrl+O`) tidak lagi terikat. Sejak v0.37 bracketed paste aktif, `Ctrl+A` = select-all bila composer kosong & dropdown tertutup (else Home), `Ctrl+C` menyalin juga saat drag aktif, resize menstabilkan auto-scroll/drag/kursor/anchor, dan lebar prompt progresif `min(chatCols, 100 + floor(max(0, chatCols-100)/4))` (composer tetap ≤2 baris). Sejak v0.41 slash command `/update` hanya ada di TUI interaktif (handoff terminal aman); non-TTY/one-shot/`exec`/pipe/ACP menjawab "not available" tanpa spawn npm. Ringkasan pintasan yang masih berlaku ada di [TUI](repl.md).
 
 ## Kapan memakai apa
 
@@ -117,6 +117,29 @@ Kepala tabel penuh ada di [Environment Variables](environment.md); yang paling s
 | `MINICODE_STARTUP_PROGRESS=0` | Matikan baris progres startup |
 | `MINICODE_SUB_AGENT_POOL_SIZE` | Slot sub-agent paralel (1..16, default 3) |
 | `MINICODE_SUB_AGENT_TIMEOUT_MS` | Timeout per turn sub-agent (ms, default 300000); ditimpa `timeoutMs` di `delegate_task` |
+| `NO_UPDATE_CHECK=1` | Lewati pengecekan pembaruan saat startup |
+| `MINICODE_AUTO_UPDATE=0\|false\|off` | Nonaktifkan pengecekan & pemasangan pembaruan otomatis |
+| `CI=1` | Auto-update fail-closed: tanpa pemasangan, tanpa spawn npm |
+| `MINICODE_AUTO_UPDATE_DONE=1` | Guard internal pada proses restart hasil `/update` (jangan diset manual) |
+
+## Auto-update (v0.41)
+
+Auto-update berlaku hanya untuk salinan ter-install (checkout source tidak
+disentuh) dan memverifikasi versi eksak lewat `npm audit signatures` sebelum
+pemasangan; kegagalan verifikasi selalu membatalkan update. Sejak v0.41
+kegagalan install menyebut **langkah & alasan** yang sudah diredaksi (ANSI,
+token/kredensial, URL berkredensial dibuang; satu baris ≤300 char), bukan pesan
+generik — batas redaksi hanya tiga kategori itu plus panjang/baris, bukan
+pembersih rahasia umum. Di Windows runner npm memilih `npm_execpath` / `npm.cmd`
+dengan timeout 60 dtk; urutan verifikasi signature tetap fail-closed.
+
+Slash command `/update` hanya tersedia di TUI interaktif: release alt-screen →
+install → spawn restart dengan `MINICODE_AUTO_UPDATE_DONE=1` → exit; bila sudah
+latest/opt-out/gagal, terminal di-reacquire dan hasil ditampilkan. Jalur
+non-TTY/one-shot/`exec`/pipe/ACP **fail-closed** — injeksi `withUpdate` absen,
+perintah menjawab "not available", tak pernah spawn npm dari pipe/CI. Instruksi
+manual: lihat [instalasi manual](getting-started.md). Lihat
+[Environment](environment.md#auto-update-v041) untuk daftar opt-out.
 
 ## Config
 

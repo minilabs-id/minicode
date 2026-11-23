@@ -109,5 +109,5 @@ There is no private security contact yet. Report issues via [GitHub Issues](http
 ## Next
 
 - [Policy & Sandbox](policy-sandbox.md) — modes, tool access policy, and guard details.
-- [Terminal Contract](../TERMINAL_CONTRACT.md) — why colour is gated on a TTY.
+- [Terminal Contract](TERMINAL_CONTRACT.md) — why colour is gated on a TTY.
 - [Automation & CI](exec.md) — agent limits in CI (fail-closed non-TTY).

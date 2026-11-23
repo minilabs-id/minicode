@@ -19,6 +19,7 @@
 //   sudah selesai lebih dulu, baris diantrikan sebagai turn berikutnya; Esc =
 //   abort yang juga membuang antrean fallback. Perintah slash butuh idle.
 import { readFileSync } from "node:fs"
+import { resolve as resolvePath } from "node:path"
 import { expandMentions } from "../src/app/mentions.ts"
 import { budgetStatus } from "../src/policy/usage.ts"
 import {
@@ -68,6 +69,7 @@ import {
   DRIVER_HELP_COMMANDS,
   HELP_GROUPS,
   handleBuiltinCommand,
+  type ManualUpdateOutcome,
   persistModelChoice,
   suggestSimilar,
 } from "./commands.ts"
@@ -1001,6 +1003,43 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
       }
       if (code !== 0 && code != null) throw new Error(`shell exited with code ${code}`)
     },
+    // /update — handoff aman meniru withShell, tapi API A TIDAK merestart:
+    // pemanggil yang spawn anak + process.exit. Lepas terminal SEBELUM cek/
+    // install (npm bisa lama; TUI yang masih memegang raw mode = terlihat hang).
+    withUpdate: async () => {
+      const { runManualUpdate } = await import("../src/policy/update-check.ts")
+      const { waitChildExit } = await import("./auto-update.ts")
+      const { spawn } = await import("node:child_process")
+      // Toast progres = status UI (locale OS via tSystem), bukan giliran bicara.
+      // showToast mengabaikan repaint saat suspended/released, aman di sini.
+      const onPhase = (phase: "check" | "install" | "verify"): void => {
+        if (phase === "check") app.showToast(tSystem("cmd.updateChecking"))
+        else if (phase === "install") app.showToast(tSystem("cmd.updateInstalling"))
+      }
+      app.releaseTerminal()
+      let result: ManualUpdateOutcome
+      try {
+        result = await runManualUpdate({ onPhase })
+      } catch (error) {
+        result = { ok: false, reason: error instanceof Error ? error.message : String(error) }
+      }
+      if (result.ok && result.latest) {
+        // Sukses & ada versi baru: restart ke kode terpasang dengan guard env
+        // anti-loop. stdio inherit + tunggu anak sebelum induk keluar.
+        const entry = process.argv[1] ?? resolvePath(import.meta.dir, "index.ts")
+        const child = spawn(process.execPath, [entry, ...process.argv.slice(2)], {
+          stdio: "inherit",
+          env: { ...process.env, MINICODE_AUTO_UPDATE_DONE: "1" },
+        })
+        const code = await waitChildExit(child)
+        process.exit(code ?? 0)
+      }
+      // alreadyLatest / opt-out / gagal: tidak ada anak → hidupkan TUI. Hasil
+      // ditampilkan handler /update lewat jendela output (lihat submit).
+      process.stdin.resume()
+      if (!app.reacquireTerminal()) app.requestQuit()
+      return result
+    },
     getContextTokens: () => session.contextTokens,
     budgetState: () => {
       const u = usage.getSession()
@@ -1150,6 +1189,8 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
         return t("out.titleSync")
       case "init":
         return t("out.titleInit")
+      case "update":
+        return t("out.titleUpdate")
       case "scheduler":
         return t("sched.title")
       case "sessions":
@@ -1698,6 +1739,48 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
             ? nonBlank.slice(1)
             : syncLines
         if (out.length) await showCommandOutput(t("out.titleSync"), out)
+      } finally {
+        process.stdout.removeListener("resize", onResize)
+        app.clearRegion()
+        app.resume()
+      }
+      return
+    }
+    if (name === "update") {
+      // Mirip /provider sync: tunjukkan progres "Checking for updates…" di
+      // kotak Layer 2 selama cek/install berjalan, lalu transisi ke jendela
+      // hasil. withUpdate melepas terminal saat phase install — paintRegion
+      // jadi no-op setelah itu, jadi progres awal + toast onPhase yang tampil.
+      app.suspend()
+      const paintUpdateProgress = (label: string): void => {
+        const cols = process.stdout.columns || 80
+        const rows = process.stdout.rows || 24
+        if (!canRenderModal(cols, rows)) return
+        const w = popupBoxWidth(cols)
+        const box = dialogBox(
+          {
+            title: tSystem("out.titleUpdate"),
+            body: [c.muted(label)],
+            minWidth: w,
+            maxWidth: w,
+          },
+          cols,
+          rows,
+        )
+        app.paintRegion(box.lines, box.topRow)
+        app.setCursorVisible(false)
+      }
+      const onResize = () => paintUpdateProgress(tSystem("cmd.updateChecking"))
+      process.stdout.on("resize", onResize)
+      try {
+        paintUpdateProgress(tSystem("cmd.updateChecking"))
+        // runBuiltin → handleBuiltinCommand → withUpdate (release + install,
+        // restart + exit di jalur sukses; reacquire di jalur gagal).
+        const { lines } = await runBuiltin("/update")
+        process.stdout.removeListener("resize", onResize)
+        app.clearRegion()
+        const out = lines.filter((l) => l.trim().length > 0)
+        if (out.length) await showCommandOutput(t("out.titleUpdate"), out)
       } finally {
         process.stdout.removeListener("resize", onResize)
         app.clearRegion()

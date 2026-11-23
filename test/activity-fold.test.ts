@@ -49,6 +49,12 @@ function build(minimizeActivity: boolean, secondStatus: UiToolStatus = "complete
   return { transcript, uiState, emit }
 }
 
+// Baris rekap = 3 spasi margin + angka kategori (tanpa prefix simbol);
+// baris tool memakai `› …` dan tidak cocok dengan pola ini.
+function recapLines(text: string): string[] {
+  return text.split("\n").filter((l) => /^ {3}\d+\s+\p{L}/u.test(l))
+}
+
 describe("activity fold (minimizeActivity)", () => {
   test("setMinimizeActivity tidak menulis process.env (F-ENV-1)", () => {
     delete process.env.MINICODE_MINIMIZE_ACTIVITY
@@ -63,14 +69,14 @@ describe("activity fold (minimizeActivity)", () => {
     const { transcript, emit } = build(false)
     emit({ type: "tool.completed", seq: 1, turnId: 1, toolCallId: "c1", status: "completed" })
     const before = transcript.view(80, 20, 0).join("\n")
-    // liveSummaryRows dihapus: tak ada baris `└` mengambang di ekor saat tool
+    // liveSummaryRows dihapus: tak ada baris rekap mengambang di ekor saat tool
     // selesai. Rekap hanya ditulis saat narasi dipotong tool / turn ditutup.
-    expect(before).not.toContain("└")
+    expect(recapLines(before)).toHaveLength(0)
     emit({ type: "turn.completed", seq: 2, turnId: 1 })
     const after = transcript.view(80, 20, 0).join("\n")
     // Satu baris permanen: rekap kumulatif identik dengan segmen terakhir
     // tidak ditulis ulang (tanpa duplikat).
-    expect(after.match(/└/g)?.length).toBe(1)
+    expect(recapLines(after)).toHaveLength(1)
   })
 
   test("on: rekap segmen + kumulatif, tool gagal tetap tampil di chat", () => {
@@ -81,14 +87,14 @@ describe("activity fold (minimizeActivity)", () => {
     // individual dengan label manusiawi bahasa SISTEM (bukan `bash` mentah).
     const during = transcript.view(40, 10, 0).join("\n")
     expect(during).toContain(humanToolLabel("bash"))
-    expect(during).not.toContain("└") // tanpa slot live
+    expect(recapLines(during)).toHaveLength(0) // tanpa slot live
     expect(during).not.toContain(`› ${humanToolLabel("read_file")}`)
 
     emit({ type: "turn.completed", seq: 3, turnId: 1 })
     const view = transcript.view(40, 10, 0).join("\n")
-    // Satu baris `└` permanen: kategori dihitung dari nama internal
+    // Satu baris rekap permanen: kategori dihitung dari nama internal
     // (`1 command · 1 read`), kumulatif identik jadi tidak diduplikasi.
-    expect(view.match(/└/g)?.length).toBe(1)
+    expect(recapLines(view)).toHaveLength(1)
     expect(view.match(/\b1 command\b/g)?.length).toBe(1)
     expect(view).toContain("1 read")
     expect(view).not.toContain("2 tools")
@@ -106,6 +112,6 @@ describe("activity fold (minimizeActivity)", () => {
     const view = transcript.view(40, 10, 0).join("\n")
     expect(view).toContain(`› ${humanToolLabel("read_file")} a.ts`)
     expect(view).toContain(`› ${humanToolLabel("bash")}`)
-    expect(view).toContain("└ 1 command · 1 read")
+    expect(recapLines(view)[0]).toContain("1 command · 1 read")
   })
 })

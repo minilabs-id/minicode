@@ -24,11 +24,12 @@ sub-milestone (`P2.x`), Quality Remediation (`Stage 1`–`10`), dan hotfix
 ## Status checkout
 
 HEAD checkout ini adalah `643f4b3` (garis rilis v0.33). Working tree adalah
-**rilis 0.40.0 belum di-commit**: `CHANGELOG.md` dan `package.json` mencatat
-0.40.0 sebagai nomor publik untuk kandidat v0.34–v0.37; kontrak terminal
-memakai entri v0.37 di atas arsip. Angka gate historis v0.33 di bawah bukan
-hasil checkout ini; hasil kandidat ada di `.audit/FINAL-STATE.md` §9/§11.
-Jangan menganggap angka historis sebagai hasil checkout ini. `PLAN.md` adalah
+**rilis 0.42.0 belum di-commit**: `CHANGELOG.md` dan `package.json` mencatat
+0.42.0; kontrak terminal memakai entri v0.42 paling atas (jitter monoton,
+rekap tanpa `└`, teks gagal ringkas) di atas arsip v0.41–v0.34. Angka gate
+historis v0.33 di bawah bukan hasil checkout ini; hasil kandidat ada di
+`.audit/FINAL-STATE.md` §9/§11. Jangan menganggap angka historis sebagai hasil
+checkout ini. `PLAN.md` adalah
 ledger milestone legacy, bukan roadmap aktif. `ROADMAP.md`,
 `docs/ARCHITECTURE.html`, dan `docs/audit/` tidak ada; status roadmap belum
 tersedia. Gate repository dapat dijalankan, tetapi checkout tidak boleh

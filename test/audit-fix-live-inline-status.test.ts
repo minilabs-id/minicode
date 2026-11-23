@@ -1,6 +1,6 @@
 // Footer aktivitas TUI (desain final):
 //
-//   tool → narasi → └ rekap(tool sebelum narasi) → tool → …
+//   tool → narasi → rekap(tool sebelum narasi) → tool → …
 //
 // `narrationSinceFlush` (di Transcript.stream) menandai jeda narasi. Rekap untuk
 // tool di segmen SEBELUM narasi ditulis saat tool BERIKUTNYA mulai
@@ -51,7 +51,7 @@ function setup(minimizeActivity = false, tools: ToolDef[] = [{ id: "c1", name: "
     },
     tool(id: string, status: "completed" | "failed" = "completed") {
       // Urutan nyata presenter: tool.started → tool.completed. `tool.started`
-      // memotong segmen narasi (bila ada) dan menulis rekap `└`.
+      // memotong segmen narasi (bila ada) dan menulis baris rekap.
       handler?.({ type: "tool.started", turnId: 1, toolCallId: id } as never)
       handler?.({ type: "tool.completed", seq: 1, turnId: 1, toolCallId: id, status } as never)
     },
@@ -61,7 +61,16 @@ function setup(minimizeActivity = false, tools: ToolDef[] = [{ id: "c1", name: "
   }
 }
 
-describe("footer narasi: tool → narasi → └ rekap → tool", () => {
+// Baris rekap = 3 spasi margin + angka kategori, tanpa prefix simbol;
+// baris tool (`› …`) tidak cocok dengan pola ini.
+function recapLines(lines: string[]): string[] {
+  return lines.filter((l) => /^ {3}\d+\s+\p{L}/u.test(l))
+}
+function recapIndex(lines: string[], category: string): number {
+  return lines.findIndex((l) => /^ {3}\d+\s+\p{L}/u.test(l) && l.includes(category))
+}
+
+describe("footer narasi: tool → narasi → rekap → tool", () => {
   test("rekap segmen ditulis setelah narasi, tepat sebelum tool berikutnya", () => {
     const { t, say, tool } = setup(false, [
       { id: "c1", name: "read_file" },
@@ -70,17 +79,17 @@ describe("footer narasi: tool → narasi → └ rekap → tool", () => {
     say("NARASI-SATU")
     tool("c1")
     say("NARASI-DUA")
-    tool("c2") // memotong segmen 1 → `└ 1 read`
+    tool("c2") // memotong segmen 1 → rekap `1 read`
 
-    const lines = t.view(80, 16, 0).join("\n")
-    const first = lines.indexOf("NARASI-SATU")
-    const second = lines.indexOf("NARASI-DUA")
-    const recap = lines.indexOf("└ 1 read")
+    const rows = t.view(80, 16, 0)
+    const first = rows.findIndex((l) => l.includes("NARASI-SATU"))
+    const second = rows.findIndex((l) => l.includes("NARASI-DUA"))
+    const recap = recapIndex(rows, "1 read")
     expect(first).toBeGreaterThanOrEqual(0)
     expect(second).toBeGreaterThan(first)
     // Rekap untuk tool SEBELUM narasi muncul SETELAH narasi yang mengikutinya.
     expect(recap).toBeGreaterThan(second)
-    expect(lines).toContain(`› ${humanToolLabel("read_file")} a.ts`)
+    expect(rows.join("\n")).toContain(`› ${humanToolLabel("read_file")} a.ts`)
   })
 
   test("hitungan di-RESET tiap segmen — tidak akumulatif", () => {
@@ -95,13 +104,18 @@ describe("footer narasi: tool → narasi → └ rekap → tool", () => {
     h.say("SEGMEN-3")
     h.finish()
 
-    const text = h.t.view(80, 20, 0).join("\n")
-    expect(text).toContain("└ 1 read")
-    expect(text).toContain("1 command")
+    const rows = h.t.view(80, 20, 0)
+    const text = rows.join("\n")
+    const recaps = recapLines(rows)
+    // Dua rekap segmen + SATU rekap kumulatif (dedup, bukan duplikat identik).
+    expect(recaps).toHaveLength(3)
+    expect(recaps[0]).toContain("1 read")
+    expect(recaps[1]).toContain("1 command")
+    expect(recaps[2]).toContain("1 command · 1 read")
     // Tak ada kategori yang hitungannya mencapai 2 di rekap PER SEGMEN;
-    // baris kumulatif memang boleh `└ 1 command · 1 read` (bukan 2 per kategori).
+    // baris kumulatif memang boleh `1 command · 1 read` (bukan 2 per kategori).
     expect(text).not.toMatch(/2 (command|read|edit|subagent|thought|other)/)
-    expect(text.indexOf("└ 1 read")).toBeLessThan(text.indexOf("└ 1 command"))
+    expect(recapIndex(rows, "1 read")).toBeLessThan(recapIndex(rows, "1 command"))
   })
 
   test("contoh '3 command · 1 edit · 10 subagent' terbentuk dari kategori internal", () => {
@@ -134,9 +148,9 @@ describe("footer narasi: tool → narasi → └ rekap → tool", () => {
     h.say("SEGMEN-BERIKUTNYA")
     h.finish()
 
-    const text = h.t.view(80, 16, 0).join("\n")
-    expect(text).toContain("└ 1 read")
-    expect(text).toContain("failed")
+    const rows = h.t.view(80, 16, 0)
+    expect(recapLines(rows)[0]).toContain("1 read")
+    expect(rows.join("\n")).toContain("failed")
   })
 
   test("tak ada slot live: rekap hanya muncul setelah jeda narasi / akhir turn", () => {
@@ -148,12 +162,13 @@ describe("footer narasi: tool → narasi → └ rekap → tool", () => {
     h.tool("c1")
     h.say("SEGMEN-2")
     // tool berikutnya belum mulai & turn belum tutup → belum ada baris rekap.
-    expect(h.t.view(80, 16, 0).join("\n").includes("└")).toBe(false)
+    expect(recapLines(h.t.view(80, 16, 0))).toHaveLength(0)
     h.tool("c2")
     // Sekarang rekap c1 ditulis permanen; bukan akumulatif `2 command`.
-    const text = h.t.view(80, 16, 0).join("\n")
-    expect(text).toContain("└ 1 read")
-    expect(text).not.toMatch(/2 (command|read|edit|subagent|thought|other)/)
+    const rows = h.t.view(80, 16, 0)
+    expect(recapLines(rows)).toHaveLength(1)
+    expect(recapLines(rows)[0]).toContain("1 read")
+    expect(rows.join("\n")).not.toMatch(/2 (command|read|edit|subagent|thought|other)/)
   })
 
   test("turn tutup: rekap kumulatif mencakup semua segmen", () => {
@@ -167,12 +182,13 @@ describe("footer narasi: tool → narasi → └ rekap → tool", () => {
     h.tool("c2")
     h.finish()
 
-    const text = h.t.view(80, 20, 0).join("\n")
-    // Rekap segmen: `└ 1 read` + `└ 1 command`. Baris kumulatif terakhir
-    // `└ 1 command · 1 read` mengulang kedua angka (cakupan seluruh turn).
+    const rows = h.t.view(80, 20, 0)
+    const text = rows.join("\n")
+    // Rekap segmen: `1 read` + `1 command`. Baris kumulatif terakhir
+    // `1 command · 1 read` mengulang kedua angka (cakupan seluruh turn).
     expect(text.match(/\b1 read\b/g)?.length).toBe(2)
     expect(text.match(/\b1 command\b/g)?.length).toBe(2)
-    expect(text).toContain("└ 1 command · 1 read")
+    expect(recapLines(rows).at(-1)).toContain("1 command · 1 read")
   })
 
   test("chat tak pernah memuat baris `Tool:` — indeks kategori menggantikannya", () => {
@@ -182,9 +198,10 @@ describe("footer narasi: tool → narasi → └ rekap → tool", () => {
       const h = setup(folded)
       h.tool("c1")
       h.finish()
-      const view = h.t.view(80, 16, 0).join("\n")
+      const rows = h.t.view(80, 16, 0)
+      const view = rows.join("\n")
       expect(view).not.toContain("Tool:")
-      expect(view).toContain("└ 1 read")
+      expect(recapLines(rows)[0]).toContain("1 read")
     }
   })
 
@@ -194,10 +211,11 @@ describe("footer narasi: tool → narasi → └ rekap → tool", () => {
     const h = setup(false, [{ id: "c1", name: "read\x1b[2J_file" }])
     h.tool("c1")
     h.finish()
-    const chat = h.t.view(80, 16, 0).join("\n")
+    const rows = h.t.view(80, 16, 0)
+    const chat = rows.join("\n")
     expect(chat).not.toContain("\x1b[2J")
     expect(chat).toContain("read")
-    expect(chat).toContain("└ 1 read")
+    expect(recapLines(rows)[0]).toContain("1 read")
   })
 
   test("invariant tak tersentuh: baris ringkas bukan baris frame tambahan", () => {
@@ -206,6 +224,6 @@ describe("footer narasi: tool → narasi → └ rekap → tool", () => {
     h.finish()
     const rows = h.t.view(80, 12, 0)
     expect(rows.length).toBe(12)
-    expect(rows.some((r) => r.includes("└ 1 read"))).toBe(true)
+    expect(recapLines(rows).some((l) => l.includes("1 read"))).toBe(true)
   })
 })

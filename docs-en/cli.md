@@ -72,7 +72,7 @@ after the system prompt, tools, and history are counted.
 
 In the TUI, **Tab** cycles Work Mode (`Discuss` -> `Build`) and **Shift+Tab** toggles Permission Mode (`Auto` <-> `Ask`). `/mode auto|ask` changes approval; `/mode discuss|build` changes the operating mode. The footer shows Work Mode on the left and Permission Mode in cyan on the right, near context usage; on narrow terminals the labels are condensed.
 
-Since v0.34 the right sidebar is gone: the chat is a centred middle column (at most 50% of terminal width, footer/composer centred with it). Tool lines, the `✦` aggregate, findings, and the `+ thinking` marker live in the chat; the old pane shortcuts (`Alt/Ctrl+PgUp/PgDn`, `Ctrl+O`) are unbound. Since v0.37 bracketed paste is active, `Ctrl+A` = select-all with an empty composer and closed dropdown (else `Home`), `Ctrl+C` copies even while a drag is active, resize stabilises auto-scroll/drag/cursor/anchor, and the prompt cap is progressive `min(chatCols, 100 + floor(max(0, chatCols-100)/4))` (the 2-row composer stays). The shortcuts that remain are listed in [TUI — Slash Commands & Keyboard](repl.md).
+Since v0.34 the right sidebar is gone: the chat is a centred middle column (at most 50% of terminal width, footer/composer centred with it). Tool lines, the `✦` aggregate, findings, and the `+ thinking` marker live in the chat; the old pane shortcuts (`Alt/Ctrl+PgUp/PgDn`, `Ctrl+O`) are unbound. Since v0.37 bracketed paste is active, `Ctrl+A` = select-all with an empty composer and closed dropdown (else `Home`), `Ctrl+C` copies even while a drag is active, resize stabilises auto-scroll/drag/cursor/anchor, and the prompt cap is progressive `min(chatCols, 100 + floor(max(0, chatCols-100)/4))` (the 2-row composer stays). Since v0.41 the `/update` slash command exists only in the interactive TUI; non-TTY/one-shot/`exec`/pipe/ACP answer "not available" without spawning npm. The shortcuts that remain are listed in [TUI — Slash Commands & Keyboard](repl.md).
 
 ## When to use what
 
@@ -116,6 +116,31 @@ The full table is in [Environment Variables](environment.md); the most used:
 | `MINICODE_STATUSLINE=rich` | Spinner also shows session tokens + cost |
 | `MINICODE_STARTUP_PROGRESS=0` | Disable the startup progress line (on by default); a single `start N%` line overwritten with `\r` |
 | `MINICODE_SESSION_SUMMARY=0` | Disable the closing session block (on by default), written to scrollback after the alternate screen is closed |
+| `NO_UPDATE_CHECK=1` | Skip the update check at startup |
+| `MINICODE_AUTO_UPDATE=0\|false\|off` | Disable the automatic update check and install |
+| `CI=1` | Auto-update is fail-closed: no install, no npm spawn |
+| `MINICODE_AUTO_UPDATE_DONE=1` | Internal guard on the restart process produced by `/update` (do not set manually) |
+
+## Auto-update (v0.41)
+
+Auto-update applies only to an installed copy (source checkouts are untouched)
+and verifies the exact version with `npm audit signatures` before installing;
+verification failure always cancels the update. Since v0.41 a failed install
+reports the **step and redacted reason** (ANSI sequences, tokens/credentials,
+and credential-bearing URLs stripped; one line of at most 300 characters), not
+a generic message — the redaction boundary is only those three categories plus
+the length/line limit, not a general secret scrubber. On Windows the npm runner
+picks `npm_execpath` / `npm.cmd` with a 60-second timeout; the
+signature-verification order stays fail-closed.
+
+The `/update` slash command exists only in the interactive TUI: release the
+alt-screen → install → spawn a restart with `MINICODE_AUTO_UPDATE_DONE=1` → exit;
+if already latest, opted out, or failed, the terminal is re-acquired and the
+result is shown. Non-TTY/one-shot/`exec`/pipe/ACP are **fail-closed** — the
+`withUpdate` injection is absent, the command answers "not available", and npm
+is never spawned from a pipe/CI. Manual instruction: see
+[manual installation](getting-started.md). See
+[Environment](environment.md#auto-update-v041) for the opt-out list.
 
 ## Config
 

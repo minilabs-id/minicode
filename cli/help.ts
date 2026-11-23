@@ -67,7 +67,7 @@ Options:
                       admitted through the runtime (kernel + durable journal); a rejected
                       admission runs nothing. Unknown value = off.
 
-TUI: /help /provider /model /context /status /sessions /init /exit /mode /undo /redo /clear /copy /view /lang /scheduler
+TUI: /help /provider /model /context /status /sessions /init /update /exit /mode /undo /redo /clear /copy /view /lang /scheduler
 Keys: Enter submit · Tab work-mode · Shift+Tab permission · Up/Down history · Mouse wheel/PgUp/PgDn scroll (Shift = half page)
       Home/End jump to transcript top/tail · Ctrl+R search · Esc abort turn (twice = quit) · Ctrl+D exit
 Subcommand flags (config/mcp/sessions/skills/exec/...): see 'minicode <cmd> --help'.

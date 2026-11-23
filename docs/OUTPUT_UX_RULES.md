@@ -144,8 +144,9 @@ live — bukan baris ledger, bukan durasi backoff, dan bukan envelope machine.
 
 **v0.35 — rekap footer & label aktivitas.** Rekap tool adalah **baris committed
 statis**, bukan state live: footer tiap narasi
-`tool → narasi → └ rekap(tool sebelum narasi)`, format
-`└ 2 command · 118 read · 1 other`. Rekap akhir turn kumulatif seluruh tool
+`tool → narasi → rekap(tool sebelum narasi)`, format
+`2 command · 118 read · 1 other` (sejak v0.41 tanpa prefix simbol). Rekap akhir
+turn kumulatif seluruh tool
 selama turn. Klausa lama (rekap dua baris saat live, `flushActivityFold`
 net-nol, `liveSummaryRows` mengikuti ekor, jeda antar narasi melayang) adalah
 arsip v0.33/v7.x yang ditimpa v0.35. Label aktivitas `› …` memakai **locale OS**
@@ -320,8 +321,9 @@ Analyzed 11 files
 
 ### Rekap tool (v0.35)
 
-Satu baris `└` per narasi, committed dan statis: `tool → narasi → └ rekap(tool
-sebelum narasi)`. Contoh `└ 2 command · 118 read · 1 other`. Rekap akhir turn =
+Satu baris rekap per narasi, committed dan statis: `tool → narasi → rekap(tool
+sebelum narasi)`. Contoh `2 command · 118 read · 1 other` (sejak v0.41 tanpa
+prefix simbol). Rekap akhir turn =
 kumulatif semua tool turn (bukan per segmen). Label `› …` pada baris tool
 memakai locale OS (`Intl`, id/en), berbeda dari narasi yang memakai `/lang`.
 
@@ -553,7 +555,7 @@ Native terminal drag selection is not promised while the app owns mouse tracking
 - [ ] Chat memuat recap + narration + answer + baris tool/`✦`/finding/`+ thinking`; tanpa `Tool:`, `/expand`, atau collapsed buffer.
 - [ ] Finding tampil di chat (TUI) / transkrip (linear) dan tetap typed di machine.
 - [ ] Retry hanya satu micro-toast footer 4 dtk, bukan baris ledger atau envelope machine.
-- [ ] (v0.35) Rekap = baris committed statis `└ …` di footer tiap narasi; rekap akhir turn kumulatif; label `› …` memakai locale OS, narasi memakai `/lang`.
+- [ ] (v0.35, amendemen v0.41) Rekap = baris committed statis di footer tiap narasi, sejak v0.41 tanpa prefix simbol; rekap akhir turn kumulatif; label `› …` memakai locale OS, narasi memakai `/lang`.
 - [ ] (v0.36) Composer maks 2 baris (jendela geser, transkrip tidak bergeser); lebar `composerWidth() = min(100, chatWidth())`; dropdown `/` overlay dalam satu frame tanpa mengurangi `viewH` dan tanpa `paintRegion()` terpisah; klik area dropdown = item menu.
 - [ ] (v0.37) Bracketed paste `?2004h`/`?2004l` di luar frame tanpa submit bertingkat; `Ctrl+A` select-all (Home bila draft/menu) & `Ctrl+C` saat drag aktif; resize stabilizer (auto-scroll/drag/kursor/anchor, dropdown busy/abort); echo prompt satu baris logis di-wrap sekali selebar chat; cap prompt progresif `min(chatCols, 100 + floor(max(0, chatCols-100)/4))`.
 - [ ] Machine output tidak bergantung pada scraping human text.

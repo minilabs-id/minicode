@@ -1,17 +1,8 @@
-// P2.12 — server IPC daemon (loopback TCP).
-//
-// Keputusan transport: TCP loopback, bukan Unix socket / named pipe. Kontrak
-// menuntut konsumen lintas-platform yang bisa dipakai Desktop di Windows;
-// Unix socket tidak ada di Windows dan named pipe tidak ada di POSIX tanpa
-// kode cabang. Loopback + capability bercakupan + berkas endpoint 0600
-// memberi batas kepercayaan yang sama: hanya proses di mesin ini, dan hanya
-// yang memegang secret.
-//
-// Alur per koneksi (kontrak § handshake): hello -> welcome -> subscribe ->
-// frontiers -> snapshot -> cursor -> replay -> tail_marker -> LIVE.
-// Replay dan live tidak boleh berbaur: event yang masih ditulis selama replay
-// akan tiba dua kali bila disuntikkan di tengah — maka event live yang seq-nya
-// sudah tercakup replay dibuang.
+// Server IPC daemon (loopback TCP). Loopback dipilih karena lintas-platform:
+// Unix socket tak ada di Windows, named pipe tak ada di POSIX. Capability
+// bercakupan + endpoint 0600 membatasi akses ke proses mesin ini pemegang secret.
+// Alur: hello -> welcome -> subscribe -> frontiers -> snapshot -> replay ->
+// tail_marker -> LIVE. Event live yang seq-nya sudah di-replay dibuang (anti-duplikat).
 
 import type { Server } from "node:net"
 import { createServer, type Socket } from "node:net"
@@ -61,14 +52,11 @@ export interface DaemonServerDeps {
     telemetry: Telemetry
     storageOk: () => boolean
     shuttingDown: () => boolean
-    /** Status runtime kanonik (P13.1) — opsional; tanpa itu daemon menyajikan view ABSENT. */
+    /** Status runtime kanonik; tanpa itu daemon menyajikan view ABSENT. */
     runtimeStatus?: () => RuntimeView
   }
   telemetry: Telemetry
-  /**
-   * Batas antrean per langganan. Seam uji untuk membuktikan backpressure satu
-   * konsumen tidak menyentuh konsumen lain; produksi memakai MAX_QUEUE_PER_CONN.
-   */
+  /** Seam uji batas antrean per langganan (produksi: MAX_QUEUE_PER_CONN). */
   maxQueuePerSubscription?: number
   /** Seam uji: batas antrean per identitas konsumen logis (lihat host). */
   maxQueuePerConsumer?: (consumerId: string) => number | undefined
@@ -86,16 +74,10 @@ interface Conn {
   decoder: FrameDecoder
   state: "new" | "ready"
   authTimer: ReturnType<typeof setTimeout> | null
-  /**
-   * Identitas logis (dari capability `who`) untuk offset durable, idempotensi,
-   * dan label wire. Stabil lintas reconnect.
-   */
+  /** Identitas logis (`who`) untuk offset durable, idempotensi, dan label wire. */
   consumerId: string | null
-  /**
-   * Identitas LIVE ber-scope koneksi. Dua koneksi dengan `consumerId` yang sama
-   * tetap punya langganan sendiri; tanpa pemisahan ini, koneksi kedua menutup
-   * langganan koneksi pertama dan teardown salah satunya mencabut keduanya.
-   */
+  /** Scope langganan per koneksi: dua koneksi dengan `consumerId` sama tetap
+   * punya langganan terpisah (teardown satu tak mencabut yang lain). */
   subscriptionScope: string | null
   scopes: DaemonScope[]
   subs: Map<string, Subscription>
@@ -107,9 +89,8 @@ interface Conn {
 
 let connSeq = 0
 
-// Pemisah yang tak mungkin muncul di label konsumen (sanitizeLabel membuang
-// kendali). Scope live = identitas logis + id koneksi, sehingga dua koneksi
-// konsumen yang sama tidak pernah berbagi kunci langganan.
+// Pemisah mustahil di label (sanitizeLabel membuang kontrol). Scope live =
+// identitas logis + id koneksi agar koneksi sama tak berbagi kunci langganan.
 const CONSUMER_SCOPE_SEP = String.fromCharCode(1)
 const DEFAULT_MAX_PENDING_HANDSHAKES = 32
 const DEFAULT_PRE_AUTH_TIMEOUT_MS = 5_000
@@ -231,8 +212,7 @@ export class DaemonServer {
       conn.authTimer = null
     }
     this.#deps.telemetry.inc("connections.closed")
-    // Tutup HANYA langganan milik koneksi ini. Memakai consumerId logis di sini
-    // akan ikut memutus koneksi lain yang memakai identitas konsumen sama.
+    // Tutup hanya langganan koneksi ini; consumerId logis akan memutus koneksi lain.
     const scope = conn.subscriptionScope ?? conn.consumerId
     if (scope) {
       this.#subs.dropConsumer(scope)
@@ -241,10 +221,8 @@ export class DaemonServer {
     this.#conns.delete(conn.id)
     conn.subs.clear()
     try {
-      // Jangan langkas-langkas: `destroy()` pada socket yang masih memegang
-      // tulisan tertunda (mis. frame control_result "shutdown diterima")
-      // membuangnya, lalu pemanggil CLI gagal padahal perintah sukses.
-      // `end()` mengosongkan buffer ke peer lebih dulu; paksa tutup sesudahnya.
+      // `end()` dulu agar frame tertunda (mis. control_result) terkirim;
+      // `destroy()` langsung membuangnya → CLI gagal padahal perintah sukses.
       conn.socket.end()
     } catch {
       // Socket sudah mati — bukan kegagalan yang perlu ditangani.
@@ -285,10 +263,8 @@ export class DaemonServer {
     } catch {
       /* jatuh ke teardown di bawah */
     }
-    // Halte adalah keputusan, bukan negosiasi. Tanpa paksa-tutup, peer yang
-    // berhenti membaca bisa menggantung `end()` tanpa batas dan koneksi itu
-    // tetap terhitung hidup setelah overflow. `#teardown` sendiri menjadwalkan
-    // `destroy()` setelah 150 ms, jadi cukup satu timer di sana.
+    // Halt = keputusan, bukan negosiasi: peer yang berhenti membaca bisa
+    // menggantung `end()`. `#teardown` sudah menjadwalkan `destroy()` (150 ms).
     setTimeout(() => this.#teardown(conn), 50).unref?.()
   }
 
@@ -354,9 +330,7 @@ export class DaemonServer {
     })
     if (!check.ok) {
       this.#deps.telemetry.inc("connections.rejected")
-      // STALE_INCARNATION vs INVALID_CAPABILITY harus terbedakan: yang pertama
-      // berarti "daemon sudah ganti, minta capability baru", yang kedua
-      // berarti "capability ini memang tidak sah".
+      // Bedakan STALE_INCARNATION (daemon berganti) dari INVALID_CAPABILITY (cap tak sah).
       const code = check.reason === "STALE_INCARNATION" ? "STALE_INCARNATION" : "INVALID_CAPABILITY"
       this.#sendError(conn, code, `capability ditolak: ${check.reason}`)
       this.#teardown(conn)
@@ -403,8 +377,7 @@ export class DaemonServer {
     }
     const feed = this.#deps.feeds.get(sid)
     if (!feed) {
-      // Sesi tidak dikenal: bukan SESSION_MISMATCH (itu untuk perbedaan milik),
-      // tapi NOT_FOUND — konsumen bertanya tentang sesi yang tak ada sama sekali.
+      // Sesi tak dikenal = NOT_FOUND (SESSION_MISMATCH hanya untuk beda milik).
       this.#sendError(
         conn,
         "NOT_FOUND",
@@ -419,12 +392,9 @@ export class DaemonServer {
         ? fromRaw
         : typeof fromRaw === "number" && Number.isFinite(fromRaw)
           ? fromRaw
-          : // Nilai tak dikenal = resume (default paling aman: tak membanjiri
-            // konsumen dengan replay penuh, dan tak kehilangan progres ack).
-            "resume"
+          : "resume" // default aman: tanpa replay penuh, progres ack tetap terjaga
     const consumer = conn.consumerId ?? `consumer-${conn.id}`
-    // Scope live ber-scope koneksi; offset tetap memakai identitas logis agar
-    // reconnect dengan konsumen yang sama melanjutkan dari ack terakhir.
+    // Scope live per koneksi; offset memakai identitas logis agar reconnect lanjut dari ack.
     const scope = conn.subscriptionScope ?? consumer
     const consumerQueue = this.#deps.maxQueuePerConsumer?.(consumer)
 
@@ -448,11 +418,8 @@ export class DaemonServer {
     conn.subs.set(sid, sub)
     this.#deps.telemetry.inc("subscribe.attached")
 
-    // Pasang listener live SEBELUM membaca toko. Keduanya sinkron hari ini,
-    // tetapi urutan ini membuat celah "event tiba di antara replay dan
-    // langganan" mustahil terjadi bila salah satu jalur kelak menjadi async:
-    // apa pun yang tiba lebih dulu sudah berada di antrean dan akan difilter
-    // terhadap cursor replay, bukan hilang begitu saja.
+    // Pasang listener live sebelum replay: event yang tiba lebih dulu masuk
+    // antrean lalu difilter cursor replay (celah replay/langganan mustahil).
     this.#ensureLive(sid)
 
     // 1) frontiers  2) snapshot  3) cursor
@@ -467,24 +434,19 @@ export class DaemonServer {
       fromSeq,
       cursor: sub.cursor,
       snapshotRejected: rejected,
-      // [Area C · PROMPT 06] Fase Awal stream, dibaca dari latch per-subscription
-      // (bukan dihitung ulang di sini): `SubscriptionRegistry.attach` sudah
-      // menetapkan "replay" bila fromSeq <= head. Sumber tunggal = latch.
+      // Fase awal stream dari latch subscription (sumber tunggal, dihitung
+      // `SubscriptionRegistry.attach` dari fromSeq vs head).
       phase: sub.phase,
     })
 
-    // 4-6) replay → replay_done → tail_marker → pump. Helper mengembalikan
-    // false bila socket backpressure memaksa replay berhenti; drain melanjutkan
-    // dari cursor yang tersimpan (bukan mengulang dari awal atau membuang sisa).
+    // replay → replay_done → tail_marker → pump. Backpressure menjeda replay;
+    // drain melanjutkan dari cursor tersimpan (tanpa ulang/buang sisa).
     if (!this.#replayRange(conn, sid, consumer, fromSeq, head)) return
     this.#pump(conn)
   }
 
-  /**
-   * P2.3: replay yang resumable. `#send` menandai `conn.paused` saat
-   * `socket.write()` mengembalikan false; loop berhenti SEBELUM buffer tumbuh
-   * tanpa batas, lalu `drain` memanggil helper ini lagi dengan cursor lanjut.
-   */
+  /** Replay resumable: saat `write()` false, `#send` menandai `conn.paused`;
+   * loop berhenti sebelum buffer tak terbatas, `drain` lanjut dari cursor. */
   #replayRange(conn: Conn, sid: string, consumer: string, fromSeq: number, head: number): boolean {
     const sub = conn.subs.get(sid)
     if (!sub) return true
@@ -514,13 +476,8 @@ export class DaemonServer {
       replayTo = sub.cursor
     }
     this.#send(conn, { t: "replay_done", sid, consumer, upToSeq: replayTo })
-    // 5) penanda live-tail: segala sesuatu SETELAH pesan ini adalah LIVE dan
-    //    boleh saja belum durable — konsumen harus memperlakukannya beda.
-    //    F-DAEMON-1: badge transisi REPLAY→LIVE dibawa eksplisit di pesan ini
-    //    (`phase: "live"`), dan latch per-subscription diputar ke live.
-    //    [Area C · PROMPT 06] Latch diputar SEBELUM pesan dikirim, dan nilai
-    //    di wire diambil DARI latch — jadi `Subscription.phase` bukan lagi
-    //    state mati: ia adalah sumber tunggal fase yang terlihat konsumen.
+    // Penanda live-tail: setelah ini = LIVE (boleh belum durable). Latch diputar
+    // sebelum kirim; nilai wire diambil dari latch (sumber tunggal fase).
     sub.markLive()
     this.#send(conn, { t: "tail_marker", sid, consumer, atSeq: replayTo, phase: sub.phase })
     conn.pendingReplay = undefined
@@ -585,9 +542,8 @@ export class DaemonServer {
     if (this.#liveUnsub.has(sid)) return
     const feed = this.#deps.feeds.get(sid)
     if (!feed) return
-    // [RC-1] Jangan subscribe/memoize feed NON-HOSTED (store feed → liveSubscribe
-    // no-op). Bila sesi kemudian jadi hosted, subscriber yang tersambung saat
-    // jendela boot bisa re-bind dan menerima stream LIVE yang sebenarnya.
+    // Jangan memoize feed non-hosted (liveSubscribe no-op); subscriber saat boot
+    // bisa re-bind bila sesi kemudian menjadi hosted.
     if (!feed.hosted) return
     const unsub = feed.liveSubscribe((event) => this.#fanout(sid, event))
     this.#liveUnsub.set(sid, unsub)
@@ -608,8 +564,7 @@ export class DaemonServer {
     const seq = numberOr(event.eventSeq, -1)
     if (seq < 0) return
 
-    // Snapshot daftar target SEBELUM menyentuh antrean: `#halt` memanggil
-    // `#teardown` yang memutasi daftar koneksi saat iterasi berlangsung.
+    // Snapshot target sebelum iterasi: `#halt` → `#teardown` memutasi daftar koneksi.
     for (const conn of [...this.#conns.values()]) {
       if (conn.closed) continue
       const sub = conn.subs.get(sid)
@@ -620,9 +575,8 @@ export class DaemonServer {
         this.#deps.telemetry.inc("events.dropped.overflow")
         sub.close()
         this.#halt(conn, "QUEUE_OVERFLOW")
-        // Hentikan HANYA konsumen ini. `return` di sini akan melewati konsumen
-        // berikutnya pada event yang sama — satu klien lambat membuat klien
-        // lain kehilangan seq durable yang tak akan pernah dikirim ulang.
+        // Hentikan hanya konsumen ini; `return` membuat klien lain kehilangan
+        // seq durable yang tak dikirim ulang.
         continue
       }
       this.#pump(conn)
@@ -638,8 +592,7 @@ export class DaemonServer {
         const item = sub.takeFirst()
         if (!item) break
         if (item.provenance !== "LIVE") continue
-        // Sudah terkirim lewat replay: mengirim ulang membuat konsumen melihat
-        // dua event identik dengan seq sama.
+        // Sudah terkirim via replay; kirim ulang = duplikat seq.
         if (item.seq <= sub.cursor) continue
         const sent = this.#send(conn, {
           t: "event",

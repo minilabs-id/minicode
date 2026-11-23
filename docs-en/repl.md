@@ -27,7 +27,7 @@ below. Narration and model answers still use the user's language (`/lang`).
 | `/help keys` | Complete keyboard shortcuts (pane shortcuts were removed with the sidebar in v0.34; alias `/help tombol`) |
 | `/provider [sync]` | Manage providers: popup — preset picker + form (URL/key/scope/override), delete (`d`, states how many models are lost), edit (`e`). `sync` refreshes the model list of every provider (only says restart when there really are new models) |
 | `/model [search]` | Popup of all `provider::model` (argument = initial filter; type inside to search live, Ctrl+U clears, Esc leaves the filter). Del = delete (confirm). Enter = select + set thinking effort (`default/low/medium/high`, stored on the provider, applies to the next session; Esc = cancel entirely). Non-default effort shows a `[low\|medium\|high]` badge |
-| `/context [value]` | Table of the effective context window per model plus where each value came from (`manual`/`endpoint`/`katalog`/`models.dev`/`flag`/`default aman`). With an argument: set it for the active model (`128k`, `1m`, `1024x1024`, `auto`) — effective on the next turn. Details in [Configuration](config.md) |
+| `/context [value]` | Table of the effective context window per model plus where each value came from (`manual`/`endpoint`/`catalog`/`models.dev`/`flag`/`safe default`). With an argument: set it for the active model (`128k`, `1m`, `1024x1024`, `auto`) — effective on the next turn. Details in [Configuration](config.md) |
 | `/undo [n\|list]` | Undo conversation **and** files back to before turn `n` (no argument: newest-first picker; `last`: the last turn). `Esc Esc` with an empty composer opens the picker. The original session stays intact; the target prompt opens as a draft in the branch session. `list` shows turn numbers. In DISCUSS, undo that touches files is refused; conversation-only undo remains allowed |
 | `/redo` | Return to the source session after `/undo` and restore the workspace to its pre-undo state; refused if a new turn already exists in the branch |
 | `/sessions [id\|history\|branches]` | With no argument = resume picker popup; `<id>` = resume directly; `history` = the last 20 prompt entries; `branches` = undo branch list |
@@ -40,6 +40,7 @@ below. Narration and model answers still use the user's language (`/lang`).
 | `/view [thinking]` | Only `thinking` is accepted (shows/hides the `+ thinking` marker in the chat); with no argument = a single-action picker. The old `compact`/`minimize`/`fold`/`expand` actions are **rejected** — full reasoning stays in the journal, not in a sidebar pane |
 | `/exit` | Quit (the only exit; `/quit` alias). After exiting, a closing block goes to the scrollback: the `minicode` wordmark + Session/Model/Mode + Usage (tokens in/out, cost, duration) + a per-category tool breakdown + agent count. Disable with `MINICODE_SESSION_SUMMARY=0` |
 | `/scheduler [status\|run\|stop]` | Production scheduler control. **Off by default** in every session (needs the `--enable-scheduler` flag); without the flag the command answers "not enabled". It stays visible in `/help` so an operator who enabled the flag can find it. |
+| `/update` (v0.41) | Update MiniCode to an **exact verified version**. **Interactive TUI only**: safe handoff — release the alt-screen → install → spawn a restart with `MINICODE_AUTO_UPDATE_DONE=1` → exit; if already latest, opted out, or failed, the terminal is re-acquired and the result is shown. Non-TTY/one-shot/`exec`/pipe/ACP answer "not available" (fail-closed, never spawn npm from a pipe/CI). Manual instruction: see [manual installation](getting-started.md). |
 
 Aliases (work, not advertised in `/help`): `/models` -> `/model`, `/providers` -> `/provider`, `/usage` & `/cost` -> `/status`, `/resume [id]` -> `/sessions [id]`, `/quit`. The old names `/sync`, `/work-mode`, `/history`, `/compact`, `/thinking`, `/expand`, `/minimize`, and `/fold` are retired (no alias) — `/help` and did-you-mean point to their replacements.
 
@@ -73,6 +74,7 @@ Did-you-mean: the typo `/sessoons` yields `Did you mean /sessions?` (distance <=
 | `ctrl+c` | Copy the selection (TUI), **including while a drag is still active** — the drag is finalised into a selection first (not a no-op/abort, since v0.37); with no selection it is a no-op. Abort a turn with `Esc` (double `Esc` within 1.5 s, or `Ctrl+D` on an empty line, when the abort stalls) |
 | `paste` (multiline) | Bracketed paste is on since v0.37: `?2004h` on entry, `?2004l` on exit — in the TUI, `askLine`/`askSecret`, and the output window. The sequences are written **outside the frame** (I1: one `write` per frame still holds). A CR inside a paste is read as a draft newline, **not a submit** — no stacked submissions |
 | `ctrl+d` | Quit on an empty line; while busy on an empty line = abort the turn then quit |
+| `/update` (handoff, v0.41) | Terminal handoff for auto-update in the TUI: release the alt-screen → install → restart with `MINICODE_AUTO_UPDATE_DONE=1` → exit. If latest/opted out/failed, the terminal is re-acquired and the result is shown. Non-TTY/one-shot/ACP: "not available", no npm spawn. A failed install reports the step and redacted reason (ANSI/token/credential URLs stripped, <=300 chars), not a generic message |
 | `resize` (v0.37) | Stops **auto-scroll**, cancels the **drag** state, resets the **cursor column preference**, and **rebases the scroll anchor** even when a selection is active — so the selection does not jump to stale rows. The `/` dropdown closes on a busy/abort transition. A click after a resize maps to the **new** geometry, not the old coordinates |
 | `enter` while a turn runs | **Steered in as additional information**: the line joins the ACTIVE turn's context at the next step boundary — before the next model request — so the model reads it within the same turn without discarding the work in flight (the transcript marks it `steered into the running turn`). If the turn already finished first, the line falls into the next-turn queue (`queued #n`) so it is never lost. A `/command` line is refused with a reason because UI commands need an idle prompt. `Esc` cancels the turn and drops the fallback queue (with a notice) |
 
@@ -136,11 +138,12 @@ The tool recap is not live state. It is written as a **static committed row**
 that acts as the footer of each narration:
 
 ```text
-tool -> narration -> └ recap(tools before that narration)
-└ 2 command · 118 read · 1 other
+tool -> narration -> recap(tools before that narration)
+2 command · 118 read · 1 other
 ```
 
-The `└` row counts the tools that happened **before** that narration. The
+The recap row counts the tools that happened **before** that narration (no symbol
+prefix since v0.41). The
 **final recap of a turn** is cumulative for all tools in the turn (not a
 per-segment slice). The older clauses — a two-line live recap, a net-zero
 `flushActivityFold`, `liveSummaryRows()` following the tail, and a floating

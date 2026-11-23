@@ -6,9 +6,9 @@ The owner's phase roadmap is not available in this checkout; do not infer phase
 status or next actions from the changelog or the code. `TERMINAL_CONTRACT.md` is
 the FROZEN terminal contract — read it before changing output; behaviour changes
 require a contract update and a protection test map. The active output contracts
-live in the [event model](../OUTPUT_EVENT_MODEL.md), [protocol](../OUTPUT_PROTOCOL_SPEC.md),
-[rendering](../OUTPUT_RENDERING_SPEC.md), and [UX rules](../OUTPUT_UX_RULES.md). The
-rendering flow map is in [UI Render Pipeline](../UI_RENDER_PIPELINE.md).
+live in the [event model](OUTPUT_EVENT_MODEL.md), [protocol](OUTPUT_PROTOCOL_SPEC.md),
+[rendering](OUTPUT_RENDERING_SPEC.md), and [UX rules](OUTPUT_UX_RULES.md). The
+rendering flow map is in [UI Render Pipeline](UI_RENDER_PIPELINE.md).
 
 ## Three layers
 
@@ -48,18 +48,19 @@ silently); the host then runs the text as the next turn.
 Since v0.35 the tool recap is **not live state**: it is written as a **static
 committed row** in the transcript, not a transient row that changes as tools
 arrive. The footer of each narration follows
-`tool -> narration -> └ recap(tools before that narration)` — the `└` row lands
+`tool -> narration -> recap(tools before that narration)` — the recap row lands
 right after the narration and counts the tools that happened **before** it. The
 **final recap of a turn** is cumulative for **all** tools in that turn (not a
 per-segment slice that resets), formatted as one line:
-`└ 2 command · 118 read · 1 other`. The older clauses — a two-line live recap,
+`2 command · 118 read · 1 other` (no symbol prefix since v0.41). The older
+clauses — a two-line live recap,
 a net-zero `flushActivityFold`, `liveSummaryRows()` following the tail, and a
 floating separator row between narrations — are **v0.33/v7.x archive material
-overridden by v0.35**; see the [Terminal Contract](../TERMINAL_CONTRACT.md) for
+overridden by v0.35**; see the [Terminal Contract](TERMINAL_CONTRACT.md) for
 precedence.
 
 ```text
-tool done -> model narration -> └ recap(tools before narration)   [committed, static]
+tool done -> model narration -> recap(tools before narration)     [committed, static]
                                      |
                                      └- end of turn: cumulative for all tools
 ```

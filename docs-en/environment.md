@@ -4,6 +4,7 @@ The variables that most determine behaviour (the rest are referenced below):
 
 - **Autonomy limits on your own machine:** `MINICODE_SANDBOX` + `MINICODE_SANDBOX_STRICT=1` (deny bash when isolation is absent) + `MINICODE_BUDGET_STRICT=1` (unknown cost = over budget).
 - **Privacy/minimal footprint:** `MINICODE_TELEMETRY=0` (no traces), `MINICODE_AUTO_MEMORY=0` (no automatic memory saving).
+- **CI/automation:** `CI=1` -> auto-update is fail-closed (no install, no npm spawn); see v0.41.
 - **Unfamiliar repo:** do NOT set `MINICODE_ALLOW_LOCAL_CONFIG=1` unless the workspace is yours.
 - **Legacy consoles/accessibility:** `MINICODE_ASCII=1`, `MINICODE_A11Y=1`, `MINICODE_BELL=0`, `NO_COLOR`.
 
@@ -13,8 +14,10 @@ The variables that most determine behaviour (the rest are referenced below):
 |---|---|
 | `MINICODE_TIMEOUT_MS` | Default timeout (ms) when `--timeout` is not set; `0` = Infinity. This is the **total** budget for one prompt (default 1 hour for interactive sessions) |
 | `MINICODE_DEBUG` | `1` -> print the full stack trace when the process fails fatally (default: one line with the cause only) |
-| `NO_UPDATE_CHECK` | `1` -> skip the update check at startup |
-| `MINICODE_AUTO_UPDATE` | `0`/`false`/`off` -> disable the automatic update check and install |
+| `NO_UPDATE_CHECK` | `1` -> skip the update check at startup (honoured since v0.41) |
+| `MINICODE_AUTO_UPDATE` | `0`/`false`/`off` -> disable the automatic update check and install; any other value = enabled |
+| `CI` | `1` -> treat as CI: auto-update is fail-closed (no install, no npm spawn) — see v0.41 |
+| `MINICODE_AUTO_UPDATE_DONE` | Internal guard: set to `1` on the restart process produced by `/update` so it does not trigger another check/install (loop). Do not set manually |
 | `MINICODE_PERMISSION` | `allowlist` -> bash tool-access policy (legacy profile) |
 | `MINICODE_TOOL_SCOPE` | `explore` -> read-only subset of 12 tools (same as `--tool-scope explore`) |
 | `MINICODE_WORK_MODE` | `DISCUSS` \| `PLAN` \| `BUILD` -> operating mode (same as `--work-mode`; default `DISCUSS`; `BUILD` maps to the internal `EXECUTE`; the flag beats the env var; an unknown value falls back to `DISCUSS` with a warning) |
@@ -32,6 +35,26 @@ The variables that most determine behaviour (the rest are referenced below):
 | `MINICODE_VERIFY_CMD` | Custom verify command (replaces `detectVerifyCommand`) |
 | `MINICODE_ACE_ENABLED` | `0`/`false`/`off`/`no` -> disable the ACE-Lite consequence engine (instant rollback to the pure baseline, no self-heal loop). Default `true`. Hard safety/tamper guard & permission policy STAY active — this switch only disables consequence evaluation, not security boundaries |
 | `MINICODE_BASH_ALLOWLIST` | Custom bash allowlist (comma-separated, replaces the DEFAULT) |
+
+## Auto-update (v0.41)
+
+A failed install now reports the **step and redacted reason** instead of a
+generic message. Redaction strips ANSI sequences, tokens/credentials, and URLs
+carrying credentials, then truncates to **one line of at most 300 characters**.
+The **redaction boundary is only those three categories plus the length/line
+limit** — this is not a general secret scrubber; the diagnostic is for humans,
+not for feeding back into a prompt/model.
+
+Honoured opt-outs: `NO_UPDATE_CHECK=1`, `MINICODE_AUTO_UPDATE=0|false|off`, and
+`CI=1`. The internal guard `MINICODE_AUTO_UPDATE_DONE=1` marks the restart
+process produced by an update so it does not trigger another check/install (loop).
+
+Manual instruction: see [manual installation](getting-started.md).
+
+On Windows the npm runner picks `npm_execpath` / `npm.cmd` with a 60-second
+timeout; the signature-verification order stays fail-closed. The `/update` slash
+command exists only in the interactive TUI; non-TTY/one-shot/ACP answer "not
+available" without spawning npm.
 
 ## Language, diagnostics & keys
 

@@ -25,11 +25,10 @@ import {
   isTrashRestore,
 } from "./jail.ts"
 import { scrubSecrets } from "./scrub.ts"
-// v0.33: tokenizer sadar-platform (POSIX: `\`/`'`; win32: `^`, `'` literal).
+// Tokenizer sadar-platform (POSIX: `\`/`'`; win32: `^`, `'` literal).
 import { isDangerousShellVerb, splitShellSegments } from "./shell-tokenize.ts"
-// [Fase 2 / TOOL-01, v7.33 / audit F2] Diimpor dari registry kontrak tool.
-// Semua klasifikasi (read/gated/jail/internal/no-prompt/plan) kini SATU sumber
-// di tool-contract.ts — permission.ts hanya mengonsumsi derivasinya.
+// Klasifikasi tool (read/gated/jail/internal/no-prompt/plan) satu sumber di
+// tool-contract.ts; permission.ts hanya mengonsumsi derivasinya.
 import {
   CWD_JAIL_TOOL_NAMES,
   contractForTool,
@@ -114,32 +113,22 @@ export function canPersistAlways(args: unknown): boolean {
 }
 
 /**
- * [AGENT-CONTROL-4] Persetujuan "Always" TIDAK boleh dipakai ulang untuk
- * `delegate_task`: grant `delegate_task:${argsJson}` akan menyetujui setiap
- * delegasi identik berikutnya tanpa izin baru, padahal docs/AGENTS.md:8
- * menetapkan satu approval ASK hanya mencakup SATU delegasi. Satu klik "Always"
- * bisa menggandakan efek samping anak yang sudah committed. `canPersistAlways`
- * sengaja tetap murni soal ukuran args (kontrak K-1 lama dipakai test), jadi
- * pembatasan ini diletakkan di helper terpisah dan dipakai di gerbang view.
- * Catatan: view memang tak menawarkan "Always" untuk delegasi, tetapi broker
- * yang di-inject bisa saja mengembalikan "always" — karena itu `saveAlways`
- * DAN jalur matchAllowlist kini ikut memblokir delegate_task (fail-closed).
+ * "Always" TIDAK boleh dipakai ulang untuk `delegate_task`: satu approval ASK
+ * hanya mencakup SATU delegasi (docs/AGENTS.md:8), kalau tidak "Always"
+ * menggandakan efek samping anak. `canPersistAlways` tetap murni soal ukuran
+ * args; pembatasan di helper ini dipakai gerbang view. Broker inject bisa
+ * return "always", jadi `saveAlways` dan `matchAllowlist` ikut memblokir (fail-closed).
  */
 export function canAlwaysForCall(call: ToolCall): boolean {
   return call.name !== "delegate_task" && canPersistAlways(call.args)
 }
 
-// [Fase 2 / TOOL-01] Satu sumber kebenaran: `READONLY_TOOLS` kini diturunkan
-// dari registry kontrak tool (`allowedInReadonly`) — bukan lagi daftar manual
-// yang bisa menyimpang dari `tool-contract.ts`. Menambah/mengganti tool read
-// berarti mengubah `allowedInReadonly` di registry; tidak ada daftar kedua
-// untuk lupa. Membership (termasuk in/out `web_fetch`/`web_search`) dipegang
-// test no-drift di p15-phase2-contracts-approval-recovery.test.ts.
+// `READONLY_TOOLS` diturunkan dari registry (`allowedInReadonly`), bukan daftar
+// manual yang bisa menyimpang. Membership dipegang test no-drift
+// p15-phase2-contracts-approval-recovery.test.ts.
 const READONLY_TOOLS: ReadonlySet<string> = READONLY_TOOL_NAMES
-// [v7.33 / audit F2] Dulu tiga set ini berupa literal manual yang menduplikasi
-// klasifikasi di tool-contract.ts dan bisa menyimpang (tool baru = fail-open).
-// Sekarang DITURUNKAN dari flag kontrak. Test no-drift memastikan himpunan
-// hasil identik dengan literal lama — ini refactor, bukan perubahan kebijakan.
+// Set diturunkan dari flag kontrak; literal manual bisa menyimpang (fail-open).
+// Test no-drift memastikan himpunan identik — refactor, bukan perubahan kebijakan.
 //
 // Tool yang menulis state internal minicode (bukan file workspace) — aman
 // di semua mode kecuali readonly/plan. `bash_kill` menghentikan proses yang
@@ -149,10 +138,8 @@ const INTERNAL_WRITE_TOOLS: ReadonlySet<string> = INTERNAL_WRITE_TOOL_NAMES
 // Tool tulis workspace (path-serialized) yang dijail path-nya & auto-allowed.
 const FILE_WRITE_TOOLS: ReadonlySet<string> = FILE_WRITE_TOOL_NAMES
 
-// Subset INTERNAL_WRITE_TOOLS yang juga tidak perlu prompt di mode `ask`.
-// `write_memory`/`forget_memory` TIDAK termasuk: itu menulis MEMORY.md yang
-// persisten lintas sesi, jadi user berhak menyetujuinya. `submit_result`
-// termasuk: ia hanya menyerahkan jawaban akhir, tanpa efek samping.
+// Subset internal-write tanpa prompt di mode `ask`. `write_memory`/`forget_memory`
+// dikecualikan (MEMORY.md persist lintas sesi); `submit_result` termasuk (tanpa efek samping).
 const NO_PROMPT_TOOLS: ReadonlySet<string> = NO_PROMPT_TOOL_NAMES
 
 // Tool yang memperbesar serangan / menembus dunia luar: tidak auto-allowed.
@@ -732,33 +719,23 @@ export function createPermissionHandler(
      */
     authorizedTools?: ReadonlySet<string> | null
     /**
-     * [v7.33 / audit F1] Predikat otorisasi LIVE. Snapshot `authorizedTools`
-     * sekali di awal sesi bikin MCP tool yang muncul saat DISCUSS→EXECUTE tetap
-     * deny ("not configured/authorized") walau sudah terlihat di wire. Predikat
-     * ini dibaca per-call dari array tool LIVE milik tool-layer (dimutasi
-     * in-place oleh setWorkMode/setPermissionMode), sehingga `visible ===
-     * callable` di kedua arah transisi. Absen = fail-closed (kecuali fallback
-     * ke `authorizedTools` statis di bawah).
+     * Predikat otorisasi LIVE, dibaca per-call dari array tool tool-layer
+     * (dimutasi setWorkMode/setPermissionMode) agar `visible === callable`
+     * saat transisi mode. Snapshot statis bikin MCP baru tetap deny.
+     * Absen = fail-closed (kecuali fallback `authorizedTools`).
      */
     hasAuthorizedTool?: (name: string) => boolean
     /**
-     * [mode-architecture] Pembatas bash TERPISAH dari sumbu persetujuan.
-     * Bila true, mode `auto` juga membatasi `bash` ke allow-list
-     * (DEFAULT_BASH_ALLOWLIST / MINICODE_BASH_ALLOWLIST) — pola "no-sandbox"
-     * (Windows) yang dulu diselipkan sebagai `mode: "allowlist"`. Mode
-     * permission tetap `auto`/`ask`; ini hanya lapis kapabilitas bash.
+     * Pembatas bash terpisah dari sumbu persetujuan: mode `auto` tetap membatasi
+     * `bash` ke allow-list. Mode permission tetap `auto`/`ask` (lapis kapabilitas bash).
      */
     restrictBash?: boolean
-    /** Pola bash tambahan dari config (`bashAllowlist` di config.json).
-     * Sebelumnya key ini di-parse `src/config.ts` tapi TIDAK pernah dibaca
-     * lapisan izin — user mengedit config dan tidak melihat efek apa pun.
-     * Precedence: env `MINICODE_BASH_ALLOWLIST` > config > default bawaan.
-     */
+    /** Pola bash tambahan dari config. Precedence: env MINICODE_BASH_ALLOWLIST
+     * > config > default. (Dulu di-parse tapi tak dibaca, jadi edit config tak berefek.) */
     bashAllowlist?: readonly string[]
     /**
-     * Izinkan callback `ask` non-TTY (mis. `ApprovalBroker` daemon) HANYA untuk
-     * tool non-gated. [AGENT-CONTROL-2] Tool gated (delegate_task, git_commit,
-     * MCP) tetap menuntut TTY——broker tak boleh membuka delegasi headless.
+     * Callback `ask` non-TTY (ApprovalBroker daemon) HANYA untuk tool non-gated;
+     * tool gated (delegate_task, git_commit, MCP) tetap menuntut TTY (fail-closed).
      */
     allowNonTtyAsk?: boolean
   } = {},
@@ -919,13 +896,9 @@ export function createPermissionHandler(
     }
     return reason
   }
-  // Guard dan shell WAJIB me-resolve operand relatif dari direktori yang SAMA.
-  // bash.ts spawn dengan cwd = sessionRoot + args.cwd, sedangkan dulu guard
-  // menerima sessionRoot saja — akibatnya `sub/link -> /outside/secret` lolos
-  // (guard cek root/link/secret, shell baca root/sub/link/secret) dan `cat ../x`
-  // dari sub salah ditolak. args.cwd sudah dijail di check() sebelum handler
-  // dipanggil, jadi di sini aman dipakai sebagai basis resolusi. Fail-closed:
-  // resolusi gagal → kembalikan root (basis lama), bukan mengizinkan.
+  // Guard & shell WAJIB memakai basis cwd sama: guard cek root/link/secret, shell
+  // baca root/sub/link/secret → symlink lolos. args.cwd sudah dijail di check().
+  // Fail-closed: resolusi gagal → root, bukan mengizinkan.
   function bashEffectiveCwd(args: unknown): string {
     const rel = (args as { cwd?: unknown } | null)?.cwd
     if (typeof rel === "string" && rel) {
@@ -943,9 +916,8 @@ export function createPermissionHandler(
       const v = inspectBashCommand(cmd, effectiveCwd, root)
       return v.denied ? (v.reason ?? "blocked command") : null
     } catch {
-      // Fail-closed: guard yang melempar exception bukan bukti perintah aman.
-      // Sebelumnya `return null` membuat setiap error internal menjadi ALLOW —
-      // satu bug di guard cukup untuk membuka seluruh permukaan eksekusi.
+      // Fail-closed: guard melempar = bukan bukti aman; `return null` dulu
+      // menjadikan error internal ALLOW — satu bug membuka seluruh eksekusi.
       return "bash-guard internal error — command refused (fail-closed)"
     }
   }
@@ -1174,15 +1146,11 @@ export function createPermissionHandler(
         (_deps as { enforceJail?: boolean } | null | undefined)?.enforceJail === true
       if (state.mode === "unrestricted" && !enforceJail) return "allow"
 
-      // v7.33 / audit F2 — jail groups DITURUNKAN dari TOOL_CONTRACTS, bukan
-      // enumerasi nama manual. Tool tulis baru lewat `ws(...)` otomatis masuk
-      // `FILE_JAIL_TOOL_NAMES` sehingga TIDAK fail-open (path-nya tetap dijail).
-      // Idealnya jail sebelum allow-all (defense-in-depth), realpath-based:
-      // symlink keluar workspace tetap tertangkap walau --allow-all.
+      // Jail groups dari TOOL_CONTRACTS (tool tulis baru otomatis masuk, tak fail-open).
+      // Jail mendahului allow-all, realpath-based: symlink keluar tetap tertangkap.
       if (FILE_JAIL_TOOL_NAMES.has(call.name)) {
-        // v7.38: `move_file` punya dua ujung (path+destination); tool lain satu `path`.
-        // Fallback `from`/`to` hanya kompatibilitas args historis (fail-closed tetap
-        // berlaku: dua ujung harus ada dan di dalam root).
+        // `move_file` dua ujung (path+destination); fallback from/to = kompatibilitas
+        // historis. Fail-closed: dua ujung wajib ada & di dalam root.
         const targets =
           call.name === "move_file"
             ? [
@@ -1198,7 +1166,7 @@ export function createPermissionHandler(
         }
       }
       if (LSP_FILE_JAIL_TOOL_NAMES.has(call.name)) {
-        // v7.38: semua tool LSP (termasuk lsp_rename) memakai `path`.
+        // Semua tool LSP (termasuk lsp_rename) memakai `path`.
         const f = (earlyArgs?.path as string) ?? (earlyArgs?.file as string) ?? ""
         if (f && isRealPathOutsideRoot(f, root)) return deny(call, "jail: outside workspace")
         if (f && isSensitive(f)) return deny(call, "jail: sensitive file")
@@ -1216,27 +1184,14 @@ export function createPermissionHandler(
           if (isSensitive(p)) return deny(call, "jail: sensitive file")
         }
       }
-      // State milik minicode (temuan audit #04, dikeraskan audit #13):
-      // tool TULIS file dilarang menyentuh apa pun di bawah `.minicode/`
-      // (dulu daftar-nama: `test-write.txt` lolos). Tanpa ini sub-agen (atau
-      // call ter-injeksi) bisa menanam file, menimpa todos/rencana,
-      // menanam allowlist "always", mendaftarkan server MCP via config,
-      // atau membutakan recovery (jurnal/checkpoint) lewat jalur jinak.
-      // Berlaku di SEMUA mode termasuk allow-all (jail mendahului mode).
-      // BACA tetap boleh; tool khusus (todo/memory/config/undo) tak lewat
-      // gerbang ini sehingga alur legit tetap jalan. Pengecualian:
-      // restore `.minicode/.trash/` → workspace (isTrashRestore) dan skrip
-      // hooks `.minicode/hooks/` (HOOKS_RE di jail.ts — registrasi eksekusi
-      // tetap dikunci via allowlist.json yang owned).
-      // KUNCI GANDA (audit 2026-09-22 F-CRIT): batas string di atas dilewati
-      // link internal (junction/symlink → `.minicode/`), jadi target NYATA
-      // ikut dicek — pola yang sama dengan proteksi workspace
-      // (isRealPathOutsideRoot) dan TOCTOU pembaca. `resolveOwnedReal`
-      // memakai best-effort realpath agar symlink INTERNAL SAH (mis. tautan
-      // repositori ke berkas biasa di luar `.minicode/`) tetap bisa ditulis,
-      // sesuai kontrak "targetnya yang dicek" di safe-open.ts.
-      // v7.33: daftar tool tulis file kini dari kontrak (satu sumber dengan
-      // auto-allow & jail path di atas), bukan enumerasi nama manual.
+      // Tool TULIS file dilarang menyentuh `.minicode/` di SEMUA mode (termasuk
+      // allow-all): cek nama saja lolos (`test-write.txt`), dan sub-agen/injeksi
+      // bisa menimpa todos, allowlist, config MCP, atau jurnal recovery.
+      // Baca & tool khusus (todo/memory/config/undo) dikecualikan; juga restore
+      // .trash/ → workspace dan skrip hooks (eksekusi tetap via allowlist owned).
+      // Kunci ganda: target NYATA dicek (junction/symlink internal → .minicode/),
+      // best-effort realpath agar symlink internal sah tetap ditulis (safe-open.ts).
+      // Daftar tool dari kontrak (satu sumber dengan jail path).
       if (FILE_WRITE_TOOL_NAMES.has(call.name)) {
         const rawTargets =
           call.name === "move_file"
@@ -1245,11 +1200,8 @@ export function createPermissionHandler(
                 (earlyArgs?.destination as string) ?? (earlyArgs?.to as string) ?? "",
               ] as const)
             : ([(earlyArgs?.path as string) ?? ""] as const)
-        // Carve-out sah (string mentah): restore `.minicode/.trash/` →
-        // workspace — satu-satunya gerak sah yang menyentuh state. Cek string
-        // dulu supaya jalur sah (yang target nyatanya justru `.minicode/`)
-        // tidak ikut ditahan kunci realpath. Skrip hooks TIDAK lagi punya
-        // carve-out (lihat jail.ts): hook auto-dieksekusi saat opt-in.
+        // Carve-out restore .trash/ → workspace: cek string dulu agar jalur sah
+        // tak ditahan kunci realpath. Hooks tak dikecualikan (auto-dieksekusi saat opt-in).
         if (call.name === "move_file") {
           const f = rawTargets[0] ?? ""
           const t = rawTargets[1] ?? ""
@@ -1289,9 +1241,8 @@ export function createPermissionHandler(
 
       return handlers[state.mode](call, earlyArgs, signal, enforceJail)
     },
-    // Kontrol mode saat runtime (Shift+Tab di TUI). Sebelumnya kedua method ini
-    // hanya ada di type-cast tanpa implementasi, sehingga pemanggilnya no-op /
-    // TypeError dan mode permission tidak pernah benar-benar berubah.
+    // Kontrol mode runtime (Shift+Tab TUI). Kedua method dulu hanya di type-cast,
+    // sehingga pemanggil no-op/TypeError dan mode tak pernah berubah.
     __setMode(m: PermissionMode): void {
       state.mode = m
       allowlistCache = null
@@ -1348,14 +1299,10 @@ export function createPermissionHandler(
     }
   }
 
-  // Satu-satunya pembungkus prompt: emit requested sebelum + settled sesudah
-  // untuk SEMUA jalur prompt (gated via promptAskOr maupun inline mode ask).
-  // Allowlist-hit TIDAK lewat sini (keputusan policy, bukan persetujuan).
-  //
-  // `requireTTY`: hanya jalur GATED (promptAskOr) yang dulu menolak non-TTY
-  // sebelum prompt — mode `ask` non-gated tidak pernah mengecek isTTY (lihat
-  // kode lama: `askUser ? raceAbort(...) : "deny"`). Memaksa TTY di kedua
-  // jalur akan membalik keputusan headless-injected-ask (regresi test matrix).
+  // Satu-satunya wrapper prompt: emit requested + settled untuk semua jalur
+  // (gated & inline ask). Allowlist-hit tak lewat sini (policy, bukan persetujuan).
+  // `requireTTY` hanya untuk jalur GATED: memaksa TTY di ask non-gated membalik
+  // keputusan headless-injected-ask.
   async function gatedPrompt(
     call: ToolCall,
     signal: AbortSignal | undefined,

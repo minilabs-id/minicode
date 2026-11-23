@@ -111,10 +111,8 @@ interface RetryIndicatorState {
 }
 
 /**
- * v0.33: retry adalah MICRO-TOAST, bukan pengganti footer. Angka detik dihitung
- * live dari `retrySince` setiap paint (activity clock jalan tiap ~detik saat
- * busy), dan toast otomatis hilang setelah `retryToastUntil` atau saat turn
- * selesai — tidak lagi nongkrong dengan angka statis.
+ * Retry = MICRO-TOAST, bukan pengganti footer. Angka detik dihitung live dari
+ * `retrySince` tiap paint; toast hilang setelah `retryToastUntil` atau turn selesai.
  */
 const RETRY_TOAST_MS = 4_000
 
@@ -369,11 +367,9 @@ export class TuiApp {
   private state: PromptState = createState()
   private scrollBack = 0
   /**
-   * v0.33: penanda "sedang mengikuti ekor". v7.28 mengubah anchor scroll ke
-   * kepala (`scrollBack=0`), sehingga saat konten tumbuh selama turn viewport
-   * diam di posisi lama — user harus scroll manual. `pinnedToTail` dipertahankan
-   * saat streaming, tetapi diclear segera setelah user sengaja scroll ke atas
-   * (kontrak: jangan menarik pembaca yang sedang membaca histori).
+   * Penanda "mengikuti ekor" saat streaming. Anchor scroll = kepala (`scrollBack=0`),
+   * jadi viewport diam saat konten tumbuh; flag diclear segera setelah user sengaja
+   * scroll ke atas (jangan menarik pembaca yang sedang membaca histori).
    */
   private pinnedToTail = true
   /** Jangkar baris viewport saat lebar chat berubah (resize). */
@@ -393,15 +389,13 @@ export class TuiApp {
   // justru saat turn IDLE (activityTimer hanya jalan saat busy).
   private waitingTimer: ReturnType<typeof setTimeout> | undefined
   private waitingStartedAt = 0
-  /** Timestamp abort terakhir (ms) — dipakai BERSAMA `awaitingSecondEsc` untuk
-   * jendela double-tap Esc = quit. Timestamp saja tak cukup: ia basi setelah
-   * draft baru diketik (temuan audit VERIFIED). */
+  /** Timestamp abort terakhir (ms), dipakai BERSAMA `awaitingSecondEsc` untuk
+   * double-tap Esc = quit. Timestamp saja basi setelah draft baru diketik. */
   private lastAbortAt = 0
   /**
-   * Khusus jendela "Esc lagi = quit" setelah abort. Beda dari `lastIdleEscapeAt`
-   * (gesture /undo saat idle) dan diprogram ulang tiap abort. Draft baru / submit
-   * / lewatnya 1,5 dtk mematikan flag ini supaya Esc berikutnya tak menyalahartikan
-   * "hapus draft" sebagai quit.
+   * Jendela "Esc lagi = quit" setelah abort. Beda dari `lastIdleEscapeAt` (/undo
+   * saat idle). Draft baru/submit/lewat 1,5 dtk mematikan flag agar Esc berikutnya
+   * tak menyalahartikan "hapus draft" sebagai quit.
    */
   private awaitingSecondEsc = false
   private lastIdleEscapeAt = 0
@@ -467,16 +461,14 @@ export class TuiApp {
    */
   private lastChatCols: number | null = null
   /**
-   * Status host yang diambil SATU kali di awal paint. `isBusy()` di dalam frame
-   * membaca ini, bukan memanggil host.getStatus() berulang (dulu 1×/frame per
-   * pemanggil + beberapa lagi lewat default argumen helper).
+   * Status host diambil SATU kali di awal paint; `isBusy()` dalam frame membaca
+   * ini, bukan memanggil getStatus() berulang.
    */
   private frameStatus: TuiStatusSnapshot | null = null
   /**
-   * Cache layout composer: satu paint memanggil tinggi, isi, dan posisi
-   * kursor untuk state yang SAMA. Dulu tiap panggilan me-wrap ulang seluruh
-   * teks (3×), jadi ketikan panjang membayar wrap berulang. Key memuat line,
-   * kursor, lebar efektif, dan mode editing agar tak menyajikan frame basi.
+   * Cache layout composer: satu paint memanggil tinggi/isi/kursor untuk state
+   * sama (dulu me-wrap 3×). Key memuat line, kursor, lebar efektif, dan mode
+   * editing agar tak menyajikan frame basi.
    */
   private composerCache: {
     line: string
@@ -591,25 +583,19 @@ export class TuiApp {
         this.stopAutoScroll()
         if (this.selection) this.selection.dragging = false
         this.preferredCol = null
-        // Lukis layar AKTIF (bukan handle `screen` run() yang basi setelah
-        // release+reacquire gagal — dulu repaint/resize melukis ke handle
-        // tertutup sekaligus menimpa currentScreen baru dengannya).
+        // Lukis layar AKTIF, bukan handle `screen` run() yang basi setelah
+        // release+reacquire gagal.
         this.paintCurrent()
       }
       stdin.setRawMode(true)
       stdin.resume()
       stdin.on("data", this.onData)
       stdout.on("resize", this.onResize)
-      // Sinyal fatal (temuan audit TUI-001): default kernel-kill TIDAK
-      // menjalankan handler "exit" Node — terminal bisa tertinggal alt-screen
-      // + raw mode. Dipasang per-run, dilepas di cleanup (pasangan ketat).
-      // Handler TERPISAH per sinyal: Bun TIDAK menyampaikan nama sinyal ke
-      // handler (argumen undefined — beda dengan Node), jadi satu handler
-      // bersama tak bisa membedakan TERM vs HUP dari parameternya.
-      // WAJIB tetap di blok sinkron yang sama dengan openAltScreen() di atas
-      // (tanpa await di antaranya): sinyal hanya disampaikan antar-tick event
-      // loop, jadi tak ada jendela nyata; sisipkan await di antara keduanya =
-      // membuka race SIGTERM sebelum handler terpasang.
+      // Sinyal fatal (TUI-001): kernel-kill TIDAK menjalankan handler "exit" Node,
+      // sehingga alt-screen + raw mode bisa tertinggal. Dipasang per-run, dilepas
+      // di cleanup. Handler TERPISAH per sinyal (Bun tak menyampaikan nama sinyal).
+      // WAJIB di blok sinkron sama dengan openAltScreen(): tanpa await di antaranya,
+      // atau SIGTERM masuk sebelum handler terpasang.
       const restoreAndExit = (code: number) => {
         if (this.signalExitHandled) return
         this.signalExitHandled = true
@@ -987,28 +973,22 @@ export class TuiApp {
       this.scheduleWheelRepaint()
       return
     }
-    // Scroll SELALU tersedia (menu buka/tutup, busy/idle, layar menciut) —
-    // di-intercept sebelum engine supaya tak jadi histori maupun teks.
-    // Dulu di bawah gate tooSmall: terminal menciut + turn busy = tak bisa
-    // scroll maupun abort (harus kill -9).
-    // Shift+PgUp/PgDn (ESC[5;2~/6;2~, didekode modifier 2 = shift) = setengah
-    // halaman (temuan audit TUI-002): halaman penuh terlalu kasar untuk
-    // transkrip panjang; Home/End = lompat top/tail (di bawah).
+    // Scroll SELALU tersedia (juga saat busy/layar menciut) — di-intercept sebelum
+    // engine. Dulu di bawah gate tooSmall: busy + ciut = tak bisa scroll/abort.
+    // Shift+PgUp/PgDn (modifier 2) = setengah halaman; halaman penuh terlalu kasar.
     if (key.type === "pageup" || key.type === "pagedown") {
       const mod = key.modifier ?? 0
       if (mod === 2) {
-        // v7.28: PgUp = naik (negatif), PgDn = turun (positif).
+        // PgUp = naik (negatif), PgDn = turun (positif).
         this.scrollBy(key.type === "pageup" ? -0.5 : 0.5)
         return
       }
       this.scrollBy(key.type === "pageup" ? -1 : 1)
       return
     }
-    // Home/End LOMPAT transkrip HANYA saat prompt kosong & tanpa dropdown
-    // (temuan audit TUI-002): transkrip cap 5000 baris ≈ 125 halaman —
-    // menekan PgUp 125× bukan navigasi. Home = baris teratas, End = kembali
-    // ke ekor. Baris BERISI = tombol editing (awal/akhir baris, kontrak lama);
-    // dropdown terbuka = navigasi menu (jalur engine).
+    // Home/End LOMPAT transkrip hanya saat prompt kosong & tanpa dropdown:
+    // 5000 baris ≈ 125 halaman, PgUp 125× bukan navigasi. Home = kepala, End = ekor.
+    // Baris berisi = tombol editing; dropdown = navigasi menu (jalur engine).
     if ((key.type === "home" || key.type === "end") && !this.state.menuOpen && !this.state.line) {
       const logical = key.type === "home"
       if (logical || this.scrollBack !== 0) {

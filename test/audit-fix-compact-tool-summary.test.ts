@@ -38,12 +38,12 @@ function setup(opts: { minimizeActivity?: boolean; activityPanel?: boolean } = {
 }
 
 /**
- * Baris ringkas = margin kiri + `└ ` + angka kategori. `└` membedakan rekap
- * dari baris ledger biasa (`› label target`), yang kini memakai label
- * manusiawibahasa SISTEM dan tak punya angka kategori.
+ * Baris ringkas = margin kiri + angka kategori (tanpa prefix simbol). Pola
+ * `^ {3}\d+\s+\p{L}` membedakan rekap dari baris ledger biasa (`› label target`),
+ * yang kini memakai label manusiawi bahasa SISTEM dan tak punya angka kategori.
  */
 function summaryLines(lines: string[]): string[] {
-  return lines.filter((l) => /^\s*└\s+\d+\s+\p{L}/u.test(l))
+  return lines.filter((l) => /^ {3}\d+\s+\p{L}/u.test(l))
 }
 
 describe("compact tool summary per turn", () => {
@@ -76,14 +76,14 @@ describe("compact tool summary per turn", () => {
     const summaries = summaryLines(lines)
     // Satu baris: rekap kumulatif identik dengan segmen terakhir jadi tidak diduplikasi.
     expect(summaries).toHaveLength(1)
-    // Format `└ 2 command · 2 edit · 2 read · 1 thought` (tanpa `+`).
+    // Format `2 command · 2 edit · 2 read · 1 thought` (tanpa prefix simbol/`+`).
     expect(summaries[0]).toContain("2 command")
     expect(summaries[0]).toContain("2 edit")
     expect(summaries[0]).toContain("2 read")
     expect(summaries[0]).toContain("1 thought")
     // Kategori yang tak muncul tidak dicetak (nol disembunyikan).
     expect(summaries[0]).not.toContain("other")
-    expect(lines.filter((l) => l.includes("└")).length).toBe(1)
+    expect(lines.some((l) => l.includes("└"))).toBe(false)
     void transcript
   })
 
@@ -160,8 +160,8 @@ describe("compact tool summary per turn", () => {
 
     const summaries = summaryLines(transcript.view(120, 300, 0).map(stripAnsi))
     const cumulative = summaries.at(-1)!
-    // Baris terakhir = akumulator KUMULATIF, format satu baris `└ …`.
-    expect(cumulative).toMatch(/^ {3}└ /)
+    // Baris terakhir = akumulator KUMULATIF, satu baris angka kategori.
+    expect(cumulative).toMatch(/^ {3}\d+\s+\p{L}/u)
     expect(cumulative).toContain("2 command")
     expect(cumulative).toContain("118 read")
     expect(cumulative).toContain("1 other")

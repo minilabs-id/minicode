@@ -14,6 +14,7 @@ import type {
 import { t } from "../i18n/locale.ts"
 import { renderActivityPanel } from "../render/activity-panel.ts"
 import { renderDiffCard } from "../render/diff.ts"
+import { friendlyToolError } from "../render/errors.ts"
 import { formatArgsPreview, formatProviderError, formatUsage } from "../render/format.ts"
 import { highlightCode } from "../render/highlight.ts"
 import { paintLedger, runMarker, statusWord } from "../render/ledger.ts"
@@ -618,8 +619,10 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
     const targetText = target ? ` ${truncateToWidth(sanitizeAnsiLine(target), 120, "")}` : ""
     const status = desc?.status ?? activity?.status ?? event.status ?? "failed"
     const message = event.message ?? desc?.message ?? activity?.error?.message
+    // v0.42: pesan kegagalan lewat redaksi ringkas kanonik (satu baris ≤120
+    // kolom). Nama/target tetap tampil di `line`; detail penuh ada di log.
     const detail = message
-      ? `: ${truncateToWidth(sanitizeAnsi(String(message)), 200, "…").split("\n")[0] ?? ""}`
+      ? `: ${friendlyToolError(String(message).split(/[\r\n]/)[0] ?? "", target ? String(target) : undefined)}`
       : ""
     // F-AGENT-1: tool anak dirender sebagai baris run sendiri (`↳ <marker>`),
     // bukan dicampur ke baris root — identitas childSessionId/runId tiap run.
@@ -918,12 +921,13 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
       if (!isError && typeof r.content === "string")
         rememberTurn(ui, truncateToWidth(sanitizeAnsi(r.content), 20000, ""))
       if (isError) {
-        // Error tool ditampilkan ringkas per baris (cap 200 kolom + marker) —
-        // tanpa marker user tak bisa bedakan "pesan 200 kolom" vs "terpotong".
+        // v0.42: redaksi ringkas kanonik — exit N / idempotency / EIO /
+        // bash-guard tak lagi bocor mentah ke scrollback. Detail di --verbose.
         ui.setActiveSection(null)
+        const errorTarget = typeof args.path === "string" ? args.path : undefined
         wErr(
           c.error(
-            `  ${glyphs.arrow} ${humanToolLabel(name, activity)}${suffix}: ${truncateToWidth(sanitizeAnsi(String(r.content)), 200, "…")}\n`,
+            `  ${glyphs.arrow} ${humanToolLabel(name, activity)}${suffix}: ${friendlyToolError(String(r.content), errorTarget)}\n`,
           ),
         )
         return

@@ -19,9 +19,9 @@ import {
 } from "#minicore/core/tokens.ts"
 import type { Message, UserMessage } from "#minicore/core/types.ts"
 import { LIMITS } from "../constants.ts"
-// [Audit F-02/F-03 2026-11-22] Instrumentasi durasi; nonaktif = no-op O(1).
+// Instrumentasi durasi; nonaktif = no-op O(1).
 import { perfCount, perfEnabled } from "../lib/perf-debug.ts"
-// [Area B · PROMPT 06] Binding persetujuan ↔ operasi yang dieksekusi.
+// Binding persetujuan ↔ operasi yang dieksekusi.
 import { ApprovalBindingStore, verifyApprovalBinding } from "../policy/approval-binding.ts"
 import {
   buildSystemPrompt,
@@ -65,18 +65,9 @@ import {
 } from "../policy/work-mode.ts"
 import type { ApprovalEventHook } from "../presentation/events.ts"
 
-/**
- * [v7.33 / audit F1] Predikat otorisasi LIVE untuk Tool Access Policy.
- *
- * `tools` adalah array LIVE milik tool-layer (`setupToolLayer().sessionTools`)
- * yang dimutasi IN-PLACE oleh `setWorkMode`/`setPermissionMode` saat operator
- * Shift+Tab. Snapshot `new Set(tools.map(...))` sekali di awal sesi membekukan
- * otorisasi: tool MCP yang baru terlihat di EXECUTE tetap dianggap
- * tak-terkonfigurasi (`auto` deny "MCP tool not configured/authorized") —
- * melanggar invarian `visible === callable`. Predikat ini membaca ulang array
- * tiap pemanggilan (dan lewat `refresh()` dari setter mode), sehingga izin
- * mengikuti visibilitas nyata di KEDUA arah transisi. Tanpa tool = fail-closed.
- */
+/** Predikat otorisasi LIVE: `tools` dimutasi in-place saat Shift+Tab, jadi snapshot
+ * awal membekukan izin (MCP baru tertolak). Baca ulang tiap call + `refresh()`
+ * dari setter mode menjaga `visible === callable`. Tanpa tool = fail-closed. */
 export function createLiveAuthorizedTools(
   tools: readonly { readonly name: string }[] | undefined,
 ): { hasAuthorizedTool(name: string): boolean; refresh(): void } {
@@ -86,15 +77,11 @@ export function createLiveAuthorizedTools(
     for (const t of tools ?? []) authorized.add(t.name)
   }
   refresh()
-  // E-11: refresh per-call dihapus. Array `tools` dimutasi IN-PLACE oleh
-  // `setWorkMode`/`setPermissionMode`, dan KEDUA setter sudah memanggil
-  // `authorized.refresh()` (lihat bawah, ~:889/:912). Menjalankan refresh lagi
-  // di sini membuat O(tools) copy per pemanggilan tool — bukan kerja nyata.
+  // Refresh per-call dihapus: kedua setter mode sudah memanggil `refresh()`,
+  // jadi refresh lagi hanya O(tools) copy per call tanpa manfaat.
   return {
     hasAuthorizedTool: (name: string): boolean => {
-      // Dirty-flag murah O(1): array bisa bertambah/berkurang di luar setter
-      // mode (mis. discovery MCP). Size beda = refresh; kalau sama, setter mode
-      // sudah menjamin isi set mutakhir.
+      // Dirty-flag O(1): ukuran beda = refresh (MCP discovery bisa mengubah array di luar setter).
       if ((tools?.length ?? 0) !== authorized.size) refresh()
       return authorized.has(name)
     },
@@ -102,12 +89,9 @@ export function createLiveAuthorizedTools(
   }
 }
 
-// Kebijakan kompaksi lebih agresif: ringkas lebih DINI daripada default kernel
-// (75%/90%), supaya konteks jarang menyentuh dinding. Untuk jendela model
-// nyata (>= 16k), selaraskan ambang medium/high dengan `contextBudgetFor` agar
-// kompaksi berjalan SEBELUM `limit - outputReserve` (mis. 60% pada 32k tanpa
-// maxOutputTokens) memicu overflow guard di dynamicProvider; jendela sintetis
-// kecil (< 16k di test) mempertahankan rasio 65%/85%.
+// Kompaksi lebih dini dari default kernel (75%/90%). Jendela ≥16k: ambang
+// diselaraskan `contextBudgetFor` agar kompaksi mendahului overflow guard;
+// jendela kecil (<16k, test) memakai rasio 65%/85%.
 export function createAggressiveBudgetPolicy(
   getMaxOutputTokens?: () => number | undefined,
 ): BudgetPolicy {
@@ -136,38 +120,18 @@ export function createAggressiveBudgetPolicy(
 
 export const aggressiveBudgetPolicy: BudgetPolicy = createAggressiveBudgetPolicy()
 
-// P2 cap wrapper: limit retryAfter to 30s without mutating original error.
-//
-// [T-009 OBSERVATION.md] Anggaran pemulihan TIDAK lagi dinyatakan sebagai "berapa
-// kali retry" di sini. Versi pertama perbaikan memakai angka lokal
-// (5 percobaan) sementara resume turn punya angka lokal lain; karena keduanya
-// berada di lapisan berbeda, biayanya BERKALI — provider yang mati permanen
-// menahan user ~82 detik, padahal sebelumnya 7 detik. Sekarang retry provider
-// memakai SATU anggaran bersama dari `src/policy/recovery-budget.ts`: satu
-// anggaran waktu, satu kuota percobaan, jitter, dan `Retry-After` sebagai floor.
-// Konsekuensinya biaya total konstan, berapa pun lapisan yang mencoba.
-//
-// `onError` di bawah tetap sinkron karena kontrak `RecoveryPolicy` kernel
-// memintanya begitu. Status anggaran hidup di `RecoveryLedger` per panggilan
-// logis yang dibuat pemanggil (lihat `createRecoveryLedger`).
+// Retry provider memakai SATU anggaran bersama dari `recovery-budget.ts` (waktu,
+// kuota, jitter, `Retry-After` sebagai floor) — angka retry lokal berlipat
+// menghasilkan biaya BERKALI (dulu ~82 dtk). `onError` sinkron sesuai kontrak
+// kernel; status anggaran di `RecoveryLedger` per panggilan logis.
 
-/** Anggaran untuk 429: tetap 3 percobaan seperti kernel, TIDAK diperpanjang.
- *
- * KENAPA (riset 2026): 429 hampir selalu membawa `Retry-After`, dan `planRecovery`
- * memperlakukannya sebagai floor. Backoff panjang justru salah — menunggu lebih
- * lama daripada yang diminta hanya menambah jeda, sedangkan 429 permanen
- * (spend cap Anthropic tanpa header, `credit_balance_exhausted` OpenAI) tidak
- * pulih sama sekali. Kuota 3 membuat kegagalan itu cepat terlihat.
- */
+/** 429: 3 percobaan (tidak diperpanjang). `Retry-After` adalah floor, jadi
+ * backoff panjang hanya menambah jeda; 429 permanen cepat terlihat. */
 export const RATE_LIMIT_RETRY_ATTEMPTS = 3
 
-/** Buku besar anggaran pemulihan untuk satu panggilan logis.
- *
- * Dipisah dari `cappedRecovery` karena kernel memanggil `onError` secara sinkron
- * dengan `attempt` saja, sementara anggaran butuh JAM. Ledger memegang jam itu.
- * Satu ledger = satu prompt user; retry provider dan resume turn memakai ledger
- * yang sama supaya tidak ada perkalian biaya.
- */
+/** Ledger anggaran satu panggilan logis: memegang jam yang tak disediakan
+ * kernel (`onError` hanya dapat `attempt`). Satu ledger = satu prompt user,
+ * dipakai retry provider + resume turn agar biaya tak berlipat. */
 export interface RecoveryLedger {
   /** Waktu mulai (epoch ms). */
   readonly startedAtMs: number
@@ -212,15 +176,8 @@ export function createRecoveryLedger(now: () => number = Date.now): RecoveryLedg
   }
 }
 
-/**
- * Sanitasi `retryAfter` + keputusan retry untuk kegagalan provider.
- *
- * F-12 (dipertahankan): nilai non-finite (Infinity/NaN) atau negatif dibuang
- * karena `setTimeout(Infinity)` berperilaku seperti ~1 ms → hot fast-retry, bukan
- * tunggu lama; nilai sangat besar di-cap ke `LIMITS.RETRY_AFTER_MAX_MS`.
- *
- * Diekspor agar teruji langsung (pola repo: pure/diekspor-untuk-test).
- */
+/** Sanitasi `retryAfter`: nilai non-finite/negatif dibuang (`setTimeout(Infinity)`
+ * ≈ 1 ms → hot fast-retry); nilai besar di-cap. Diekspor untuk test langsung. */
 export const cappedRecovery = {
   onError(error: ProviderError, attempt: number): RecoveryAction {
     const category = error.category
@@ -238,9 +195,7 @@ export const cappedRecovery = {
         ? Math.min(ra, LIMITS.RETRY_AFTER_MAX_MS)
         : undefined
 
-    // 429 punya plafon percobaan sendiri yang lebih ketat (lihat
-    // RATE_LIMIT_RETRY_ATTEMPTS). Selain itu keputusan jeda diserahkan ke
-    // anggaran bersama supaya retry dan resume tidak mengalikan biaya.
+    // 429 pakai plafon lebih ketat; jeda diserahkan anggaran bersama agar biaya tak berlipat.
     const cap = category === "rate_limit" ? RATE_LIMIT_RETRY_ATTEMPTS : RECOVERY_ATTEMPT_QUOTA
     if (attempt > cap) return { type: "throw" }
 
@@ -249,15 +204,13 @@ export const cappedRecovery = {
         category,
         ...(saneRetryAfter !== undefined ? { retryAfterMs: saneRetryAfter } : {}),
       },
-      // Sinkron tanpa jam: pakai awal waktu nol. Pagar waktu sesungguhnya
-      // dipegang ledger di atas; di sini kuota + kategori yang menahan.
+      // Sinkron tanpa jam (nol): pagar waktu ada di ledger; di sini kuota yang menahan.
       { startedAtMs: 0, nowMs: 0, attemptsUsed: attempt - 1 },
       { hasPrompt: true },
     )
     if (decision.action === "retry") return { type: "retry", delayMs: decision.delayMs }
 
-    // Bukan urusan anggaran bersama → serahkan ke kebijakan kernel (mis.
-    // compaction untuk context_length_exceeded, langsung throw untuk auth).
+    // Di luar anggaran bersama → kebijakan kernel (compaction/throw auth).
     if (ra != null && (!Number.isFinite(ra) || ra < 0)) {
       const clean = new ProviderError(error.category, error.message, undefined)
       Object.assign(clean, { cause: (error as unknown as { cause?: unknown }).cause })
@@ -275,13 +228,8 @@ export const cappedRecovery = {
   },
 }
 
-/**
- * Telemetri retry yang dikirim lewat bus kernel (`provider:extension` kind
- * `minicode:retry`) supaya TUI bisa menampilkan SATU baris status yang
- * diperbarui di tempat. Angka `attempt`/`quota` berasal dari kebijakan
- * pemulihan yang sudah ada (bukan penghitung baru), jadi yang tampil benar-
- * benar percobaan yang sedang dijalankan — bukan "progres" rekaan.
- */
+/** Telemetri retry via bus kernel (`minicode:retry`) untuk satu baris status TUI.
+ * `attempt`/`quota` dari kebijakan existing, bukan progres rekaan. */
 export interface RecoveryRetryTelemetry {
   /** Percobaan ke-n (1-based) pada putaran provider saat ini. */
   readonly attempt: number
@@ -295,32 +243,19 @@ export interface RecoveryRetryTelemetry {
   readonly delayMs: number
 }
 
-/** Kind event bus untuk telemetri retry — kontrak struktural dengan UiBus. */
+/** Kind event bus telemetri retry (kontrak UiBus). */
 export const RECOVERY_RETRY_EVENT_KIND = "minicode:retry"
 
-/**
- * Kuota yang BENAR-BENAR dipakai untuk kategori ini.
- *
- * KENAPA tidak selalu `RECOVERY_ATTEMPT_QUOTA`: `cappedRecovery` memakai
- * anggaran bersama (6) hanya untuk server/network; kategori lain yang masih
- * di-retry jatuh ke kebijakan kernel (`maxProviderRetries` = 3, sama dengan
- * `RATE_LIMIT_RETRY_ATTEMPTS`). Menampilkan "x/6" untuk retry 429 akan
- * berbohong, dan itulah yang dicegah fungsi ini.
- */
+/** Kuota riil per kategori: anggaran bersama (6) hanya untuk server/network;
+ * kategori lain pakai 3. Mencegah label "x/6" yang berbohong untuk retry 429. */
 export function recoveryQuotaFor(category: string | undefined): number {
   return category === "server" || category === "network"
     ? RECOVERY_ATTEMPT_QUOTA
     : RATE_LIMIT_RETRY_ATTEMPTS
 }
 
-/**
- * Ambil durasi idle dari pesan guard (`provider sent nothing for 60000ms …`).
- *
- * KENAPA di-parse dari pesan asli, bukan dari konfigurasi: angka di layar
- * harus sama dengan yang benar-benar dipakai koneksi itu. Kalau guard
- * diubah (mis. per-model timeout), pesan errornya ikut berubah dan label
- * UI otomatis jujur tanpa drift konstanta. Null = bukan kegagalan stall.
- */
+/** Durasi idle di-parse dari pesan guard (bukan konfigurasi) agar label UI
+ * mengikuti timeout koneksi yang sebenarnya. Null = bukan stall. */
 export function stalledMsFromMessage(message: string): number | undefined {
   const match = /sent nothing for (\d+)ms/i.exec(message)
   if (!match) return undefined
@@ -337,30 +272,16 @@ export type PermissionControl = {
   getRestrictBash?(): boolean
 }
 
-/**
- * P12 S2.2 Slice 5 — kontrol WorkMode runtime (DISCUSS/PLAN/EXECUTE). Mirip
- * PermissionControl: handler WorkMode menyimpan WorkMode MUTABLE dan kernel
- * mengkonsultasi handler per tool call, jadi setWorkMode menggeser ceiling
- * tanpa mengganti handler. Composition root menangkap handle ini dan
- * meneruskannya ke footer/subagent/hooks (live, bukan snapshot).
- */
+/** Kontrol WorkMode runtime: handler menyimpan mode MUTABLE yang dikonsultasi
+ * kernel per tool call. Composition root meneruskan handle live (bukan snapshot). */
 export type WorkModeControl = {
   setWorkMode(m: WorkMode): void
   getWorkMode(): WorkMode
 }
 
-/**
- * Guidance system-prompt ber-keyed WorkMode (lapis intent), BUKAN PermissionMode.
- *
- * DISCUSS = investigasi baca-saja yang berorientasi diskusi: model membaca,
- * mencari, dan bernalar, lalu MENYAJIKAN temuan/opsi/trade-off untuk didiskusikan
- * dengan user — bukan menulis atau mengeksekusi apa pun.
- * BUILD (EXECUTE) = direktif aktif positif bahwa implementasi diizinkan dan
- * mengabaikan pembatasan DISCUSS pada histori percakapan sebelumnya.
- *
- * Ini *guidance* (behavior), bukan enforcement — enforcement tetap milik ceiling
- * handler `work-mode.ts`. Diekspor agar teruji langsung (pola repo pure/export).
- */
+/** Guidance WorkMode (lapis intent, bukan PermissionMode): DISCUSS = baca-saja
+ * dan sajikan opsi; BUILD = implementasi diizinkan, abaikan pembatasan DISCUSS
+ * lama. Enforcement tetap di handler `work-mode.ts`. */
 export function workModeHint(workMode: WorkMode): string {
   if (workMode === "DISCUSS") {
     return (
@@ -379,11 +300,8 @@ export function workModeHint(workMode: WorkMode): string {
 const PLAN_PM_HINT =
   "\n\nPLAN MODE: You are in read-only planning mode. Do NOT modify files, run bash, or use write/edit tools. Only read, search, and reason — then output a concrete implementation plan."
 
-/**
- * Penanda live `PermissionMode` (`Auto`, `Ask`, `Unrestricted`, dsb.) pada
- * system prompt supaya model memahami perilaku gerbang izin & tidak meminta
- * konfirmasi tertulis yang tidak perlu saat berganti mode.
- */
+/** Penanda `PermissionMode` live di system prompt agar model tak meminta
+ * konfirmasi tertulis saat mode berganti. */
 export function permissionModeHint(
   permissionMode: PermissionMode | undefined,
   workMode: WorkMode,
@@ -417,11 +335,8 @@ export interface ModeSnapshot {
 const workModeLabel = (wm: WorkMode): "BUILD" | "DISCUSS" =>
   wm === "EXECUTE" ? "BUILD" : "DISCUSS"
 
-/**
- * Catatan transisi singkat ketika `WorkMode` atau `PermissionMode` berubah antar
- * turn dalam sesi yang sama — disisipkan hanya di salinan wire request turn itu
- * supaya model tidak terkecoh oleh histori turn sebelumnya saat bolak-balik mode.
- */
+/** Catatan transisi mode antar-turn, disisipkan hanya di wire request turn itu
+ * agar model tak terkecoh histori saat bolak-balik mode. */
 export function buildModeTransitionNote(prev: ModeSnapshot, curr: ModeSnapshot): string {
   const parts: string[] = []
   if (prev.workMode !== curr.workMode) {
@@ -469,12 +384,9 @@ function annotateLastUserMessage(messages: readonly Message[], note: string): re
   return messages
 }
 
-/** [AUDIT] Skema tool yang benar-benar dikirim di wire LLM. `stream()` sudah
- * membuang `hiddenWireTools` dari `req.tools` sebelum estimasi token; endpoint
- * token estimate lewat `liveToolSchemas()` dulu TIDAK membuangnya, sehingga
- * code_run, mcp_*, ask_user ikut terhitung. Satu filter untuk dua jalur supaya
- * angka estimasi selalu mencerminkan wire yang nyata. Diekspor agar bisa
- * dipinjam test tanpa perlu membangun sesi penuh. */
+/** Skema tool yang benar-benar dikirim di wire (tanpa `hiddenWireTools`).
+ * Satu filter untuk `stream()` dan `liveToolSchemas()` agar estimasi token
+ * sesuai wire. Diekspor untuk test. */
 type WireToolSchema = Parameters<typeof estimateTools>[0][number]
 
 export function visibleWireToolSchemas<T extends WireToolSchema>(
@@ -498,7 +410,7 @@ export async function createMinicodeSession(
   > & {
     systemExtra?: string
     cwd?: string
-    /** Live model identity used for per-model token calibration. */
+    /** Identitas model live untuk kalibrasi token per-model. */
     getContextModel?: () => string | undefined
     permissionMode?:
       | "auto"
@@ -508,147 +420,91 @@ export async function createMinicodeSession(
       | "ask"
       | "allowlist"
       | "unrestricted"
-    /**
-     * [mode-architecture] Lapis kapabilitas bash TERPISAH dari permission mode.
-     * Bila true, `auto` membatasi bash ke allow-list (fallback "no-sandbox").
-     */
+    /** Kapabilitas bash terpisah dari mode: `auto` membatasi ke allow-list. */
     restrictBash?: boolean
     /** Pola bash tambahan dari config; diteruskan apa adanya ke gate izin. */
     bashAllowlist?: readonly string[]
-    /** S2.1: WorkMode adalah lapis intent TERPISAH dari PermissionMode.
-     * Default EXECUTE = perilaku lama (base handler apa adanya). Nilai selain
-     * EXECUTE memasang ceiling tipis di atas handler PM (lihat work-mode.ts);
-     * belum ada permukaan CLI/TUI — wiring itu slice integrasi berikutnya. */
+    /** WorkMode = lapis intent terpisah dari PermissionMode. EXECUTE = perilaku
+     * lama; mode lain memasang ceiling di atas handler PM (work-mode.ts). */
     workMode?: WorkMode
     /** Izinkan callback `ask` non-TTY (mis. broker persetujuan daemon) untuk tool gated. */
     allowNonTtyAsk?: boolean
-    /** Teruskan flag --allow-local-config ke permission handler (allowlist
-     * lokal). Default deny — lihat loadAllowlist. */
+    /** Flag --allow-local-config ke permission handler (default deny). */
     allowLocalConfig?: boolean
     concurrency?: number
     writeConcurrency?: number
     turnCount?: number
     stepCount?: number
-    /**
-     * [Fase 3 / LOOP-INV-11] Batas keras jumlah turn lintas resume. Bila
-     * `state.turnCount >= maxTurns`, `session.run()` menolak deterministik
-     * dengan `maxTurnsExceededError` (`AgentError` ber-kind `budget_exceeded`).
-     */
+    /** Batas keras turn lintas resume; `run()` menolak deterministik dengan
+     * `maxTurnsExceededError` saat `turnCount >= maxTurns`. */
     maxTurns?: number
-    /**
-     * [Fase 3 / LOOP-G19, LOOP-G27] Konfigurasi detektor no-progress &
-     * oscillation. Default aktif; `false` menonaktifkan eksplisit untuk test
-     * khusus.
-     */
+    /** Konfigurasi detektor no-progress/osilasi; aktif default, `false` untuk test. */
     noProgress?: NoProgressOptions | false
-    /** Hook opsional agar composition root dapat mereset riwayat osilasi saat verify hijau. */
+    /** Hook reset riwayat osilasi saat verify hijau. */
     onNoProgress?: (detector: NoProgressDetector) => void
-    /** Mengembalikan `true` jika batas jendela model dipin eksplisit oleh user
-     *  (`--context-window` atau `origin: "user"`), sehingga guard estimasi
-     *  lokal tidak boleh menaikkan jendela tanpa bukti error dari provider. */
+    /** True jika jendela dipin user: guard lokal tak boleh menaikkannya tanpa
+     * bukti error provider. */
     isExplicitContextWindow?: (model?: string) => boolean
-    /**
-     * Dipanggil saat jendela konteks dinaikkan otomatis setelah overflow
-     * terverifikasi. Composition root memakainya untuk memberi tahu user
-     * (footer/log) dan — bila diinginkan — mempersistensikan nilai baru.
-     * Tidak pernah dipanggil untuk 429/402/auth/jaringan.
-     */
+    /** Dipanggil saat jendela naik setelah overflow terverifikasi (bukan
+     * 429/402/auth/jaringan) untuk notifikasi/persistensi oleh composition root. */
     onContextWindowEscalated?: (info: {
       model: string
       fromTokens: number
       toTokens: number
       observedTokens: number
     }) => void
-    /**
-     * [T-008 OBSERVATION.md] Dipanggil ketika batas langkah per turn naik satu
-     * tangga setelah `max_steps_exceeded`. Composition root memakainya untuk
-     * memberi tahu user (footer/log). Tidak pernah dipanggil untuk abort,
-     * timeout, atau error provider non-langkah.
-     */
+    /** Dipanggil saat batas langkah naik setelah `max_steps_exceeded` (bukan
+     * abort/timeout/error provider) untuk notifikasi user. */
     onMaxStepsEscalated?: (info: {
       fromSteps: number
       toSteps: number
       observedSteps: number
     }) => void
-    /**
-     * [Area B · PROMPT 06] Penyimpanan binding persetujuan milik SESI.
-     *
-     * Default: dibuat baru per sesi (lihat implementasi). Composition root
-     * boleh mengoper instance sendiri bila perlu membagikannya dengan lapisan
-     * lain; bila tidak, tiap sesi punya store sendiri sehingga bukti
-     * persetujuan tak pernah lintas sesi.
-     */
+    /** Store binding persetujuan per-sesi (default) agar bukti tak lintas sesi;
+     * composition root boleh mengoper instance bersama bila perlu. */
     approvalBindings?: ApprovalBindingStore
-    /** Menerima handle kontrol mode permission. Kernel tidak mengekspos
-     * `config`, jadi satu-satunya cara mengubah mode saat runtime (mis.
-     * Shift+Tab di TUI) adalah menangkap handler di sini. */
+    /** Handle kontrol mode permission: kernel tak expose `config`, jadi mode
+     * runtime (Shift+Tab) hanya bisa diubah lewat handler ini. */
     onPermissions?: (control: PermissionControl) => void
-    /** P12 S2.2 Slice 5 — menerima handle kontrol WorkMode runtime (setWorkMode
-     * / getWorkMode). Sama seperti onPermissions: kernel tidak mengekspos
-     * `config`, jadi satu-satunya cara menggeser WorkMode saat runtime (mis.
-     * command `/work-mode` di TUI) adalah menangkap handler di sini. */
+    /** Handle kontrol WorkMode runtime; sama seperti onPermissions (kernel tak
+     * expose `config`). */
     onWorkMode?: (control: WorkModeControl) => void
-    /** View persetujuan tool (di-inject dari cli/; tanpa ini mode interaktif
-     * menolak semua prompt — aman untuk headless/library). */
+    /** View persetujuan (diinject cli/); tanpa ini mode interaktif menolak semua prompt (aman untuk headless). */
     ask?: PermissionAsk
-    /** Hook observability persetujuan Fase 1 (diteruskan ke permission
-     *  handler; tanpa ini gate identik seperti dulu). */
+    /** Hook observability persetujuan (diteruskan ke permission handler). */
     onApprovalEvent?: ApprovalEventHook
-    /**
-     * [PHASE 6U] Inject a permission handler, bypassing the mode-derived one.
-     *
-     * [DESIGN DECISION] Exists so an unattended autonomous execution can carry the
-     * 6S `AutonomousPermissionHandler` instead of a `readonly` MODE. Without this
-     * seam a production autonomous child would silently get the interactive
-     * policy, which 6S proved is (a) revocable at runtime via `__setMode` and
-     * (b) admits `web_fetch`/`web_search`. That would be a real bypass of the
-     * autonomous permission policy, introduced purely by composing for
-     * production.
-     *
-     * When provided, `permissionMode` becomes kernel metadata only and
-     * `onPermissions` is not wired — there is no mode to control.
-     */
+    /** Injeksi handler permission, menggantikan handler turunan-mode. Tanpa seam
+     * ini, child otonom produksi diam-diam memakai policy interaktif (bisa
+     * dicabut via `__setMode`, mengizinkan web_fetch/web_search) — bypass nyata.
+     * Saat diisi, `permissionMode` hanya metadata kernel dan `onPermissions`
+     * tidak di-wire (tak ada mode untuk dikontrol). */
     permissionHandler?: PermissionHandler
-    /**
-     * [Fase 1 / LOOP-INV-03] Barrier yang dijalankan kernel SEBELUM
-     * `tool.execute` untuk setiap panggilan yang diizinkan policy.
-     *
-     * Dipanggil dari dalam `permissions.check` (setelah keputusan "allow",
-     * sebelum kembali ke kernel), jadi:
-     * - hanya tool yang benar-benar akan dieksekusi yang menulis bukti;
-     * - kegagalan barrier menggagalkan panggilan (kernel mengubahnya menjadi
-     *   hasil tool error), bukan menjalankan efek tanpa jejak.
-     *
-     * Composition root memakainya untuk menulis intent jurnal secara AWAITED
-     * dan menandai operasi in-flight sebelum efek samping terjadi. Tanpa opsi
-     * ini perilaku identik seperti sebelumnya.
-     */
+    /** Barrier sebelum `tool.execute` (dari `permissions.check` setelah allow):
+     * hanya tool yang benar-benar jalan yang menulis bukti; kegagalan barrier
+     * menggagalkan panggilan, bukan efek tanpa jejak. Dipakai untuk menulis
+     * intent jurnal secara awaited sebelum efek. */
     beforeToolEffect?: (call: { id: string; name: string; args: unknown }) => Promise<void>
-    /** Tool tak-tersedia yang skemanya disembunyikan pada request wire LLM
-     * (tidak mengubah registry `tools`/permission kanonik). */
+    /** Sembunyikan skema tool dari wire LLM (registry/permission tak berubah). */
     hiddenWireTools?: ReadonlySet<string>
   },
 ): Promise<Session> {
   // Normalisasi root sekali di composition agar ToolContext selalu memiliki path tepercaya.
   const defaultCwd = resolve(opts.cwd ?? process.cwd())
-  // Fail-closed lebih awal (sebelum provider/system prompt): WorkMode non-
-  // EXECUTE di atas handler terinjeksi belum punya komposisi yang terbukti
-  // aman — jangan pernah membungkus atau melewati policy yang diinjeksi 6S.
+  // Fail-closed lebih awal: WorkMode non-EXECUTE + handler terinjeksi belum
+  // terbukti aman — jangan membungkus policy 6S.
   const resolvedWorkMode: WorkMode = normalizeWorkMode(opts.workMode ?? "EXECUTE")
   if (opts.permissionHandler !== undefined && resolvedWorkMode !== "EXECUTE") {
     throw new Error(
       `createMinicodeSession: workMode ${resolvedWorkMode} dengan permissionHandler terinjeksi belum didukung (fail-closed S2.1)`,
     )
   }
-  // P0.2 (G-PROMPT-RT): rakit bagian dasar sekali, lalu tambahkan `workModeHint`
-  // + `permissionModeHint` secara LIVE per-turn lewat pembungkus provider supaya
-  // transisi runtime `/work-mode` maupun `/mode` & `/unrestric` tercermin
-  // langsung di StreamRequest.system tanpa mengedit vendor/minicore.
+  // Dasar prompt dirakit sekali; hint mode ditambah LIVE per-turn lewat wrapper
+  // provider agar transisi `/work-mode`/`/mode` tercermin tanpa edit vendor.
   const baseSystem = await buildSystemPrompt({
     cwd: defaultCwd,
     extra: opts.systemExtra ?? "",
     signal: (opts as unknown as { signal?: AbortSignal }).signal,
-    // v0.33: cadangkan ruang untuk hint live agar total system ≤ 8000 char.
+    // Cadangkan ruang hint live agar total system ≤ cap.
     reserveForLiveHints: 1200,
     allowLocalConfig: opts.allowLocalConfig,
   })
@@ -680,17 +536,11 @@ export async function createMinicodeSession(
     ...rest
   } = opts
   if (!provider) throw new Error("createMinicodeSession: provider is required")
-  // [Area B · PROMPT 06] Penyimpanan binding persetujuan milik SESI ini.
-  // Dibuat di sini (bukan global) supaya dua sesi dalam satu proses tak
-  // saling memakai bukti persetujuan. Root = cwd sesi (sama dengan yang
-  // dipakai tool untuk resolve path target).
+  // Store binding per-sesi (bukan global): dua sesi tak saling pakai bukti.
+  // Root = cwd sesi (sama untuk resolve path target tool).
   const approvalBindings = _approvalBindings ?? new ApprovalBindingStore(defaultCwd)
-  // F-09: sanitasi batas di lapisan app (mencakup pemanggil library langsung,
-  // bukan hanya CLI yang sudah sanitasi di cli/setup.ts + cli/index.ts).
-  // Tanpa ini: timeoutMs NaN/negatif = abort instan; maxSteps 0/negatif =
-  // selalu throw, Infinity = loop luar tak terbatas; concurrency 0 = zero
-  // worker → hasil undefined (korupsi diam-diam). Nilai tak valid → default
-  // kernel (hilangkan kunci), bukan error — sesi tetap jalan aman.
+  // Sanitasi batas di lapisan app (juga pemanggil library): nilai invalid
+  // (NaN/negatif/0/Infinity) → default kernel, bukan error, agar sesi aman.
   {
     const t = (rest as Record<string, unknown>).timeoutMs
     if (typeof t === "number" && (!Number.isFinite(t) || t < 0))
@@ -716,18 +566,11 @@ export async function createMinicodeSession(
     typeof maxTurns === "number" && Number.isFinite(maxTurns) && maxTurns >= 1
       ? Math.floor(maxTurns)
       : undefined
-  // P12 S2.2 Slice 5 — handler WorkMode SELALU dibungkus (bukan `compose`,
-  // yang mengembalikan base polos untuk EXECUTE). Alasannya runtime upgrade:
-  // `compose` EXECUTE = base tanpa __setWorkMode, jadi operator tak bisa
-  // menggeser EXECUTE→DISCUSS/PLAN di sesi yang sama. Wrapper EXECUTE
-  // mendelegasikan keputusan ke base apa adanya (perilaku identik) tetapi
-  // tetap menyediakan __setWorkMode.
-  //
-  // Tool Access Policy: tool terotorisasi = tool yang terlihat/terdaftar
-  // (termasuk MCP runtime dari server terkonfigurasi). Dipakai `auto` untuk
-  // membedakan MCP sah dari MCP tak-terkonfigurasi (fail-closed deny).
-  // v7.33: LIVE, bukan snapshot — `rest.tools` adalah array yang dimutasi
-  // tool-layer saat Shift+Tab (lihat createLiveAuthorizedTools).
+  // Handler WorkMode selalu dibungkus (bukan `compose`: EXECUTE polos tak punya
+  // __setWorkMode, mengunci transisi mode). Wrapper mendelegasikan ke base tapi
+  // menyediakan __setWorkMode.
+  // Tool terotorisasi = tool terlihat/terdaftar (termasuk MCP runtime); `auto`
+  // membedakan MCP sah dari tak-terkonfigurasi (fail-closed). Predikat LIVE.
   const authorized = createLiveAuthorizedTools(rest.tools)
   const permissions =
     opts.permissionHandler ??
@@ -743,8 +586,7 @@ export async function createMinicodeSession(
         ...(bashAllowlist ? { bashAllowlist } : {}),
         onApprovalEvent,
         hasAuthorizedTool: authorized.hasAuthorizedTool,
-        // [Area B · PROMPT 06] Store per-sesi: persetujuan dari sesi A tak
-        // bisa dipakai sebagai bukti di sesi B.
+        // Store per-sesi: bukti sesi A tak berlaku di sesi B.
         approvalBindings,
       }),
       root: defaultCwd,
@@ -782,34 +624,22 @@ export async function createMinicodeSession(
         })
   if (detector && onNoProgress) onNoProgress(detector)
 
-  // [Fase 1 / LOOP-INV-03 + Fase 3 / LOOP-G19, LOOP-G27] Barrier sebelum efek:
-  //   1. `detector.assertBeforeCall` memblokir panggilan yang terdeteksi
-  //      no-progress / osilasi SEBELUM intent jurnal ditulis & sebelum efek.
-  //   2. `detector.capturePreMutation` merekam hash pra-efek untuk osilasi.
-  //   3. `beforeToolEffect` writes intent jurnal secara awaited.
-  //
-  // [Area B · PROMPT 06] Barrier ini juga BATAS EKSEKUSI verifikasi
-  // persetujuan setelah await intent jurnal + no-progress. Executor memeriksa
-  // versi otorisasi lagi tepat sebelum tool.execute, setelah listener started.
-  // Wrapper per-call tidak mengubah array tool LIVE milik kernel/setWorkMode.
-  //
-  // Alasan deny "approval stale" dicatat terpisah karena handler base
-  // menyimpan alasannya di peta privat; kernel membacanya lewat
-  // `describeDenial` yang kita override.
+  // Barrier sebelum efek: detektor no-progress/osilasi → capture hash pra-efek
+  // → `beforeToolEffect` menulis intent jurnal secara awaited. Juga jadi batas
+  // eksekusi verifikasi approval (executor cek versi otorisasi lagi sebelum
+  // tool.execute). Alasan deny "approval stale" disimpan terpisah karena
+  // handler base memakai peta privat; kernel membacanya via `describeDenial`.
   let authorizationVersion = 0
   const staleDenyReasons = new Map<string, string>()
-  // Barrier selalu dipasang (bukan hanya bila detector/journal ada): di sini
-  // verifikasi persetujuan terjadi, dan ia harus berlaku di SETIAP konfigurasi
-  // — termasuk sesi tanpa jurnal dan tanpa detektor.
+  // Barrier selalu dipasang: verifikasi approval berlaku di semua konfigurasi,
+  // termasuk sesi tanpa jurnal/detektor.
   const withEffectBarrier: PermissionHandler = {
     ...permissions,
     check: async (call, deps) => {
       const authorizedVersion = authorizationVersion
       const decision = await permissions.check(call, deps)
-      // Kernel vendored saat ini hanya memblokir literal "deny". Validasi di
-      // composition root ini menjaga production dispatch fail-closed tanpa
-      // mengubah salinan MiniCore yang wajib disinkronkan dari repo sumber.
-      // Handler ASK yang sah tetap menunggu approval lalu mengembalikan allow/deny.
+      // Kernel hanya memblokir literal "deny": validasi di sini menjaga
+      // fail-closed tanpa mengubah salinan MiniCore. Handler ASK tetap sah.
       if (decision !== "allow") return "deny"
       const recordStaleDeny = (reason: string): "deny" => {
         const id = (call as { id?: string } | null)?.id
@@ -820,26 +650,18 @@ export async function createMinicodeSession(
         }
         return "deny"
       }
-      // Ambil (konsumsi) bukti persetujuan milik call ini — sekali saja.
-      // Diambil SEBELUM await supaya tak ada binding tersisa kalau barrier
-      // memblokir call (tak ada deny lalu tak ada jejak).
+      // Konsumsi binding sekali, sebelum await: tak ada sisa binding bila barrier memblokir.
       const currentArgsHash = canonicalArgsHash(call.args)
       const binding = approvalBindings.take(call.name, currentArgsHash, call.id)
-      // [AUDIT-FIX #1] Fail-closed terhadap mutasi args antara prompt dan
-      // eksekusi. Binding kini diambil berdasarkan callId (identitas stabil),
-      // jadi tetap ketemu walau args berubah — beda dengan kunci lama yang
-      // pakai argsHash dan membuat `take` miss ⇒ "no-binding" ⇒ lolos. Args
-      // yang AKAN dieksekusi wajib sama dengan args yang disetujui; bila beda,
-      // ini persetujuan BASI dan ditolak dengan alasan khusus. Jalur tanpa
-      // binding (auto/allowlist/headless-injected-ask) tetap lewat: `binding`
-      // undefined ⇒ Tak ada yang dibandingkan, persis seperti sebelum-nya.
+      // Fail-closed mutasi args: binding diambil via callId (stabil), bukan
+      // argsHash (dulu `take` miss ⇒ lolos). Args eksekusi wajib sama dengan
+      // args disetujui; tanpa binding (auto/allowlist/headless) tetap lewat.
       if (binding && binding.argsHash !== currentArgsHash) {
         return recordStaleDeny(
           "approval stale: args changed since approval — request fresh approval",
         )
       }
-      // Verifikasi awal SEBELUM preflightIntent menulis record `pending` ke
-      // jurnal agar persetujuan basi / pergeseran mode tidak menodai jurnal.
+      // Verifikasi sebelum preflight menulis `pending` agar approval basi tak menodai jurnal.
       const preVerdict = verifyApprovalBinding(binding)
       if (authorizedVersion !== authorizationVersion || preVerdict.kind === "stale") {
         return recordStaleDeny(
@@ -854,8 +676,7 @@ export async function createMinicodeSession(
       if (beforeToolEffect !== undefined) {
         await beforeToolEffect(call)
       }
-      // Verifikasi lapis-2 (batas eksekusi): fail-closed bila target atau mode
-      // berubah selama await no-progress / intent jurnal berlangsung.
+      // Verifikasi lapis-2: fail-closed bila target/mode berubah saat await berlangsung.
       const verdict = verifyApprovalBinding(binding)
       if (authorizedVersion !== authorizationVersion || verdict.kind === "stale") {
         return recordStaleDeny(
@@ -878,32 +699,24 @@ export async function createMinicodeSession(
       return permissions.describeDenial?.(call)
     },
   }
-  // [PHASE 6U] An INJECTED handler is not a mode, and has no mode control.
-  //
-  // [DESIGN DECISION] `onPermissions` and `livePermissionMode` are deliberately NOT
-  // wired when a handler was injected. The 6S autonomous handler is a policy, not a
-  // mode: it has no `__setMode`, and exposing one would hand a Shift+Tab caller the
-  // ability to revoke read-only on an unattended executor — precisely the hole 6S
-  // F1 closed. `permissionMode` stays `"readonly"` purely as kernel metadata
-  // (ToolContext's label); the DECISION is the handler's.
+  // Handler terinjeksi = policy, bukan mode: tak punya `__setMode`. `onPermissions`
+  // sengaja tidak di-wire agar Shift+Tab tak bisa mencabut readonly pada executor
+  // otonom (lubang yang ditutup 6S). `permissionMode` hanya metadata kernel.
   if (onPermissions && !injected) {
     onPermissions({
       setMode: (m) => {
         if (withMode.__getMode() !== m) authorizationVersion++
         withMode.__setMode(m)
-        // v7.33: segarkan otorisasi saat PM berganti (DEFENSE-IN-DEPTH;
-        // predikat juga refresh per-call, jadi aman walau wiring berubah).
+        // Segarkan otorisasi saat PM berganti (defense-in-depth; predikat juga refresh per-call).
         authorized.refresh()
       },
       getMode: () => withMode.__getMode(),
-      // restrictBash adalah opsi tetap (bukan state handler) — dibaca langsung
-      // dari closure, bukan lewat wrapper WorkMode yang tak meneruskannya.
+      // restrictBash = opsi tetap dari closure, bukan state handler WorkMode.
       getRestrictBash: () => restrictBash === true,
     })
   }
-  // P12 S2.2 Slice 5 — handle kontrol WorkMode runtime. Hanya di-wire bila
-  // handler BUKAN terinjeksi (handler terinjeksi = policy, bukan mode; juga
-  // tak punya __setWorkMode — fail-closed, sama seperti onPermissions).
+  // Kontrol WorkMode hanya di-wire bila handler bukan terinjeksi (policy tak
+  // punya __setWorkMode — fail-closed, sama seperti onPermissions).
   if (onWorkMode && !injected) {
     const wm = permissions as typeof permissions & {
       __setWorkMode(m: WorkMode): void
@@ -914,8 +727,7 @@ export async function createMinicodeSession(
         const norm = normalizeWorkMode(m)
         if (wm.__getWorkMode() !== norm) authorizationVersion++
         wm.__setWorkMode(norm)
-        // v7.33: segarkan otorisasi saat WM berganti (DEFENSE-IN-DEPTH;
-        // predikat juga refresh per-call, jadi aman walau wiring berubah).
+        // Segarkan otorisasi saat WM berganti (defense-in-depth; predikat juga refresh per-call).
         authorized.refresh()
       },
       getWorkMode: () => wm.__getWorkMode(),
@@ -931,12 +743,8 @@ export async function createMinicodeSession(
   let lastTurnMode: ModeSnapshot | null = null
   let activeTurnTransitionNote = ""
   let turnSentStream = false
-  // [Audit] Tiga state di atas BERSAMA untuk semua run() dalam sesi ini. Run
-  // kedua yang datang saat run pertama masih aktif akan ditolak core sebagai
-  // "busy"; tanpa penanda pemilik, penolakan itu menimpa state dan finally-nya
-  // menghapus anotasi transisi / menggagalkan update lastTurnMode milik turn
-  // yang masih hidup. Token monoton + pemilik aktif menjaga cleanup tetap milik
-  // run yang benar-benar berjalan.
+  // State bersama semua run(); run "busy" yang ditolak core tak boleh menimpa
+  // state turn aktif lewat finally. Token monoton + pemilik aktif menjaga cleanup.
   let runSeq = 0
   let stateOwner = 0
   const computeLiveSystem = (): string => {
@@ -951,8 +759,7 @@ export async function createMinicodeSession(
       perfCount("session.computeLiveSystem", perfEnabled() ? performance.now() - __t : 0)
     }
   }
-  // [CTX] Kalibrasi dipisahkan per identitas model agar berpindah ke model
-  // lain tidak membawa rasio tokenizer/provider dari sesi sebelumnya.
+  // Kalibrasi per-model: pindah model tak membawa rasio tokenizer/provider lama.
   const calibrations = new Map<string, ReturnType<typeof createCalibratedEstimator>>()
   const contextModelKey = (model?: string): string => model?.trim() || "__default__"
   const calibrationFor = (model?: string) => {
@@ -973,35 +780,28 @@ export async function createMinicodeSession(
       return selected
     }
   }
-  // Estimator presisi: pakai tokenizer EXACT (bila vocab tersedia/cache) lalu
-  // jatuh ke estimasi density + kalibrasi usage. Menutup under-count chars/4
-  // pada model open (deepseek/qwen/mistral/gemma/phi) tanpa tokenizer ter-bundle.
+  // Estimator presisi: tokenizer EXACT bila tersedia, else density + kalibrasi;
+  // menutup under-count chars/4 pada model open tanpa tokenizer ter-bundle.
   const preciseEstimator = (model: string | undefined, text: string): number => {
     const tok = model ? getCachedTokenizer(model) : null
     if (tok) return Math.ceil(tok.countTokens(text))
     return calibrationFor(model).estimator(text)
   }
   const calibratedEstimator = (text: string) => preciseEstimator(currentContextModel(), text)
-  // Warm tokenizer model saat ini di belakang layar (fire-and-forget): unduh vocab
-  // dari HuggingFace bila tersedia, cache lokal; request berikutnya otomatis presisi.
+  // Warm tokenizer di latar (fire-and-forget): vocab di-cache, request berikut presisi.
   void loadTokenizer(currentContextModel() ?? "").catch(() => {})
   let lastRequestLocalEstimate: { model: string; tokens: number } | undefined
-  // Input asli terakhir yang dilaporkan provider (`usage.prompt_tokens`). Dipakai
-  // sebagai ANCHOR (lantai) estimasi admission: estimator chars/4 under-count
-  // kode/JSON hingga beberapa kali lipat, sehingga tanpa anchor request berikutnya
-  // bisa melampaui jendela tanpa disadari. Nilai yang progresif-kumulatif dari
-  // gateway tetap aman karena kita hanya mengambil nilai TERBESAR per turn.
+  // ANCHOR input provider (usage.prompt_tokens) = lantai estimasi admission:
+  // chars/4 under-count kode/JSON. Ambil nilai terbesar per turn agar aman
+  // terhadap usage kumulatif gateway.
   let lastProviderInputTokens: number | undefined
   let lastRequestMessageCount = 0
   const contextWindowForModel = (model?: string): number => {
     const __t = perfEnabled() ? performance.now() : 0
     try {
-      // Eskalasi adaptif menang atas resolusi statis: ia adalah bukti dari
-      // endpoint bahwa jendela lebih besar daripada tebakan. Tetap tunduk pada
-      // nilai eksak operator? TIDAK: operator yang memasang flag eksplisit sudah
-      // dihormati di `contextWindowBase`, namun bila flag itu TERBUKTI kurang
-      // (overflow nyata terjadi), menaikkan satu anak tangga lebih benar daripada
-      // mengulang kegagalan yang sama.
+      // Eskalasi adaptif = bukti endpoint, menang atas resolusi statis. Pin operator
+      // dihormati di `contextWindowBase`, tapi bila terbukti kurang (overflow
+      // nyata), naik satu tangga lebih baik daripada mengulang kegagalan.
       const escalated = escalatedWindows.get(escalationKey(model))
       if (escalated !== undefined) return escalated
       return contextWindowBase(model)
@@ -1009,9 +809,8 @@ export async function createMinicodeSession(
       perfCount("session.contextWindowForModel", perfEnabled() ? performance.now() - __t : 0)
     }
   }
-  // Batas output model: dipakai sebagai reserve output (bukan angka tetap 20k).
-  // Dicari dari metadata provider (`maxOutputTokens`, diisi dari `/models` bila
-  // endpoint melaporkannya); tanpa metadata → `undefined` = reserve default.
+  // Batas output untuk reserve (bukan angka tetap): dari metadata provider
+  // (`/models`); tanpa metadata → reserve default.
   const maxOutputTokensForModel = (model?: string): number | undefined => {
     try {
       const fromCore = rest.maxOutputTokensForModel?.(model)
@@ -1029,16 +828,14 @@ export async function createMinicodeSession(
     } catch {}
     return undefined
   }
-  // ── Eskalasi adaptif jendela konteks ───────────────────────────────────
-  // Nilai yang dinaikkan SESI INI saja (bukan ditulis ke config: perubahan
-  // konfigurasi harus lewat /sync atau niat operator). Kunci = `provider::model`
-  // ternormalisasi; nilai = jendela hasil eskalasi.
+  // ── Eskalasi jendela konteks ──
+  // Hanya untuk sesi ini (bukan config: itu niat operator). Kunci `provider::model`.
   const escalatedWindows = new Map<string, number>()
   const escalationKey = (model?: string): string => {
     const raw = model ?? currentContextModel() ?? "default"
     return raw.includes("::") ? raw : `${provider.id}::${raw}`
   }
-  /** Jendela "dasar" sebelum eskalasi: hasil resolusi biasa, tanpa eskalasi. */
+  /** Jendela dasar sebelum eskalasi. */
   const contextWindowBase = (model?: string): number => {
     const explicit = rest.contextWindowTokens
     try {
@@ -1051,27 +848,19 @@ export async function createMinicodeSession(
       ? explicit
       : DEFAULT_FALLBACK_CONTEXT_WINDOW_TOKENS
   }
-  /**
-   * Naikkan jendela satu anak tangga setelah overflow terverifikasi.
-   *
-   * KENAPA otomatis: user yang sedang bekerja tidak bisa tahu ada anak tangga
-   * berikutnya — dan sesi yang mati di tengah jalan jauh lebih mahal daripada
-   * satu eskalasi. Namun ia tetap BOUNDED: satu langkah per kejadian, tak
-   * pernah melebihi batas atas, dan hasilnya hanya berlaku untuk sesi ini.
-   */
+  /** Naik satu tangga setelah overflow terverifikasi. Otomatis (user tak tahu
+   * tangga berikutnya; sesi mati lebih mahal), tapi BOUNDED: satu langkah per
+   * kejadian, tak melewati batas atas, hanya sesi ini. */
   const escalateContextWindow = (
     model: string | undefined,
     observedTokens: number,
     fromClientGuard = false,
   ) => {
-    // Jika operator mem-pin jendela eksplisit (--context-window / origin user),
-    // guard kalibrasi lokal saja tidak boleh menaikkan pin tersebut tanpa
-    // bukti error kapasitas dari provider.
+    // Pin eksplisit operator tak boleh dinaikkan guard lokal tanpa bukti error provider.
     if (fromClientGuard && rest.isExplicitContextWindow?.(model)) return
     const key = escalationKey(model)
     const base = escalatedWindows.get(key) ?? contextWindowBase(model)
-    // Bila pengamatan sudah jelas melampaui jendela dasar, naik dari nilai
-    // pengamatan; kalau tidak, naik dari jendela yang sekarang dipakai.
+    // Naik dari nilai pengamatan bila sudah melewati dasar; jika tidak, dari jendela kini.
     const from = Math.max(base, Number.isFinite(observedTokens) ? observedTokens : 0)
     const next = nextLadderStep(from)
     if (next === undefined || next <= base) return
@@ -1086,14 +875,10 @@ export async function createMinicodeSession(
     } catch {}
   }
 
-  // ── Eskalasi adaptif batas langkah (T-008 OBSERVATION.md) ──────────────
-  // Batas langkah adalah backstop, bukan anggaran kerja. Turn yang mentok
-  // karena batas tidak boleh membuang kerja yang sudah dilakukan: naik satu
-  // tangga untuk turn berikutnya, bounded oleh STEP_LIMIT_CEILING. Berlaku
-  // hanya untuk sesi ini (bukan menulis config: itu niat operator).
-  //
-  // KENAPA dipicu HANYA oleh `max_steps_exceeded`: error lain (abort, timeout,
-  // provider, budget konteks) tidak akan tertolong oleh langkah tambahan.
+  // ── Eskalasi batas langkah ──
+  // Backstop, bukan anggaran: turn mentok naik satu tangga (bounded) untuk turn
+  // berikutnya, hanya sesi ini. Dipicu HANYA oleh `max_steps_exceeded` — error
+  // lain tak tertolong langkah tambahan.
   let effectiveMaxSteps =
     typeof rest.maxSteps === "number" && Number.isFinite(rest.maxSteps) && rest.maxSteps >= 1
       ? Math.floor(rest.maxSteps)
@@ -1145,10 +930,8 @@ export async function createMinicodeSession(
         estimateMessages(messages, estimator) +
         estimateSystem(system, estimator) +
         estimateTools(tools, estimator)
-      // Anchor ukuran nyata: jangan biarkan estimasi (chars/4, bisa under-count
-      // 2–5× pada kode/JSON) jatuh di bawah input asli terakhir provider. Input
-      // hanya tumbuh antar-turn normal; bila jumlah pesan menyusut (kompaksi,
-      // rewind/checkpoint, atau clear), reset anchor agar tidak memicu overflow palsu.
+      // Jangan biarkan estimasi (chars/4, under-count 2–5×) jatuh di bawah anchor
+      // provider. Reset anchor bila pesan menyusut (kompaksi/rewind/clear).
       if (messages.length < lastRequestMessageCount) {
         lastProviderInputTokens = undefined
       }
@@ -1160,12 +943,9 @@ export async function createMinicodeSession(
         model: contextModelKey(estimatorModel),
         tokens: localInputTokens,
       }
-      // Sisakan ruang framing dan respons minimum. Tanpa reserve, request yang
-      // tepat menyentuh batas provider tetap ditolak setelah biaya dibakar.
-      // Reserve dihitung dari anggaran konteks terpusat (`context-budget.ts`):
-      // `min(max_output_tokens, 20k)` dengan lantai 4k dan lantai 2% jendela.
-      // Nilai lama `min(256, limit/10)` praktis nol untuk jendela besar, jadi
-      // model berjendela 1M tetap kehabisan ruang jawaban di ambang batas.
+      // Reserve ruang jawaban dari `context-budget.ts` (min(max_output,20k),
+      // lantai 4k/2%). Tanpa ini request di ambang batas ditolak setelah biaya
+      // dibakar (nilai lama ~256 praktis nol untuk jendela 1M).
       let reserve = outputReserveFor(limit, maxOutputTokens)
       let outputAllowance = Math.max(0, limit - inputTokens - reserve)
       let outputTokens = 0
@@ -1178,19 +958,17 @@ export async function createMinicodeSession(
           inputTokens: input,
           outputTokens: output,
           windowTokens: limit,
-          // Diagnostik: factor kalibrasi (>=1) dan estimasi lokal tanpa
-          // kalibrasi (chars/4). Bila factor besar sementara localInput kecil,
-          // cutoff ini palsu (inflasi kalibrasi) — bukan konteks benar-benar penuh.
+          // Diagnostik: factor besar + localInput kecil = cutoff palsu (inflasi
+          // kalibrasi), bukan konteks penuh.
           factor: calibration.snapshot().factor,
           localInputTokens: localInputTokens,
           storeMessages: messages.length,
         },
       })
       let clientOverflowErr: ProviderError | undefined
-      // `reclassified` = 400 generik yang KITA duga kehabisan konteks. Kasus
-      // itu tidak boleh menaikkan jendela: sesi nyata menaikkan 1M→2M karena
-      // 400 biasa, lalu kompaksi baru berjalan di ~1.9M token (input turn
-      // membengkak 9,3 juta token). Eskalasi hanya untuk bukti overflow.
+      // `reclassified` = 400 generik yang diduga konteks penuh: jangan menaikkan
+      // jendela (dulu 1M→2M dan input membengkak 9,3 juta token). Eskalasi hanya
+      // untuk overflow terbukti.
       let reclassifiedOverflow = false
       const overflow = (
         actualInput = inputTokens,
@@ -1198,13 +976,11 @@ export async function createMinicodeSession(
         clientGuard = false,
         reclassified = false,
       ) => {
-        // context_length_exceeded agar kernel menempuh force_compact_and_retry,
-        // plus eskalasi adaptif terikat (hanya jalur overflow, bukan 429/402/auth).
+        // `context_length_exceeded` → kernel force_compact_and_retry + eskalasi terikat (bukan 429/402/auth).
         if (!reclassified) escalateContextWindow(model, actualInput + actualOutput, clientGuard)
         const total = actualInput + actualOutput
-        // Pesan harus jujur: dulu ia selalu menulis "exceeds" walau angka yang
-        // dilaporkan jauh di bawah jendela (mis. "input 334644 + 0 exceeds
-        // 2097152"), yang membuat diagnosis user salah arah.
+        // Pesan jujur: jangan tulis "exceeds" bila angka jauh di bawah jendela
+        // (dulu menyesatkan diagnosis user).
         const detail = reclassified
           ? `the provider rejected this request (400) while the local estimate was ${actualInput} of ${limit} tokens, so it is being treated as a context overflow`
           : total >= limit
@@ -1244,9 +1020,8 @@ export async function createMinicodeSession(
               typeof effective?.effective === "string" &&
               typeof effective.provider === "string"
             ) {
-              // Router fallback/substitution is a different model boundary.
-              // Keep the smaller of the requested and effective capacities so
-              // a failed primary provider cannot silently widen the budget.
+              // Fallback router = boundary model lain. Ambil kapasitas terkecil
+              // agar provider utama yang gagal tak melebarkan budget diam-diam.
               const effectiveModel = `${effective.provider}::${effective.effective}`
               const effectiveLimit = contextWindowForModel(effectiveModel)
               maxOutputTokens = maxOutputTokensForModel(effectiveModel) ?? maxOutputTokens
@@ -1308,26 +1083,17 @@ export async function createMinicodeSession(
             error === clientOverflowErr,
           )
         }
-        // Generic 400 "invalid_request" dari gateway (tiprouter dll) yang BISA
-        // sebenarnya konteks kepanjangan meski teksnya tak menyebut "context".
-        // Reklasifikasi sebagai context_length_exceeded supaya kernel menempuh
-        // compact-and-retry (bounded + no-op-safe) alih-alih mati fatal. Ambang
-        // tanngal
-        // `localInputTokens >= contextReclassifyThreshold(limit)` — ambang
-        // RELATIF jendela (`min(50_000, window*0.5)`), bukan 50.000 mutlak.
-        // Angka mutlak membuat model berjendela < 50k mustahil menempuh
-        // compact-and-retry: jendelanya penuh jauh sebelum ambang tercapai,
-        // sehingga 400 generik selalu mati fatal.
+        // 400 generik ("invalid_request") bisa berarti konteks penuh →
+        // reklasifikasi agar kernel compact-and-retry, bukan mati fatal. Ambang
+        // RELATIF (`min(50k, window*0.5)`); angka mutlak membuat jendela <50k
+        // mustahil mencapai ambang.
         if (
           error instanceof ProviderError &&
           (error.category === "invalid_request" || error.category === "unknown")
         ) {
-          // Reklasifikasi dulu membabi-buta: SETIAP 400/unknown di atas 50k
-          // token lokal dianggap konteks kepanjangan. Akibatnya penolakan
-          // skema/parameter biasa memicu compact-and-retry + eskalasi jendela
-          // yang tak pernah menyelesaikan masalah. Sekarang butuh salah satu
-          // bukti: teks provider menyebut konteks, ATAU estimasi lokal sudah
-          // melewati titik kompaksi (bukan sekadar "cukup besar").
+          // Reklasifikasi butuh bukti: teks provider menyebut konteks ATAU
+          // estimasi lokal melewati titik kompaksi. Dulu setiap 400 besar
+          // memicu retry/eskalasi yang tak menyelesaikan masalah.
           if (
             shouldReclassifyAsOverflow({
               localInputTokens,
@@ -1350,12 +1116,9 @@ export async function createMinicodeSession(
     },
   }
   const liveToolSchemas = () => visibleWireToolSchemas(registeredTools, hiddenWireTools)
-  // [retry-visibility] Bungkus kebijakan pemulihan PER SESI dengan telemetri.
-  // `cappedRecovery` sengaja tetap murni (dipakai langsung oleh test dan
-  // pemanggil library), sehingga event dipancarkan dari sini — setelah `core`
-  // ada — lewat sink yang diisi di bawah. Retry yang TIDAK jadi (throw /
-  // compact) sengaja tak memancarkan apa pun: jangan mengklaim kemajuan yang
-  // tidak nyata.
+  // `cappedRecovery` sengaja murni; telemetri dipancarkan dari sini via sink
+  // setelah `core` ada. Retry yang tak jadi (throw/compact) tak memancarkan
+  // apa pun — jangan klaim kemajuan rekaan.
   let retrySink: ((info: RecoveryRetryTelemetry) => void) | undefined
   const recoveryWithTelemetry: typeof cappedRecovery = {
     onError(error, attempt) {
@@ -1370,9 +1133,8 @@ export async function createMinicodeSession(
             delayMs: action.delayMs,
           })
         } catch {
-          // Observability TAK BOLEH menggagalkan turn: bus yang rusak harus
-          // dibungkam seperti listener kernel lain (fail-open di sini aman
-          // karena tidak ada keputusan keamanan yang bergantung pada ini).
+          // Observability tak boleh menggagalkan turn: bus rusak dibungkam
+          // (fail-open aman, tak ada keputusan keamanan di sini).
         }
       }
       return action
@@ -1386,9 +1148,8 @@ export async function createMinicodeSession(
     contextWindowTokens: contextWindowForModel(currentContextModel()),
     contextWindowTokensForModel: contextWindowForModel,
     maxOutputTokensForModel: maxOutputTokensForModel,
-    // [T-008] Batas langkah adaptif: nilai eksplisit operator (bila ada) tetap
-    // titik awal, lalu naik satu tangga per `max_steps_exceeded`. Kernel membaca
-    // ini sekali per turn lewat seam aditif `maxStepsForRun`.
+    // Batas langkah adaptif: nilai operator = titik awal, naik per
+    // `max_steps_exceeded`; kernel baca sekali per turn via `maxStepsForRun`.
     maxSteps: effectiveMaxSteps,
     maxStepsForRun: () => effectiveMaxSteps,
     // Kompaksi lebih agresif (host-side): ringkas mulai 65% jendela, bukan 75%.
@@ -1398,8 +1159,7 @@ export async function createMinicodeSession(
     systemForContext: computeLiveSystem,
     permissions: withEffectBarrier,
     permissionMode: livePermissionMode,
-    // [Audit F-02] Bungkus estimator kernel dengan timer tanpa mengubah
-    // identitas/perilaku fungsi (kernel hanya memanggilnya).
+    // Timer estimator kernel tanpa mengubah identitas/perilaku fungsi.
     estimator: (text: string): number => {
       const __t = perfEnabled() ? performance.now() : 0
       try {
@@ -1418,9 +1178,8 @@ export async function createMinicodeSession(
     ...(turnCount !== undefined ? { turnCount } : {}),
     ...(stepCount !== undefined ? { stepCount } : {}),
   })
-  // Sink dipasang SETELAH core ada: policy di atas dipanggil kernel saat
-  // `stream()`, jadi event harus lewat bus yang SAMA dengan yang disubscribe
-  // TUI (cli/tui.ts melempar `session.events` sebagai UiBus apa adanya).
+  // Sink dipasang setelah core ada: event lewat bus yang SAMA dengan langganan
+  // TUI (cli/tui.ts melempar `session.events` sebagai UiBus).
   retrySink = (info) => {
     core.events.emit({
       type: "provider:extension",
@@ -1462,8 +1221,7 @@ export async function createMinicodeSession(
       perfCount("session.estimateFallback", perfEnabled() ? performance.now() - __fbT : 0)
     }
     const localEstimatedTokens = lastRequestLocalEstimate?.tokens ?? fallbackLocal
-    // Anchor input nyata (nilai terbesar per turn, toleran pada laporan
-    // progresif-kumulatif gateway) untuk lantai admission request berikutnya.
+    // Anchor input nyata (max per turn) = lantai admission request berikutnya.
     if (typeof d.inputTokens === "number" && d.inputTokens > 0) {
       lastProviderInputTokens =
         lastProviderInputTokens === undefined
@@ -1507,15 +1265,10 @@ export async function createMinicodeSession(
       detector.noteAssistantResponse()
     })
   }
-  // R11/T3 (opt-in, default off) — anggaran volume-baca per turn. Guard token
-  // hanya peka tekanan TOKEN, bukan tekanan working-memory: model berjendela
-  // raksasa (1M) bisa membaca ribuan baris tanpa memicu kompaksi, lalu
-  // kualitas nalarnya menurun diam-diam (lih. evidence dogfooding: audit UI
-  // berhenti minta-konfirmasi setelah membaca ~5k baris tanpa kompaksi).
-  // Observer ini MENGHITUNG total char hasil tool per turn dan memperingatkan
-  // sekali bila melewati ambang — membantu operator mengenali kasus "penuh
-  // karena perhatian, bukan jendela". Opt-in lewat MINICODE_READ_VOLUME_GUARD=1
-  // supaya perilaku default TIDAK berubah.
+  // Guard volume-baca (opt-in MINICODE_READ_VOLUME_GUARD=1): menghitung char hasil
+  // tool per turn dan memperingatkan sekali saat lewat ambang. Guard token hanya
+  // peka tekanan TOKEN, bukan working-memory (model 1M bisa baca ribuan baris
+  // tanpa kompaksi, nalar menurun diam-diam).
   if (process.env.MINICODE_READ_VOLUME_GUARD === "1") {
     let turnReadChars = 0
     let warnedThisTurn = false
@@ -1557,9 +1310,8 @@ export async function createMinicodeSession(
     },
     run(input: string, runOpts?: { signal?: AbortSignal; model?: string }) {
       const myToken = ++runSeq
-      // Hanya run yang menjadi pemilik core yang boleh menulis state bersama.
-      // Bila ada pemilik aktif, core.run() akan menolak "busy"; kita biarkan
-      // state turn pertama utuh dan TIDAK menjalankan cleanup penolakan itu.
+      // Hanya pemilik core yang menulis state bersama; penolakan "busy" dari
+      // run lain tak boleh menjalankan cleanup.
       if (stateOwner === 0) {
         stateOwner = myToken
         activeContextModel = runOpts?.model ?? opts.model
@@ -1576,8 +1328,7 @@ export async function createMinicodeSession(
       return core
         .run(input, runOpts)
         .finally(() => {
-          // Bersihkan HANYA bila run ini masih pemilik state. Penolakan "busy"
-          // dari run concurrent tak boleh menyentuh state turn yang aktif.
+          // Bersihkan hanya bila masih pemilik; run "busy" tak boleh menyentuh state aktif.
           if (myToken !== stateOwner) return
           if (turnSentStream) {
             lastTurnMode = {
@@ -1590,16 +1341,10 @@ export async function createMinicodeSession(
           stateOwner = 0
         })
         .catch((error: unknown) => {
-          // Kernel melaporkan kehabisan konteks sebagai `budget_exceeded` dengan
-          // `details.reason` = `fixpoint` atau `critical`. Keduanya BUKTI
-          // terverifikasi bahwa jendela yang dipakai terlalu kecil untuk sesi ini
-          // — sama sahnya dengan penolakan provider. Tanpa eskalasi di sini,
-          // sesi yang sudah di titik tetap langsung mati padahal endpoint mungkin
-          // punya kapasitas jauh lebih besar.
-          //
-          // Bukan pemicu: `max_steps_exceeded`, `max_turns`, `aborted`, timeout,
-          // dan error provider non-konteks — menaikkan jendela tak akan menolong.
-          // (`max_steps_exceeded` punya jalurnya sendiri: eskalasi batas langkah.)
+          // `budget_exceeded` (reason fixpoint/critical) = bukti jendela terlalu
+          // kecil, sama sahnya dengan penolakan provider → eskalasi. Bukan pemicu:
+          // max_steps/max_turns/abort/timeout/error non-konteks (max_steps punya
+          // jalur sendiri).
           if (error instanceof AgentError && error.kind === "budget_exceeded") {
             const reason = error.details?.reason
             if (reason === "fixpoint" || reason === "critical") {
@@ -1608,10 +1353,8 @@ export async function createMinicodeSession(
               escalateContextWindow(modelForRun, used, true)
             }
           }
-          // [T-008] Turn mentok batas langkah: naik satu tangga untuk turn
-          // berikutnya. Kerja turn ini tetap hilang (kernel sudah berhenti), tapi
-          // turn lanjutan tidak akan menabrak dinding yang sama. Bounded: satu
-          // langkah per kejadian, dibatasi STEP_LIMIT_CEILING.
+          // Mentok batas langkah → naik satu tangga (bounded) untuk turn berikut;
+          // kerja turn ini tetap hilang, tapi turn lanjutan tak menabrak dinding sama.
           if (error instanceof AgentError && error.kind === "max_steps_exceeded") {
             const used = typeof error.details?.steps === "number" ? error.details.steps : 0
             escalateMaxSteps(used)
@@ -1622,12 +1365,8 @@ export async function createMinicodeSession(
     abort() {
       core.abort()
     },
-    /**
-     * Seam steering ke kernel: pesan diselipkan ke turn AKTIF di batas step
-     * berikutnya. Diteruskan apa adanya — keputusan "boleh/tidak" (ada turn
-     * aktif) milik kernel, sehingga host tak bisa menyelipkan pesan ke sesi
-     * idle lalu mengira sudah terkirim.
-     */
+    /** Steering ke kernel: pesan disisipkan di batas step turn aktif. Keputusan
+     * "boleh/tidak" milik kernel (host tak bisa menyisipkan ke sesi idle). */
     steer(text: string) {
       return core.steer(text)
     },

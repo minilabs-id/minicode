@@ -13,12 +13,13 @@ import { AdoptionRefusedError, parseAdoptTaskArg } from "../src/session/cross-se
 import { mintSessionId } from "../src/session/identity.ts"
 import { attachMutationJournal } from "../src/session/journal.ts"
 import { findSkill, renderSkill } from "../src/skills/loader.ts"
-// [PHASE 6X] The ONE production gate resolver, imported directly so the call site
-// and its tests cannot drift apart. See the note at the `schedulerEnabled` line.
+// [PHASE 6X] SATU resolver gate produksi, diimpor langsung supaya call-site
+// dan test-nya tak bisa melenceng. Lihat catatan di baris `schedulerEnabled`.
 import { GATE_ENABLED, resolveSchedulerGate } from "../src/task/production-scheduler.ts"
 import { writeTrace } from "../src/telemetry/trace.ts"
 import { setSubAgentSessionFactory } from "../src/tools/task.ts"
 import { formatError } from "../src/ui/assistant/simple.ts"
+import { t } from "../src/ui/i18n/locale.ts"
 import { formatUsd } from "../src/ui/render/money.ts"
 import { c } from "../src/ui/render/theme.ts"
 import {
@@ -139,9 +140,7 @@ function getArg(name: string): string | undefined {
 // "AbortSignal.any is not a function" di tengah turn pertama — jauh dari
 // penyebabnya. Gagal cepat + sebut versi minimum.
 if (typeof AbortSignal.any !== "function") {
-  process.stderr.write(
-    `minicode requires Bun >= 1.1.13 (AbortSignal.any missing; detected ${process.versions.bun ?? "unknown"})\n`,
-  )
+  process.stderr.write(`${t("cli.bunRequired", { v: process.versions.bun ?? "unknown" })}\n`)
   process.exit(1)
 }
 
@@ -237,7 +236,7 @@ setSubAgentSessionFactory(async (spec) => {
   return session
 })
 
-// dispatch subcommands via registry (handlers call process.exit internally)
+// Dispatch subcommand lewat registry (handler memanggil process.exit sendiri).
 await dispatch(args, getArg, HELP)
 
 if (hasFlag(args, "--version") || args.includes("-v")) {
@@ -254,7 +253,7 @@ if (args.includes("-h") || args.includes("--help")) {
     )
   }
   if (args.includes("--json")) {
-    // machine-readable help for CI (minicode --help --json)
+    // Bantuan mesin untuk CI (minicode --help --json) — jangan diterjemahkan.
     console.log(JSON.stringify(buildHelpJson()))
     process.exit(0)
   }
@@ -293,24 +292,22 @@ const workMode = workModeResolved.workMode
 // membedakan pilihan sesi tersimpan dari default DISCUSS.
 const workModeExplicit = workModeResolved.explicit
 if (workModeResolved.warning) process.stderr.write(`[warn] ${workModeResolved.warning}\n`)
-// [PHASE 6U] Autonomous Scheduler opt-in. DEFAULT OFF.
+// [PHASE 6U] Opt-in Scheduler otonom. DEFAULT OFF.
 //
-// [DESIGN DECISION] `hasFlag` and nothing else - deliberately NOT `|| process.env.`,
-// unlike the permission and plan flags above. This one must not be inheritable:
-// `process.env` is passed to sub-agents, MCP servers and LSP servers, so an env
-// gate would switch autonomous execution on for children the person running the
-// process never asked for. This flag is the only mechanism, and it is per-invocation.
+// [DESIGN DECISION] Hanya `hasFlag`, sengaja TANPA `|| process.env.` seperti flag
+// izin/plan di atas: env diteruskan ke sub-agen, server MCP, dan LSP, sehingga gate
+// lewat env bisa menyalakan eksekusi otonom pada anak yang tak pernah diminta.
+// Flag ini satu-satunya mekanisme, dan berlaku per-invokasi.
 //
-// [PHASE 6X] ...but `hasFlag` is the WRONG matcher here (6V FINDING-01). It accepts
-// any `name=value` form, so `--enable-scheduler=false`, `=0` and even `=whatever`
-// all ENABLED the Scheduler - the exact opposite of what the person asked for. The
-// gate itself was already correct and unit-tested; the production CALLER was not
-// using it. So the call site now uses the same resolver the tests pin, which makes
-// "the flag is absent" and "the flag is negated" the same answer, as they must be.
+// [PHASE 6X] ...tetapi `hasFlag` matcher yang SALAH di sini (6V FINDING-01): ia
+// menerima bentuk `name=value`, jadi `--enable-scheduler=false`, `=0`, bahkan
+// `=whatever` tetap MENYALAKAN Scheduler — kebalikan dari maksud operator. Gate-nya
+// sudah benar dan diuji; yang salah adalah CALLER produksinya. Kini call-site
+// memakai resolver yang sama dengan yang dikunci test, agar "flag absen" dan
+// "flag dinegasi" dijawab sama.
 //
-// The generic `hasFlag` is deliberately left alone: its value-form behaviour is
-// correct for the permission and plan flags, and changing it would alter unrelated
-// CLI semantics. The bug was in choosing it for a valueless flag.
+// `hasFlag` generik sengaja tidak diubah: perilaku value-form-nya benar untuk flag
+// izin/plan; bug-nya ada pada pemilihan matcher untuk flag tanpa nilai.
 const schedulerEnabled = resolveSchedulerGate(args) === GATE_ENABLED
 // [P1 M15] Mode runtime produksi. Deterministik per invokasi (flag CLI, bukan
 // env): `off` (default) = jalur legacy utuh, `constructed` = runtime + jurnal
@@ -409,7 +406,7 @@ const enterRepl = interactive || (!prompt && process.stdin.isTTY)
 // dan SEBELUM runTui menerima input pertama — lihat blok di bawah `finally`.
 // Dengan begitu restart tak pernah memotong TUI aktif/turn yang sedang jalan.
 if (!prompt && !enterRepl) {
-  process.stderr.write('usage: minicode "prompt"  |  minicode (interactive mode)\n')
+  process.stderr.write(`${t("cli.usage")}\n`)
   // Salah pakai (bukan gagal runtime): exit 2 agar skrip bisa membedakan
   // dari kegagalan provider/budget (exit 1). Lihat TERMINAL_CONTRACT.md.
   process.exit(2)
@@ -467,9 +464,9 @@ try {
     allowlist: effectiveAllowlist,
     verify,
     allowLocalConfig: allowLocal,
-    // [PHASE 6U] Off unless the token was literally passed.
+    // [PHASE 6U] Mati kecuali token memang benar-benar diberikan.
     schedulerEnabled,
-    // [P1 M15] Reroute runtime (default `off`).
+    // [P1 M15] Alihkan runtime (default `off`).
     runtimeMode,
     budget,
     budgetStrict,

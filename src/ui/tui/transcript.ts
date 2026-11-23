@@ -1,12 +1,6 @@
 // Transkrip TUI — kolektor append-only event bus menjadi baris logis.
-//
-// Kenapa kelas sendiri: App butuh sumber kebenaran tunggal untuk viewport
-// (paint, scroll, resize) yang terpisah dari pengambilan input. Menyimpan
-// baris LOGIS (tanpa wrap) supaya resize me-wrap ulang saat paint — lebar
-// terminal dibaca saat paint, bukan saat event (kontrak I11).
-//
-// Mode compact saja di Fase 1: teks model mengalir, ledger tool satu baris
-// `  › nama target` (grammar sama dengan REPL), error merah satu baris.
+// Baris LOGIS disimpan tanpa wrap agar resize me-wrap saat paint; lebar terminal
+// dibaca saat paint, bukan saat event (kontrak I11).
 import type {
   PresentationPolicy,
   UiBus,
@@ -23,6 +17,7 @@ import {
   formatAgentProgress,
 } from "../render/agent-progress.ts"
 import { chatColumnGeometry, chatWidth as chatWidthFromGeometry } from "../render/chat-column.ts"
+import { friendlyToolError } from "../render/errors.ts"
 import { paintLedger, runMarker, statusWord } from "../render/ledger.ts"
 import { parseFence, renderInline } from "../render/markdown.ts"
 import {
@@ -46,18 +41,12 @@ import { defaultUiState, type UiSessionState } from "../session-state.ts"
 const FLAT_RENDERER = true
 
 /**
- * v0.33 (20 Nov): lipat deretan sentinel microcompact jadi SATU baris ringkas.
- *
- * KENAPA ada di sini: `microcompact.ts` menulis satu sentinel per hasil tool yang
- * dipangkas. Jujur, tapi setelah kompaksi besar user melihat dinding berisi
- * `[hasil tool lama dipangkas: …]` — satu baris per tool. Itu chatter internal,
- * bukan informasi yang bisa ditindaklanjuti. Di sini kami ubah HANYA tampilan:
- * sentinel model-facing di `microcompact.ts` tetap apa adanya.
- *
- * KENAPA cocok secara STRUKTURAL, bukan menyalin teks sentinel: batas
- * presentation layer melarang `src/ui/**` mengimpor `src/` non-ui, dan
- * menyalin frasa Indonesia ke UI memecah aturan i18n-hardcode. Sentinel
- * selalu berbentuk `[...: <tool> <n> char...]`, jadi pola itu yang dicocokkan.
+ * Lipat deretan sentinel microcompact jadi SATU baris ringkas.
+ * `microcompact.ts` menulis satu sentinel per tool (jujur, tapi jadi dinding
+ * chatter setelah kompaksi besar); di sini HANYA tampilan yang diubah.
+ * Cocok lewat POLA, bukan salin teks: `src/ui/**` dilarang impor `src/` non-ui
+ * (batas lapisan) dan menyalin frasa Indonesia memecah i18n-hardcode.
+ * Sentinel selalu `[...: <tool> <n> char...]`.
  */
 const COMPACTION_TRIM_READ_ONLY: ReadonlySet<string> = new Set([
   "read_file",
@@ -131,13 +120,9 @@ export function compactionTrimSummary(items: readonly CompactionTrimItem[]): str
 }
 
 /**
- * v0.33 (catatan 20 Nov): semua baris transkrip — termasuk warning/error/notice
- * dan marker eviction — memakai margin kiri yang SAMA dengan prompt, jawaban,
- * tabel, dan baris tool. Sebelumnya `pushError`/`pushInfo`/compaction menempel
- * di kolom 0 sehingga sisi kiri transkrip bergerigi. Warna/error marker tetap
- * membedakan makna; hanya geometrinya yang disamakan.
- *
- * Baris kosong sengaja dikembalikan apa adanya (jangan mengisi spasi ke scrollback).
+ * Semua baris transkrip memakai margin kiri sama dengan prompt/jawaban/tabel/tool.
+ * Dulu error/notice menempel di kolom 0 sehingga sisi kiri bergerigi; warna/marker
+ * tetap membedakan makna. Baris kosong dikembalikan apa adanya.
  */
 function withTranscriptMargin(line: string): string {
   if (line === "") return line
@@ -196,11 +181,8 @@ function compactToolCategory(name: string): CompactToolCategory {
 }
 
 /**
- * Ratakan jeda: maksimal DUA baris kosong beruntun. v0.33: batas lama satu
- * mengompres pemisah bab (`### 6)`, `### 7)`) yang sengaja dibuat dua baris
- * oleh `formatAssistantSpacing`, sehingga hierarki antar poin utama hilang
- * di layar. Dua masih aman — sub-poin sudah merapat dari hulu (blank di
- * dalam list ditelan), jadi tidak ada dinding baris kosong baru.
+ * Maksimal DUA baris kosong beruntun. Batas satu mengompres pemisah bab yang
+ * sengaja dua baris (`formatAssistantSpacing`), menghilangkan hierarki.
  */
 function normalizeBlankRunsFrom(
   rows: readonly TranscriptRow[],
@@ -550,8 +532,8 @@ export class Transcript {
    * semua input yang memengaruhi hasil (width, teks, source, prefix, tabel,
    * fence state), memakai ID stabil; eviction hanya membuang ID yang hilang.
    */
-  /** Cache per (id, width) — satu slot per lebar dulu bikin cache miss terus
-   *  saat scroll memakai lebar terminal dan render memakai lebar chat. */
+  /** Cache per (id, width) — satu slot per lebar bikin miss terus saat scroll
+   *  memakai lebar terminal dan render memakai lebar chat. */
   private rowCache = new Map<number, Map<number, ProjectedLineCache>>()
   private ids: number[] = []
   private sourcePrefixes: string[] = []
@@ -608,15 +590,12 @@ export class Transcript {
   private presentationUnsub: (() => void) | null = null
   private presentedTerminals = new Set<string>()
   /**
-   * v0.33: baris tool anak yang identik (run + tool + target + status + alasan)
-   * ditimpa di tempat dengan penanda ×N, bukan di-append berulang. Observasi
-   * nyata: `read_file functions/index.js` muncul 22× dengan toolCallId beda —
-   * itu retry/duplikasi anak, bukan 22 langkah berbeda yang harus dibaca user.
+   * Baris tool anak identik (run+tool+target+status+alasan) ditimpa dengan ×N,
+   * bukan di-append: `read_file` yang sama 22× = retry anak, bukan 22 langkah.
    */
   /**
-   * Satu baris agregat per `delegate_task` induk. Child tool tidak lagi
-   * meng-append baris `↳` — semua masuk sini lalu baris yang SAMA ditimpa.
-   * `✦` di chat dan rekap kategori memakai satu sumber angka yang sama.
+   * Satu baris agregat per `delegate_task` induk; child ditimpa di baris SAMA.
+   * `✦` chat & rekap memakai satu sumber angka.
    */
   private agentProgress = new Map<
     string,
@@ -628,19 +607,22 @@ export class Transcript {
     }
   >()
   private delegateRowIds = new Map<string, number>()
+  /**
+   * v0.42 commit-in-place: baris LIVE tool (root/anak) ditulis permanen di
+   * `lines[]` sejak pertama kali muncul, keyed toolCallId/runId. Saat tool
+   * terminal, entri SAMA yang ditimpa — tinggi transkrip tak pernah menyusut
+   * (jitter "naik lalu turun" saat ekor menempel composer hilang).
+   */
+  private liveRowIds = new Map<string, number>()
   private presentedVerifications = new Set<string>()
-  // v7.40: dedup finding dari child report (`finding.detected` / `[EVALUATE]`)
-  // — event bisa datang ulang dari bridge/replay, jadi satu finding = satu baris.
+  // Dedup finding child (`finding.detected` / `[EVALUATE]`): event bisa datang
+  // ulang dari bridge/replay, jadi satu finding = satu baris.
   private presentedFindings = new Set<string>()
   private summarizedTurns = new Set<number>()
-  /** Lipat aktivitas (minimizeActivity): baris ledger per-tool ditahan dulu,
-   * lalu saat turn selesai dirangkum jadi SATU baris (opencode-like) + detail
-   * di-buffer untuk /expand.
-   *
-   * `rawName` = NAMA INTERNAL tool (dipakai `formatFoldSummary` untuk hitung
-   * kategori). `name` = label manusiawibahasa SISTEM (`humanToolLabel`), hanya
-   * untuk `line` tampilan. Dua field ini TIDAK boleh digabung: mengganti label
-   * dengan terjemahan akan menggeser kategori rekap (`2 command · 118 read`). */
+  /** Lipat aktivitas: baris per-tool ditahan, lalu dirangkum jadi SATU baris
+   * di akhir turn (+ detail di-buffer untuk /expand).
+   * `rawName` = nama internal (hitung kategori); `name` = label humanToolLabel
+   * untuk tampilan. Tak boleh digabung: terjemahan menggeser kategori rekap. */
   private activityFold: { rawName: string; name: string; status: string; line: string }[] = []
   /**
    * Nama internal (mentah) SEMUA tool selama turn berjalan. Beda dengan
@@ -652,7 +634,7 @@ export class Transcript {
   private lastRecapText = ""
   /**
    * True bila ada teks narasi sejak flush terakhir. Dikonsumsi `tool.started`:
-   * footer `tool → narasi → └ rekap → tool` hanya ditulis bila narasi benar-benar
+   * footer `tool → narasi → rekap → tool` hanya ditulis bila narasi benar-benar
    * sudah lewat, bukan pada tool pertama / tool anak.
    */
   private narrationSinceFlush = false
@@ -811,7 +793,7 @@ export class Transcript {
   stream(text: string): void {
     if (!text) return
     this.commitThinking()
-    // Footer narasi: `tool → narasi → └ rekap → tool`. Teks model menandai
+    // Footer narasi: `tool → narasi → rekap → tool`. Teks model menandai
     // ujung segmen; rekap untuk tool SEBELUM narasi ditulis nanti, tepat saat
     // tool berikutnya dimulai (`tool.started`), bukan di sini. Flush di sini
     // (v7.37) dulu menulis baris sebelum narasi sempat di-commit.
@@ -1181,6 +1163,7 @@ export class Transcript {
     this.presentedTerminals.clear()
     this.agentProgress.clear()
     this.delegateRowIds.clear()
+    this.liveRowIds.clear()
     this.presentedVerifications.clear()
     this.presentedFindings.clear()
     this.summarizedTurns.clear()
@@ -1603,6 +1586,11 @@ export class Transcript {
 
   /** Proyeksi committed untuk satu lebar — O(1) bila masih segar. */
   private projection(width: number): WidthProjection {
+    // v0.42: commit-in-place baris live dilakan SEBELUM proyeksi dibaca, supaya
+    // baris yang baru muncul langsung masuk `proj.rows` di frame yang SAMA
+    // (bukan tail yang di-app saat paint). Idempoten: hanya activity yang
+    // belum punya entri committed yang ditulis.
+    this.syncRunningRows()
     const w = Math.max(10, width)
     const hit = this.committedByWidth.get(w)
     if (hit && !hit.dirty && hit.appendsSeen === this.totalAppended) {
@@ -1689,9 +1677,9 @@ export class Transcript {
 
   /**
    * Baris di luar committed, URUTAN SAMA dengan projectAll lama:
-   * thinking → running → panel → pending. Rekap `└` TIDAK lagi hidup di sini:
+   * thinking → running → panel → pending. Rekap TIDAK lagi hidup di sini:
    * ia ditulis permanen saat narasi dipotong tool berikutnya (atau di akhir
-   * turn), supaya urutan footer `tool → narasi → └ rekap → tool` terjaga.
+   * turn), supaya urutan footer `tool → narasi → rekap → tool` terjaga.
    * Dipisah supaya viewport bisa memotong langsung dari array committed (O(height)).
    */
   private tailRows(width: number): TranscriptRow[] {
@@ -2176,6 +2164,7 @@ export class Transcript {
       this.presentedTerminals.clear()
       this.agentProgress.clear()
       this.delegateRowIds.clear()
+      this.liveRowIds.clear()
       // Progres lama tak boleh bocor ke turn berikutnya.
       this.progressLabel = ""
       this.planLabel = ""
@@ -2209,6 +2198,7 @@ export class Transcript {
       this.compactionTrimRow = null
       this.agentProgress.clear()
       this.delegateRowIds.clear()
+      this.liveRowIds.clear()
       this.progressLabel = ""
       this.planLabel = ""
       return
@@ -2275,7 +2265,7 @@ export class Transcript {
       // berikutnya muncul di bawahnya, bukan menempel di ekor jawaban.
       this.commit()
       this.commitThinking()
-      // Footer narasi: `tool → narasi → └ rekap → tool`. Rekap untuk tool di
+      // Footer narasi: `tool → narasi → rekap → tool`. Rekap untuk tool di
       // segmen SEBELUM narasi ditulis SETELAH narasi di-commit, tepat sebelum
       // tool baru muncul. Hanya saat narasi benar-benar lewat — tool pertama
       // turn / deretan tool tanpa narasi tak memotong segmen. Tool anak
@@ -2323,6 +2313,10 @@ export class Transcript {
       this.presentedTerminals.add(event.toolCallId)
     }
     const activity = this.snapshotActivity(event.toolCallId)
+    // v0.42: baris live tool sudah di-commit sejak pertama muncul. Saat terminal,
+    // entri yang SAMA ditimpa — jangan pernah append baris kedua (never-shrink
+    // by id). `presentedTerminals` di atas tetap jaga dedup terminal.
+    const liveId = event.toolCallId ? this.liveRowIds.get(event.toolCallId) : undefined
     // F-AGENT-1: baris per-run HANYA bila activity membawa identitas run anak
     // (childSessionId/runId — data nyata dari ChildSessionLink). Tool anak yang
     // cuma punya `parentToolCallId` (jalur grouping legacy) tetap SEPENUHNYA
@@ -2330,6 +2324,13 @@ export class Transcript {
     // induk. `parentToolCallId` = taut ke pemanggil, BUKAN identitas run; jangan
     // disamakan dengan childSessionId/runId.
     if (activity?.parentToolCallId) {
+      // Anak dengan baris live sendiri: timpa dengan baris ringkas terminal,
+      // biar jumlah baris tak menyusut saat ia diagregasi ke induk. Agregat `✦`
+      // induk TIDAK diubah.
+      if (liveId !== undefined) {
+        this.overwriteLiveChildRow(liveId, event, activity)
+        if (event.toolCallId) this.liveRowIds.delete(event.toolCallId)
+      }
       if (activity.childSessionId || activity.runId) this.aggregateAgent(event, activity)
       return
     }
@@ -2337,7 +2338,9 @@ export class Transcript {
     // dari baris tool — seperti `marginTop=1` OpenCode. Hanya sekali per
     // transisi, bukan tiap tool: consecutive tools tetap rapat. `normalizeBlankRuns`
     // menjamin maksimal satu blank walau jalur lain menyisipkan juga.
-    if (this.lines.length > 0 && this.lines[this.lines.length - 1] !== "") {
+    // v0.42: bila baris live sudah ada, pemisah itu SUDAH tercetak di atasnya —
+    // jangan sisipkan blank baru (itu menambah tinggi = jitter).
+    if (liveId === undefined && this.lines.length > 0 && this.lines[this.lines.length - 1] !== "") {
       this.append("", { kind: "assistant" })
     }
     this.commit()
@@ -2406,8 +2409,15 @@ export class Transcript {
     // pesannya sudah tergabung menjadi satu baris panjang. Tanpa potongan awal,
     // satu error ikut menyeret sisa pesannya ke dalam ledger.
     const firstLine = String(errorMessage ?? "").split(/[\r\n]/)[0] ?? ""
-    const message = errorMessage
-      ? `: ${truncateToWidth(sanitizeAnsiLine(firstLine), 200, "…")}`
+    // v0.42: lewatkan redaksi ringkas kanonik (satu baris ≤120 kolom, tSystem
+    // locale OS, detail penuh tetap di jurnal/--verbose). Nama/target tool sudah
+    // tampil di `line` — `friendlyToolError` menerimanya hanya untuk frasa
+    // "Command failed · <target> · …".
+    const friendly = errorMessage
+      ? friendlyToolError(firstLine, target ? String(target) : undefined)
+      : ""
+    const message = friendly
+      ? `: ${friendly}`
       : denyReason
         ? `: ${truncateToWidth(sanitizeAnsi(denyReason), 200, "…").split("\n")[0] ?? ""}`
         : ""
@@ -2430,8 +2440,10 @@ export class Transcript {
     // jadi tidak ada teks alasan yang tercetak dua kali.
     if (this.uiState.minimizeActivity || this.uiState.activityPanel) {
       this.activityFold.push({ rawName, name, status, line })
-      // Yang berhasil sudah diwakili baris grup → tak perlu baris individual.
-      if (status === "completed") return
+      // Yang berhasil sudah diwakili baris grup → tak perlu baris individual,
+      // KECUALI ia punya baris live yang harus ditimpa (kalau tidak, kata
+      // "running" tertinggal selamanya di layar).
+      if (status === "completed" && liveId === undefined) return
     } else if (FLAT_RENDERER) {
       // Renderer flat: kumpulkan JUGA untuk jejak ringkas akhir turn. Beda
       // dengan mode lipatan, baris live TETAP diprint — ringkasan itu footer,
@@ -2446,14 +2458,51 @@ export class Transcript {
       status,
       ...(activity?.expandRef ? { expandRef: activity.expandRef } : {}),
     }
+    const painted = paintLedger(status, line)
+    if (liveId !== undefined) {
+      // Timpa entri lama di tempat — tinggi tetap, urutan tetap, dedup utuh.
+      this.replaceEntry(liveId, painted)
+      const index = this.ids.indexOf(liveId)
+      if (index >= 0) this.meta[index] = meta
+      if (event.toolCallId) this.liveRowIds.delete(event.toolCallId)
+      if (rawName === "delegate_task" && !activity?.parentToolCallId && event.toolCallId) {
+        this.delegateRowIds.set(event.toolCallId, liveId)
+      }
+      return
+    }
     // Baris `delegate_task` induk kelak ditimpa oleh ringkasan agregat —
     // simpan id-nya sekarang supaya tak ada barus `› failed N child tools`
     // berdiri sendiri di bawahnya.
     if (rawName === "delegate_task" && !activity?.parentToolCallId && event.toolCallId) {
-      this.delegateRowIds.set(event.toolCallId, this.appendWithId(paintLedger(status, line), meta))
+      this.delegateRowIds.set(event.toolCallId, this.appendWithId(painted, meta))
     } else {
-      this.append(paintLedger(status, line), meta)
+      this.append(painted, meta)
     }
+  }
+
+  /**
+   * v0.42 — Timpa baris live ANAK dengan baris ringkas terminal `› nama target`.
+   * Dipakai saat child yang sudah punya baris sendiri diagregasi ke induk saat
+   * terminal: barisnya TETAP ada (tak menyusut), hanya redaksinya yang berubah.
+   * Agregat `✦` induk dijaga `aggregateAgent()` dan sengaja tak disentuh.
+   */
+  private overwriteLiveChildRow(
+    id: number,
+    event: UiPresentationEvent,
+    activity: UiPresentationActivity,
+  ): void {
+    const rawName = sanitizeAnsiLine(activity.name ?? event.name ?? "tool")
+    const name = humanToolLabel(rawName, activity)
+    const target = activity.target ?? event.target
+    const targetText = target ? ` ${truncateToWidth(sanitizeAnsiLine(target), 120, "")}` : ""
+    const status = activity.status ?? event.status ?? "failed"
+    const errorText = event.message ?? activity.error?.message
+    const message = errorText
+      ? `: ${friendlyToolError(String(errorText).split(/[\r\n]/)[0] ?? "", target ? String(target) : undefined)}`
+      : ""
+    const suffix = status === "completed" ? "" : ` ${glyphs.dot} ${statusWord(status)}`
+    const line = `${" ".repeat(ASSISTANT_LEFT_MARGIN)}${glyphs.arrow} ${name}${targetText}${suffix}${message}`
+    this.replaceEntry(id, paintLedger(status, line))
   }
 
   /** Golongkan alasan kegagalan anak ke kategori ringkas (fail-closed: error). */
@@ -2730,12 +2779,13 @@ export class Transcript {
       return label
     })
     if (parts.length === 0) return ""
-    // `└` menandai rekap sebagai EKOR dari segmen yang baru saja lewat, bukan
-    // baris tool baru. Urutan footer: `tool → narasi → └ rekap → tool → …`.
-    return `${" ".repeat(ASSISTANT_LEFT_MARGIN)}└ ${parts.join(` ${c.faint(glyphs.dot)} `)}`
+    // Baris kategori (tanpa prefix simbol) menandai rekap sebagai EKOR dari segmen
+    // yang baru saja lewat, bukan baris tool baru. Urutan footer:
+    // `tool → narasi → rekap → tool → …`.
+    return `${" ".repeat(ASSISTANT_LEFT_MARGIN)}${parts.join(` ${c.faint(glyphs.dot)} `)}`
   }
 
-  /** Tutup satu segmen narasi → tepat SATU baris `└ rekap`.
+  /** Tutup satu segmen narasi → tepat SATU baris rekap.
    * Dulu slot live menulis dua baris dan flush menulis tiga baris supaya tinggi
    * ekor net-nol. Slot live sudah dihapus, jadi aturan "dua baris net-nol" tak
    * berlaku lagi — satu baris permanen saja. */
@@ -2784,45 +2834,98 @@ export class Transcript {
     return running
   }
 
-  private runningRows(): string[] {
-    const snapshot = this.presentationSnapshot()
-    if (!snapshot) return []
+  /** Satu baris live untuk activity running — format SAMA persis dengan
+   *  implementasi tail lama supaya test/parity tak bergeser. Dipakai baik saat
+   *  commit-in-place maupun (fallback) untuk activity tanpa id stabil. */
+  private runningLine(activity: UiPresentationActivity, child: boolean, marker: string): string {
+    const name = sanitizeAnsiLine(activity.name)
+    const target = activity.target
+      ? ` ${truncateToWidth(sanitizeAnsiLine(activity.target), 120, "")}`
+      : ""
+    const elapsed = Date.now() - activity.tsStart
+    const showElapsed = this.policy
+      ? this.policy.elapsedVisible(activity.tsStart, Date.now())
+      : elapsed >= 2000
+    const elapsedText = showElapsed ? ` (${formatElapsed(elapsed)})` : ""
+    const retry = activity.supersedes ? ` ${t("ts.retry")}` : ""
+    const markerText = marker ? `${marker} ` : ""
+    const prefix = child
+      ? `${" ".repeat(ASSISTANT_LEFT_MARGIN + 2)}↳ `
+      : `${" ".repeat(ASSISTANT_LEFT_MARGIN)}${glyphs.arrow} `
+    return c.info(
+      `${prefix}${markerText}${name}${target} … ${t("ts.statusRunning")}${elapsedText}${retry}`,
+    )
+  }
+
+  /** Urutan baris live: root + anaknya, lalu anak yatim (sama seperti dulu). */
+  private orderedRunning(snapshot: UiPresentationSnapshot): {
+    activity: UiPresentationActivity
+    child: boolean
+    marker: string
+  }[] {
     const running = this.runningActivities(snapshot)
     const roots = running.filter((a) => !a.parentToolCallId)
-    const row = (activity: (typeof running)[number], child: boolean, marker: string): string => {
-      const name = sanitizeAnsiLine(activity.name)
-      const target = activity.target
-        ? ` ${truncateToWidth(sanitizeAnsiLine(activity.target), 120, "")}`
-        : ""
-      const elapsed = Date.now() - activity.tsStart
-      const showElapsed = this.policy
-        ? this.policy.elapsedVisible(activity.tsStart, Date.now())
-        : elapsed >= 2000
-      const elapsedText = showElapsed ? ` (${formatElapsed(elapsed)})` : ""
-      const retry = activity.supersedes ? ` ${t("ts.retry")}` : ""
-      const markerText = marker ? `${marker} ` : ""
-      const prefix = child
-        ? `${" ".repeat(ASSISTANT_LEFT_MARGIN + 2)}↳ `
-        : `${" ".repeat(ASSISTANT_LEFT_MARGIN)}${glyphs.arrow} `
-      return c.info(
-        `${prefix}${markerText}${name}${target} … ${t("ts.statusRunning")}${elapsedText}${retry}`,
-      )
-    }
-    // F-AGENT-1: tiap run anak = baris sendiri, bukan hitungan "n tool anak".
-    const out: string[] = []
+    const out: { activity: UiPresentationActivity; child: boolean; marker: string }[] = []
     for (const activity of roots) {
-      out.push(row(activity, false, ""))
+      out.push({ activity, child: false, marker: "" })
       for (const child of running.filter((a) => a.parentToolCallId === activity.toolCallId))
-        out.push(row(child, true, runMarker(child)))
+        out.push({ activity: child, child: true, marker: runMarker(child) })
     }
-    // Anak yatim (parent tak lagi running/root): tetap tampil, jangan hilang.
     for (const activity of running) {
       if (
         !activity.parentToolCallId ||
         roots.some((r) => r.toolCallId === activity.parentToolCallId)
       )
         continue
-      out.push(row(activity, true, runMarker(activity)))
+      out.push({ activity, child: true, marker: runMarker(activity) })
+    }
+    return out
+  }
+
+  /**
+   * v0.42 commit-in-place / never-shrink by id. Tiap activity running yang
+   * pertama kali terlihat ditulis SEBAGAI BARIS committed permanen (bukan tail
+   * sementara). Kunci stabil = toolCallId (atau runId/childSessionId untuk
+   * activity tanpa call id). Saat terminal, baris SAMA yang ditimpa — jumlah
+   * baris tak pernah turun, jadi sticky-tail App tak lagi menggeser konten naik
+   * saat live muncul lalu turun saat live hilang.
+   *
+   * Dipanggil dari `projection()` SEBELUM proyeksi dibaca; `appendWithId` →
+   * `applyAppend` menjaga cache proyeksi tetap segar di lebar mana pun.
+   */
+  private syncRunningRows(): void {
+    const snapshot = this.presentationSnapshot()
+    if (!snapshot) return
+    let changed = false
+    for (const { activity, child, marker } of this.orderedRunning(snapshot)) {
+      const key = activity.toolCallId ?? activity.runId ?? activity.childSessionId
+      if (!key || this.liveRowIds.has(key)) continue
+      const id = this.appendWithId(this.runningLine(activity, child, marker), {
+        kind: "activity",
+        ...(activity.toolCallId ? { toolCallId: activity.toolCallId } : {}),
+        status: "running",
+      })
+      this.liveRowIds.set(key, id)
+      // delegate_task induk: arahkan agregat `✦` ke baris live yang sama supaya
+      // child yang terminal lebih dulu tetap menimpa entri ini (bukan menambah).
+      if (!child && activity.name === "delegate_task" && activity.toolCallId) {
+        this.delegateRowIds.set(activity.toolCallId, id)
+      }
+      changed = true
+    }
+    if (changed) this.runningMemo = null
+  }
+
+  /** Sisa baris live TANPA id stabil (kasus langka) — tetap jadi tail. Untuk
+   *  activity dengan id, baris sudah di-commit oleh `syncRunningRows()`. */
+  private runningRows(): string[] {
+    const snapshot = this.presentationSnapshot()
+    if (!snapshot) return []
+    const out: string[] = []
+    for (const { activity, child, marker } of this.orderedRunning(snapshot)) {
+      const key = activity.toolCallId ?? activity.runId ?? activity.childSessionId
+      if (key && this.liveRowIds.has(key)) continue
+      out.push(this.runningLine(activity, child, marker))
     }
     return out
   }

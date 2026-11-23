@@ -194,8 +194,9 @@ native selection bukan acceptance contract karena mouse tracking aktif.
 ## 5b. Rekap footer & label aktivitas tool (v0.35)
 
 Rekap tool adalah **baris committed statis**, bukan state live: footer tiap
-narasi mengikuti `tool → narasi → └ rekap(tool sebelum narasi)` dengan format
-`└ 2 command · 118 read · 1 other`. Rekap **akhir turn** kumulatif untuk semua
+narasi mengikuti `tool → narasi → rekap(tool sebelum narasi)` dengan format
+`2 command · 118 read · 1 other` (sejak v0.41 tanpa prefix simbol). Rekap
+**akhir turn** kumulatif untuk semua
 tool dalam turn, bukan potongan segmen yang di-reset. Klausa lama — rekap dua
 baris saat live, `flushActivityFold` net-nol, `liveSummaryRows()` mengikuti
 ekor, dan jeda antar narasi sebagai baris melayang — adalah arsip v0.33/v7.x
@@ -216,7 +217,7 @@ geser mengikuti kursor; transkrip di atas tetap utuh, tidak bergeser):
 ```text
 ┌ transkrip (viewH baris, tidak berubah saat dropdown/ketik) ──┐
 │ … baris lama …                                             │
-│ └ 2 command · 118 read · 1 other                           │
+│ 2 command · 118 read · 1 other                             │
 ├── composer (maks 2 baris, ter-centre, lebar composerWidth) ┤
 │ minicode › baris draft pertama yang sangat panjang …       │
 │ · lanjutan draft baris kedua ← kursor                      │
@@ -264,8 +265,9 @@ Linear renderer menerima `ProjectionNode[]`/snapshot yang sama:
 - markdown table: semantic table hanya di TTY; non-TTY mempertahankan source sanitized;
 - copy buffer: isi yang benar-benar terlihat, dengan cap dan marker.
 
-- v0.35: baris rekap `└ …` ditulis sebagai baris committed statis (footer tiap
-  narasi; rekap akhir turn kumulatif), dan label `› …` memakai locale OS via
+- v0.35: baris rekap ditulis sebagai baris committed statis (footer tiap
+  narasi; rekap akhir turn kumulatif); sejak v0.41 tanpa prefix simbol `└`.
+  Label `› …` memakai locale OS via
   `tool-label.ts` — narasi/jawaban tetap memakai `/lang`.
 
 `simple.ts` tidak lagi menentukan status dari raw result. Ia menerima activity

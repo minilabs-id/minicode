@@ -1,24 +1,10 @@
-// Mutation intent journal — application-layer commitment truth.
-//
-// Masalah yang ditutup (AUDIT #01 P0-1/P0-2): filesystem dapat berubah
-// sebelum turn commit/persist, sementara SQLite dan checkpoint ditulis dua
-// penulis tak tersinkron. Setelah crash, tak ada artefak yang tahu apakah
-// mutasi terakhir committed, belum, atau ambigu.
-//
-// Modul ini menjawab SATU pertanyaan: "status komitmen mutasi X?"
-// - intent  = execution:started (terbit SETELAH permission+validate, SEBELUM
-//   execute — titik D audit #01C; denied/invalid tak pernah tercatat).
-// - terminal = execution:completed (!isError → committed, isError → failed).
-// - finalize = turn durable di SQLite (hanya ini yang boleh di-cleanup).
-//
-// BUKAN transaksi lintas FS+DB (tak tersedia). BUKAN checkpoint (tak restore
-// file). BUKAN penentu redo (tak pernah auto-redo; resume = verify-first).
-// Kernel vendor tak tersentuh: semua lewat langganan event + API eksplisit.
-//
-// Model kegagalan tulis: kegagalan append/fsync TAK PERNAH menggagalkan turn
-// (fail-open eksekusi) tetapi menandai sesi degraded + warn keras — resume
-// lalu memperlakukan sesi itu via jalur advisory. Paling aman yang tersedia:
-// menghentikan turn karena log gagal akan merusak lebih banyak daripada gap.
+// Jurnal intent mutasi — otoritas komitmen lapisan aplikasi. Menjawab satu
+// pertanyaan: "status komitmen mutasi X?" Intent ditulis setelah permission+
+// validate dan sebelum execute; terminal saat execution:completed; finalize saat
+// turn durable di SQLite (hanya ini yang boleh di-cleanup). Bukan transaksi
+// FS+DB, checkpoint, atau penentu redo (resume = verify-first). Gagal
+// append/fsync tak menggagalkan turn, tapi menandai sesi degraded + warn;
+// resume memakai jalur advisory.
 
 import { createHash } from "node:crypto"
 import { unlinkSync } from "node:fs"
@@ -31,29 +17,18 @@ import { classifyContractTool } from "../policy/tool-contract.ts"
 import { isMcpToolName } from "../presentation/label.ts"
 
 /**
- * [Fase 10 / 10.1] Otoritas penyimpanan kanonik.
- * `session/journal.ts` adalah Canonical Recovery Authority: satu-satunya
- * sumber kebenaran intent/receipt/verification untuk crash recovery.
- * `runtime/execution-journal.ts` adalah Diagnostic Audit Projection: history
- * audit yang MEREKAM, bukan memutus recovery. Matriks lengkap 7 penyimpanan
- * didefinisikan di `runtime/execution-journal.ts#STORAGE_AUTHORITY_MATRIX`
- * (diimpor balik untuk menghindari siklus impor) — konstanta ini adalah
- * penanda local authority agar tak pernah tertukar source of truth.
+ * Jurnal sesi = Canonical Recovery Authority untuk intent/receipt/verification.
+ * `runtime/execution-journal.ts` hanya Diagnostic Audit Projection (merekam,
+ * bukan memutus recovery). Konstanta ini penanda authority lokal agar source
+ * of truth tak tertukar.
  */
 export const SESSION_JOURNAL_AUTHORITY = "canonical_recovery_ledger" as const
 
-// [Fase 2 / LOOP-INV-07] `unknown` = terminal AMBIGU: eksekusi berhenti tanpa
-// bukti apakah efeknya terjadi (mis. timeout bash). Bukan `failed` (yang
-// menyiratkan "tidak terjadi") dan bukan `pending` (yang menyiratkan "belum
-// selesai"): recovery wajib memverifikasi sebelum mengulang.
+// `unknown` = terminal ambigu: efek tak terbukti terjadi (mis. timeout bash).
+// Bukan `failed`/`pending` — recovery wajib verifikasi sebelum mengulang.
 export type JournalState = "pending" | "committed" | "failed" | "unknown"
 
-/**
- * [Fase 2] SATU definisi "terminal". Sebelumnya predicate
- * `state === "committed" || state === "failed"` disalin di banyak tempat;
- * menambah `unknown` tanpa helper akan membuat record ambigu dianggap pending
- * (dan di-stitch sebagai sukses) di jalur yang terlewat.
- */
+/** Satu definisi "terminal" agar `unknown` tak pernah dianggap pending. */
 const TERMINAL_JOURNAL_STATES: ReadonlySet<string> = new Set(["committed", "failed", "unknown"])
 
 export function isTerminalJournalState(state: JournalState | undefined): boolean {
@@ -86,34 +61,27 @@ export function isVerificationMethod(method: string): method is VerificationMeth
 export interface JournalOutcome {
   code?: number | null
   note?: string
-  /** Application-observed acknowledgement only; never universal effect proof. */
+  /** Acknowledgement hasil pengamatan aplikasi, bukan bukti efek universal. */
   ack?: string | number | boolean | null
   ackSource?: "bash-exit" | "sandbox-exit" | "git-commit" | "external-response" | "absent"
   ackAuthority?: "application-observed"
   truncated?: true
   timeout?: true
   aborted?: true
-  /** v7.31: childturn dipotong oleh batas max_steps (bukan timeout/abort). */
+  /** Child turn dipotong batas max_steps (bukan timeout/abort). */
   maxStepsExceeded?: true
   loss?: "none" | "response" | "persistence" | "unknown"
   uncertainty?: "none" | "ambiguous-effect" | "unverified-external" | "evidence-incomplete"
   observedAt?: number
-  /**
-   * Bounded child-execution observation (P9.2.1, delegate-task only).
-   * Dilaporkan apa yang teramati dari turn anak — BUKAN otoritas baru:
-   * tak mengubah makna `committed`/`failed`, tak mempublikasikan histori,
-   * tak menggantikan verifikasi/bukti lain. Opsional agar record lama tetap
-   * terbaca; pembaca tak boleh menjadikannya bukti efek.
-   */
+  /** Observasi bounded turn anak (delegate-task) — bukan otoritas baru: tak
+   * mengubah `committed`/`failed` atau menggantikan verifikasi. Opsional untuk
+   * kompatibilitas record lama; bukan bukti efek. */
   childResult?: ChildResultEnvelope
 }
 
-/**
- * Status observasi anak (P9.2.1): apa yang terlihat dari sisi pemanggil,
- * bukan rekonstruksi kausal lengkap. `returned` = runner kembali normal
- * (isi ringkasan boleh berupa teks error anak — itu observasi, bukan vonis);
- * `failed_to_start` = runner tak pernah jalan (factory/provider/pool).
- */
+/** Status observasi anak dari sisi pemanggil: `returned` = runner kembali
+ * normal (ringkasan boleh berisi teks error anak); `failed_to_start` = runner
+ * tak pernah jalan. */
 export type ChildStatus =
   | "returned"
   | "timeout"
@@ -122,13 +90,9 @@ export type ChildStatus =
   | "error"
   | "failed_to_start"
 
-/**
- * Amplop hasil anak yang bounded + disanitasi (P9.2.1). `resultSummary`
- * adalah salinan sanitasi dari string yang sudah dilihat parent (batas
- * panjang sama), BUKAN transkrip anak. Absent (`null`) = data memang tak
- * tersedia di jalur itu — jangan difabrikasi.
- */
-/** [Fase 7 / LOOP-INV-13/15] Verdict consequence-engine (ACE-Lite) dari hasil anak. */
+/** Amplop hasil anak bounded + disanitasi: `resultSummary` bukan transkrip;
+ * `null` = data tak tersedia (jangan difabrikasi). */
+/** Verdict consequence-engine (ACE-Lite) dari hasil anak. */
 export interface AceResultSnapshot {
   readonly verdict: import("../policy/consequence-engine.ts").AceVerdict
   readonly failureClass: import("../policy/consequence-engine.ts").AceFailureClass
@@ -142,10 +106,8 @@ export interface ChildResultEnvelope {
   readonly runId: string | null
   readonly steps: number | null
   readonly truncated: boolean
-  /** [Fase 7 / LOOP-INV-13/15] Hasil deterministik consequence-engine pada penyelesaian/
-   * kegagalan turn anak — tersurat di amplop agar parent dan auditor bisa verifikasi
-   * apakah outcome layak diterima apa adanya (PASS) atau perlu review/retry (FAIL).
-   * Absent = test khusus / legacy runner yang belum hitung ACE. */
+  /** Hasil deterministik consequence-engine untuk turn anak (PASS/FAIL);
+   * absent = runner legacy yang belum menghitung ACE. */
   readonly aceVerdict?: AceResultSnapshot
 }
 
@@ -170,98 +132,65 @@ export interface JournalRecord {
   cwd: string
   /** Path relatif-workspace untuk verification (allowlist per kelas-tool). */
   paths?: string[]
-  /** Canonical history thread for this intent (P2.10 invocation scope). */
+  /** Thread history kanonik untuk intent ini (scope invokasi). */
   threadId?: string
-  /** Application-owned invocation key (provider call identifiers are locators only). */
+  /** Kunci invokasi milik aplikasi (id provider hanya penanda lokasi). */
   invocationId?: string
-  /** Provider call identifier, when available; never canonical by itself. */
+  /** Id panggilan provider bila ada; tak pernah kanonik sendiri. */
   providerToolCallId?: string
   /** SHA-256 JSON kanonisal argumen — identitas, BUKAN replay (tanpa raw args). */
   argsHash?: string
-  /**
-   * [Fase 2 / LOOP-G06, LOOP-G07] Hash isi target SEBELUM efek (SHA-256 hex),
-   * atau `null` bila file belum ada. Hanya ditulis jalur pre-flight (barrier
-   * durable), karena hanya di sana waktu "sebelum efek" benar-benar dijamin.
-   * Absent = record legacy / jalur fallback → rekonsiliasi wajib UNKNOWN.
-   */
+  /** Hash target SEBELUM efek (SHA-256) atau `null` bila file belum ada.
+   * Hanya jalur pre-flight yang menulisnya; absent = rekonsiliasi UNKNOWN. */
   preTargetHash?: string | null
-  /**
-   * Hash isi target yang DIHARAPKAN setelah efek sukses. `null` = target
-   * diharapkan tidak ada (delete_file). Absent = tidak dapat dihitung dari
-   * argumen (edit/apply_patch) → rekonsiliasi jatuh ke UNKNOWN bila isi
-   * berubah dari preTargetHash.
-   */
+  /** Hash target yang diharapkan pasca-efek; `null` = target diharapkan tak ada.
+   * Absent (isi tak bisa diturunkan dari argumen) → UNKNOWN bila isi berubah. */
   postTargetHash?: string | null
   /** Tautan delegasi: id sesi anak (parent-side record). */
   childSessionId?: string
-  // M1 correlator (ADR-002, additive-optional): korelasi execution pada intent
-  // + terminal. Absent = record legacy / jalur belum wiring; recovery lama
-  // (consolidate per `id` session:seq) tak berubah. Jangan jadikan pengganti
-  // `id` — `id` tetap identity utama jurnal.
-  //
-  // [P1 M15][DEPRECATED] Lima field di bawah USED to be the staged place for
-  // runtime correlation. Produksi TIDAK PERNAH mengisinya (nol caller), dan M15
-  // menetapkan satu history eksekusi durable: jurnal runtime M11
-  // (`src/runtime/execution-journal.ts`) yang memegang executionId/parent/
-  // lineageRoot/version. Jurnal ini tetap milik domain mutation/undo (git
-  // checkpoints), dan sengaja TIDAK menjadi bridge kedua ke runtime.
-  //
-  // Aturan: JANGAN menambah caller produksi yang mengisinya. Kalau sebuah record
-  // butuh korelasi runtime, tulislah ke jurnal runtime; kalau butuh jejak
-  // mutation, field ini tetap `absent`. Field tak dihapus agar record lama
-  // (yang mungkin sudah tertulis) tetap terbaca — penghapusan adalah M16+ dan
-  // butuh migrasi reader.
-  /** Identity instance execution (allocated / derived stabil). DEPRECATED — see above. */
+  // Korelator execution: `id` tetap identitas utama; field ini opsional.
+  // Lima field di bawah DEPRECATED: produksi tak mengisinya. Korelasi runtime
+  // milik `src/runtime/execution-journal.ts`; jurnal ini tetap domain mutasi.
+  // Jangan tambah caller produksi. Field dipertahankan agar record lama terbaca.
+  /** Identity instance execution (allocated / derived stabil). DEPRECATED (lihat catatan). */
   executionId?: string
-  /** Parent execution (absen pada root). DEPRECATED — see above. */
+  /** Parent execution (absen pada root). DEPRECATED (lihat catatan). */
   parentExecutionId?: string
-  /** Root forest korelasi (immutable). DEPRECATED — see above. */
+  /** Root forest korelasi (immutable). DEPRECATED (lihat catatan). */
   rootExecutionId?: string
-  /** Kind datar M1. DEPRECATED — see above. */
+  /** Kind datar M1. DEPRECATED (lihat catatan). */
   executionKind?: string
-  /** Owner menurut arsitektur; bukan authority user input. DEPRECATED — see above. */
+  /** Owner menurut arsitektur; bukan authority user input. DEPRECATED (lihat catatan). */
   ownerId?: string
   /** Marker finalize: semua seq ≤ ini durable. */
   uptoSeq?: number
   /** Marker undo/redo: turn target manifest. */
   targetTurn?: number
-  /**
-   * Marker undo/redo: nilai pointer manifest (currentIndex) SETELAH operasi.
-   * Ditulis SETELAH apply files, SEBELUM save manifest — crash di antaranya
-   * meninggalkan bukti durable untuk rekonsiliasi pointer (P0-3).
-   */
+  /** Pointer manifest pasca-operasi: ditulis setelah apply file, sebelum save
+   * manifest — crash di antaranya meninggalkan bukti rekonsiliasi. */
   newIndex?: number
   /** Marker undo/redo: jumlah file yang berhasil di-apply (info, bukan janji). */
   files?: number
   /** Hanya untuk kind mutation. Terminal immutable (lihat consolidate). */
   state?: JournalState
   outcome?: JournalOutcome
-  /** Hanya untuk kind verification: explicit observation method and verdict. */
+  /** Hanya kind verification: metode observasi dan verdict eksplisit. */
   method?: VerificationMethod
   verdict?: VerificationVerdict
-  /** Scrubbed, length-capped pointer to the external observation (never raw content). */
+  /** Penunjuk observasi eksternal discrub + dipotong (bukan konten mentah). */
   evidenceReference?: string
-  /** When the external observation occurred (may differ from append time). */
+  /** Waktu observasi eksternal (boleh beda dari waktu append). */
   observedAt?: number
-  /**
-   * Bukti dedup idempotency (audit #08 P0): terminal yang ditandai ini
-   * dipertahankan sweep (lihat sweepInner) agar retry id-sama pasca-restart
-   * tetap terdeteksi. Dipakai server MCP: note = `req:<id>:<argsHash>`.
-   * Tanpa ini finalize+sweep rutin menghapus bukti id dan retry berikutnya
-   * dieksekusi ulang buta — padahal client tak bisa tahu server restart.
-   */
+  /** Bukti dedup idempotency dipertahankan sweep agar retry id-sama pasca-
+   * restart terdeteksi (MCP: note = `req:<id>:<argsHash>`). */
   dedup?: true
   ts: number
 }
 
-// ── Klasifikasi closed-set berbasis efek aktual (AUDIT #01C §2) ──
-//
-// MUTATION = execute() dapat menimbulkan efek eksternal durable.
-// "none" = terbukti tanpa efek durable (read, kontrol, full-replace
-// idempoten seperti todo_write, memori-proses seperti submit_result).
-// [Fase 2 / TOOL-01] Klasifikasi diturunkan dari registry kontrak tool.
-// Tool tak dikenal tetap fail-closed: `classifyContractTool` mengembalikan
-// "unknown" dan `isMutationTool` memperlakukannya sebagai mutasi.
+// ── Klasifikasi closed-set berbasis efek aktual ──
+// MUTATION = execute() bisa berdampak durable; "none" = terbukti tanpa efek.
+// Berasal dari registry kontrak tool; tool tak dikenal tetap fail-closed
+// diperlakukan sebagai mutasi.
 
 export function classifyTool(name: string): "mutation" | "none" | "unknown" {
   // Nama bertitik (server.tool) = kelas mcp_call; sudah ditangani kontrak.
@@ -269,20 +198,15 @@ export function classifyTool(name: string): "mutation" | "none" | "unknown" {
 }
 
 export function isMutationTool(name: string): boolean {
-  // F-14: unknown = mutasi (fail-closed). Tool baru yang lupa didaftarkan di
-  // MUTATION_TOOLS/NON_MUTATION_TOOLS tetap terjurnal + ter-recovery, bukan
-  // buta. Biaya salah-klasifikasi hanya baris jurnal ekstra untuk tool baca
-  // yang terlupa — jauh lebih murah daripada efek tulis yang tak tercatat.
-  // classifyTool tetap mengembalikan "unknown" (taksonomi untuk test-time
-  // guard `tool belum diklasifikasikan` di journal.test.ts).
+  // unknown = mutasi (fail-closed): tool baru yang belum didaftarkan tetap
+  // terjurnal. `classifyTool` tetap mengembalikan "unknown" untuk guard test.
   return classifyTool(name) !== "none"
 }
 
-/** P2.10 canonical coverage: plain registry tools handled by an awaited wrapper. */
+/** Tool registry yang dicakup wrapper awaited (mode canonical). */
 export function isCanonicalEvidenceCovered(name: string): boolean {
-  // Independent special paths keep their own single intent/terminal pair:
-  // delegate_task writes explicitly, and dotted runtime MCP tools remain on
-  // the event path while MCP server mode has its own awaited instrumentation.
+  // Jalur khusus punya pasangan intent/terminal sendiri: delegate_task menulis
+  // eksplisit; MCP runtime bertitik tetap di jalur event.
   return isMutationTool(name) && !NO_AUTO_JOURNAL.has(name) && !isMcpToolName(name)
 }
 
@@ -305,17 +229,11 @@ export function hashArgs(args: unknown): string {
     .digest("hex")
 }
 
-// ── [Fase 2 / LOOP-INV-07] Tag hasil tool yang ambigu ──────────────────────
-//
-// `ToolResult` kernel FROZEN hanya punya `{content, isError}`. Karena itu
-// status UNKNOWN diwakili prefix deterministik di awal `content`, bukan field
-// baru di kernel. Format sengaja stabil dan sempit supaya bisa diparse tanpa
-// menebak isi bebas:
-//
-//   [TOOL_OUTCOME state=UNKNOWN reason=TIMEOUT side_effect_tier=LOCAL_ENV_MUTATION duration_ms=… timeout_ms=…]
-//
-// Parser mengembalikan `null` untuk hasil normal, sehingga pemanggil lama tak
-// berubah perilakunya.
+// ── Tag hasil tool ambigu ──
+// `ToolResult` kernel FROZEN hanya `{content, isError}`, jadi UNKNOWN memakai
+// prefix deterministik di `content` (bukan field baru). Parser return `null`
+// untuk hasil normal, menjaga perilaku pemanggil lama.
+// Format: [TOOL_OUTCOME state=UNKNOWN reason=… side_effect_tier=… …]
 export interface ToolOutcomeTag {
   readonly state: "UNKNOWN"
   readonly reason: string
@@ -377,12 +295,10 @@ export function verifyPaths(tool: string, args: unknown, cwd: string): string[] 
   }
 }
 
-// ── [Fase 2 / LOOP-G06, LOOP-G07] Hash target pra/pasca mutasi ─────────────
-//
-// Tujuan: setelah crash, recovery bisa membedakan "belum terjadi" dari "sudah
-// selesai" dari "setengah tertulis" TANPA menjalankan ulang mutasi. Bukti ini
-// hanya mungkin dikumpulkan SEBELUM efek, jadi hanya jalur pre-flight (barrier
-// Fase 1) yang menulisnya. Batas ukuran mencegah barrier membaca file raksasa.
+// ── Hash target pra/pasca mutasi ──
+// Setelah crash, recovery membedakan "belum terjadi"/"selesai"/"setengah
+// tertulis" tanpa mengulang mutasi. Bukti hanya dikumpulkan sebelum efek
+// (jalur pre-flight); batas ukuran mencegah membaca file raksasa.
 
 const TARGET_HASH_TOOLS: ReadonlySet<string> = new Set([
   "write_file",
@@ -413,11 +329,8 @@ function sha256Text(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex")
 }
 
-/**
- * Hitung hash pra-efek (dan pasca-efek bila dapat diturunkan dari argumen).
- * Tak pernah melempar: kegagalan baca = bukti tidak tersedia (field absen),
- * bukan alasan menggagalkan tool.
- */
+/** Hash pra-efek (+pasca bila bisa diturunkan). Tak pernah melempar: gagal
+ * baca = field absen, bukan alasan menggagalkan tool. */
 async function targetHashesFor(
   name: string,
   args: Record<string, unknown>,
@@ -437,9 +350,8 @@ async function targetHashesFor(
     // Field hadir dengan nilai null = "diharapkan tidak ada setelah efek".
     out.postTargetHash = null
   }
-  // edit/apply_patch/move_file: isi akhir tidak dapat diturunkan dari argumen
-  // tanpa menerapkan patch → postTargetHash absen (rekonsiliasi = UNKNOWN bila
-  // isi berubah dari pre).
+  // edit/apply_patch/move_file: isi akhir tak bisa diturunkan dari argumen →
+  // postTargetHash absen (UNKNOWN bila isi berubah dari pre).
   return out
 }
 
@@ -452,19 +364,10 @@ export interface WorkspaceReconciliation {
   readonly reason: string
 }
 
-/**
- * [Fase 2 / LOOP-G06, LOOP-G07] Rekonsiliasi deterministik satu intent mutasi
- * terhadap kondisi disk SEKARANG.
- *
- * Aturan (urutan penting):
- *   1. isi == preTargetHash DAN != postTargetHash  → CONFIRMED_NOT_EXECUTED
- *   2. postTargetHash diketahui DAN isi == post     → CONFIRMED_EXECUTED
- *   3. selain itu (berubah tapi bukan post yang diketahui, record legacy tanpa
- *      hash, path di luar root, file tak terbaca)   → UNKNOWN
- *
- * `UNKNOWN` adalah jawaban aman: pemanggil wajib memverifikasi/meminta
- * keputusan, bukan mengulang mutasi.
- */
+/** Rekonsiliasi intent mutasi terhadap disk saat ini (urutan penting):
+ *  1. isi == pre dan != post → CONFIRMED_NOT_EXECUTED
+ *  2. post diketahui dan isi == post → CONFIRMED_EXECUTED
+ *  3. selainnya → UNKNOWN (aman: verifikasi, bukan ulang mutasi). */
 export async function reconcileWorkspaceMutationIntent(
   record: Pick<JournalRecord, "paths" | "preTargetHash" | "postTargetHash">,
   workspaceRoot: string,
@@ -520,8 +423,7 @@ export async function reconcileWorkspaceMutationIntent(
 // ── Lokasi & state penulis ──
 
 function sanitizeId(s: string): string {
-  // F-17: delegasi ke sanitizer bersama (dulu duplikasi 3 baris dengan
-  // pemetaan sedikit berbeda dari checkpoint/shadow).
+  // Delegasi ke sanitizer bersama agar pemetaan id konsisten.
   return sanitizeSessionPart(s)
 }
 
@@ -530,12 +432,8 @@ export function journalPath(sessionId: string, cwd?: string): string {
 }
 
 export function deleteJournalFile(sessionId: string, cwd?: string): void {
-  // Lifecycle: ikut hapus sesi/TTL (best-effort, sinkron agar materai).
-  // Audit: dulu ini `void import("node:fs").then(unlinkSync)` — ternyata
-  // ASINKRON meski kontrak dan pemanggil mengira sinkron. Pemanggil bisa
-  // membaca journal lagi sebelum unlink selesai (race). Sekarang unlinkSync
-  // dipanggil langsung: benar-benar selesai sebelum fungsi kembali, seperti
-  // yang dijanjikan signature `: void` dan komentar "sinkron agar materai".
+  // Best-effort sinkron: unlinkSync selesai sebelum fungsi kembali (kontrak
+  // `: void`); jangan pakai import async — memicu race baca-jurnal.
   try {
     unlinkSync(journalPath(sessionId, cwd))
   } catch {
@@ -543,12 +441,8 @@ export function deleteJournalFile(sessionId: string, cwd?: string): void {
   }
 }
 
-/**
- * Temukan jurnal yatim untuk purge TTL (AUDIT #01E §6): file milik sesi yang
- * tak ada di tabel sessions DAN tak dirujuk delegasi hidup mana pun DAN
- * lebih tua dari TTL. Unreadable dilewati (tak bisa dibuktikan yatim —
- * menghapus yang tak terbaca adalah heuristik berbahaya).
- */
+/** Jurnal yatim untuk purge TTL: sesi tak dikenal, tak dirujuk delegasi, dan
+ * lebih tua dari TTL. File tak terbaca dilewati (yatim tak terbukti). */
 export async function findOrphanJournals(
   journalDir: string,
   knownSessionIds: Set<string>,
@@ -563,8 +457,7 @@ export async function findOrphanJournals(
     return []
   }
   const files = entries.filter((f) => f.startsWith("journal-") && f.endsWith(".jsonl"))
-  // Pass 1: kumpulkan referensi anak dari semua file terbaca (parent yang
-  // masih hidup melindungi jurnal anaknya walau id anak asing bagi DB).
+  // Pass 1: kumpulkan referensi anak; parent hidup melindungi jurnal anaknya.
   const referenced = new Set<string>()
   const owners = new Map<string, string>() // file → owner session
   for (const f of files) {
@@ -617,10 +510,10 @@ function writerKey(session: string, cwd: string): string {
   return `${resolve(cwd)}::${session}`
 }
 
-// ── Serialisasi per-file (§F16): alokasi seq + append harus atomik terhadap
-// sesama penulis. Tanpa ini dua intent konkuren membaca nextSeq sama →
-// tabrakan id → konsolidasi/keputusan runtuh. Rantai janji per file; deadlock
-// mustahil selama callback tak memanggil API terkunci lain (dipatuhi).
+// ── Serialisasi per-file ──
+// Alokasi seq + append harus atomik: dua intent konkuren membaca nextSeq sama
+// → tabrakan id. Rantai janji per file; deadlock mustahil bila callback tak
+// memanggil API terkunci lain.
 const fileLocks = new Map<string, Promise<void>>()
 
 async function withFileLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
@@ -659,8 +552,7 @@ function markDegraded(sessionId: string, cwd: string, why: string): void {
 
 async function appendLine(path: string, obj: JournalRecord): Promise<boolean> {
   const line = `${JSON.stringify(obj)}\n`
-  // Baris kecil + O_APPEND = tulis atomik antar proses (POSIX); cukup untuk
-  // satu penulis per sesi + penulis sesekali (sweep memakai file lain).
+  // Baris kecil + O_APPEND = tulis atomik antar proses (POSIX).
   try {
     await mkdir(dirname(path), { recursive: true, mode: 0o700 }).catch(() => {})
     const h = await open(path, "a")
@@ -705,10 +597,10 @@ export interface IntentInput {
   turn?: number | null
   tool: string
   threadId?: string
-  /** Provisional or canonical application-owned invocation key. */
+  /** Kunci invokasi milik aplikasi (provisional atau kanonik). */
   invocationId?: string
   providerToolCallId?: string
-  /** Allocate the canonical key from the reserved journal sequence inside the lock. */
+  /** Alokasi kunci kanonik dari seq jurnal di dalam lock. */
   allocateInvocationId?: (allocationSequence: number) => string
   remote?: true
   backend?: string
@@ -720,17 +612,11 @@ export interface IntentInput {
   /** [Fase 2 / LOOP-G07] Hash target yang diharapkan setelah efek sukses. */
   postTargetHash?: string | null
   childSessionId?: string
-  /**
-   * Kunci idempotency (audit #08): ditulis ke outcome.note SEJAK intent agar
-   * crash di tengah eksekusi tetap meninggalkan bukti yang dapat dicocokkan
-   * (sebelumnya note hanya ada di terminal → bukti pending tak terlihat →
-   * retry id-sama pasca-crash dieksekusi ulang buta).
-   */
+  /** Kunci idempotency ditulis ke outcome.note sejak intent agar crash saat
+   * eksekusi tetap meninggalkan bukti yang bisa dicocokkan. */
   note?: string
-  // M1 correlator (ADR-002, passthrough): korelasi execution opsional dari
-  // pemanggil (Host M3+). Absent = jalur belum wiring — perilaku lama utuh.
-  // Validasi bentuk BUKAN di sini (allocator/helper yang menjamin); jurnal
-  // hanya menyalin string yang diberikan (tanpa rahasia: id/korelasi publik).
+  // Korelator execution passthrough; absent = perilaku lama. Validasi bentuk
+  // di allocator/helper — jurnal hanya menyalin id publik (tanpa rahasia).
   executionId?: string
   parentExecutionId?: string
   rootExecutionId?: string
@@ -745,8 +631,7 @@ export async function appendMutationIntent(input: IntentInput): Promise<JournalR
   const key = writerKey(input.session, root)
   return withFileLock(key, async () => {
     const st = await stateFor(path, key)
-    // Alokasi seq SYNCHRONOUS di dalam lock: tanpa ini dua pemanggil konkuren
-    // mendapat seq sama (tabrakan id — P0, ditemukan AUDIT #01D).
+    // Alokasi seq sinkron di dalam lock: cegah tabrakan id antar pemanggil konkuren.
     const seq = st.nextSeq
     const invocationId = input.allocateInvocationId
       ? input.allocateInvocationId(seq)
@@ -781,8 +666,7 @@ export async function appendMutationIntent(input: IntentInput): Promise<JournalR
       state: "pending",
       ts: Date.now(),
     }
-    // Tak-pernah-throw disengaja: kegagalan jurnal tak boleh menggagalkan turn.
-    // Resume memperlakukan sesi degraded via jalur advisory + warn ini.
+    // Tak pernah throw: gagal jurnal tak boleh menggagalkan turn (degraded-loud).
     if (await appendLine(path, rec)) {
       st.nextSeq = seq + 1
     } else {
@@ -843,8 +727,7 @@ export async function appendMutationTerminal(
             },
           }
         : {}),
-      // Tautan delegasi diwariskan ke terminal agar pembaca tak perlu
-      // join intent-terminal untuk mengetahui anak mana yang dirujuk.
+      // Tautan delegasi diwariskan agar pembaca tak perlu join intent-terminal.
       ...(childSessionId ? { childSessionId } : {}),
       // Bukti dedup idempotency (mis. MCP request id): dipertahankan sweep.
       ...(opts.dedup ? { dedup: true as const } : {}),
@@ -861,7 +744,7 @@ export async function appendMutationTerminal(
   })
 }
 
-/** Append a standalone explicit external-effect observation (P2.10 VerificationRecord). */
+/** Tulis observasi efek eksternal mandiri (VerificationRecord). */
 export async function appendVerificationRecord(input: {
   session: string
   threadId?: string
@@ -1000,15 +883,10 @@ export async function finalizeJournal(sessionId: string, cwd?: string): Promise<
   })
 }
 
-/**
- * Hapus HANYA yang finalized + marker lama. Atomic: tulis tmp → rename.
- * - committed/failed dengan seq ≤ maxUpto → finalized → buang.
- * - pending TAK PERNAH dibuang karena finalize (finalize menandai persist,
- *   bukan status mutasi) — KECUALI superseded: mutasi sama (tool+paths)
- *   berhasil di-commit belakangan = bukti operator verifikasi + jalan terus.
- *   Pending tanpa paths (bash/MCP) tak bisa disupersede — ambiguitasnya
- *   genuinely berbahaya, jadi bertahan sampai resolvePending eksplisit.
- */
+/** Sweep atomik (tmp → rename): buang terminal finalized dan marker lama.
+ * Pending tak dibuang oleh finalize (finalize = persist, bukan status mutasi),
+ * kecuali superseded oleh commit mutasi sama (tool+paths). Pending tanpa paths
+ * bertahan sampai resolvePending eksplisit. */
 export async function sweepJournal(sessionId: string, cwd?: string): Promise<number> {
   const root = resolve(cwd ?? process.cwd())
   const key = writerKey(sessionId, root)
@@ -1026,8 +904,7 @@ async function sweepInner(sessionId: string, root: string): Promise<number> {
       maxUpto = Math.max(maxUpto, r.uptoSeq)
   }
   if (maxUpto < 0) return 0
-  // Pasangan selesai: pending yang sudah punya terminal (id sama) ikut
-  // dibuang — statusnya hidup di record terminal (satu semantik mutasi).
+  // Pending berpasangan dengan terminal ikut dibuang (status di terminal).
   const paired = new Set<string>()
   for (const r of loaded.records) {
     if ((!r.kind || r.kind === "mutation") && isTerminalJournalState(r.state)) {
@@ -1035,23 +912,18 @@ async function sweepInner(sessionId: string, root: string): Promise<number> {
     }
   }
   const committedKeys = committedPathsKeys(loaded.records)
-  // [Audit #2 C.F8] Hoist maxFinalizeSeq ke konstanta — semula dihitung ulang
-  // di dalam `.filter` untuk setiap record (O(n²)). Sekali jalan = O(n).
+  // Hitung sekali di luar filter agar sweep O(n), bukan O(n²).
   const maxFinalize = maxFinalizeSeq(loaded.records)
   const keep = loaded.records.filter((r) => {
     if (r.kind === "finalize") return r.seq === maxFinalize
     if (r.kind === "undo" || r.kind === "redo") return r.seq > maxUpto
-    // P2.10 verification evidence is retained like dedup terminals: it may be
-    // the only durable external-effect observation after finalize/sweep.
-    // Bound by per-session files + orphan TTL, not by finalize.
+    // Bukti verification dipertahankan seperti terminal dedup: bisa jadi satu-
+    // satunya observasi efek eksternal pasca-sweep. Dibatasi TTL/ukuran file.
     if (r.kind === "verification") return true
     if (r.state === "pending" && paired.has(r.id)) return false
     if (r.state === "pending") return !isSuperseded(r, committedKeys)
-    // Bukti dedup idempotency (dedup: true, mis. MCP request id) BUKAN sampah
-    // finalize: menghapusnya membuat retry id-sama pasca-restart dieksekusi
-    // ulang buta (audit #08 P0 — reproducer: note hilang setelah sweep).
-    // Intent pasangannya tetap dibuang (aturan paired di atas); terminal ini
-    // yang menjadi bukti. Batas pertumbuhan: file per sesi + purge yatim TTL.
+    // Terminal dedup dipertahankan: menghapusnya membuat retry id-sama pasca-
+    // restart dieksekusi ulang buta. Intent pasangannya tetap dibuang.
     if ((!r.kind || r.kind === "mutation") && isTerminalJournalState(r.state) && r.dedup === true)
       return true
     return (r.seq ?? 0) > maxUpto // committed/failed muda bertahan
@@ -1078,8 +950,7 @@ function pathsKey(tool: string, paths?: string[]): string | null {
 
 function committedPathsKeys(records: JournalRecord[]): Set<string> {
   const out = new Set<string>()
-  // Terminal committed per id (duplikat: terminal pertama menang — sama
-  // seperti consolidate di decideRecovery).
+  // Terminal committed per id: terminal pertama menang (sama seperti decideRecovery).
   const seen = new Set<string>()
   for (const r of records) {
     if (r.kind && r.kind !== "mutation") continue
@@ -1101,11 +972,8 @@ function isSuperseded(r: JournalRecord, committedKeys: Set<string>): boolean {
   return false
 }
 
-/**
- * Resolusi manual pending → terminal berdasar verifikasi manusia (calon
- * pemanggil: perintah /verify-ack masa depan). applied = efek ada (jangan
- * ulang); absent = efek tak ada (boleh coba lagi via gate normal).
- */
+/** Resolusi manual pending → terminal dari verifikasi manusia: `applied` =
+ * efek ada (jangan ulang); `absent` = efek tak ada (boleh dicoba lagi). */
 export async function resolvePending(
   sessionId: string,
   cwd: string | undefined,
@@ -1149,13 +1017,8 @@ export interface JournalLoad {
   /** Ekor terpotong (fail-closed keputusan, fail-open sesi). */
   truncatedTail: boolean
   quarantined: boolean
-  /**
-   * Status file — TIDAK disamakan:
-   * absent = tak pernah ada (bukan bukti apa pun);
-   * empty = ada tetapi nol record (sesi terpasang, belum bermutasi);
-   * valid = ≥1 record utuh; corrupt = dikarantina / ekor-rusak tanpa isi;
-   * unreadable = ada tetapi tak terbaca (bukan bukti kosong).
-   */
+  /** Status file: absent = tak ada; empty = nol record; valid = ≥1 record;
+   * corrupt = dikarantina/ekor-rusak; unreadable = tak terbaca (bukan kosong). */
   status: "absent" | "empty" | "valid" | "corrupt" | "unreadable"
 }
 
@@ -1191,8 +1054,7 @@ export async function loadJournal(sessionId: string, cwd?: string): Promise<Jour
   try {
     raw = await readFile(path, "utf8")
   } catch (e) {
-    // ENOENT = memang tak ada (bukan bukti kosong). Sisanya = unreadable,
-    // BUKAN empty — file yang tak terbaca tak boleh disamakan dengan bersih.
+    // ENOENT = absent; error lain = unreadable (bukan empty).
     if ((e as NodeJS.ErrnoException)?.code === "ENOENT") {
       return { records: [], warnings, truncatedTail: false, quarantined: false, status: "absent" }
     }
@@ -1319,9 +1181,8 @@ export function decideRecovery(
 ): RecoveryPlan {
   const warnings: string[] = []
   const maxItems = opts.maxItems ?? MAX_DIRECTIVE_ITEMS
-  // Konsolidasi per id (append-only boleh punya pasangan pending→terminal).
-  // Aturan: terminal pertama menang; terminal ganda / terminal→pending =
-  // anomali → warn + abaikan tulisan basi.
+  // Konsolidasi per id: terminal pertama menang; duplikat/terminal→pending =
+  // anomali → warn, abaikan tulisan basi.
   const byId = new Map<string, JournalRecord[]>()
   for (const r of records) {
     if (r.kind && r.kind !== "mutation") continue
@@ -1329,13 +1190,11 @@ export function decideRecovery(
     list.push(r)
     byId.set(r.id, list)
   }
-  // Finalize scope = PER SESSION FILE (seq spaces tak sebanding antar file).
-  // Global maxUpto akan mencampur namespace parent/child secara salah.
+  // Finalize diskop per file sesi: maxUpto global mencampur namespace parent/child.
   const uptoBySession = new Map<string, number>()
   let undoRedoCount = 0
-  // Marker undo/redo untuk aturan stitch (P0-3): redo mengembalikan efek
-  // (stitch moot), undo mencabut efek (stitch salah → warning khusus).
-  // Hanya untuk record sesi-sendiri (tanpa childOf) — namespace terisolasi.
+  // Marker undo/redo untuk stitch: redo mengembalikan efek (stitch moot), undo
+  // mencabutnya (warning khusus). Hanya record sesi sendiri (tanpa childOf).
   const redoMarks: { targetTurn: number; seq: number }[] = []
   const undoMarks: { targetTurn: number; seq: number }[] = []
   for (const r of records) {
@@ -1350,9 +1209,8 @@ export function decideRecovery(
     }
   }
   const covered = (r: JournalRecord): boolean => r.seq <= (uptoBySession.get(r.session) ?? -1)
-  // Cakupan transitif delegasi: anak ter-cover bila record delegasi parent-nya
-  // terminal committed DAN finalized (skop sesi parent). Tanpa ini committed
-  // anak selalu stitch karena turn anak tak ada di DB parent (false positive).
+  // Anak ter-cover bila delegasi parent committed + finalized; jika tidak,
+  // committed anak stitch spurius (turn anak tak ada di DB parent).
   const coveredChild = new Set<string>()
   for (const [, list] of byId) {
     const first = list[0]!
@@ -1398,13 +1256,11 @@ export function decideRecovery(
     }
     const eff = list.find((r) => isTerminalJournalState(r.state)) ?? first
     if (!eff.state || eff.state === "pending") {
-      // Superseded = mutasi sama berhasil belakangan = bukti verifikasi
-      // implisit (sweep akan membuangnya). Jangan nagih yang sudah terjawab.
+      // Superseded = mutasi sama berhasil belakangan; jangan nagih yang sudah terjawab.
       if (isSuperseded(first, supersedeKeys)) continue
       stats.pending += 1
       if (covered(first)) {
-        // Tertutup finalize tetapi tanpa terminal: finalize menandai cakupan
-        // persist, BUKAN status mutasi — tetap ambigu (konservatif benar).
+        // Ter-cover finalize tanpa terminal tetap ambigu (finalize = persist, bukan status).
         warnings.push(
           `journal ${first.id} pending tetapi ter-cover finalize — tetap diperlakukan ambigu`,
         )
@@ -1413,10 +1269,8 @@ export function decideRecovery(
       continue
     }
     if (eff.state === "unknown") {
-      // [Fase 2 / LOOP-INV-07] Terminal ambigu SELALU butuh verifikasi, bahkan
-      // bila sudah ter-cover finalize: finalize membuktikan record durable,
-      // bukan membuktikan efek terjadi/tidak. Menyembunyikannya = auto-retry
-      // buta pada perintah yang mungkin sudah setengah berjalan.
+      // Terminal ambigu selalu butuh verifikasi: finalize membuktikan record
+      // durable, bukan efek. Menyembunyikannya = auto-retry buta.
       stats.unknown += 1
       warnings.push(
         `journal ${first.id} (${first.tool}) berakhir UNKNOWN — efek belum dapat dipastikan; verifikasi sebelum mengulang`,
@@ -1439,8 +1293,7 @@ export function decideRecovery(
       stats.finalized += 1
       continue
     }
-    // Anak ter-cover transitif: delegasi parent-nya committed + finalized
-    // (skop sesi parent). Tanpa ini setiap committed anak stitch spurios.
+    // Anak ter-cover transitif via delegasi parent committed + finalized.
     if (first.childOf && coveredChild.has(first.session)) {
       stats.committed += 1
       continue
@@ -1450,14 +1303,12 @@ export function decideRecovery(
       remoteVerify.push(toItem(first, "committed"))
       continue
     }
-    // Redo yang lebih baru dan mencakup turn ini mengembalikan efeknya —
-    // stitch moot. BUKAN auto-redo: redo sudah terjadi dan tercatat.
-    // (Remote dikecualikan di atas: redo file tak memulihkan efek server.)
+    // Redo lebih baru mengembalikan efek (stitch moot; bukan auto-redo).
+    // Remote dikecualikan: redo file tak memulihkan efek server.
     if (!first.childOf && first.turn != null) {
       const redone = redoMarks.some((mk) => mk.seq > first.seq && mk.targetTurn >= first.turn!)
       if (redone) continue
-      // Undo yang lebih baru dan mencakup turn ini MENCABUT efeknya: stitch
-      // "anggap efek ada" menjadi salah — ganti warning jujur, tanpa redo.
+      // Undo lebih baru mencabut efek: stitch "anggap ada" salah → warning jujur.
       const undone = undoMarks.some((mk) => mk.seq > first.seq && first.turn! >= mk.targetTurn)
       if (undone) {
         warnings.push(
@@ -1466,9 +1317,8 @@ export function decideRecovery(
         continue
       }
     }
-    // ISOLASI NAMESPACE TURN: turn anak tak pernah dibandingkan dengan turns
-    // parent (ruang turn berbeda). Anak uncovered selalu stitch — aman dan
-    // tak pernah cross-match kebetulan.
+    // Isolasi namespace turn: turn anak tak dibandingkan dengan turn parent.
+    // Anak uncovered selalu stitch (aman, tak ada cross-match kebetulan).
     if (!first.childOf) {
       const turn = first.turn ?? null
       if (turn !== null && persistedTurns.includes(turn)) continue // normal
@@ -1546,28 +1396,17 @@ interface ExecutionEvent {
     call?: { name?: unknown; args?: unknown; id?: unknown }
     result?: { isError?: unknown; content?: unknown }
   }
-  /** Ditandai task.ts saat event child di-forward ke bus parent: catat di
-   * jurnal ANAK saja (bus asal), bukan ganda di parent. Checkpoint, trace,
-   * dan UI tetap mengonsumsi event forward seperti biasa. */
+  /** Event child yang di-forward ke bus parent: catat hanya di jurnal anak
+   * (bus asal), bukan ganda di parent. */
   forwardedChild?: unknown
 }
 
-/**
- * Pasang jurnal pada sesi apa pun (parent maupun anak). Total: kegagalan
- * I/O jurnal tak pernah melempar ke bus turn (degraded-loud).
- */
+/** Pasang jurnal pada sesi apa pun; gagal I/O tak pernah melempar ke bus turn. */
 export interface MutationJournalHandle {
-  /**
-   * [Fase 1] Tulis record intent dan tunggu sampai durable. Dipanggil
-   * SEBELUM tool dieksekusi. No-op untuk tool yang tak dijurnal (read-only,
-   * NO_AUTO_JOURNAL, atau sudah dicakup jalur canonical).
-   */
+  /** Tulis intent dan tunggu durable, sebelum tool dieksekusi. No-op untuk
+   * tool tak dijurnal (read-only/NO_AUTO_JOURNAL/canonical). */
   preflightIntent(call: { id: string; name: string; args: unknown }): Promise<void>
-  /**
-   * [Fase 1] Tunggu seluruh penulisan terminal yang masih berjalan selesai.
-   * Dipanggil composition root sebelum turn dinyatakan selesai, sehingga
-   * "selesai" tidak pernah mendahului bukti.
-   */
+  /** Tunggu terminal selesai sebelum turn dinyatakan selesai (bukti sebelum status). */
   flushPending(): Promise<void>
 }
 
@@ -1577,11 +1416,8 @@ export function attachMutationJournal(
     sessionId: string
     cwd?: string
     childOf?: string
-    /**
-     * Fase 4 V2.1: kabar terminal committed (paths+journalSeq) → composition
-     * root memancarkan file.changed (receipt paths+journalSeq) ke adapter.
-     * Opsional — tanpa hook, jurnal tetap berjalan seperti dulu.
-     */
+    /** Kabar committed (paths+journalSeq) → composition root memancarkan
+     * file.changed. Opsional; tanpa hook jurnal tetap berjalan. */
     onCommitted?: (info: {
       toolCallId: string
       paths: string[]
@@ -1589,23 +1425,15 @@ export function attachMutationJournal(
       sessionId: string
       turnId?: number
     }) => void
-    /**
-     * P2.10 canonical mode: registry tools covered by an awaited wrapper
-     * already wrote one intent/terminal pair. Event fallback stays only for
-     * special paths and uncovered tools, so production has no double evidence.
-     */
+    /** Mode canonical: tool yang dicakup wrapper awaited sudah menulis satu
+     * pasangan intent/terminal. Fallback event hanya untuk jalur khusus. */
     evidenceMode?: "events" | "canonical"
   },
 ): MutationJournalHandle {
   const root = resolve(opts.cwd ?? process.cwd())
-  // Eager creation (AUDIT #01E §1): file jurnal dibuat saat wiring dipasang
-  // — SEBELUM mutasi pertama — agar ABSENT vs EMPTY dapat dibedakan saat
-  // resume (absent = bukti hilang; empty = sesi ada, belum bermutasi).
-  // Create-if-absent ("wx"): tak menimpa file existing, tak menulis record
-  // palsu; balapan dengan append pertama aman dari dua arah (append memakai
-  // "a" yang juga membuat bila belum ada).
-  // Fire-and-forget disengaja: attach sinkron; kegagalan → degraded-loud,
-  // BUKAN sesi gagal start.
+  // Buat file saat wiring (sebelum mutasi pertama) agar absent ≠ empty saat
+  // resume. Mode "wx" tak menimpa file ada; fire-and-forget menjaga attach
+  // sinkron (gagal = degraded, bukan sesi gagal start).
   void (async () => {
     const path = journalPath(opts.sessionId, root)
     try {
@@ -1623,17 +1451,13 @@ export function attachMutationJournal(
       }
     }
   })()
-  // toolCallId → ANTRE intent (FIFO). Started ganda id sama (retry/duplikat)
-  // tak boleh saling menimpa: completed mengambil pasangan TERTUA yang belum
-  // berpasangan. Map-overwrite = terminal salah pasangan = pending hantu.
+  // Antre intent FIFO per toolCallId: started ganda tak boleh menimpa;
+  // completed mengambil pasangan tertua (map-overwrite = pending hantu).
   const inflight = new Map<string, Promise<JournalRecord>[]>()
-  // [Fase 1 / LOOP-INV-03] toolCallId yang intent-nya sudah ditulis oleh
-  // PRE-FLIGHT (jalur awaited sebelum efek). Listener `execution:started`
-  // melewatkannya supaya satu efek tidak menghasilkan dua record intent.
+  // toolCallId yang sudah di-preflight dilewati listener started (cegah intent ganda).
   const preflighted = new Set<string>()
-  // [Fase 1 / LOOP-INV-03] Terminal yang masih menulis. `execution:completed`
-  // adalah event SINKRON, sedangkan append terminal async; tanpa daftar ini
-  // turn bisa dinyatakan selesai saat bukti terminal masih di jalan.
+  // Terminal yang masih menulis: completed sinkron, append async — tanpa daftar
+  // ini turn selesai sebelum bukti terminal tiba.
   const pendingTerminals = new Set<Promise<void>>()
   const turnOf = (): number | null => {
     try {
@@ -1643,11 +1467,8 @@ export function attachMutationJournal(
       return null
     }
   }
-  /**
-   * [Fase 1] Satu-satunya tempat membangun input intent, dipakai bersama oleh
-   * listener event (fallback) dan pre-flight (jalur utama). Duplikasi di sini
-   * akan membuat dua jalur menulis bentuk record yang berbeda.
-   */
+  /** Satu-satunya pembangun input intent, dipakai event fallback dan pre-flight
+   * agar bentuk record identik di dua jalur. */
   const intentInputFor = (
     name: string,
     args: Record<string, unknown>,
@@ -1675,20 +1496,17 @@ export function attachMutationJournal(
     !(opts.evidenceMode === "canonical" && isCanonicalEvidenceCovered(name))
   session.events.on("execution:started", (e) => {
     const ev = e as unknown as ExecutionEvent
-    // Forward dari child: ground truth ada di jurnal anak (bus asal).
-    // Mencatatnya juga di sini = bukti ganda (satu efek, dua id/sesi).
+    // Event child forward: truth di jurnal anak; mencatat di sini = bukti ganda.
     if (ev.forwardedChild != null) return
     const name = typeof ev.execution?.call?.name === "string" ? ev.execution.call.name : ""
     if (!shouldJournal(name)) return
     const callId =
       typeof ev.execution?.call?.id === "string" ? (ev.execution.call.id as string) : ""
-    // [Fase 1 / LOOP-INV-03] Pre-flight sudah menulis intent untuk call ini
-    // SEBELUM tool dieksekusi. Menulis lagi di sini = dua record untuk satu
-    // efek, dan recovery akan melihat satu intent menggantung selamanya.
+    // Pre-flight sudah menulis intent sebelum efek; menulis lagi = intent
+    // ganda yang menggantung saat recovery.
     if (callId !== "" && preflighted.has(callId)) return
     const args = (ev.execution?.call?.args ?? {}) as Record<string, unknown>
-    // Daftarkan promise SEBELUM await: completed dijamin datang sesudah
-    // started, dan kini pasti menunggu intent selesai dulu.
+    // Daftarkan promise sebelum await agar completed menunggu intent selesai.
     const intentP = appendMutationIntent(intentInputFor(name, args))
     if (callId) {
       const q = inflight.get(callId) ?? []
@@ -1716,14 +1534,12 @@ export function attachMutationJournal(
         const q = callId ? (inflight.get(callId) ?? []) : []
         const found = q.length > 0 ? await q.shift()!.catch(() => undefined) : undefined
         if (callId && q.length === 0) inflight.delete(callId)
-        // Tanpa pasangan intent (mis. intent gagal tulis / degraded): jangan
-        // karang terminal yatim — biarkan absen (jalur advisory + warn).
+        // Tanpa pasangan intent: jangan karang terminal yatim (advisory + warn).
         if (!found) return
         const result = ev.execution?.result
         const failed = result?.isError === true
-        // [Fase 2 / LOOP-INV-07] Hasil ber-tag UNKNOWN bukan "failed" biasa:
-        // efeknya mungkin sudah terjadi. Terminal ditandai `unknown` supaya
-        // recovery tidak pernah memperlakukannya sebagai aman-diulang.
+        // Tag UNKNOWN ≠ failed biasa (efek mungkin terjadi) → terminal `unknown`
+        // agar recovery tak menganggapnya aman-diulang.
         const outcomeTag = failed ? parseToolOutcomeTag(String(result?.content ?? "")) : null
         const state = outcomeTag ? "unknown" : failed ? "failed" : "committed"
         let note: string | undefined
@@ -1756,8 +1572,7 @@ export function attachMutationJournal(
           state,
           outcome,
         )
-        // Fase 4: kabar committed ke composition root (file.changed/receipt).
-        // Gagal hook tak boleh menggagalkan jurnal (degraded-loud).
+        // Kabar committed ke composition root; gagal hook tak boleh menggagalkan jurnal.
         if (state === "committed" && opts.onCommitted && callId) {
           try {
             opts.onCommitted({
@@ -1773,30 +1588,18 @@ export function attachMutationJournal(
         process.stderr.write(`[warn] journal: terminal failed: ${(err as Error).message}\n`)
       }
     })()
-    // [Fase 1] Daftarkan supaya composition root bisa MENUNGGU terminal selesai
-    // sebelum turn dinyatakan selesai. Body di atas menangkap semua error, jadi
-    // promise ini tidak pernah reject; `finally` hanya membersihkan daftar.
+    // Daftarkan agar composition root bisa menunggu terminal; `finally` hanya
+    // membersihkan daftar (promise tak pernah reject).
     pendingTerminals.add(task)
     void task.finally(() => pendingTerminals.delete(task)).catch(() => {})
   })
 
-  /**
-   * [Fase 1 / LOOP-INV-03, LOOP-INV-04] Handle untuk composition root.
-   *
-   * `preflightIntent` menulis record intent dan MENUNGGU-nya sampai durable.
-   * Pemanggil (`src/app/session.ts` lewat `beforeToolEffect`, dipasang
-   * `cli/setup.ts`) menjalankannya SEBELUM tool dieksekusi, sehingga
-   * "durability-before-effect" menjadi urutan yang benar-benar di-await, bukan
-   * harapan pada scheduling microtask.
-   *
-   * Idempoten per `toolCallId`: panggilan kedua (mis. retry hook) tidak
-   * menulis record kedua, dan listener `execution:started` melewatkan id yang
-   * sudah di-preflight.
-   */
+  /** Handle composition root: `preflightIntent` menulis intent dan menunggu
+   * durable sebelum efek (via beforeToolEffect). Idempoten per toolCallId;
+   * listener started melewati id yang sudah di-preflight. */
   return {
     async flushPending(): Promise<void> {
-      // Tunggu sampai TIDAK ADA terminal tertunda. Loop karena penulisan baru
-      // bisa lahir selama await (batch berurutan); sekali kosong, selesai.
+      // Loop sampai tak ada terminal tertunda (penulisan baru bisa lahir saat await).
       while (pendingTerminals.size > 0) {
         await Promise.allSettled([...pendingTerminals])
       }
@@ -1806,13 +1609,11 @@ export function attachMutationJournal(
       if (!shouldJournal(name)) return
       const callId = typeof call.id === "string" ? call.id : ""
       if (callId === "" || preflighted.has(callId)) return
-      // Tandai SEBELUM await: dua preflight paralel untuk id yang sama tidak
-      // boleh sama-sama menulis.
+      // Tandai sebelum await: cegah dua preflight paralel untuk id sama.
       preflighted.add(callId)
       const args = (call.args ?? {}) as Record<string, unknown>
-      // [Fase 2 / LOOP-G06] Hash pra-efek dihitung SEBELUM intent ditulis,
-      // sehingga record intent sudah membawa bukti yang bisa direkonsiliasi
-      // setelah crash. Kegagalan baca = field absen (UNKNOWN saat reconcile).
+      // Hash pra-efek dihitung sebelum intent ditulis; gagal baca = field absen
+      // (UNKNOWN saat reconcile).
       const hashes = await targetHashesFor(name, args, root)
       const p = appendMutationIntent(intentInputFor(name, args, hashes))
       const q = inflight.get(callId) ?? []
@@ -1821,9 +1622,8 @@ export function attachMutationJournal(
       try {
         await p
       } catch (err) {
-        // Durabilitas gagal: jangan biarkan efek berjalan (pemanggil akan
-        // menolak tool). Bersihkan state supaya tidak ada intent hantu yang
-        // ditunggu terminal yang tak akan pernah datang.
+        // Durabilitas gagal → pemanggil menolak tool. Bersihkan state agar tak
+        // ada intent hantu yang ditunggu terminal.
         preflighted.delete(callId)
         const idx = q.indexOf(p)
         if (idx !== -1) q.splice(idx, 1)
@@ -1838,27 +1638,18 @@ function base_of(name: string): string {
   return isMcpToolName(name) ? "mcp_call" : name
 }
 
-/**
- * Record mutasi dengan turn lebih baru dari turn bukti (P10.1.1, freshness
- * bukti completion). Murni baca: tanpa tulis/ubah/compact jurnal.
- *
- * Aturan (disetujui owner): relevan = klasifikasi `isMutationTool` (tulis,
- * bash, delegasi, memori, MCP, tak-dikenal-fail-closed); record turn null
- * (legacy) DIKECUALIKAN agar sesi lama tak terkunci permanen; state record
- * (pending/committed/failed) tak membedakan — upaya mutasi yang tercatat
- * sudah cukup untuk meragukan bukti lama. Gagal baca DILEMPAR ke pemanggil
- * (konteks gate: pemanggil wajib fail-closed); bedakan dari pembaca display
- * (committedDelegatesSince) yang gagal-lembut.
- */
+/** Mutasi dengan turn lebih baru dari bukti (freshness completion). Murni baca.
+ * Relevan = `isMutationTool`; record turn null (legacy) dikecualikan agar sesi
+ * lama tak terkunci. State tak membedakan. Gagal baca DILEMPAR (gate wajib
+ * fail-closed), beda dari pembaca display yang gagal-lembut. */
 export async function mutationsSinceTurn(
   sessionId: string,
   cwd: string | undefined,
   evidenceTurn: number,
 ): Promise<readonly JournalRecord[]> {
   const loaded = await loadJournal(sessionId, cwd)
-  // Jurnal tak-terbaca/korup = buktinya sendiri tak bisa diaudit: tolak
-  // diam-diam BUKAN pilihan — lempar agar pemanggil (gate) fail-closed.
-  // `absent` (belum ada berkas) dan `empty` aman: nol record = nol mutasi.
+  // Jurnal tak-terbaca/korup → lempar agar gate fail-closed. `absent`/`empty`
+  // aman (nol record = nol mutasi).
   if (loaded.status !== "absent" && loaded.status !== "empty" && loaded.status !== "valid") {
     throw new Error(`journal unreadable for freshness check (status: ${loaded.status})`)
   }
@@ -1880,20 +1671,14 @@ export interface RecoveryInput {
   clean: boolean
 }
 
-/**
- * Delegasi committed sejak timestamp: dipakai peringatan turn-gagal ("efek
- * anak tetap ada walau riwayat bersih"). Kembalikan childSessionId + seq + ts.
- * Murni baca; tak pernah melempar (gagal baca = [] + warn stderr).
- */
+/** Delegasi committed sejak timestamp (untuk peringatan turn-gagal). Murni
+ * baca; gagal baca = [] + warn stderr. */
 export interface CommittedDelegate {
   readonly childSessionId: string
   readonly seq: number
   readonly ts: number
-  /**
-   * Observasi amplop anak (P9.2.2.1, display-only): disalin dari terminal
-   * record yang sama — BUKAN bacaan jurnal anak baru. Absen = record
-   * legacy/rusak → pemanggil wajib fallback baris legacy.
-   */
+  /** Amplop anak (display-only) disalin dari terminal yang sama, bukan baca
+   * jurnal anak. Absen = pemanggil fallback baris legacy. */
   readonly childStatus?: ChildStatus
   readonly resultSummary?: string
   readonly truncated?: boolean
@@ -1909,11 +1694,8 @@ const DISPLAYABLE_CHILD_STATUS: ReadonlySet<string> = new Set([
   "failed_to_start",
 ])
 
-/**
- * Predikat bersama untuk status tampil (dipakai pembaca committedDelegatesSince
- * DAN formatter cli/recovery-warning.ts — satu sumber kebenaran agar status
- * asing tak pernah menjadi teks status menyesatkan di lapisan mana pun).
- */
+/** Predikat status tampil bersama (pembaca jurnal + formatter CLI): satu
+ * sumber agar status asing tak jadi teks menyesatkan. */
 export function isDisplayableChildStatus(value: unknown): value is ChildStatus {
   return typeof value === "string" && DISPLAYABLE_CHILD_STATUS.has(value)
 }
@@ -1938,9 +1720,8 @@ export async function committedDelegatesSince(
       const cid = r.childSessionId ?? intentChild.get(r.id)
       if (!cid) continue
       if (typeof r.ts !== "number" || r.ts < sinceTs) continue
-      // Amplop usang/rusak = absen (fallback baris legacy di pemanggil, tak
-      // pernah gagal): childStatus harus dikenal (status asing tak boleh
-      // jadi teks status menyesatkan) dan ringkasan harus string.
+      // Amplop rusak = absen (fallback legacy): childStatus harus dikenal dan
+      // ringkasan harus string — status asing tak boleh jadi teks menyesatkan.
       const env = r.outcome?.childResult
       const envelope =
         env !== null &&
@@ -1964,10 +1745,8 @@ export async function committedDelegatesSince(
   }
 }
 
-/**
- * Rencana recovery untuk satu sesi: jurnal sendiri + jurnal anak yang dirujuk
- * record delegasi. Murni baca; keputusan via decideRecovery (tanpa I/O).
- */
+/** Rencana recovery satu sesi: jurnal sendiri + anak yang dirujuk delegasi.
+ * Murni baca; keputusan via decideRecovery (tanpa I/O). */
 export async function planRecoveryForSession(
   sessionId: string,
   cwd?: string,
@@ -1990,10 +1769,8 @@ export async function planRecoveryForSession(
             .map((r) => r.childSessionId as string),
         ),
       ].slice(0, 10)
-      // Status terminal delegasi parent per anak: hanya committed yang
-      // menjadi bukti anak "seharusnya ada" (failed/pending = anak boleh
-      // tak lahir → absen adalah normal, bukan anomali). Tautan diambil
-      // dari terminal, fallback ke intent se-id (jurnal lama).
+      // Hanya delegasi committed yang membuktikan anak "seharusnya ada";
+      // failed/pending = absen normal. Tautan dari terminal, fallback intent.
       const intentChild = new Map<string, string>()
       for (const r of main.records) {
         if (r.tool === "delegate_task" && r.childSessionId && r.state === "pending") {
@@ -2020,8 +1797,7 @@ export async function planRecoveryForSession(
         warnings.push(...child.warnings.map((w) => `child ${cid}: ${w}`))
         switch (child.status) {
           case "absent":
-            // Bukti parent committed + file tak ada = bukti HILANG (degraded).
-            // Parent failed/pending = anak boleh tak lahir → sunyi (normal).
+            // Parent committed + file tak ada = bukti hilang; failed/pending = normal.
             if (delegateDone.has(cid)) {
               degraded.push(
                 `jurnal anak ${cid} SEHARUSNYA ADA (delegasi committed) tetapi file tak ditemukan — bukti tak-lengkap, jangan asumsikan efek anak ada/tidak-ada`,
@@ -2047,8 +1823,7 @@ export async function planRecoveryForSession(
           )
         }
       }
-      // Degraded evidence = bagian direktif (non-blocking, informatif) agar
-      // model tak membangun di atas ketiadaan bukti + warnings user-visible.
+      // Bukti degraded masuk direktif non-blocking agar model tak membangun di atasnya.
       if (degraded.length > 0) {
         const extra = `[recovery] BUKTI TAK-LENGKAP (degraded, bukan blokir):\n${degraded.map((d) => `- ${d}`).join("\n")}`
         warnings.push(...degraded)
@@ -2061,8 +1836,7 @@ export async function planRecoveryForSession(
         return { directive, warnings, clean: false, stats: base.stats }
       }
     }
-    // Turn durable dipasok pemanggil (persistence.listPersistedTurns) agar
-    // modul ini tak bergantung modul persistence (anti cycle-import).
+    // Turn durable dipasok pemanggil agar tak bergantung persistence (anti cycle-import).
     const plan = decideRecovery(records, opts.persistedTurns ?? [], { maxItems: opts.maxItems })
     warnings.push(...plan.warnings)
     if (!isJournalHealthy(sessionId, root)) {

@@ -663,3 +663,89 @@ describe("Transcript UI audit regressions (Fase 3.2-3.4)", () => {
     expect(range!.last.id).toBe(lastSource.sourceId)
   })
 })
+
+describe("v0.42 — commit-in-place baris live tool (never-shrink by id)", () => {
+  function setupMutable(initial: UiPresentationSnapshot) {
+    const bus = createFakeBus()
+    let snapshot = initial
+    let handler: ((event: never) => void) | undefined
+    const t = new Transcript(bus as never, {
+      getSnapshot: () => snapshot,
+      onPresentationEvent: (next) => {
+        handler = next as (event: never) => void
+        return () => {
+          handler = undefined
+        }
+      },
+    })
+    return {
+      t,
+      set(next: UiPresentationSnapshot) {
+        snapshot = next
+      },
+      emit(type: string, payload: Record<string, unknown>) {
+        handler?.({ type, ...payload } as never)
+      },
+    }
+  }
+
+  test("running root di-commit sekali lalu ditimpa ringkas saat terminal — tinggi tetap", () => {
+    const run = activity({ toolCallId: "m1", name: "grep", target: "src/", status: "running" })
+    const { t, set, emit } = setupMutable({ activities: [run], turns: [] })
+    const live = t.view(80, 6, 0).join("\n")
+    expect(live).toContain(`› grep src/ … ${live.includes("berjalan") ? "berjalan" : "running"}`)
+    const before = t.wrappedLength(80)
+    expect(t.size()).toBe(1)
+
+    // Reducer update snapshot lebih dulu, lalu event terminal.
+    set({ activities: [activity({ ...run, status: "completed" })], turns: [] })
+    emit("tool.completed", { seq: 1, turnId: 1, toolCallId: "m1", status: "completed" })
+
+    const after = t.view(80, 6, 0).join("\n")
+    expect(after).toContain(`› ${humanToolLabel("grep")} src/`)
+    expect(after).not.toContain("running")
+    expect(after).not.toContain("berjalan")
+    // SATU baris sebelum dan sesudah — tak ada baris kedua, tak ada yang hilang.
+    expect(t.size()).toBe(1)
+    expect(t.wrappedLength(80)).toBe(before)
+  })
+
+  test("child dengan baris live sendiri tetap ada (ditimpa ringkas) saat diagregasi", () => {
+    const parent = activity({
+      toolCallId: "p1",
+      name: "delegate_task",
+      target: undefined,
+      status: "running",
+    })
+    const child = activity({
+      toolCallId: "c1",
+      name: "read_file",
+      target: "a.ts",
+      parentToolCallId: "p1",
+      childSessionId: "sub_1",
+      runId: "run_1",
+      label: "explore-a",
+      status: "running",
+    })
+    const { t, set, emit } = setupMutable({ activities: [parent, child], turns: [] })
+    const live = t.view(120, 10, 0).join("\n")
+    expect(live).toContain("↳ explore-a read_file a.ts … running")
+    const before = t.size()
+    expect(before).toBe(2) // root + child
+
+    const doneParent = activity({ ...parent, status: "completed" })
+    const doneChild = activity({ ...child, status: "completed" })
+    set({ activities: [doneParent, doneChild], turns: [] })
+    emit("tool.completed", { seq: 1, turnId: 1, toolCallId: "p1", status: "completed" })
+    emit("tool.completed", { seq: 2, turnId: 1, toolCallId: "c1", status: "completed" })
+
+    const after = t.view(120, 10, 0).join("\n")
+    // Child tetap punya baris sendiri (tak menyusut), kini ringkas `›`.
+    expect(
+      after.split("\n").filter((l) => l.includes("read_file") || l.includes("read file")),
+    ).toHaveLength(1)
+    expect(after).toContain("✦ 1 sub agent · 1 tool · 0 failed")
+    expect(after).not.toContain("running")
+    expect(t.size()).toBeGreaterThanOrEqual(before)
+  })
+})
