@@ -37,6 +37,43 @@ export function __resetVectorDdlCounterForTest(): void {
   vectorDdlRuns = 0
 }
 
+/**
+ * Kolom yang ditambahkan migrasi DDL ke DB lama. Dipakai POST-CHECK: snapshot
+ * `cols` diambil SEBELUM ALTER, jadi tidak boleh dipakai untuk verifikasi akhir
+ * (kolom baru belum ada di snapshot itu). user_version hanya boleh naik bila
+ * query ULANG `PRAGMA table_info(memory)` menunjukkan semua kolom ini hadir.
+ */
+const VECTOR_MIGRATED_COLUMNS = [
+  "model",
+  "dim",
+  "parent",
+  "category",
+  "tags",
+  "access_count",
+  "session_id",
+  "turn_id",
+  "source_kind",
+  "source_ref",
+  "validation_status",
+  "supersedes",
+  "superseded_by",
+] as const
+
+/** Seam uji: nomor ALTER 1-based yang akan digagalkan. null = tak ada fault (produksi). */
+let vectorDdlFaultStage: number | null = null
+
+/** Seam uji: pasang/lepas fault pada ALTER ke-N (null = reset). Default produksi: null. */
+export function setVectorDdlFaultForTest(stage: number | null): void {
+  vectorDdlFaultStage = stage
+}
+
+/** Dipanggil tepat SEBELUM ALTER ke-N; melempar bila stage fault cocok. */
+function maybeInjectVectorDdlFault(alterNo: number): void {
+  if (vectorDdlFaultStage === alterNo) {
+    throw new Error(`[test] vector DDL fault injected at ALTER #${alterNo}`)
+  }
+}
+
 function readSchemaVersion(db: Database): number {
   try {
     const row = db.prepare("PRAGMA user_version").get() as { user_version?: unknown } | null
@@ -236,41 +273,73 @@ function openAt(p: string): Database {
       // P13 S2: kategori terstruktur untuk retrieval presisi
       // P13 P1: access_count untuk bukti manfaat (berapa kali row ikut jadi hit)
       // MEM-01 / Fase 5A: provenance tracking (session/turn/source) untuk revokasi selektif
+      // Jangan telan error ALTER: simpan dulu, lalu post-check memutuskan apakah
+      // user_version boleh naik. `cols` adalah snapshot SEBELUM ALTER (benar untuk
+      // idempoten), jadi tidak bisa dipakai untuk verifikasi akhir.
+      let ddlError: unknown = null
+      let alterNo = 0
       try {
         const cols = db.prepare(`PRAGMA table_info(memory)`).all() as { name: string }[]
-        if (!cols.some((c) => c.name === "model"))
+        if (!cols.some((c) => c.name === "model")) {
+          maybeInjectVectorDdlFault(++alterNo)
           db.exec(`ALTER TABLE memory ADD COLUMN model TEXT`)
-        if (!cols.some((c) => c.name === "dim"))
+        }
+        if (!cols.some((c) => c.name === "dim")) {
+          maybeInjectVectorDdlFault(++alterNo)
           db.exec(`ALTER TABLE memory ADD COLUMN dim INTEGER`)
-        if (!cols.some((c) => c.name === "parent"))
+        }
+        if (!cols.some((c) => c.name === "parent")) {
+          maybeInjectVectorDdlFault(++alterNo)
           db.exec(`ALTER TABLE memory ADD COLUMN parent TEXT`)
-        if (!cols.some((c) => c.name === "category"))
+        }
+        if (!cols.some((c) => c.name === "category")) {
+          maybeInjectVectorDdlFault(++alterNo)
           db.exec(`ALTER TABLE memory ADD COLUMN category TEXT DEFAULT 'fact'`)
-        if (!cols.some((c) => c.name === "tags")) db.exec(`ALTER TABLE memory ADD COLUMN tags TEXT`)
-        if (!cols.some((c) => c.name === "access_count"))
+        }
+        if (!cols.some((c) => c.name === "tags")) {
+          maybeInjectVectorDdlFault(++alterNo)
+          db.exec(`ALTER TABLE memory ADD COLUMN tags TEXT`)
+        }
+        if (!cols.some((c) => c.name === "access_count")) {
+          maybeInjectVectorDdlFault(++alterNo)
           db.exec(`ALTER TABLE memory ADD COLUMN access_count INTEGER DEFAULT 0`)
+        }
         // MEM-01: provenance columns (idempoten — skip bila sudah ada)
-        if (!cols.some((c) => c.name === "session_id"))
+        if (!cols.some((c) => c.name === "session_id")) {
+          maybeInjectVectorDdlFault(++alterNo)
           db.exec(`ALTER TABLE memory ADD COLUMN session_id TEXT`)
-        if (!cols.some((c) => c.name === "turn_id"))
+        }
+        if (!cols.some((c) => c.name === "turn_id")) {
+          maybeInjectVectorDdlFault(++alterNo)
           db.exec(`ALTER TABLE memory ADD COLUMN turn_id TEXT`)
-        if (!cols.some((c) => c.name === "source_kind"))
+        }
+        if (!cols.some((c) => c.name === "source_kind")) {
+          maybeInjectVectorDdlFault(++alterNo)
           db.exec(`ALTER TABLE memory ADD COLUMN source_kind TEXT`)
-        if (!cols.some((c) => c.name === "source_ref"))
+        }
+        if (!cols.some((c) => c.name === "source_ref")) {
+          maybeInjectVectorDdlFault(++alterNo)
           db.exec(`ALTER TABLE memory ADD COLUMN source_ref TEXT`)
+        }
         // [Fase 6A / ACE-03] Gate pelajaran kandidat: hanya pelajaran yang sudah
         // lolos verifikasi yang boleh muncul di retrieval default. Baris legacy
         // (NULL) diperlakukan sebagai `validated` agar perilaku lama tak berubah.
-        if (!cols.some((c) => c.name === "validation_status"))
+        if (!cols.some((c) => c.name === "validation_status")) {
+          maybeInjectVectorDdlFault(++alterNo)
           db.exec(`ALTER TABLE memory ADD COLUMN validation_status TEXT DEFAULT 'validated'`)
+        }
         // F8.1: Supersession tracking untuk memory replacement. Idempoten — skip bila
         // sudah ada (migration dari versi sebelumnya). `superseded_by IS NOT NULL` menandai
         // baris yang telah digantikan oleh fakta/keputusan baru; recall default mengabaikan
         // baris superseded untuk prevent staleness.
-        if (!cols.some((c) => c.name === "supersedes"))
+        if (!cols.some((c) => c.name === "supersedes")) {
+          maybeInjectVectorDdlFault(++alterNo)
           db.exec(`ALTER TABLE memory ADD COLUMN supersedes TEXT NULL`)
-        if (!cols.some((c) => c.name === "superseded_by"))
+        }
+        if (!cols.some((c) => c.name === "superseded_by")) {
+          maybeInjectVectorDdlFault(++alterNo)
           db.exec(`ALTER TABLE memory ADD COLUMN superseded_by TEXT NULL`)
+        }
         // F8.1: Index untuk query performan (filter row yang tidak superseded)
         try {
           db.exec(
@@ -282,7 +351,11 @@ function openAt(p: string): Database {
             `CREATE INDEX IF NOT EXISTS idx_memory_supersedes ON memory(supersedes) WHERE supersedes IS NOT NULL AND supersedes != '';`,
           )
         } catch {}
-      } catch {}
+      } catch (e) {
+        // Best-effort index tetap dilanjutkan (FTS di blok terpisah), tapi error
+        // ini MENGAGALKAN commit versi — jangan pernah ditelan seperti dulu.
+        ddlError = e
+      }
       // P1.1: expression index + FTS5 untuk keyword pre-filter (10-50× vs instr scan)
       try {
         db.exec(`CREATE INDEX IF NOT EXISTS idx_memory_text_lower ON memory(lower(text));`)
@@ -303,11 +376,28 @@ function openAt(p: string): Database {
           db.exec(`INSERT INTO memory_fts(memory_fts) VALUES('rebuild')`)
         }
       } catch {}
-      // Tandai SELESAI hanya setelah DDL + migrasi + FTS selesai. Bila gagal di
-      // tengah, user_version tetap lama → open berikutnya mengulang (idempoten).
-      try {
-        db.exec(`PRAGMA user_version=${VECTOR_SCHEMA_VERSION}`)
-      } catch {}
+      // POST-CHECK: query ULANG table_info(memory) — jangan pakai `cols` stale dari
+      // atas, karena snapshot itu diambil SEBELUM ALTER dan tak mencerminkan kolom
+      // yang baru ditambahkan. Tanpa ini, satu ALTER yang gagal (SQLITE_BUSY, disk
+      // penuh) tetap menaikkan user_version → guard di atas selamanya false, kolom
+      // hilang tak pernah dicoba lagi, dan pemanggil dapat "no such column" tanpa log.
+      const postCols = db.prepare(`PRAGMA table_info(memory)`).all() as { name: string }[]
+      const postNames = new Set(postCols.map((c) => c.name))
+      const missing = VECTOR_MIGRATED_COLUMNS.filter((c) => !postNames.has(c))
+      if (ddlError !== null || missing.length > 0) {
+        // Pastikan open berikutnya mengulang seluruh init. DDL memang dijaga
+        // user_version (bukan Set ini), tapi jangan biarkan path ditandai siap
+        // saat migrasi setengah jadi.
+        initializedPaths.delete(p)
+        const detail =
+          ddlError !== null
+            ? `error ALTER/index: ${ddlError instanceof Error ? ddlError.message : String(ddlError)}`
+            : `kolom hilang: ${missing.join(", ")}`
+        throw new Error(`[vector] migrasi DDL gagal, user_version tidak dinaikkan: ${detail}`)
+      }
+      // Baru tandai SELESAI setelah post-check lolos. Error di sini dibiarkan naik
+      // ke outer catch (handle ditutup, lalu dilempar) — jangan catch {} diam-diam.
+      db.exec(`PRAGMA user_version=${VECTOR_SCHEMA_VERSION}`)
       vectorDdlRuns++
     }
     return db

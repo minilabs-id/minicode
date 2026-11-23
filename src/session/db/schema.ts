@@ -10,6 +10,65 @@ const initializedSessionPaths = new Set<string>()
 const migratedSessionPaths = new Set<string>()
 
 /**
+ * v0.44 (audit F-1 session): daftar kolom yang PASTI ada setelah seluruh blok
+ * DDL di `openSessionHandle` berhasil. Dipakai `daemonApprovalsMigrated` untuk
+ * memverifikasi migrasi secara menyeluruh, bukan cuma 3 penanda lama.
+ *
+ * Mengapa tidak memakai `PRAGMA user_version` seperti memory/vector.ts? Karena
+ * DB session sudah beredar di ribuan mesin user; menambahkan user_version
+ * mengubah format DB dan berisiko pada DB yang sudah ada. Pendekatan (b) ini
+ * murni additive: tidak ada perubahan format, cukup verifikasi kolom lewat
+ * `PRAGMA table_info` di atas penanda yang sudah ada.
+ */
+const SESSION_REQUIRED_COLUMNS: Record<string, readonly string[]> = {
+  sessions: [
+    "work_mode",
+    "updated_at",
+    "parent_session_id",
+    "parent_run_id",
+    "writer_epoch",
+    "default_thread_id",
+  ],
+  messages: [
+    "toolCallId",
+    "name",
+    "reasoning",
+    "is_error",
+    "thread_id",
+    "event_id",
+    "run_id",
+    "migrated",
+    "migrated_compacted",
+    "projection_note",
+  ],
+  daemon_approvals: ["args_hash", "invocation_id"],
+  runs: ["takeover_epoch"],
+  history_projections: ["anchor_event_id"],
+}
+
+// Seam uji: injeksi kegagalan DDL. `null` = produksi normal (tak ada injeksi).
+// `failAt` = nomor urut ALTER ADD COLUMN yang akan dilempar saat dieksekusi.
+// Dipakai test untuk membuktikan migrasi parsial TIDAK ditandai selesai.
+let sessionDdlFaultForTest: number | null = null
+let sessionDdlCallCount = 0
+
+export function setSessionDdlFaultForTest(failAt: number | null): void {
+  sessionDdlFaultForTest = failAt
+  sessionDdlCallCount = 0
+}
+
+// Bungkus setiap ALTER ADD COLUMN: menghitung urutan dan (saat diuji) melempar
+// SEBELUM eksekusi supaya kolom benar-benar tidak ditambahkan — mensimulasikan
+// ALTER gagal (lock/disk) yang dulu ditelan `catch {}`.
+function execAlter(db: Database, sql: string): void {
+  sessionDdlCallCount += 1
+  if (sessionDdlFaultForTest !== null && sessionDdlCallCount === sessionDdlFaultForTest) {
+    throw new Error(`[test] session DDL fault injected at ALTER #${sessionDdlCallCount}`)
+  }
+  db.exec(sql)
+}
+
+/**
  * v7.40 (audit): samakan dengan memory/vector.ts — chmod 0600 pada DB + sidecar
  * WAL/SHM dijalankan di `finally` SETIAP open, bukan hanya saat pertama kali
  * `initializedSessionPaths` diisi. SQLite bisa membuat ulang `-wal`/`-shm`
@@ -28,15 +87,35 @@ function chmodSessionDbSync(p: string): void {
 
 function daemonApprovalsMigrated(db: Database): boolean {
   try {
+    // Penanda lama TETAP dicek — jangan dihapus. `invocation_id`/`work_mode`/
+    // `turn_ledger` cukup untuk menjawab "apakah DB pernah tersentuh migrasi
+    // daemon-approval", tapi TIDAK cukup untuk menjamin setiap ALTER ADD COLUMN
+    // berhasil. ALTER bisa gagal lalu ditelan catch, menyisakan sebagian kolom
+    // hilang; penanda tetap benar sehingga migrasi tak pernah diulang (partial
+    // migration permanen, beda dengan vector DB yang punya user_version=0).
     const cols = db.prepare("PRAGMA table_info(daemon_approvals)").all() as { name: string }[]
     if (!cols.some((c) => c.name === "invocation_id")) return false
     const sessCols = db.prepare("PRAGMA table_info(sessions)").all() as { name: string }[]
-    return (
-      sessCols.some((c) => c.name === "work_mode") &&
-      !!db
+    if (!sessCols.some((c) => c.name === "work_mode")) return false
+    if (
+      !db
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'turn_ledger'")
         .get()
     )
+      return false
+
+    // Verifikasi baru: SEMUA kolom hasil ALTER harus hadir. Bila ada tabel yang
+    // belum ada (DB legacy) atau kolom hilang, kembalikan false → DDL dijalankan
+    // ulang dan melengkapi yang kurang (ALTER aditif, aman diulang berulang kali).
+    for (const [table, required] of Object.entries(SESSION_REQUIRED_COLUMNS)) {
+      const existing = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]
+      if (existing.length === 0) return false
+      const names = new Set(existing.map((c) => c.name))
+      for (const col of required) {
+        if (!names.has(col)) return false
+      }
+    }
+    return true
   } catch {
     return false
   }
@@ -131,6 +210,11 @@ export function openSessionHandle(cwd?: string, local = false): Database {
     }
     const needsDdl = !migratedSessionPaths.has(p) || !daemonApprovalsMigrated(db)
     if (needsDdl) {
+      // Kumpulkan kegagalan DDL alih-alih menelannya. Bila ada ALTER gagal,
+      // jangan tandai path sebagai migrated dan lempar di akhir blok supaya
+      // open berikutnya mengulang (tidak ada partial migration permanen).
+      let ddlError: Error | null = null
+      sessionDdlCallCount = 0
       withBusyRetrySync(() => {
         db.exec(`
     CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, created_at INTEGER, cwd TEXT, system TEXT, writer_epoch INTEGER NOT NULL DEFAULT 0, default_thread_id TEXT NULL, work_mode TEXT NULL);
@@ -159,21 +243,22 @@ export function openSessionHandle(cwd?: string, local = false): Database {
       try {
         const cols = db.prepare("PRAGMA table_info(sessions)").all() as { name: string }[]
         if (!cols.some((c) => c.name === "updated_at")) {
-          db.exec("ALTER TABLE sessions ADD COLUMN updated_at INTEGER")
+          execAlter(db, "ALTER TABLE sessions ADD COLUMN updated_at INTEGER")
           db.exec("UPDATE sessions SET updated_at = created_at WHERE updated_at IS NULL")
         }
         db.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC)`)
         if (!cols.some((c) => c.name === "parent_session_id")) {
-          db.exec("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT NULL")
+          execAlter(db, "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT NULL")
         }
         if (!cols.some((c) => c.name === "parent_run_id")) {
-          db.exec("ALTER TABLE sessions ADD COLUMN parent_run_id TEXT NULL")
+          execAlter(db, "ALTER TABLE sessions ADD COLUMN parent_run_id TEXT NULL")
         }
         if (!cols.some((c) => c.name === "work_mode")) {
-          db.exec("ALTER TABLE sessions ADD COLUMN work_mode TEXT NULL")
+          execAlter(db, "ALTER TABLE sessions ADD COLUMN work_mode TEXT NULL")
         }
         db.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)`)
       } catch (e) {
+        if (!ddlError) ddlError = e as Error
         process.stderr.write(
           `[warn] persistence: sessions migration skipped: ${(e as Error).message}\n`,
         )
@@ -181,16 +266,17 @@ export function openSessionHandle(cwd?: string, local = false): Database {
       try {
         const msgCols = db.prepare("PRAGMA table_info(messages)").all() as { name: string }[]
         if (!msgCols.some((c) => c.name === "toolCallId")) {
-          db.exec("ALTER TABLE messages ADD COLUMN toolCallId TEXT")
-          db.exec("ALTER TABLE messages ADD COLUMN name TEXT")
+          execAlter(db, "ALTER TABLE messages ADD COLUMN toolCallId TEXT")
+          execAlter(db, "ALTER TABLE messages ADD COLUMN name TEXT")
         }
         if (!msgCols.some((c) => c.name === "reasoning")) {
-          db.exec("ALTER TABLE messages ADD COLUMN reasoning TEXT")
+          execAlter(db, "ALTER TABLE messages ADD COLUMN reasoning TEXT")
         }
         if (!msgCols.some((c) => c.name === "is_error")) {
-          db.exec("ALTER TABLE messages ADD COLUMN is_error INTEGER")
+          execAlter(db, "ALTER TABLE messages ADD COLUMN is_error INTEGER")
         }
       } catch (e) {
+        if (!ddlError) ddlError = e as Error
         process.stderr.write(
           `[warn] persistence: messages migration skipped: ${(e as Error).message}\n`,
         )
@@ -205,15 +291,15 @@ export function openSessionHandle(cwd?: string, local = false): Database {
       try {
         const sessCols = db.prepare("PRAGMA table_info(sessions)").all() as { name: string }[]
         if (!sessCols.some((c) => c.name === "writer_epoch")) {
-          db.exec("ALTER TABLE sessions ADD COLUMN writer_epoch INTEGER NOT NULL DEFAULT 0")
+          execAlter(db, "ALTER TABLE sessions ADD COLUMN writer_epoch INTEGER NOT NULL DEFAULT 0")
         }
         if (!sessCols.some((c) => c.name === "default_thread_id")) {
-          db.exec("ALTER TABLE sessions ADD COLUMN default_thread_id TEXT NULL")
+          execAlter(db, "ALTER TABLE sessions ADD COLUMN default_thread_id TEXT NULL")
         }
         const msgCols2 = db.prepare("PRAGMA table_info(messages)").all() as { name: string }[]
         const addMsgCol = (name: string, ddl: string): void => {
           if (!msgCols2.some((c) => c.name === name))
-            db.exec(`ALTER TABLE messages ADD COLUMN ${ddl}`)
+            execAlter(db, `ALTER TABLE messages ADD COLUMN ${ddl}`)
         }
         addMsgCol("thread_id", "thread_id TEXT NULL")
         addMsgCol("event_id", "event_id TEXT NULL")
@@ -224,17 +310,21 @@ export function openSessionHandle(cwd?: string, local = false): Database {
         try {
           const runCols = db.prepare("PRAGMA table_info(runs)").all() as { name: string }[]
           if (runCols.length > 0 && !runCols.some((c) => c.name === "takeover_epoch")) {
-            db.exec("ALTER TABLE runs ADD COLUMN takeover_epoch INTEGER NULL")
+            execAlter(db, "ALTER TABLE runs ADD COLUMN takeover_epoch INTEGER NULL")
           }
-        } catch {}
+        } catch (e) {
+          if (!ddlError) ddlError = e as Error
+        }
         try {
           const projCols = db.prepare("PRAGMA table_info(history_projections)").all() as {
             name: string
           }[]
           if (projCols.length > 0 && !projCols.some((c) => c.name === "anchor_event_id")) {
-            db.exec("ALTER TABLE history_projections ADD COLUMN anchor_event_id TEXT NULL")
+            execAlter(db, "ALTER TABLE history_projections ADD COLUMN anchor_event_id TEXT NULL")
           }
-        } catch {}
+        } catch (e) {
+          if (!ddlError) ddlError = e as Error
+        }
         db.exec("DROP INDEX IF EXISTS idx_messages_thread")
         withBusyRetrySync(() => {
           db.exec(`
@@ -244,6 +334,7 @@ export function openSessionHandle(cwd?: string, local = false): Database {
     `)
         })
       } catch (e) {
+        if (!ddlError) ddlError = e as Error
         process.stderr.write(
           `[warn] persistence: writer_epoch migration skipped: ${(e as Error).message}\n`,
         )
@@ -319,14 +410,23 @@ export function openSessionHandle(cwd?: string, local = false): Database {
           name: string
         }[]
         if (!approvalCols.some((c) => c.name === "args_hash")) {
-          db.exec("ALTER TABLE daemon_approvals ADD COLUMN args_hash TEXT NULL")
+          execAlter(db, "ALTER TABLE daemon_approvals ADD COLUMN args_hash TEXT NULL")
         }
         if (!approvalCols.some((c) => c.name === "invocation_id")) {
-          db.exec("ALTER TABLE daemon_approvals ADD COLUMN invocation_id TEXT NULL")
+          execAlter(db, "ALTER TABLE daemon_approvals ADD COLUMN invocation_id TEXT NULL")
         }
       } catch (e) {
+        if (!ddlError) ddlError = e as Error
         process.stderr.write(
           `[warn] persistence: daemon_approvals migration skipped: ${(e as Error).message}\n`,
+        )
+      }
+      // Bila ada ALTER gagal, JANGAN tandai migrated dan lempar error supaya
+      // caller tahu & open berikutnya mengulang dari awal blok DDL.
+      if (ddlError) {
+        throw new Error(
+          `[persistence] session DB migrasi tidak lengkap untuk ${p}: ${ddlError.message}`,
+          { cause: ddlError },
         )
       }
       migratedSessionPaths.add(p)

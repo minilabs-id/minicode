@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.43.1] - 2026-11-23
+
+### Fixed — Migrasi DB "setengah jadi" (Quality Remediation F-1)
+
+- **Vector DB** (`src/memory/vector.ts`): error `ALTER TABLE ... ADD COLUMN`
+  tidak lagi ditelan. Setelah blok migrasi, `PRAGMA table_info(memory)`
+  di-query **ulang** (bukan pakai snapshot `cols` sebelum ALTER) untuk memastikan
+  13 kolom benar-benar ada. `PRAGMA user_version` dan counter DDL hanya ditulis
+  bila post-check lolos; bila gagal, path dihapus dari `initializedPaths` supaya
+  open berikutnya mengulang. Mencegah skenario "kolom hilang permanen" saat ALTER
+  gagal (mis. `SQLITE_BUSY` / disk penuh). DB sehat tidak berubah.
+- **Session DB** (`src/session/db/schema.ts`): guard `daemonApprovalsMigrated()`
+  diperkuat — 3 penanda lama tetap dicek, ditambah verifikasi bahwa semua kolom
+  hasil ALTER ada di tabel-tabel yang relevan. `migratedSessionPaths.add()`
+  dilewati bila ada ALTER gagal, dan error deskriptif dilempar supaya open
+  berikutnya mengulang. Tanpa perubahan format DB yang sudah beredar.
+- Seam uji `setVectorDdlFaultForTest` / `setSessionDdlFaultForTest` (default
+  `null` di produksi) + test injeksi kegagalan DDL di
+  `test/memory-vector-ddl.test.ts` dan `test/session-db-migration.test.ts`.
+  Detail temuan & rencana ada di `.audit/QR-REMEDIATION-PLAN.md` (Catatan:
+  rencana QR tidak ikut paket npm).
+
 ## [0.43.0] - 2026-11-23
 
 ### Changed — Baris live tool transien tail ≤3, ratchet `scrollBack` naik-saja (amandemen v0.42)
