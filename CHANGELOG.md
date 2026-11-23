@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.43.2] - 2026-11-23
+
+### Fixed — Auto-update ETARGET saat versi baru baru terbit
+
+- `installUpdate()` (`src/policy/update-check.ts`) kini memakai `--prefer-online`
+  pada **verifikasi install** maupun `npm install -g`. Sebelumnya
+  `checkForUpdateFresh()` mendeteksi versi terbaru lewat HTTP langsung (selalu
+  segar), tetapi `npm install` membaca packument dari cache npm lokal yang bisa
+  basi — menghasilkan `ETARGET: No matching version found` padahal versi sudah
+  ada di registry. Revalidasi paket memaksa npm menyegarkan metadata sebelum
+  resolusi versi.
+- Test `test/update-auto.test.ts` mengunci keberadaan `--prefer-online` di
+  kedua jalur install.
+
 ## [0.43.1] - 2026-11-23
 
 ### Fixed — Migrasi DB "setengah jadi" (Quality Remediation F-1)

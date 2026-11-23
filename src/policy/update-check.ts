@@ -432,6 +432,11 @@ export function installUpdate(version: string, runner?: InstallRunner): boolean 
         "--no-audit",
         "--save-exact",
         "--package-lock=true",
+        // checkForUpdateFresh() membaca packument via HTTP langsung (selalu
+        // fresh), tapi `npm install` memakai packument cache lokal yang bisa
+        // basi — itulah sebabnya versi baru terdeteksi lalu ETARGET saat install.
+        // Paksa npm merevalidasi metadata registry sebelum resolusi versi.
+        "--prefer-online",
         "--registry",
         NPM_REGISTRY,
         `${PKG_NAME}@${version}`,
@@ -469,6 +474,9 @@ export function installUpdate(version: string, runner?: InstallRunner): boolean 
       "install",
       "-g",
       "--ignore-scripts",
+      // Sama seperti verifikasi: revalidasi packument agar versi yang baru
+      // saja terbit tidak kena ETARGET dari cache npm lokal yang basi.
+      "--prefer-online",
       "--registry",
       NPM_REGISTRY,
       `${PKG_NAME}@${version}`,

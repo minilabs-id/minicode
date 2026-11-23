@@ -107,9 +107,14 @@ describe("installUpdate", () => {
     expect(seen).toHaveLength(3)
     expect(seen[0]?.args).toContain("minicode-ai@1.2.3")
     expect(seen[0]?.args).toContain("--ignore-scripts")
+    // v0.43.2: revalidasi packument — if check() melihat versi baru via HTTP
+    // langsung, npm install harus memakai metadata segar, bukan cache basi
+    // (ETARGET "No matching version found" padahal versi sudah terbit).
+    expect(seen[0]?.args).toContain("--prefer-online")
     expect(seen[1]?.args.slice(0, 2)).toEqual(["audit", "signatures"])
     expect(seen[2]?.args).toContain("-g")
     expect(seen[2]?.args).toContain("minicode-ai@1.2.3")
+    expect(seen[2]?.args).toContain("--prefer-online")
     expect(seen[0]?.cwd).toBeDefined()
     expect(seen[1]?.cwd).toBe(seen[0]?.cwd)
     expect(seen[0]?.cwd && existsSync(seen[0].cwd)).toBe(false)
