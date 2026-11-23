@@ -172,6 +172,18 @@ dropdown memetakan ke item menu; sejak v0.37 dropdown ditutup saat transisi
 busy/abort. Lihat kontrak I14/I17/I19/I1 dan entri `## Perubahan v0.37` (yang
 meng-override cap/ambang v0.36) di `TERMINAL_CONTRACT.md`.
 
+Sejak v0.43 **baris aktivitas tool live** kembali transien seperti v0.40.0:
+ia ikut tail transkrip dan hilang setelah tool selesai. Saat baris live muncul,
+`total` bertambah dan sticky-tail menggeser jendela (history boleh naik); saat
+ia hilang dan `total` menyusut, jendela tidak bergeser balik — posisi baris
+committed tetap, ruang di bawah boleh kosong. Mekanismenya = **ratchet
+`scrollBack` per turn** (hanya naik), di-reset pada `turn:started` / prompt baru
+/ `/clear`; bukan overlay, bukan `liveRegion`, bukan commit-in-place baris live.
+History committed tetap kebal; I1 (satu write/frame) utuh tanpa writer/region
+baru. Hanya aspek transiensi dari butir v0.42 "commit-in-place /
+never-shrink by id" yang ditimpa (klausa v0.42 lain tetap berlaku). Lihat entri
+`## Perubahan v0.43` di `TERMINAL_CONTRACT.md`.
+
 ## Alur paste & seleksi (v0.37)
 
 Tiga alur input baru yang menyentuh boundary controller/painter:

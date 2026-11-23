@@ -145,6 +145,18 @@ memakai `paintRegion()` — kini tidak ada kolom sidebar yang turut dilukis.
 **Dropdown `/` adalah pengecualian:** ia bukan popup `paintRegion()`, melainkan
 bagian dari frame `paint()` yang sama (I1 ditegaskan v0.36).
 
+**Baris live tool (v0.43) kembali transien seperti v0.40.0:** ia ikut tail dan
+hilang saat tool selesai. Munculnya menambah `total` sehingga sticky-tail
+menggeser jendela (history boleh naik); saat ia hilang dan `total` menyusut,
+jendela tidak bergeser balik — posisi baris committed tetap, ruang di bawah
+boleh kosong. Mekanismenya = ratchet `scrollBack` per turn (hanya naik),
+di-reset pada `turn:started` / prompt baru / `/clear`. Bukan overlay, bukan
+`liveRegion`, bukan commit-in-place; I1 (satu write/frame) utuh tanpa
+writer/region baru. History committed tetap kebal; ini hanya menggantikan
+aspek transiensi dari klausa v0.42 "commit-in-place / never-shrink by id"
+(klausa v0.42 lain tetap berlaku). Lihat entri `## Perubahan v0.43` di
+`TERMINAL_CONTRACT.md`.
+
 `screen.ts` tetap satu-satunya alt-screen owner. `paintRegion()` hanya untuk popup;
 popup tidak boleh membuat listener stdin kedua.
 

@@ -209,7 +209,7 @@ describe("panel aktivitas di Transcript (TUI)", () => {
     expect(screen.split("\n").filter((l) => l.includes("1 read"))).toHaveLength(1)
   })
 
-  test("flat: tool gagal + alasan tetap tampil sebagai satu baris sebelum dan sesudah turn selesai", () => {
+  test("flat: tool gagal tetap tampil sebagai satu baris sebelum dan sesudah turn selesai", () => {
     const { t, emit } = setupTui(true)
     emit({ type: "turn.started", seq: 1, turnId: 1 })
     emit({
@@ -222,14 +222,19 @@ describe("panel aktivitas di Transcript (TUI)", () => {
       message: "unknown job id",
     })
     const visible = () => t.view(120, 20, 0).map(stripAnsi).join("\n")
-    // Tool gagal TIDAK masuk fold-sunyi: baris flat tetap memikul nama + alasan.
-    expect(visible()).toContain(`${humanToolLabel("bash_output")} · failed: unknown job id`)
+    // v0.43: error mentah yang tak cocok 13 pola kanonik friendlyToolError()
+    // sengaja disembunyikan. Yang dijaga: BARIS ledger nama + status failed
+    // tetap ada; redaksi "unknown job id" tak boleh bocor, sebelum maupun
+    // sesudah turn selesai.
+    const failedRow = `${humanToolLabel("bash_output")} · failed`
+    expect(visible()).toContain(failedRow)
+    expect(visible()).not.toContain("unknown job id")
     // Hitungan agregat `1 failed` dulu berasal dari ringkasan grup — kini hilang.
     expect(visible()).not.toContain("1 failed")
     expect(groupLines(t)).toHaveLength(0)
     emit({ type: "turn.completed", seq: 3, turnId: 1 })
-    expect(visible()).toContain(`${humanToolLabel("bash_output")} · failed: unknown job id`)
-    expect(visible().match(/unknown job id/g)).toHaveLength(1)
+    expect(visible()).toContain(failedRow)
+    expect(visible()).not.toContain("unknown job id")
   })
 
   test("panel OFF: ledger per-tool tetap tampil (tanpa grup)", () => {

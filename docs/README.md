@@ -1,6 +1,6 @@
 # Dokumentasi MiniCode
 
-MiniCode adalah coding agent terminal berbasis kernel MiniCore: jalur interaktif memakai TUI fullscreen dengan chat kolom tengah tanpa sidebar; jalur one-shot/otomatis menulis ke scrollback atau stream mesin. Rincian perilaku terkini (rekap statis tanpa `└`, baris live tool committed monoton, teks gagal tool ringkas, label locale OS, composer dua baris, bracketed paste, auto-update diagnostik) ada di [Kontrak Terminal](TERMINAL_CONTRACT.md).
+MiniCode adalah coding agent terminal berbasis kernel MiniCore: jalur interaktif memakai TUI fullscreen dengan chat kolom tengah tanpa sidebar; jalur one-shot/otomatis menulis ke scrollback atau stream mesin. Rincian perilaku terkini (baris live tool transien ikut tail dengan ratchet `scrollBack` per turn; history chat committed tetap kebal; rekap statis tanpa `└`, teks gagal tool ringkas, label locale OS, composer dua baris, bracketed paste, auto-update diagnostik) ada di [Kontrak Terminal](TERMINAL_CONTRACT.md).
 
 ## Mulai
 

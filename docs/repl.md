@@ -34,7 +34,7 @@ bahasa user (`/lang`).
 | `/mode [discuss\|build\|auto\|ask]` | Tanpa argumen = popup dua sumbu: WorkMode (`discuss`/`build`) + PermissionMode (`auto`/`ask`). WorkMode membatasi cara agent bekerja: `DISCUSS` investigasi/perencanaan read-only (+ artefak rencana), `BUILD` tidak menambah ceiling (identitas internal `EXECUTE`). Nilai invalid ditolak dan mode aktif tidak berubah. Tab/Shift+Tab tetap pintasan cepat. |
 | `/lang [en|id]` | Bahasa UI; tanpa argumen = tampilkan aktif |
 | `/init` | Buat `AGENTS.md` proyek ini |
-| `/copy [n]` | Salin `n` turn terakhir (default `1`, maksimal `10`) via OSC 52 |
+| `/copy [n]` | Salin `n` turn terakhir (default `1`, maksimal `10`) via OSC 52 — yang tersalin adalah **yang benar-benar dirender** di transkrip: narasi asisten + rekap/laporan, bukan output tool mentah; gema prompt, baris ledger, diagnostic, dan error tak ikut |
 | `/clear` | Kosongkan transkrip (viewport kembali kosong) |
 | `/view [thinking]` | Hanya menerima `thinking`: tanpa argumen = picker satu aksi (`thinking`), `thinking` = tampil/sembunyikan baris `+ thinking` di chat. Aksi lama `compact`/`minimize`/`fold`/`expand` DITOLAK — reasoning penuh tetap di jurnal, bukan panel samping |
 | `/exit` | Keluar (satu-satunya jalan keluar; `/quit` alias). Setelah keluar, blok penutup ke scrollback: wordmark `minicode` + Session/Model/Mode + Usage (token in/out, biaya, durasi) + rincian tool per kategori + jumlah agent. Matikan dengan `MINICODE_SESSION_SUMMARY=0` |
@@ -145,6 +145,26 @@ Label aktivitas `› …` (nama/status tool) memakai **bahasa sistem/OS** lewat
 user (`/lang`, fallback `MINICODE_LANG`). Jadi mengubah `/lang` tidak mengubah
 label `› …`; locale OS yang menang khusus untuk label itu, demi konsistensi
 lintas permukaan. Sumber tunggalnya ada di `src/ui/render/tool-label.ts`.
+
+## Baris live tool (v0.43 — amandemen v0.42)
+
+Baris aktivitas tool **live** (root/anak) kembali transien seperti v0.40.0:
+muncul saat tool berjalan, ikut tail transkrip, dan hilang setelah tool
+selesai — tanpa entri committed baru. Saat baris live muncul, `total` bertambah
+dan sticky-tail menggeser jendela, sehingga history boleh naik. Saat baris live
+hilang dan `total` menyusut, jendela **tidak bergeser balik**: posisi baris
+committed di layar tetap, ruang di bawah boleh kosong.
+
+Mekanismenya adalah **ratchet `scrollBack` per turn** — hanya naik, tidak
+turun — di-reset pada `turn:started`, prompt baru, maupun `/clear`. Baris live
+bukan overlay, bukan `liveRegion`, dan bukan commit-in-place; I1 (satu
+`stdout.write` per frame) tetap utuh, tanpa writer/region baru.
+
+Yang tidak boleh hilang adalah **history chat yang sudah committed** — itu
+tetap berlaku sejak v0.42. Butir v0.42 "commit-in-place / never-shrink by id"
+**ditimpa hanya pada aspek transiensi baris live**; klausa v0.42 lain (teks
+gagal ringkas, rekap tanpa `└`) tetap berlaku. Arsip tidak dihapus maupun
+direnomor — lihat entri `## Perubahan v0.43` di `TERMINAL_CONTRACT.md`.
 
 ## Aturan konsistensi (kontrak I25)
 

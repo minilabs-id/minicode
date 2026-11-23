@@ -149,8 +149,8 @@ describe("thinking: satu baris per turn, bukan per segmen", () => {
   })
 })
 
-describe("tool gagal: satu baris, alasan tidak hilang", () => {
-  test("tool gagal: alasan tercetak sekali di baris flat (tanpa panel grup)", () => {
+describe("tool gagal: satu baris, alasan mentah disembunyikan (v0.43)", () => {
+  test("tool gagal: baris ledger tampil sekali, redaksi error tak bocor (tanpa panel grup)", () => {
     const h = harness()
     h.emit({ type: "turn.started" })
     for (let i = 0; i < 3; i++)
@@ -179,14 +179,18 @@ describe("tool gagal: satu baris, alasan tidak hilang", () => {
     })
     h.emit({ type: "turn.completed", summary: {} })
     const rows = h.rows()
-    // Renderer flat (ledger) tak punya panel grup: satu baris tool gagal membawa
-    // nama, status, dan alasan. Yang dijaga: alasan tampil tepat SEKALI dan tak
-    // hilang (regresi lama: barisnya ditelan saat hitungan dipindah ke grup).
-    expect(rows.filter((line) => line.includes("pola tidak ditemukan")).length).toBe(1)
-    const failedRow = rows.find((line) => line.includes("pola tidak ditemukan"))!
+    // v0.43: error mentah "pola tidak ditemukan" tak cocok 13 pola kanonik
+    // friendlyToolError(), jadi sengaja disembunyikan. Yang dijaga: BARIS
+    // ledger tool gagal (nama + status) tetap ada tepat SEKALI — regresi lama
+    // adalah barisnya ditelan saat hitungan dipindah ke grup.
+    const failedRows = rows.filter(
+      (line) => line.includes(humanToolLabel("grep")) && line.includes("failed"),
+    )
+    expect(failedRows).toHaveLength(1)
+    const failedRow = failedRows[0]
     expect(failedRow).toContain(humanToolLabel("grep"))
     expect(failedRow).toContain("failed")
-    expect(failedRow).toContain("pola tidak ditemukan")
+    expect(failedRow).not.toContain("pola tidak ditemukan")
     // Tak ada lagi baris grup "execute · 3 ok" — tiap tool dicatat apa adanya.
     expect(rows.some((line) => line.includes("execute"))).toBe(false)
     expect(rows.some((line) => line.includes("3 ok"))).toBe(false)

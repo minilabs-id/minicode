@@ -2,8 +2,9 @@
 import { describe, expect, test } from "bun:test"
 import { readFileSync } from "node:fs"
 import type { UiPresentationActivity, UiPresentationSnapshot } from "../src/ui/contract.ts"
-import { glyphs } from "../src/ui/render/theme.ts"
-import { humanToolLabel } from "../src/ui/render/tool-label.ts"
+import { paintLedger } from "../src/ui/render/ledger.ts"
+import { glyphs, stripAnsi } from "../src/ui/render/theme.ts"
+import { humanToolLabel, tSystem } from "../src/ui/render/tool-label.ts"
 import { displayWidth } from "../src/ui/render/width.ts"
 import { Transcript } from "../src/ui/tui/transcript.ts"
 import { createFakeBus } from "./helpers/tui-harness.ts"
@@ -106,7 +107,7 @@ describe("Transcript", () => {
     // daftar tool yang panjang jadi derau bila setiap baris berakhir "completed".
     expect(out).not.toContain("completed")
   })
-  test("ledger error satu baris merah diawali ›", () => {
+  test("ledger error satu baris merah diawali › — tanpa pola kanonik, raw tak tampil", () => {
     const { t, emit } = setupPresentation({
       activities: [
         activity({
@@ -128,7 +129,9 @@ describe("Transcript", () => {
     const out = t.view(60, 2, 0).join("\n")
     expect(out).toContain(humanToolLabel("bash"))
     expect(out).toContain("failed")
-    expect(out).toContain("boom")
+    // v0.43: "boom" bukan 13 pola kanonik — redaksi dihilangkan, bukan
+    // diteruskan mentah. statusWord tetap jadi penanda kegagalan.
+    expect(out).not.toContain("boom")
     expect(out).not.toContain("baris2")
   })
   test("nama tool tak terpercaya disanitasi (tak bisa clear-screen)", () => {
@@ -465,6 +468,55 @@ describe("P1 operator diagnostics in TUI (renderer flat)", () => {
   })
 })
 
+describe("v0.43 — baris ledger error ringkas (tanpa duplikasi status/child)", () => {
+  test("delegate_task gagal + 1 child: redaksi ringkas menang, warna paintLedger tetap", () => {
+    const parentId = "call-delegate"
+    const childId = "call-child"
+    const snapshot: UiPresentationSnapshot = {
+      activities: [
+        activity({
+          toolCallId: parentId,
+          name: "delegate_task",
+          label: "delegate_task",
+          status: "failed",
+        }),
+        activity({
+          toolCallId: childId,
+          name: "read_file",
+          target: "a.ts",
+          status: "failed",
+          parentToolCallId: parentId,
+        }),
+      ],
+      turns: [],
+    }
+    const { t, emit } = setupPresentation(snapshot)
+    emit("tool.failed", {
+      seq: 1,
+      turnId: 1,
+      toolCallId: parentId,
+      name: "delegate_task",
+      status: "failed",
+      message: "[sub-agent error] turn exceeded 180000ms",
+    })
+
+    const rows = t.view(120, 6, 0)
+    const redaksi = tSystem("msg.subagentFailed")
+    // Satu baris ledger, bukan dua: status/child tak jadi baris sendiri.
+    expect(rows.filter((row) => row.includes(redaksi))).toHaveLength(1)
+    const painted = rows.find((row) => row.includes(redaksi))!
+    const plain = stripAnsi(painted)
+    // Redaksi kanonik tampil; duplikasi statusWord + hitungan child hilang.
+    expect(plain).toContain(redaksi)
+    expect(plain).not.toContain("child tools")
+    expect(plain).not.toContain("tool anak")
+    expect(plain).not.toMatch(/failed 1|\bgagal 1\b/)
+    // Satu baris ≤120 kolom dan status visual tetap lewat paintLedger("failed", …).
+    expect(displayWidth(plain)).toBeLessThanOrEqual(120)
+    expect(painted).toBe(paintLedger("failed", plain))
+  })
+})
+
 describe("Transcript.replayHistory (resume)", () => {
   test("membangun ulang echo user + jawaban model", () => {
     const { t } = setup()
@@ -664,7 +716,7 @@ describe("Transcript UI audit regressions (Fase 3.2-3.4)", () => {
   })
 })
 
-describe("v0.42 — commit-in-place baris live tool (never-shrink by id)", () => {
+describe("v0.40 — baris live tool tetap tail transien (bukan commit-in-place)", () => {
   function setupMutable(initial: UiPresentationSnapshot) {
     const bus = createFakeBus()
     let snapshot = initial
@@ -680,6 +732,7 @@ describe("v0.42 — commit-in-place baris live tool (never-shrink by id)", () =>
     })
     return {
       t,
+      bus,
       set(next: UiPresentationSnapshot) {
         snapshot = next
       },
@@ -689,33 +742,46 @@ describe("v0.42 — commit-in-place baris live tool (never-shrink by id)", () =>
     }
   }
 
-  test("running root di-commit sekali lalu ditimpa ringkas saat terminal — tinggi tetap", () => {
+  test("running root adalah tail — size() 0 sebelum, saat, dan sesudah live", () => {
+    const run = activity({ toolCallId: "m1", name: "grep", target: "src/", status: "running" })
+    const { t, set } = setupMutable({ activities: [], turns: [] })
+    expect(t.size()).toBe(0)
+
+    set({ activities: [run], turns: [] })
+    const live = t.view(80, 6, 0).join("\n")
+    expect(live).toContain("grep src/")
+    expect(live).toContain("running")
+    // Baris live TIDAK pernah masuk `lines[]`/proyeksi.
+    expect(t.size()).toBe(0)
+    expect(t.total()).toBe(0)
+
+    set({ activities: [], turns: [] })
+    expect(t.view(80, 6, 0).join("\n")).not.toContain("grep src/")
+    expect(t.size()).toBe(0)
+    expect(t.total()).toBe(0)
+  })
+
+  test("tool terminal menulis SATU baris ledger ringkas (live hilang)", () => {
     const run = activity({ toolCallId: "m1", name: "grep", target: "src/", status: "running" })
     const { t, set, emit } = setupMutable({ activities: [run], turns: [] })
-    const live = t.view(80, 6, 0).join("\n")
-    expect(live).toContain(`› grep src/ … ${live.includes("berjalan") ? "berjalan" : "running"}`)
-    const before = t.wrappedLength(80)
-    expect(t.size()).toBe(1)
+    expect(t.view(80, 6, 0).join("\n")).toContain("running")
+    expect(t.size()).toBe(0)
 
-    // Reducer update snapshot lebih dulu, lalu event terminal.
     set({ activities: [activity({ ...run, status: "completed" })], turns: [] })
     emit("tool.completed", { seq: 1, turnId: 1, toolCallId: "m1", status: "completed" })
 
     const after = t.view(80, 6, 0).join("\n")
     expect(after).toContain(`› ${humanToolLabel("grep")} src/`)
     expect(after).not.toContain("running")
-    expect(after).not.toContain("berjalan")
-    // SATU baris sebelum dan sesudah — tak ada baris kedua, tak ada yang hilang.
     expect(t.size()).toBe(1)
-    expect(t.wrappedLength(80)).toBe(before)
   })
 
-  test("child dengan baris live sendiri tetap ada (ditimpa ringkas) saat diagregasi", () => {
+  test("child yang diagregasi tak punya baris sendiri; agregat ✦ tetap", () => {
     const parent = activity({
       toolCallId: "p1",
       name: "delegate_task",
       target: undefined,
-      status: "running",
+      status: "completed",
     })
     const child = activity({
       toolCallId: "c1",
@@ -725,27 +791,186 @@ describe("v0.42 — commit-in-place baris live tool (never-shrink by id)", () =>
       childSessionId: "sub_1",
       runId: "run_1",
       label: "explore-a",
-      status: "running",
+      status: "completed",
     })
-    const { t, set, emit } = setupMutable({ activities: [parent, child], turns: [] })
-    const live = t.view(120, 10, 0).join("\n")
-    expect(live).toContain("↳ explore-a read_file a.ts … running")
-    const before = t.size()
-    expect(before).toBe(2) // root + child
-
-    const doneParent = activity({ ...parent, status: "completed" })
-    const doneChild = activity({ ...child, status: "completed" })
-    set({ activities: [doneParent, doneChild], turns: [] })
+    const { t, emit } = setupMutable({ activities: [parent, child], turns: [] })
     emit("tool.completed", { seq: 1, turnId: 1, toolCallId: "p1", status: "completed" })
     emit("tool.completed", { seq: 2, turnId: 1, toolCallId: "c1", status: "completed" })
 
     const after = t.view(120, 10, 0).join("\n")
-    // Child tetap punya baris sendiri (tak menyusut), kini ringkas `›`.
+    // Child ditelan induk: tak ada baris `read_file` sendiri (bukan commit-in-place).
     expect(
       after.split("\n").filter((l) => l.includes("read_file") || l.includes("read file")),
-    ).toHaveLength(1)
+    ).toHaveLength(0)
     expect(after).toContain("✦ 1 sub agent · 1 tool · 0 failed")
     expect(after).not.toContain("running")
-    expect(t.size()).toBeGreaterThanOrEqual(before)
+  })
+
+  test("siklus live muncul→hilang tak menggeser indeks narasi committed di view()", () => {
+    const { t, bus, set } = setupMutable({ activities: [], turns: [] })
+    bus.emit("provider:text", { text: "narasi committed yang stabil" })
+    bus.emit("turn:completed", {})
+    const before = t.view(80, 8, 0)
+    const idx = before.findIndex((r) => r.includes("narasi committed yang stabil"))
+    expect(idx).toBeGreaterThanOrEqual(0)
+    const committedSize = t.size()
+    const committedTotal = t.total()
+
+    set({
+      activities: [
+        activity({ toolCallId: "live-1", name: "grep", target: "src/", status: "running" }),
+      ],
+      turns: [],
+    })
+    const during = t.view(80, 8, 0)
+    expect(during.findIndex((r) => r.includes("narasi committed yang stabil"))).toBe(idx)
+    expect(during.join("\n")).toContain("grep src/")
+
+    set({ activities: [], turns: [] })
+    const after = t.view(80, 8, 0)
+    expect(after.findIndex((r) => r.includes("narasi committed yang stabil"))).toBe(idx)
+    expect(t.size()).toBe(committedSize)
+    expect(t.total()).toBe(committedTotal)
+  })
+
+  test("liveRows(w) mengembalikan baris live tanpa menambah committed", () => {
+    const parent = activity({
+      toolCallId: "p",
+      name: "delegate_task",
+      target: undefined,
+      status: "running",
+    })
+    const child = activity({
+      toolCallId: "c",
+      name: "read_file",
+      target: "a.ts",
+      parentToolCallId: "p",
+      childSessionId: "sub_1",
+      runId: "run_1",
+      status: "running",
+    })
+    const orphan = activity({
+      toolCallId: "o",
+      name: "grep",
+      target: "b.ts",
+      parentToolCallId: "parent-yang-sudah-hilang",
+      status: "running",
+    })
+    const { t, set } = setupMutable({ activities: [parent, child, orphan], turns: [] })
+    const beforeSize = t.size()
+    const beforeTotal = t.total()
+
+    const rows = t.liveRows(40)
+    expect(rows).toHaveLength(3)
+    // Urutan root → anak → anak yatim (sama dengan tail lama).
+    expect(rows[0]).toContain("delegate_task")
+    expect(rows[1]).toContain("read_file")
+    expect(rows[2]).toContain("grep")
+    for (const row of rows) {
+      expect(displayWidth(row)).toBe(40)
+      expect(row).not.toContain("\x1b[2J")
+    }
+    // Murni pembaca: tak ada mutasi state.
+    expect(t.size()).toBe(beforeSize)
+    expect(t.total()).toBe(beforeTotal)
+
+    set({ activities: [], turns: [] })
+    expect(t.liveRows(40)).toEqual([])
+  })
+
+  test("v0.43: s > maxBack saat live hilang — committed tak bergeser, bawah kosong", () => {
+    const { t, set } = setupMutable({ activities: [], turns: [] })
+    t.pushInfo(["satu", "dua", "tiga", "empat"])
+    const w = 80
+    const h = 4
+    // 4 committed + 1 live tool → total 5, maxBack 1. scrollBack di ekor = 1.
+    set({
+      activities: [
+        activity({ toolCallId: "live-1", name: "grep", target: "src/", status: "running" }),
+      ],
+      turns: [],
+    })
+    expect(t.wrappedLength(w)).toBe(5)
+    const before = t.viewport(w, h, 1)
+    expect(before.totalRows).toBe(5)
+    expect(before.maxBack).toBe(1)
+    expect(before.firstIndex).toBe(1)
+    expect(before.rows).toHaveLength(h)
+    expect(before.rows.map((r) => r.text).slice(0, 3)).toEqual(["   dua", "   tiga", "   empat"])
+    expect(before.rows[3]!.text).toContain("grep")
+
+    // Tool selesai tanpa ledger: baris live hilang, total menyusut jadi 4
+    // (maxBack 0). scrollBack belum di-rebase → tetap 1, kini > maxBack.
+    set({ activities: [], turns: [] })
+    expect(t.wrappedLength(w)).toBe(4)
+    const after = t.viewport(w, h, 1)
+    expect(after.totalRows).toBe(4)
+    expect(after.maxBack).toBe(0)
+    // firstIndex = back yang dipakai (1), bukan yang ter-clamp (0).
+    expect(after.firstIndex).toBe(1)
+    expect(after.rows).toHaveLength(h)
+    // Posisi baris committed di layar identik; baris bawah jadi kosong.
+    expect(after.rows.map((r) => r.text).slice(0, 3)).toEqual(
+      before.rows.map((r) => r.text).slice(0, 3),
+    )
+    expect(after.rows[3]!.text).toBe("")
+    expect(after.rows[3]!.selectable).toBe(false)
+  })
+
+  test("v0.43: scrollBack jauh melebihi total → tepat h baris kosong, aman", () => {
+    const { t } = setup()
+    t.pushInfo(["hanya", "dua", "baris"])
+    const vp = t.viewport(40, 5, 99)
+    expect(vp.rows).toHaveLength(5)
+    expect(vp.rows.every((r) => r.text === "")).toBe(true)
+    expect(vp.firstIndex).toBe(99)
+    expect(vp.totalRows).toBe(3)
+    expect(vp.maxBack).toBe(0)
+  })
+
+  test("v0.43: regresi — scrollBack <= maxBack identik perilaku v0.40", () => {
+    const { t } = setup()
+    t.pushInfo(["a", "b", "c", "d", "e", "f"])
+    const w = 40
+    const h = 3
+    // total 6, maxBack 3. s = 2 → baris indeks 2,3,4.
+    const vp = t.viewport(w, h, 2)
+    expect(vp.totalRows).toBe(6)
+    expect(vp.maxBack).toBe(3)
+    expect(vp.firstIndex).toBe(2)
+    expect(vp.rows.map((r) => r.text)).toEqual(["   c", "   d", "   e"])
+    expect(t.view(w, h, 2)).toEqual(["   c", "   d", "   e"])
+    // s = maxBack → ekor; s = 0 → kepala.
+    expect(t.view(w, h, 3)).toEqual(["   d", "   e", "   f"])
+    expect(t.view(w, h, 0)).toEqual(["   a", "   b", "   c"])
+  })
+
+  test("v0.43: tail live dibatasi 3 aktivitas terakhir walau 20 running", () => {
+    const activities = Array.from({ length: 20 }, (_, i) =>
+      activity({
+        toolCallId: `live-${i}`,
+        name: "grep",
+        target: `src/${i}`,
+        status: "running",
+      }),
+    )
+    const { t, set } = setupMutable({ activities, turns: [] })
+    const w = 80
+    // Tanpa committed, seluruh baris viewport = tail. Kap 3 → tepat 3 baris,
+    // bukan 20 (dulu puluhan baris live mendorong narasi keluar layar).
+    expect(t.wrappedLength(w)).toBe(3)
+    const live = t.view(w, 20, 0).filter((row) => row.includes("grep src/"))
+    expect(live).toHaveLength(3)
+    // Yang tampil = TIGA aktivitas terakhir (urutan root → anak tetap jujur).
+    expect(live[0]).toContain("src/17")
+    expect(live[1]).toContain("src/18")
+    expect(live[2]).toContain("src/19")
+    // Murni pembaca: tak ada baris live yang masuk `lines[]`.
+    expect(t.size()).toBe(0)
+    expect(t.total()).toBe(0)
+
+    set({ activities: [], turns: [] })
+    expect(t.wrappedLength(w)).toBe(0)
+    expect(t.view(w, 20, 0).filter((row) => row.includes("grep src/"))).toHaveLength(0)
   })
 })

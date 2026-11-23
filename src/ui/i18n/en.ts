@@ -23,6 +23,17 @@ export const en = {
   "msg.cmdFailed": "Command failed · {target} · details in --verbose",
   "msg.toolFailed": "Terminal read failed · retry",
   "msg.guardError": "Command blocked · retry",
+  "msg.subagentFailed": "Sub-agent failed · details in --verbose",
+  // v0.43: delapan pola kegagalan tool tambahan. Prosa sistem (tSystem / locale
+  // OS), bukan narasi sesi — sengaja sejajar dengan kunci msg.* di atas.
+  "msg.toolNotFound": "Unknown tool · check the name",
+  "msg.permissionDenied": "Blocked by permission policy · check access",
+  "msg.invalidArgs": "Invalid tool arguments · check the call",
+  "msg.toolTimeout": "Tool timed out · retry or raise the limit",
+  "msg.targetNotFound": "Target not found · check the path/id",
+  "msg.notConfigured": "Dependency not configured · check setup",
+  "msg.requestFailed": "Request failed · retry or check the endpoint",
+  "msg.cancelled": "Cancelled",
   "form.idleWarning": "idle — canceling in {s}s (press any key to keep editing)",
   "appr.title": "Approval required",
   "appr.tool": "Tool:",

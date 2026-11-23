@@ -149,6 +149,14 @@ const CASES: [string, boolean][] = [
   ["grep -r TODO src", false],
   ["echo $PATH", false],
   ["cat package.json", false],
+  // Reader sistem/inventaris yang baru masuk allowlist narrow. Harus lolos di
+  // DUA mode. `tree /`/`du /` justru diuji sebagai serangan ROOT_SCAN di atas;
+  // di sini hanya bentuk relatif/dalam workspace yang sah.
+  ["uname -a", false],
+  ["date", false],
+  ["df -h .", false],
+  ["du -sh src", false],
+  ["tree -L 1 src", false],
   // Tetangga terdekat kelas 11/12 — harus tetap lolos: caret literal di dalam
   // kutip ganda (cmd.exe tidak memprosesnya di sana) dan `%` tunggal.
   ['echo "a^b"', false],

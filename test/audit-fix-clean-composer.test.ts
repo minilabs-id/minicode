@@ -124,7 +124,7 @@ describe("audit v7.29 — clean composer", () => {
     // mengikuti tepi teks asisten. Isi draft & invariant bersih tetap sama; hanya
     // baris prompt yang bergeser 3 kolom — bukan penambahan status/progres.
     const draftRow = frame.find((line) => line.includes("minicode ›")) ?? ""
-    expect(draftRow).toBe("   minicode › draf")
+    expect(draftRow).toBe("   minicode ›draf")
     // Tak ada status/progres/tool/elapsed yang bocor ke composer.
     expect(draftRow).not.toMatch(/step \d|\.{1,3}|read_file|\(\d+s\)/)
     expect(m.text()).not.toMatch(/\b(Working|Thinking|Running)\b/)
@@ -163,7 +163,7 @@ describe("audit v7.29 — clean composer", () => {
     tty = installFakeTty({ columns: 60, rows: 14 })
     // v7.42: sampel prompt memakai margin kiri 3 kolom yang sama dengan prompt
     // composer baru; round-trip warna (accent → stripAnsi) tetap diuji setara.
-    const prompt = "   minicode › "
+    const prompt = "   minicode ›"
     delete process.env.MINICODE_COLOR
     const colored = c.accent(prompt)
     expect(colored).toContain("\x1b[")

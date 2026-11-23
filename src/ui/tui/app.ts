@@ -148,18 +148,18 @@ const MAX_DROPDOWN_ROWS = 8
 const MIN_ROWS = 10
 const MIN_COLS = 20
 
-// Prefix adaptif: prefix panjang `minicode › ` memakan 14 kolom (3 margin +
-// 11 label), jadi hanya dipakai bila ruang isi `w - 14 >= 24` (w ≥ 38).
-// Di bawah itu pakai `› ` / `· ` supaya ruang wrap tidak termakan label.
-// `w` = composerWidth() satu-sumber (cap progresif di chat-column.ts).
-const PROMPT_LONG_PREFIX_COLS = ASSISTANT_LEFT_MARGIN + 11
+// Prefix adaptif: prefix panjang `minicode ›` memakan 13 kolom (3 margin +
+// 10 label), jadi hanya dipakai bila ruang isi `w - 13 >= 24` (w ≥ 37).
+// Di bawah itu pakai `›` / `·` supaya ruang wrap tidak termakan label.
+// Kedua prefix TANPA spasi trailing supaya caret DECSCUSR menempel di glif
+// (`›` / `·`) — klausa v0.36/v7.30. `w` = composerWidth() satu-sumber
+// (cap progresif di chat-column.ts); posisi caret memakai displayWidth(pf)+1.
+const PROMPT_LONG_PREFIX_COLS = ASSISTANT_LEFT_MARGIN + 10
 const PROMPT_MIN_BODY_COLS = 24
 const promptLong = (w: number): boolean => w - PROMPT_LONG_PREFIX_COLS >= PROMPT_MIN_BODY_COLS
 const promptFirst = (w: number): string =>
-  promptLong(w)
-    ? `${" ".repeat(ASSISTANT_LEFT_MARGIN)}minicode ${glyphs.arrow} `
-    : `${glyphs.arrow} `
-const promptCont = (w: number): string => (promptLong(w) ? `  ${glyphs.dot} ` : `${glyphs.dot} `)
+  promptLong(w) ? `${" ".repeat(ASSISTANT_LEFT_MARGIN)}minicode ${glyphs.arrow}` : glyphs.arrow
+const promptCont = (w: number): string => (promptLong(w) ? `  ${glyphs.dot}` : glyphs.dot)
 const TIMER_TEXT = "00.00.00"
 const DOT_INTERVAL_MS = 200
 /** v7.29: peta laju stream teks → interval kedip spark (sama seperti turn-status). */
@@ -366,6 +366,22 @@ function cursorAtVisualRowColumn(row: ComposerVisualRow, screenColZeroBased: num
 export class TuiApp {
   private state: PromptState = createState()
   private scrollBack = 0
+  /**
+   * v0.43 — Ratchet scroll PER TURN (murni state, BUKAN indikator UI).
+   *
+   * Baris live tool adalah tail transien: saat ia muncul `total` tumbuh dan
+   * sticky-tail menggeser jendela ke bawah (history naik di layar). Saat ia
+   * hilang, `total` menyusut — tanpa ratchet `scrollBack` dihitung ulang ke
+   * `maxBack` yang lebih kecil dan history turun lagi (jitter "naik-turun").
+   * Floor ini mengunci jendela agar TAK PERNAH bergeser balik selama turn yang
+   * sama; baris bawah yang tak terisi di-pad kosong oleh viewport().
+   *
+   * Reset HANYA di awal turn/prompt (/clear & sesi baru = konstruktor), bukan
+   * tiap frame — kalau tiap frame, floor selalu menyamai maxBack dan ratchet
+   * jadi no-op. Inisialisasi di sini juga mencakup "sesi dibuat ulang" (instance
+   * TuiApp baru = sesi baru).
+   */
+  private turnScrollFloor = 0
   /**
    * Penanda "mengikuti ekor" saat streaming. Anchor scroll = kepala (`scrollBack=0`),
    * jadi viewport diam saat konten tumbuh; flag diclear segera setelah user sengaja
@@ -583,6 +599,10 @@ export class TuiApp {
         this.stopAutoScroll()
         if (this.selection) this.selection.dragging = false
         this.preferredCol = null
+        // Ratchet per turn mengunci scrollBack lama; setelah geometri berubah,
+        // angka itu basi (wrap ulang mengubah total). Buang agar viewport bisa
+        // dihitung ulang dari ekor yang baru.
+        this.turnScrollFloor = 0
         // Lukis layar AKTIF, bukan handle `screen` run() yang basi setelah
         // release+reacquire gagal.
         this.paintCurrent()
@@ -683,6 +703,9 @@ export class TuiApp {
       sub("turn:started", () => {
         this.closeMenu()
         this.turnStartedAt = Date.now()
+        // Turn baru = lepas ratchet scroll: history boleh kembali ke posisi
+        // normal (jendela mengikuti ekor tanpa jejak baris live turn lama).
+        this.turnScrollFloor = 0
         this.streamDeltas = []
         this.lastStreamTextAt = 0
         this.streamIntervalMs = 0
@@ -1297,6 +1320,11 @@ export class TuiApp {
       // lalu lagi oleh projectText pada kolom chat yang ter-centre.
       this.transcript.pushUser(rawLine, this.chatWidth())
     }
+    // Prompt user baru = awal turn baru. Ratchet dari turn sebelumnya dilepas
+    // supaya history bisa kembali ke ekor (bukan terkunci oleh live yang sudah
+    // hilang). `turn:started` juga me-reset, tapi submit parent siklus lengkap
+    // (host tak selalu memancarkan event bus).
+    this.turnScrollFloor = 0
     this.busy = true
     this.turnStartedAt = Date.now()
     this.lastAbortAt = 0
@@ -1607,6 +1635,9 @@ export class TuiApp {
   // ── Scroll ──
 
   private scrollBy(pages: number): void {
+    // Navigasi eksplisit user melepaskan ratchet turn — kalau tidak, saat user
+    // scroll balik ke ekor, floor lama menarik viewport ke posisi basi.
+    this.turnScrollFloor = 0
     const rows = process.stdout.rows || 24
     const cols = process.stdout.columns || 80
     const viewH = this.viewportHeight(rows, cols, this.isBusy())
@@ -1638,6 +1669,7 @@ export class TuiApp {
    * scrollBack 0 = kepala, nilai besar = ekor (v7.28 anchor atas).
    */
   private scrollRows(n: number, repaint = true): void {
+    this.turnScrollFloor = 0
     const cols = process.stdout.columns || 80
     const rows = process.stdout.rows || 24
     const viewH = this.viewportHeight(rows, cols, this.isBusy())
@@ -1661,6 +1693,7 @@ export class TuiApp {
    * viewport kembali ke ekor (lompatan tak terlihat).
    */
   private jumpEdge(top: boolean): void {
+    this.turnScrollFloor = 0
     const rows = process.stdout.rows || 24
     const cols = process.stdout.columns || 80
     const curWrapped = this.transcript.wrappedLength(this.chatWidth())
@@ -1692,6 +1725,9 @@ export class TuiApp {
    * tak tertinggal scrollBack basi (layar kosong + user harus PgDn manual). */
   clearView(): void {
     this.transcript.clear()
+    // /clear = sesi tampilan baru: buang ratchet turn lama supaya viewport
+    // benar-benar mulai dari nol, bukan menyimpan floor dari transkrip lama.
+    this.turnScrollFloor = 0
     this.followTail()
     this.paintCurrent()
   }
@@ -1798,11 +1834,14 @@ export class TuiApp {
     if (!this.quitRequested && this.suspended === 0 && !this.released) this.paintCurrent()
   }
 
-  private composerHeight(busy = this.busy): number {
-    if (!this.composerLive(busy)) return 1
-    // TETAP 2 baris saat editing — draft lebih panjang tak menambah baris dan
-    // menggeser transkrip. Jendela `composerOffset` yang bergulir mengikuti
-    // caret; baris kosong mengisi sisa bila draft cuma satu baris.
+  /**
+   * Composer dikunci 2 baris di SEMUA state (idle, mengetik, busy, habis submit).
+   * Reservasi ini mencegah prompt naik-turun saat `editing` berubah di
+   * doSubmit/finally: dulu `composerH` menyusut jadi 1 saat busy, `viewH`
+   * membesar satu, dan `composerTop` turun satu baris. Baris ke-2 sengaja
+   * dikosongkan bila draft cuma satu baris / sedang busy (padding di buildLayout).
+   */
+  private composerHeight(_busy = this.busy): number {
     return COMPOSER_MAX_ROWS
   }
 
@@ -2527,9 +2566,11 @@ export class TuiApp {
     const allComposer = this.composerRows(snap, busy, now)
     const contentBudget = Math.max(1, height - 3)
     let menu = menuView.lines
-    // Composer TETAP 2 baris saat editing; sisanya ditangani jendela geser
-    // `composerOffset`. Dropdown adalah overlay, jadi tak ikut memotong viewH.
-    let composerH = this.composerLive(busy) ? COMPOSER_MAX_ROWS : 1
+    // Composer TETAP 2 baris di semua state — TIDAK bergantung pada
+    // `composerLive(busy)`/`editing`. Kalau tinggi mengikuti `editing`, prompt
+    // bergeser satu baris di transisi submit → busy → selesai (viewH berubah).
+    // Jendela geser `composerOffset` menangani draft panjang; dropdown overlay.
+    let composerH = COMPOSER_MAX_ROWS
     if (menu.length + composerH > contentBudget) {
       menu = menu.slice(0, Math.max(0, contentBudget - 1))
       composerH = Math.max(1, contentBudget - menu.length)
@@ -2598,7 +2639,14 @@ export class TuiApp {
       this.pendingScrollAnchor = null
       if (idx >= 0) this.scrollBack = idx
     } else if (this.pinnedToTail && !this.selection) {
-      this.scrollBack = Math.max(0, this.transcript.wrappedLength(chatCols) - viewH)
+      // v0.43 — sticky-tail + ratchet naik-saja. Baris live transien dibatasi
+      // maksimal TIGA baris terakhir di tail transkrip (lihat
+      // `MAX_LIVE_TAIL_ROWS`), jadi narasi committed tak terdorong keluar
+      // viewport. Saat live hilang `total` menyusut tetapi floor menahan
+      // jendela: posisi baris committed di layar tetap, bawah boleh kosong.
+      const maxBack = Math.max(0, this.transcript.wrappedLength(chatCols) - viewH)
+      this.scrollBack = Math.max(maxBack, this.turnScrollFloor)
+      this.turnScrollFloor = Math.max(this.turnScrollFloor, this.scrollBack)
     }
     const viewport = this.transcript.viewport(chatCols, viewH, this.scrollBack)
     if (

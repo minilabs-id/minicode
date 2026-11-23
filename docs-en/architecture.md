@@ -260,6 +260,19 @@ transcript selection; since v0.37 the dropdown closes on a busy/abort
 transition. See invariants I14/I17/I19/I1 and the `## Perubahan v0.37` entry
 (which overrides the v0.36 cap/threshold) in `TERMINAL_CONTRACT.md`.
 
+Since v0.43 the **live tool activity row** is transient again, as in v0.40.0:
+it follows the transcript tail and disappears once the tool finishes. When the
+live row appears, `total` grows and sticky-tail shifts the window (history may
+move up); when it disappears and `total` shrinks, the window does not shift
+back — committed rows keep their on-screen position and the space below may be
+empty. The mechanism is a **per-turn `scrollBack` ratchet** (only ever grows),
+reset on `turn:started`, a new prompt, or `/clear`; not an overlay, not a
+`liveRegion`, and not a commit-in-place of the live row. Committed history stays
+intact; I1 (one write per frame) holds with no new writer or region. Only the
+transience aspect of the v0.42 "commit-in-place / never-shrink by id" clause is
+overridden (other v0.42 clauses still apply). See the `## Perubahan v0.43` entry
+in `TERMINAL_CONTRACT.md`.
+
 ## Paste & selection flow (v0.37)
 
 Three new input flows touch the controller/painter boundary:

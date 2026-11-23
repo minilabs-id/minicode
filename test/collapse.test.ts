@@ -146,7 +146,11 @@ describe("collapse: tool section", () => {
     bus.emit("turn:started", { turn: 1 })
     bus.emit("execution:completed", done("read_file", { path: "x.ts" }, "gagal membaca", true))
     detach()
-    expect(err()).toContain(`› ${humanToolLabel("read_file")}: gagal membaca`)
+    // v0.43: makna test tetap — BARIS error tool tetap tampil walau section
+    // diminimalkan. Yang berubah: redaksi mentah "gagal membaca" kini
+    // disembunyikan (tak cocok 13 pola kanonik friendlyToolError()).
+    expect(err()).toContain(`› ${humanToolLabel("read_file")}`)
+    expect(err()).not.toContain("gagal membaca")
     expect(err()).not.toContain("+ read_file")
   })
 

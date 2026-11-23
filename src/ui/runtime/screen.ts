@@ -35,12 +35,19 @@ const HIDE_CURSOR = "\x1b[?25l"
 const RESET_REGION = "\x1b[r"
 const SYNC_START = "\x1b[?2026h"
 const SYNC_END = "\x1b[?2026l"
-/** Satu sekuens exit atomik: reset atribut → tampilkan kursor → tutup sync
- * update → keluar alt-screen → reset region. Ditulis SEBAGAI SATU tulis agar
- * terminal tak pernah tertinggal setengah pulih, dan agar jumlah writer di
- * berkas ini tidak melewati batas inventaris OAP-008 (writer-inventory.test.ts
- * menolak penulis yang bertambah diam-diam). */
-const EXIT_SEQUENCE = RESET_ATTRS + SHOW_CURSOR + SYNC_END + EXIT + RESET_REGION
+/** DECSCUSR `6 q` = bar tegak stabil (tak berkedip): SATU-SATUNYA mekanisme
+ * penanda kursor di seluruh TUI. Picker/manager TIDAK lagi menggambar caret
+ * glyph blok statis — kursor terminal yang diparkir jadi penanda tunggal. */
+const CARET_BAR = "\x1b[6 q"
+/** DECSCUSR `0 q` = kembalikan bentuk caret terminal ke default saat keluar
+ * alt-screen (simetris dengan `6 q` yang dipakai selama sesi). */
+const CARET_RESET = "\x1b[0 q"
+/** Satu sekuens exit atomik: reset atribut → reset gaya caret → tampilkan
+ * kursor → tutup sync update → keluar alt-screen → reset region. Ditulis
+ * SEBAGAI SATU tulis agar terminal tak pernah tertinggal setengah pulih, dan
+ * agar jumlah writer di berkas ini tidak melewati batas inventaris OAP-008
+ * (writer-inventory.test.ts menolak penulis yang bertambah diam-diam). */
+const EXIT_SEQUENCE = RESET_ATTRS + CARET_RESET + SHOW_CURSOR + SYNC_END + EXIT + RESET_REGION
 /** Ekspor untuk pemanggil yang melukis kursor di luar paint() (app.ts) —
  * kursor WAJIB di dalam blok sync yang sama dengan framenya (TUI-007). */
 export const SYNC_UPDATE_START = SYNC_START
@@ -250,9 +257,9 @@ export function openAltScreen(): AltScreen {
       if (cursor) {
         const row = Math.max(1, Math.floor(cursor.row))
         const col = Math.max(1, Math.floor(cursor.col))
-        // DECSCUSR `6 q` = bar tegak stabil (tak berkedip): caret tak menutupi
-        // karakter di bawahnya (blok penuh), dan lebih tenang = clean & minimal.
-        out += `\x1b[?25l\x1b[${row};${col}H\x1b[6 q\x1b[?25h`
+        // Urutan samakan dengan moveCursor(): sembunyi → posisi → caret bar →
+        // tampil. SATU mekanisme caret (CARET_BAR) dipakai paint & moveCursor.
+        out += `${HIDE_CURSOR}\x1b[${row};${col}H${CARET_BAR}${SHOW_CURSOR}`
       }
       out += SYNC_END
       process.stdout.write(out)
@@ -264,14 +271,17 @@ export function openAltScreen(): AltScreen {
       // Sync block + reset atribut: kursor tak boleh mewarisi warna run
       // sebelumnya, dan perpindahan kursor tak perlu menyentuh satu sel pun.
       process.stdout.write(
-        `${SYNC_START}${RESET_ATTRS}${HIDE_CURSOR}\x1b[${r};${c}H\x1b[6 q${SHOW_CURSOR}${SYNC_END}`,
+        `${SYNC_START}${RESET_ATTRS}${HIDE_CURSOR}\x1b[${r};${c}H${CARET_BAR}${SHOW_CURSOR}${SYNC_END}`,
       )
     },
     setCursorVisible(visible: boolean): void {
       if (closed) return
+      // Re-assert gaya caret bar saat show: setelah sub-modal (picker/form)
+      // memakai caret-nya sendiri, pastikan satu mekanisme `6 q` tetap aktif.
+      // Tetap SATU `stdout.write` yang sudah ada — tanpa writer baru.
       process.stdout.write(
         visible
-          ? `${SYNC_START}${RESET_ATTRS}${SHOW_CURSOR}${SYNC_END}`
+          ? `${SYNC_START}${RESET_ATTRS}${CARET_BAR}${SHOW_CURSOR}${SYNC_END}`
           : `${SYNC_START}${HIDE_CURSOR}${SYNC_END}`,
       )
     },

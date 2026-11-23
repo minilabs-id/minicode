@@ -818,7 +818,7 @@ describe("simple logger (one-shot)", () => {
     expect(o).toContain("halodunia")
   })
 
-  test("tool error ditandai", () => {
+  test("tool error tanpa pola kanonik: ledger tetap tampil, teks mentah disembunyikan", () => {
     const { bus, detach, out } = attach()
     bus.emit("execution:completed", {
       execution: {
@@ -827,7 +827,13 @@ describe("simple logger (one-shot)", () => {
       },
     })
     detach()
-    expect(out()).toContain("gagal")
+    // v0.43: baris ledger/status tetap menandai kegagalan (warna via paintLedger),
+    // tetapi pesan yang tak cocok dengan 13 pola kanonik TIDAK dirender — permintaan
+    // owner: error mentah tak usah muncul bila tak ada di friendlyToolError.
+    const o = out()
+    expect(o).toContain(`› ${humanToolLabel("bash")}`)
+    expect(o).not.toContain("gagal")
+    expect(o).not.toMatch(/: \s*$/m) // tak ada ": " menggantung
   })
 
   test("provider error ditunda ke driver (tanpa cetak ganda)", () => {
@@ -1108,7 +1114,7 @@ describe("simple logger (one-shot)", () => {
       expect(out()).not.toContain("rahasia-")
     })
 
-    test("tool gagal lalu retry sukses: dua baris terpisah, gagal dulu lalu sukses", () => {
+    test("tool gagal lalu retry sukses: dua baris ledger terpisah, error mentah tak tampil", () => {
       setCompactMode(true)
       const { bus, detach, out } = attach()
       bus.emit("execution:completed", toolDone("read_file", "a.ts", true))
@@ -1116,10 +1122,13 @@ describe("simple logger (one-shot)", () => {
       detach()
       setCompactMode(false)
       const o = out()
-      const x = o.indexOf(`› ${humanToolLabel("read_file")}: gagal membaca`)
-      const ok = o.indexOf(`› ${humanToolLabel("read_file")} a.ts`)
-      expect(x).toBeGreaterThanOrEqual(0)
-      expect(ok).toBeGreaterThan(x)
+      const label = `› ${humanToolLabel("read_file")}`
+      // Dua eksekusi → dua baris ledger (urutan eksekusi tetap: gagal, lalu sukses).
+      // v0.43: teks "gagal membaca a.ts" tak cocok pola kanonik ⇒ tak dirender;
+      // yang membedakan dua baris adalah warna paintLedger, bukan redaksi mentah.
+      expect(o.split(label).length - 1).toBe(2)
+      expect(o).not.toContain("gagal membaca")
+      expect(o).not.toMatch(/: \s*$/m)
     })
 
     test("tool selesai bersamaan dengan aliran teks: konten tidak menyatu dengan ledger", () => {

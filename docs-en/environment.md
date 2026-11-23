@@ -34,7 +34,7 @@ The variables that most determine behaviour (the rest are referenced below):
 | `MINICODE_TELEMETRY` | `0`/`false`/`off` -> disable writing traces.jsonl |
 | `MINICODE_VERIFY_CMD` | Custom verify command (replaces `detectVerifyCommand`) |
 | `MINICODE_ACE_ENABLED` | `0`/`false`/`off`/`no` -> disable the ACE-Lite consequence engine (instant rollback to the pure baseline, no self-heal loop). Default `true`. Hard safety/tamper guard & permission policy STAY active — this switch only disables consequence evaluation, not security boundaries |
-| `MINICODE_BASH_ALLOWLIST` | Custom bash allowlist (comma-separated, replaces the DEFAULT) |
+| `MINICODE_BASH_ALLOWLIST` | Custom bash allowlist (comma-separated). Replaces the **entire** built-in narrow list — the built-in additions (e.g. `tree`/`du`/`df`/`date`/`uname`) are not used when this env is set; include the patterns yourself. Takes precedence over `bashAllowlist` in config |
 
 ## Auto-update (v0.41)
 

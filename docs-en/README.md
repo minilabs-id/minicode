@@ -1,6 +1,6 @@
 # MiniCode Documentation
 
-MiniCode is a terminal coding agent built on the MiniCore kernel: the interactive path uses a fullscreen TUI with a centred chat column and no right sidebar; one-shot/automated paths write to the scrollback or a machine-readable stream. Current behaviour (static recap, OS-locale activity labels, two-row composer, bracketed paste, diagnostic auto-update) is recorded in the [Terminal Contract](TERMINAL_CONTRACT.md).
+MiniCode is a terminal coding agent built on the MiniCore kernel: the interactive path uses a fullscreen TUI with a centred chat column and no right sidebar; one-shot/automated paths write to the scrollback or a machine-readable stream. Current behaviour (live tool rows stay transient and follow the tail, with a per-turn `scrollBack` ratchet keeping committed rows in place while committed chat history stays intact; static recap without a `└` marker, OS-locale activity labels, two-row composer, bracketed paste, diagnostic auto-update) is recorded in the [Terminal Contract](TERMINAL_CONTRACT.md).
 
 ## Start here
 

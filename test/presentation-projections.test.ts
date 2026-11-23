@@ -596,9 +596,13 @@ describe("F-AGENT-1: renderer linear (non-TTY) marker run", () => {
       })
       detach()
       const raw = tty.allErr()
+      // v0.43: marker `↳ <label>` dan status [failed] tetap tampil; redaksi
+      // error mentah "boom" sengaja disembunyikan (tak cocok 13 pola kanonik
+      // friendlyToolError()). runId tetap tak bocor.
       expect(raw).toContain("↳ plan-build bash ls")
+      expect(raw).toContain("[failed]")
       expect(raw).not.toContain("run_abcdef01")
-      expect(raw).toContain("boom")
+      expect(raw).not.toContain("boom")
     } finally {
       tty.restore()
     }

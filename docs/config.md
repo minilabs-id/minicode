@@ -52,7 +52,7 @@ Di mana pengaturan dan data Minicode tinggal, bagaimana file lokal yang tak tepe
   Pilihan yang diterima mengikuti ukuran yang benar-benar dipakai model produksi: `16K`, `32K`, `64K`, `128K`, `200K`, `256K`, `400K`, `500K`, `1M`, `1M (1024²)`, `1.05M`, `2M`, `4M`, `10M`, ditambah angka eksak. **Tiga varian 1M** disengaja karena memang berbeda: `1000000` (Anthropic/DeepSeek/Qwen), `1048576` (Google/Gemini, Kimi, GLM), `1050000` (OpenAI) — selisihnya sampai ~50K token.
 - `mcpServers` — dua bentuk: stdio (`command`+`args`) dan HTTP (`url`+opsional `headers`). Detail transport di [MCP & LSP](mcp-lsp.md).
 - `verifyCommand` — dipakai `--verify` bila auto-detect tidak menemukan (urutan deteksi: `typecheck` → `test` → `tsconfig`).
-- `bashAllowlist` — pola glob perintah bash tambahan yang dianggap aman. Precedence: env `MINICODE_BASH_ALLOWLIST` > `bashAllowlist` (config) > daftar bawaan. Di daftar narrow pola config **menggantikan** bawaan; di daftar developer (fallback tanpa sandbox, `restrictBash`) pola config **menambah**. Perintah majemuk diperiksa per segmen — lihat [Policy & Sandbox](policy-sandbox.md).
+- `bashAllowlist` — pola glob perintah bash tambahan yang dianggap aman. Precedence: env `MINICODE_BASH_ALLOWLIST` > `bashAllowlist` (config) > daftar bawaan. Di daftar narrow pola config **menggantikan seluruh** bawaan; di daftar developer (fallback tanpa sandbox, `restrictBash`) pola config **menambah**. Artinya, bila override aktif, penambahan bawaan (mis. `tree`/`du`/`df`/`date`/`uname`) tidak ikut dipakai — sertakan sendiri pola yang dibutuhkan. Perintah majemuk diperiksa per segmen — lihat [Policy & Sandbox](policy-sandbox.md).
 
 ## 15 preset gateway (termasuk Custom URL)
 

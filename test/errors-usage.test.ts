@@ -367,20 +367,36 @@ test("formatError: ProviderError (category) & AgentError (kind) tetap dipetakan"
   expect(agent.toLowerCase()).toContain("timeout")
 })
 
-// ── v0.42: redaksi ringkas kegagalan tool (tSystem / locale OS) ───────────────
+// ── v0.42/v0.43: redaksi ringkas kegagalan tool (tSystem / locale OS) ────────
 describe("friendlyToolError", () => {
   afterEach(() => __setSystemLocaleForTest(null))
 
-  test("prioritas: duplicate > exit > EIO > bash-guard > default", () => {
+  test("prioritas: duplicate > subagent > guard > exit > EIO > 8 pola > fallback", () => {
     __setSystemLocaleForTest("en")
     expect(friendlyToolError("duplicate idempotency key abc-123")).toBe(
       "Already run · verify state before retrying",
+    )
+    // Sub-agent MENANG atas `exit N`: ringkasan child sering memuat kode keluar.
+    expect(
+      friendlyToolError(
+        "1 child tools: [sub-agent explore error] exit 2 | partial: I'll start by mapping the security-rel…",
+      ),
+    ).toBe("Sub-agent failed · details in --verbose")
+    expect(friendlyToolError("sub-agent failed: exit 7")).toBe(
+      "Sub-agent failed · details in --verbose",
+    )
+    // "turn exceeded" juga pola toolTimeout, tapi sub-agent dicek lebih dulu.
+    expect(friendlyToolError("turn exceeded 180000ms")).toBe(
+      "Sub-agent failed · details in --verbose",
+    )
+    // Guard mengalahkan `permission denied`.
+    expect(friendlyToolError("bash-guard internal error: permission denied: blocked rm")).toBe(
+      "Command blocked · retry",
     )
     expect(friendlyToolError("failed: exit 1\nerror: boom", "bash")).toBe(
       "Command failed · bash · details in --verbose",
     )
     expect(friendlyToolError("read failed: EIO: something")).toBe("Terminal read failed · retry")
-    expect(friendlyToolError("bash-guard internal error: boom")).toBe("Command blocked · retry")
     expect(friendlyToolError("boom")).toBe("boom")
   })
 
@@ -395,17 +411,151 @@ describe("friendlyToolError", () => {
     )
   })
 
-  test("murni, satu baris ≤120 kolom, rahasia teredaksi", () => {
+  const TOOL_ERROR_CASES: ReadonlyArray<{ raw: string; en: string; id: string }> = [
+    {
+      raw: "unknown tool: do_thing",
+      en: "Unknown tool · check the name",
+      id: "Tool tidak dikenal · periksa nama",
+    },
+    {
+      raw: "tool not found: read_file",
+      en: "Unknown tool · check the name",
+      id: "Tool tidak dikenal · periksa nama",
+    },
+    {
+      raw: "permission denied: outside workspace",
+      en: "Blocked by permission policy · check access",
+      id: "Ditolak kebijakan izin · periksa akses",
+    },
+    {
+      raw: "invalid arguments: path must be a string",
+      en: "Invalid tool arguments · check the call",
+      id: "Argumen tool tidak valid · periksa panggilan",
+    },
+    {
+      raw: "read_file timed out after 5000ms",
+      en: "Tool timed out · retry or raise the limit",
+      id: "Tool melewati batas waktu · ulangi atau naikkan batas",
+    },
+    {
+      raw: "ETIMEDOUT while fetching schema",
+      en: "Tool timed out · retry or raise the limit",
+      id: "Tool melewati batas waktu · ulangi atau naikkan batas",
+    },
+    {
+      raw: "MCP server timed out",
+      en: "Tool timed out · retry or raise the limit",
+      id: "Tool melewati batas waktu · ulangi atau naikkan batas",
+    },
+    {
+      raw: "file not found: /tmp/missing",
+      en: "Target not found · check the path/id",
+      id: "Target tidak ditemukan · periksa path/id",
+    },
+    {
+      raw: "ENOENT: no such file or directory",
+      en: "Target not found · check the path/id",
+      id: "Target tidak ditemukan · periksa path/id",
+    },
+    {
+      raw: "oldString not found in src/ui/a.ts",
+      en: "Target not found · check the path/id",
+      id: "Target tidak ditemukan · periksa path/id",
+    },
+    {
+      raw: "source not found: old.ts",
+      en: "Target not found · check the path/id",
+      id: "Target tidak ditemukan · periksa path/id",
+    },
+    {
+      raw: "no provider for sub-agent",
+      en: "Dependency not configured · check setup",
+      id: "Dependensi belum dikonfigurasi · periksa penyiapan",
+    },
+    {
+      raw: "docker unavailable — refusing direct execution",
+      en: "Dependency not configured · check setup",
+      id: "Dependensi belum dikonfigurasi · periksa penyiapan",
+    },
+    {
+      raw: "HTTP 429 too many requests",
+      en: "Request failed · retry or check the endpoint",
+      id: "Permintaan gagal · ulangi atau periksa endpoint",
+    },
+    {
+      raw: "fetch 429 from gateway",
+      en: "Request failed · retry or check the endpoint",
+      id: "Permintaan gagal · ulangi atau periksa endpoint",
+    },
+    {
+      raw: "upstream rate limited, retry later",
+      en: "Request failed · retry or check the endpoint",
+      id: "Permintaan gagal · ulangi atau periksa endpoint",
+    },
+    {
+      raw: "aborted by user",
+      en: "Cancelled",
+      id: "Dibatalkan",
+    },
+    {
+      raw: "ask_user cancelled by user",
+      en: "Cancelled",
+      id: "Dibatalkan",
+    },
+    {
+      raw: "answer cancelled (empty answer)",
+      en: "Cancelled",
+      id: "Dibatalkan",
+    },
+  ]
+
+  test("8 pola baru: tabel redaksi en/id via locale OS (tSystem)", () => {
+    for (const c of TOOL_ERROR_CASES) {
+      __setSystemLocaleForTest("en")
+      setSessionLocale("id") // /lang sesi tak boleh mengubah kwitansi sistem
+      expect(friendlyToolError(c.raw), `en: ${c.raw}`).toBe(c.en)
+      __setSystemLocaleForTest("id")
+      setSessionLocale("en")
+      expect(friendlyToolError(c.raw), `id: ${c.raw}`).toBe(c.id)
+    }
+  })
+
+  test("negatif: anchor/batas kata mencegah over-match", () => {
+    __setSystemLocaleForTest("en")
+    // exit 0 = sukses: baris log netral tetap apa adanya.
+    expect(friendlyToolError("exit code 0 recorded in log")).toBe("exit code 0 recorded in log")
+    // Tanpa angka, penyebutan "exit code" tak lagi memicu cmdFailed.
+    expect(friendlyToolError("see exit code in log")).toBe("see exit code in log")
+    expect(friendlyToolError("grep: permission denied (in fixture)")).not.toBe(
+      "Blocked by permission policy · check access",
+    )
+    expect(friendlyToolError("set timeout 30s")).not.toBe(
+      "Tool timed out · retry or raise the limit",
+    )
+  })
+
+  test("murni, satu baris ≤120 kolom, tanpa SGR, rahasia di pesan DAN target teredaksi", () => {
     __setSystemLocaleForTest("en")
     const long = friendlyToolError(
       `exit 2 ${"x".repeat(200)} Authorization: Bearer ${SENTINEL_BEARER}`,
-      "bash",
+      `bash Authorization: Bearer ${SENTINEL_BEARER}`,
     )
     expect(displayWidth(long)).toBeLessThanOrEqual(120)
     expect(long).not.toContain("\n")
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: regex SGR memang memakai ESC
+    expect(long).not.toMatch(/\x1b\[[0-9;?]*[A-Za-z]/)
+    expect(long).not.toContain(SENTINEL_BEARER)
+    expect(long).toContain("[redacted]")
     expect(long).toContain("Command failed")
     const secret = friendlyToolError(`boom Authorization: Bearer ${SENTINEL_BEARER}`)
     expect(secret).not.toContain(SENTINEL_BEARER)
     expect(secret).toContain("[redacted]")
+    // Cabang pola baru juga lewat gerbang redaksi yang sama.
+    const matched = friendlyToolError(
+      `unknown tool: Authorization: Bearer ${SENTINEL_BEARER}`,
+      `target Bearer ${SENTINEL_BEARER}`,
+    )
+    expect(matched).toBe("Unknown tool · check the name")
+    expect(matched).not.toContain(SENTINEL_BEARER)
   })
 })

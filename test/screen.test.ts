@@ -58,8 +58,14 @@ test("non-TTY = null-screen: ok false, paint/close nol byte", () => {
   const s = openAltScreen()
   expect(s.ok).toBe(false)
   s.paint(["hello"])
+  s.moveCursor(1, 1)
+  // show/hide memang mengirim caret bar di TTY, tapi nol byte di non-TTY.
+  s.setCursorVisible(true)
+  s.setCursorVisible(false)
   s.close()
   expect(tty.all()).toBe("")
+  expect(tty.all()).not.toContain("\x1b[6 q")
+  expect(tty.all()).not.toContain("\x1b[0 q")
   expect(tty.allErr()).toBe("")
 })
 
@@ -181,6 +187,53 @@ test("paint: satu chunk stdout per frame (ConPTY menagih tiap write)", () => {
   // Seluruh frame (sync-start + diff + kursor + sync-end) = satu write.
   expect(tty.chunks()).toHaveLength(1)
   s.close()
+})
+
+test("caret bar DECSCUSR `6 q` — satu mekanisme, re-assert saat show", () => {
+  tty = installFakeTty({ columns: 80, rows: 24 })
+  const s = openAltScreen()
+  tty.clear()
+  // show mengirim ulang `6 q` di DALAM write yang sudah ada (tanpa writer baru).
+  s.setCursorVisible(true)
+  expect(tty.all()).toContain("\x1b[6 q")
+  expect(tty.chunks()).toHaveLength(1)
+  tty.clear()
+  // hide tak mengubah gaya caret — simetris: hanya show yang re-assert.
+  s.setCursorVisible(false)
+  expect(tty.all()).not.toContain("\x1b[6 q")
+  s.close()
+})
+
+test("paint(cursor): caret bar `6 q` dikirim dalam satu frame (urutan = moveCursor)", () => {
+  tty = installFakeTty({ columns: 40, rows: 5 })
+  const s = openAltScreen()
+  tty.clear()
+  s.paint(["baris"], { row: 1, col: 3 })
+  const out = tty.all()
+  expect(out).toContain("\x1b[6 q")
+  // Urutan: sembunyi → posisi → caret bar → tampil (sama dengan moveCursor).
+  expect(out.indexOf("\x1b[?25l")).toBeLessThan(out.indexOf("\x1b[6 q"))
+  expect(out.indexOf("\x1b[6 q")).toBeLessThan(out.indexOf("\x1b[?25h"))
+  expect(tty.chunks()).toHaveLength(1)
+  s.close()
+})
+
+test("exit: reset gaya caret `0 q` dikirim bersama sekuens restore dalam satu write", () => {
+  tty = installFakeTty({ columns: 80, rows: 24 })
+  const s = openAltScreen()
+  tty.clear()
+  s.close()
+  const out = tty.all()
+  // `0 q` (kembali ke caret default) ikut di dalam write atomik yang sama.
+  expect(out).toContain("\x1b[0 q")
+  expect(out).toContain("\x1b[0m")
+  expect(out).toContain("\x1b[?25h")
+  expect(out).toContain("\x1b[?2026l")
+  expect(out).toContain("\x1b[?1049l")
+  expect(out).toContain("\x1b[r")
+  // Sebelum kursor tampil & sync ditutup, dan seluruh sekuens = SATU write.
+  expect(out.indexOf("\x1b[0 q")).toBeLessThan(out.indexOf("\x1b[?25h"))
+  expect(tty.chunks()).toHaveLength(1)
 })
 
 test("paintRegion: tulis region tanpa clear — konten luar tak tersentuh", () => {

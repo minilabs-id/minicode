@@ -113,9 +113,12 @@ export async function runModelManagerView(opts: ModelManagerViewOptions): Promis
       const cut = (s: string) => truncateToWidth(s, w)
       const view = list.slice(scroll, scroll + v)
       const lines: string[] = []
-      const filterBudget = Math.max(4, w - 3 - displayWidth(glyphs.caret))
+      // Caret glyph blok statis dihapus — caret bar terminal (DECSCUSR `6 q`)
+      // jadi satu-satunya penanda. `w - 3` = budget lama tanpa lebar glyph;
+      // total lebar baris tetap w-1 dengan ruang caret di ujung filter.
+      const filterBudget = Math.max(4, w - 3)
       const filterShown = tailFilterWindow(filter ?? "", filterBudget)
-      lines.push(cut(`${dim(">")} ${c.brightCyan(filterShown)}${c.accent(glyphs.caret)}`))
+      lines.push(cut(`${dim(">")} ${c.brightCyan(filterShown)}`))
       if (!list.length) {
         lines.push(cut(dim(`  ${filter == null ? t("model.empty") : t("model.noMatch")}`)))
       } else {
@@ -165,7 +168,7 @@ export async function runModelManagerView(opts: ModelManagerViewOptions): Promis
         screen.rows,
       )
       screen.paintRegion(box.lines, box.topRow)
-      // Parkir kursor tepat sebelum caret di dalam kotak dan blok sync-update.
+      // Parkir caret bar tepat di ujung filter di dalam kotak dan blok sync-update.
       try {
         const li = Math.min(box.lines.length - 1, box.bodyTop)
         const row = box.topRow + li

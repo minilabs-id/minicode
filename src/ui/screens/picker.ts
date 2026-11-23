@@ -141,10 +141,15 @@ export async function runPicker(opts: PickerOptions): Promise<void> {
       let filterShown = ""
       if (isFilterable) {
         // Filter = input user tak terpercaya — sanitasi + windowing agar muat.
-        const budget = Math.max(4, w - 3 - displayWidth(glyphs.caret))
+        // Caret glyph blok statis dihapus: SATU penanda = caret bar terminal
+        // (DECSCUSR `6 q`, diparkir lewat screen.moveCursor()). Budget lama
+        // `w - 3 - displayWidth(glyphs.caret)` menyisakan 1 kolom untuk glyph;
+        // tanpa glyph, `w - 3` mempertahankan lebar baris (w-1) dan ruang caret
+        // di ujung filter.
+        const budget = Math.max(4, w - 3)
         filterShown = filter ? tailFilterWindow(filter, budget) : ""
         const display = filterShown ? c.brightCyan(filterShown) : ""
-        lines.push(cut(`${dim(">")} ${display}${c.accent(glyphs.caret)}`))
+        lines.push(cut(`${dim(">")} ${display}`))
       }
       if (items.length === 0) {
         lines.push(cut(dim(`  ${t("pick.noMatch", { q: sanitizeAnsiLine(filter) })}`)))

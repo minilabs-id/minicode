@@ -268,35 +268,122 @@ export function friendlyError(raw: string): FriendlyError {
 }
 
 /**
- * v0.42 — Redaksi RINGKAS untuk kegagalan tool di LAPISAN TAMPIL (transkrip
- * TUI & printer linear). Jalur `tool.failed` dulu mem-bypass `formatError()`
- * kanonik sehingga `failed: exit 1`, idempotency key panjang, atau dump
- * internal bocor ke baris ledger satu-baris. Detail LENGKAP tetap ada di
- * jurnal/verbose — yang berubah hanya redaksi di layar.
+ * v0.42 / v0.43 — Redaksi RINGKAS untuk kegagalan tool di LAPISAN TAMPIL
+ * (transkrip TUI & printer linear). Jalur `tool.failed` dulu mem-bypass
+ * `formatError()` kanonik sehingga `failed: exit 1`, idempotency key panjang,
+ * atau dump internal bocor ke baris ledger satu-baris. Detail LENGKAP tetap
+ * ada di jurnal/verbose — yang berubah hanya redaksi di layar.
  *
  * Murni & satu baris ≤120 kolom. Kata kunci deteksi sengaja Inggris (body
  * error tool/proxy berbahasa Inggris apa pun locale UI); terjemahan memakai
  * `tSystem()` (locale OS), bukan `/lang` — ini kwitansi/peringatan sistem,
  * bukan narasi percakapan. Semua cabang (termasuk target tak terpercaya)
  * tetap lewat redaksi → sanitasi → potong per kolom.
+ *
+ * v0.43: 13 pola dikenali (4 lama + sub-agent + 8 baru). Presedensi
+ * `duplicate → subagent → guard → exit → EIO → 8 pola baru → fallback`
+ * disengaja: ringkasan child bisa memuat `exit N`, jadi sub-agent harus
+ * menang lebih dulu; guard internal mengalahkan `permission denied`.
  */
-export function friendlyToolError(message: string, target?: string): string {
+
+// Regex modul-scope tanpa flag `g` — aman dipakai berulang (lastIndex tak
+// bergeser antar-panggilan, yang bisa membuat deteksi bolak-balik benar/salah).
+const TOOL_DUPLICATE_RE = /duplicate idempotency key/i
+// Sub-agent dicek sebelum exit: summary child sering menyertakan "exit N".
+const TOOL_SUBAGENT_RE = /sub[- ]?agent|turn exceeded|child tools?:/i
+// `no provider for sub-agent` (src/tools/task.ts) = dependensi tak terkonfigurasi,
+// bukan ringkasan child; dikecualikan agar tak tertelan pola sub-agent.
+const TOOL_NO_PROVIDER_SUBAGENT_RE = /^no provider for sub[- ]?agent\b/i
+// Guard internal diperiksa sebelum pola permission denied di grup baru.
+const TOOL_GUARD_RE = /bash-guard internal error/i
+// `.includes("exit code")` lama mentrigger pada teks tanpa angka; sekarang
+// harus ada kode numerik nyata (`exit 1`, `exit code -2`, `exit +7`).
+const TOOL_EXIT_RE = /\bexit(?:\s+code)?\s+[+-]?\d+\b/i
+// exit 0 = sukses. Baris log netral ("exit code 0 recorded in log") tetap
+// apa adanya, bukan diubah jadi "Command failed".
+const TOOL_ZERO_EXIT_RE = /\bexit(?:\s+code)?\s+[+-]?0+\b/i
+const TOOL_EIO_RE = /\beio\b/i
+
+/**
+ * Delapan pola baru, diurutkan: yang lebih spesifik didahulukan agar
+ * `tool not found` tak jadi `targetNotFound`, dan `turn exceeded` sudah
+ * diserap cabang sub-agent di atas. Anchor `^`/`\b` mencegah substring
+ * longgar (`grep: permission denied (in fixture)`, `set timeout 30s`).
+ */
+const TOOL_ERROR_PATTERNS = [
+  { re: /^unknown tool:|\btool not found\b/i, key: "msg.toolNotFound" },
+  {
+    re: /^(?:permission denied|permission error|not authorized|outside workspace|blocked )\b/i,
+    key: "msg.permissionDenied",
+  },
+  { re: /^invalid arguments:/i, key: "msg.invalidArgs" },
+  {
+    re: /\btimed out\b|\bETIMEDOUT\b|^(?:MCP|LSP)\b.*\btimed out\b|^turn exceeded\b/i,
+    key: "msg.toolTimeout",
+  },
+  {
+    re: /^file not found\b|\bENOENT\b|\bnot found in\b|\bsource not found\b|\bcwd not found\b|\bnot found$/i,
+    key: "msg.targetNotFound",
+  },
+  {
+    re: /\bno provider for sub[- ]?agent\b|\bnot configured\b|\bunavailable\b|\brefusing direct execution\b/i,
+    key: "msg.notConfigured",
+  },
+  { re: /^HTTP 4\d\d|^HTTP 5\d\d|^fetch 429|\brate limited\b/i, key: "msg.requestFailed" },
+  { re: /^aborted\b|\bcancelled \(empty answer\)|^ask_user cancelled\b/i, key: "msg.cancelled" },
+] as const
+
+/**
+ * SATU-SATUNYA sumber deteksi 13 pola kanonik (presedensi
+ * `duplicate → subagent → guard → exit → EIO → 8 pola baru`). Dipakai bersama
+ * oleh dua gerbang tampil:
+ *  - friendlyToolError()          → fallback ke pesan mentah (perilaku lama).
+ *  - friendlyToolErrorCanonical() → fallback ke "" (jangan tampilkan yang tak
+ *    dikenali — permintaan owner: error tanpa pola kanonik tak usah muncul).
+ *
+ * Mengembalikan redaksi kanonik BELUM disanitasi, atau `undefined` bila tak ada
+ * pola yang cocok. Regex modul-scope di atas tanpa flag `g` aman dipakai
+ * berulang (lastIndex tak bergeser antar-panggilan).
+ */
+function canonicalToolError(message: string, target?: string): string | undefined {
   const raw = String(message ?? "")
-  const low = raw.toLowerCase()
   const safeTarget = target ? sanitizeAnsiLine(redactSecrets(String(target))).trim() : ""
   const targetText = safeTarget || "-"
-  let text: string
-  if (low.includes("duplicate idempotency key")) {
-    text = tSystem("msg.duplicateAction")
-  } else if (/\bexit\s+(-?\d+)\b/i.test(raw) || /\bexit\s+code\b/i.test(raw)) {
-    text = tSystem("msg.cmdFailed", { target: targetText })
-  } else if (/\beio\b/i.test(raw)) {
-    text = tSystem("msg.toolFailed")
-  } else if (low.includes("bash-guard internal error")) {
-    text = tSystem("msg.guardError")
-  } else {
-    text = friendlyError(raw).message
+  if (TOOL_DUPLICATE_RE.test(raw)) return tSystem("msg.duplicateAction")
+  if (TOOL_SUBAGENT_RE.test(raw) && !TOOL_NO_PROVIDER_SUBAGENT_RE.test(raw)) {
+    // Timeout/gagal sub-agent: jangan tampilkan stack + potongan partial mentah
+    // di ledger. Detail penuh tetap di jurnal/--verbose.
+    return tSystem("msg.subagentFailed")
   }
+  if (TOOL_GUARD_RE.test(raw)) return tSystem("msg.guardError")
+  if (TOOL_EXIT_RE.test(raw) && !TOOL_ZERO_EXIT_RE.test(raw))
+    return tSystem("msg.cmdFailed", { target: targetText })
+  if (TOOL_EIO_RE.test(raw)) return tSystem("msg.toolFailed")
+  const matched = TOOL_ERROR_PATTERNS.find(({ re }) => re.test(raw))
+  return matched ? tSystem(matched.key) : undefined
+}
+
+/**
+ * v0.43 — Redaksi kanonik SAJA untuk kegagalan tool di lapisan tampil.
+ *
+ * Bedanya dengan friendlyToolError(): bila pesan TIDAK cocok dengan salah satu
+ * dari 13 pola kanonik, fungsi ini mengembalikan `""` — jangan tampilkan `raw
+ * message` yang tidak dikenali sama sekali. Baris ledger/status tool tetap bisa
+ * dirender oleh pemanggil; yang hilang hanyalah redaksi errornya.
+ *
+ * Cabang kanonik identik dengan friendlyToolError() (locale OS via tSystem,
+ * lewat redaksi → sanitasi → potong 120 kolom).
+ */
+export function friendlyToolErrorCanonical(message: string, target?: string): string {
+  const canonical = canonicalToolError(message, target)
+  if (canonical === undefined) return ""
+  return truncateToWidth(sanitizeAnsiLine(redactSecrets(canonical)), 120, "…")
+}
+
+export function friendlyToolError(message: string, target?: string): string {
+  const canonical = canonicalToolError(message, target)
+  // Fallback ke pesan mentah dipertahankan demek kompatibilitas test/API lama.
+  const text = canonical ?? friendlyError(String(message ?? "")).message
   return truncateToWidth(sanitizeAnsiLine(redactSecrets(text)), 120, "…")
 }
 

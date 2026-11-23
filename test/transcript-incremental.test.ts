@@ -34,10 +34,14 @@ test("wrappedLength konsisten dengan viewport dan panjang view", () => {
   expect(vp.totalRows).toBe(t.wrappedLength(w))
   expect(t.view(w, h, 0)).toHaveLength(h)
   expect(vp.rows).toHaveLength(h)
-  // Scroll ke ekor: totalRows tetap sama, jendela bergeser.
+  // v0.43: viewport TIDAK lagi meng-clamp `scrollBack` ke `maxBack` — ratchet
+  // naik-saja memakai nilai apa adanya supaya baris committed tetap di indeks
+  // layar yang sama saat baris live hilang (kontrak v0.43). `maxBack` kini
+  // diekspos sebagai INFORMATIONAL bounds bagi pemanggil yang ingin clamp.
   const tail = t.viewport(w, h, 1_000_000)
   expect(tail.totalRows).toBe(vp.totalRows)
-  expect(tail.firstIndex).toBe(Math.max(0, vp.totalRows - h))
+  expect(tail.firstIndex).toBe(1_000_000)
+  expect(tail.maxBack).toBe(Math.max(0, vp.totalRows - h))
 })
 
 test("evict di TRANSCRIPT_CAP tetap menjaga panjang & anchor seleksi", () => {

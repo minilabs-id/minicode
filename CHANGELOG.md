@@ -1,5 +1,70 @@
 # Changelog
 
+## [0.43.0] - 2026-11-23
+
+### Changed — Baris live tool transien tail ≤3, ratchet `scrollBack` naik-saja (amandemen v0.42)
+
+- **Klarifikasi owner:** yang tidak boleh hilang adalah **history chat yang
+  sudah committed** (tetap berlaku sejak v0.42). Baris aktivitas tool **live
+  kembali transien** seperti v0.40.0 — muncul saat tool berjalan, ikut tail,
+  hilang setelah tool selesai.
+- **Jendela transkrip:** saat baris live muncul, `total` bertambah dan
+  sticky-tail menggeser jendela — history boleh naik. Saat baris live hilang
+  dan `total` menyusut, jendela **tidak bergeser balik**: posisi baris committed
+  di layar tetap, ruang di bawah boleh kosong.
+- **Mekanisme ratchet:** `scrollBack` per turn hanya naik, tidak turun;
+  di-reset pada `turn:started` / prompt baru / `/clear`. Bukan overlay, bukan
+  `liveRegion`, bukan commit-in-place baris live. I1 (satu write/frame) utuh;
+  tidak ada writer/region baru.
+- **Tail live dibatasi 3 baris (amandemen butir di atas):** hanya 3 aktivitas
+  live terakhir yang tampil di tail (`MAX_LIVE_TAIL_ROWS`), sehingga narasi
+  committed tetap tampil walau puluhan tool berjalan; detail lengkap di
+  jurnal/`--verbose`. Ratchet `scrollBack` tetap naik-saja (tanpa kap indeks
+  narasi). Regresi 60×14 (20 live + narasi/siklus) di `test/tui-app.test.ts`.
+- **Presedensi:** butir v0.42 "commit-in-place / never-shrink by id" ditimpa
+  **hanya pada aspek transiensi baris live**. Klausa v0.42 lain — teks gagal
+  ringkas dan rekap tanpa `└` — tetap berlaku. Arsip tidak dihapus/direnomor.
+- **Redaksi kegagalan tool:** `friendlyToolError()` kini mengenali 13 pola (4
+  lama, sub-agent, +8 pola baru: tool/izin/argumen/timeout/target/dependensi/
+  request/batal) dengan presedensi duplikat → sub-agent → guard → exit → EIO →
+  8 pola baru → fallback; paritas kunci `msg.*` en/id via `tSystem()`. Detail
+  penuh tetap di jurnal/`--verbose`.
+- **Baris ledger error:** bila redaksi ringkas dipakai, `statusWord` dan hitungan
+  child tidak diulang di baris yang sama (mis. `› sub agent · delegate_task:
+  Sub-agent failed · details in --verbose`); warna status tetap via
+  `paintLedger`, deny reason tanpa redaksi tetap tampil.
+- **Caret prompt:** prefix composer tanpa spasi trailing (`minicode ›` / `›` /
+  `·`) sehingga caret DECSCUSR menempel di glif, selaras dengan klausa
+  v0.36/v7.30; `PROMPT_LONG_PREFIX_COLS` jadi `ASSISTANT_LEFT_MARGIN + 10`
+  (ambang `w ≥ 37`).
+- **Composer 2 baris tetap:** `composerH` tidak lagi bergantung `editing` —
+  dikunci 2 baris di idle/mengetik/busy/setelah submit, sehingga prompt tidak
+  bergeser satu baris saat submit; baris ke-2 dikosongkan bila draft satu baris.
+- **`/copy` menyalin yang terender:** sumbernya kini
+  `Transcript.copyTurnTexts()` (narasi asisten + rekap/laporan per turn), bukan
+  buffer `#lastTurnText` yang memotong output tool 20.000 kolom; payload OSC 52
+  bebas tanpa paksaan ≤120 kolom, guard byte & toast tetap.
+- **Error tanpa redaksi kanonik tak dirender mentah:** ledger/status tool lewat
+  `friendlyToolErrorCanonical()` — `""` berarti tanpa `: <raw>`; deny reason P0
+  dan redaksi sub-agent via `tSystem()` tetap tampil.
+
+### Catatan migrasi (jujur)
+
+- Perubahan ini **hanya** menyentuh aspek transiensi baris live tool dan
+  pengelolaan jendela transkrip di lapisan tampilan TUI. History committed dan
+  jalur non-interaktif (one-shot/`exec`/ACP) tidak berubah.
+- Entri v0.42 di kontrak tetap terbaca sebagai sejarah; jangan dijadikan
+  deskripsi keadaan kini untuk baris live. Rincian presedensi ada di
+  [TERMINAL_CONTRACT.md](docs/TERMINAL_CONTRACT.md) entri v0.43.
+- **Tidak ada angka gate di entri ini.** Ini bukan klaim rilis hijau.
+
+### Dokumentasi
+
+- `TERMINAL_CONTRACT.md`: entri `## Perubahan v0.43` di paling atas; judul,
+  blok presedensi, pointer per versi, dan peta proteksi dirapikan (tail live
+  ≤3 baris + ratchet `scrollBack` naik-saja; proteksi di `test/tui-app.test.ts`
+  dan `test/tui-transcript.test.ts`).
+
 ## [0.42.0] - 2026-11-23
 
 ### Changed — Baris live tool committed monoton, rekap tanpa `└`, teks gagal ringkas

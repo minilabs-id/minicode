@@ -158,6 +158,28 @@ the user's language (`/lang`, with `MINICODE_LANG` as fallback). So changing
 alone, for consistency across surfaces. The single resolver is
 `src/ui/render/tool-label.ts`.
 
+## Live tool row (v0.43 — amendment to v0.42)
+
+The **live** tool activity row (root or child) is transient again, as in
+v0.40.0: it appears while a tool runs, follows the transcript tail, and
+disappears once the tool finishes — with no new committed entry. When the live
+row appears, `total` grows and sticky-tail shifts the window, so history may
+move up. When the live row disappears and `total` shrinks, the window **does not
+shift back**: committed rows keep their on-screen position and the space below
+may be empty.
+
+The mechanism is a **per-turn `scrollBack` ratchet** — it only ever grows, never
+shrinks — reset on `turn:started`, a new prompt, or `/clear`. The live row is
+not an overlay, not a `liveRegion`, and not a commit-in-place; I1 (one
+`stdout.write` per frame) holds, with no new writer or region.
+
+What must not disappear is **already-committed chat history** — that has held
+since v0.42. The v0.42 "commit-in-place / never-shrink by id" clause is
+**overridden only on the transience of the live row**; other v0.42 clauses
+(concise failure text, recap without `└`) still apply. Archives are neither
+deleted nor renumbered — see the `## Perubahan v0.43` entry in
+`TERMINAL_CONTRACT.md`.
+
 ## Consistency rules (contract I25)
 
 - Two-stage `Esc` in EVERY text input: content is never lost on a single press.

@@ -243,6 +243,19 @@ const DEFAULT_BASH_ALLOWLIST = [
   "uniq*",
   "cut *",
   "diff *",
+  // Reader inventaris/sistem tambahan yang aman secara baca: `tree`/`du`
+  // berguna untuk memetakan struktur & ukuran repo, `df`/`date`/`uname` untuk
+  // info lingkungan. `tree /` dan `du /` TETAP ditolak ROOT_SCAN di bash-guard
+  // (lihat bash-guard.ts), jadi pola `tree*`/`du*` tidak melemahkan jail scan.
+  // Sengaja TIDAK menambah `command -v *`: `command` adalah wrapper yang
+  // dibuang `normalizeCommand` (bash-guard :240-259), sehingga allowlist
+  // mencocokkan teks mentah sementara guard mengevaluasi bentuk tanpa wrapper —
+  // pola itu bergantung pada asimetri rapuh dan redundan dengan `which *`.
+  "tree*",
+  "du*",
+  "df*",
+  "date*",
+  "uname*",
   // Menjalankan berkas skrip Node (mis. `node server.js`) — bukan REPL polos
   // (pola `*` butuh argumen) dan bukan eval inline (diblokir bash-guard).
   // Subsumes `node --version` (versi lama) sehingga entri itu tak lagi khusus.

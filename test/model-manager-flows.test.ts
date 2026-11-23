@@ -129,7 +129,8 @@ describe("model-manager: alur interactive", () => {
 
   test("kursor diparkir di ujung baris search pada jendela berjudul", async () => {
     // Jendela command seragam: border + judul + baris search.
-    // Benar: tepat sebelum penanda █ tempat ketikan menempel.
+    // Benar: tepat di ujung filter; caret bar terminal (DECSCUSR `6 q`)
+    // satu-satunya penanda — tak ada lagi glyph blok statis `█`.
     tty = installFakeTty({ columns: 100, rows: 24 })
     const p = runModelManager({ cwd: workspace, currentModel: "prov::m1" })
     await tty.ready()
@@ -142,6 +143,8 @@ describe("model-manager: alur interactive", () => {
     const row = top0 + 2 + 1
     const col = Math.max(1, Math.min(100, leftPad + 2 + 2 + 0 + 1))
     expect(srow).toContain(">")
+    // Tak ada caret glyph blok statis — caret bar terminal jadi penanda tunggal.
+    expect(srow).not.toContain("█")
     expect(tty.all()).toContain(`\x1b[${row};${col}H`)
     await tty.send(KEY.esc, 30)
     await p

@@ -129,6 +129,36 @@ describe("allowlist: AUTO + restrictBash memakai aturan yang sama", () => {
   })
 })
 
+describe("allowlist: reader inventaris/sistem (tree, du, df, date, uname)", () => {
+  const benign = ["uname -a", "date", "df -h .", "du -sh src", "tree -L 1 src"]
+
+  test("diterima di mode allowlist", async () => {
+    const h = allowlistMode()
+    for (const cmd of benign) {
+      const r = await decide(h, cmd)
+      expect({ cmd, decision: r.decision }).toEqual({ cmd, decision: "allow" })
+    }
+  })
+
+  test("diterima di AUTO + restrictBash", async () => {
+    const h = autoRestricted()
+    for (const cmd of benign) {
+      const r = await decide(h, cmd)
+      expect({ cmd, decision: r.decision }).toEqual({ cmd, decision: "allow" })
+    }
+  })
+
+  test("tree / dan du / tetap ditolak bash-guard (ROOT_SCAN)", async () => {
+    for (const h of [allowlistMode(), autoRestricted()]) {
+      for (const cmd of ["tree /", "du /"]) {
+        const r = await decide(h, cmd)
+        expect({ cmd, decision: r.decision }).toEqual({ cmd, decision: "deny" })
+        expect(r.reason).toContain("bash-guard: filesystem-root scan")
+      }
+    }
+  })
+})
+
 describe("allowlist: config `bashAllowlist` benar-benar dipakai", () => {
   test("pola dari config menambah daftar (dulu key mati)", async () => {
     const h = allowlistMode({ bashAllowlist: ["mycmd *"] })

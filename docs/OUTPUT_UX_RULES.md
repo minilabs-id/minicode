@@ -178,6 +178,20 @@ satu baris logis dan di-wrap sekali selebar kolom chat. Cap prompt progresif
 `min(chatCols, 100 + floor(max(0, chatCols-100)/4))` dengan prefix `minicode › `
 bila `w−14 ≥ 24`, else `› `; composer 2 baris & dropdown overlay tetap.
 
+**v0.43 — baris live tool transien, ratchet `scrollBack` per turn (amandemen
+v0.42).** Yang tidak boleh hilang adalah **history chat yang sudah committed**
+(tetap berlaku sejak v0.42). Baris aktivitas tool **live kembali transien**
+seperti v0.40.0: ikut tail, hilang setelah tool selesai. Saat baris live muncul,
+`total` bertambah dan sticky-tail menggeser jendela — history boleh naik. Saat
+baris live hilang dan `total` menyusut, jendela **tidak bergeser balik**: posisi
+baris committed di layar tetap, ruang di bawah boleh kosong. Mekanismenya =
+**ratchet `scrollBack` per turn** (hanya naik, tidak turun), di-reset pada
+`turn:started` / prompt baru / `/clear` — bukan overlay, bukan `liveRegion`,
+bukan commit-in-place baris live. I1 (satu write/frame) utuh; tidak ada
+writer/region baru. Butir v0.42 "commit-in-place / never-shrink by id"
+**ditimpa hanya pada aspek transiensi baris live**; klausa v0.42 lain (teks
+gagal ringkas, rekap tanpa `└`) tetap berlaku. Arsip tidak dihapus/direnomor.
+
 ## 3. Status vocabulary
 
 Sejak v0.17.0 ikon status (`✓`/`✗`/`⊘`/`◌`) DIHAPUS — `glyphs.check/cross/denied/circle`
@@ -558,4 +572,5 @@ Native terminal drag selection is not promised while the app owns mouse tracking
 - [ ] (v0.35, amendemen v0.41) Rekap = baris committed statis di footer tiap narasi, sejak v0.41 tanpa prefix simbol; rekap akhir turn kumulatif; label `› …` memakai locale OS, narasi memakai `/lang`.
 - [ ] (v0.36) Composer maks 2 baris (jendela geser, transkrip tidak bergeser); lebar `composerWidth() = min(100, chatWidth())`; dropdown `/` overlay dalam satu frame tanpa mengurangi `viewH` dan tanpa `paintRegion()` terpisah; klik area dropdown = item menu.
 - [ ] (v0.37) Bracketed paste `?2004h`/`?2004l` di luar frame tanpa submit bertingkat; `Ctrl+A` select-all (Home bila draft/menu) & `Ctrl+C` saat drag aktif; resize stabilizer (auto-scroll/drag/kursor/anchor, dropdown busy/abort); echo prompt satu baris logis di-wrap sekali selebar chat; cap prompt progresif `min(chatCols, 100 + floor(max(0, chatCols-100)/4))`.
+- [ ] (v0.43) Baris live tool transien ikut tail (v0.40.0): history committed utuh; `total` naik saat live muncul → jendela boleh naik; saat live hilang & `total` menyusut jendela tidak geser balik (posisi committed tetap, ruang bawah boleh kosong) via ratchet `scrollBack` per turn yang di-reset pada `turn:started`/prompt baru/`/clear`; bukan overlay/`liveRegion`/commit-in-place; I1 satu write/frame; aspek transiensi v0.42 ditimpa, klausa v0.42 lain tetap.
 - [ ] Machine output tidak bergantung pada scraping human text.

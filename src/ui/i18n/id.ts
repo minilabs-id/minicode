@@ -25,6 +25,17 @@ export const id: Record<MsgKey, string> = {
   "msg.cmdFailed": "Perintah gagal · {target} · detail di --verbose",
   "msg.toolFailed": "Gagal baca terminal · coba lagi",
   "msg.guardError": "Perintah ditolak · coba lagi",
+  "msg.subagentFailed": "Sub-agent gagal · detail di --verbose",
+  // v0.43: delapan pola kegagalan tool tambahan. Prosa sistem (tSystem / locale
+  // OS), bukan narasi sesi — paritas kunci dijaga tsc + test/i18n.test.ts.
+  "msg.toolNotFound": "Tool tidak dikenal · periksa nama",
+  "msg.permissionDenied": "Ditolak kebijakan izin · periksa akses",
+  "msg.invalidArgs": "Argumen tool tidak valid · periksa panggilan",
+  "msg.toolTimeout": "Tool melewati batas waktu · ulangi atau naikkan batas",
+  "msg.targetNotFound": "Target tidak ditemukan · periksa path/id",
+  "msg.notConfigured": "Dependensi belum dikonfigurasi · periksa penyiapan",
+  "msg.requestFailed": "Permintaan gagal · ulangi atau periksa endpoint",
+  "msg.cancelled": "Dibatalkan",
   "form.idleWarning": "diam — dibatalkan dalam {s} dtk (tekan sembarang tombol untuk lanjut)",
   "appr.title": "Perlu persetujuan",
   "appr.tool": "Tool:",

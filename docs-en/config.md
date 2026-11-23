@@ -51,7 +51,7 @@ Where MiniCode settings and data live, how untrusted local files are treated, an
   Accepted choices follow sizes actually used by production models: `16K`, `32K`, `64K`, `128K`, `200K`, `256K`, `400K`, `500K`, `1M`, `1M (1024^2)`, `1.05M`, `2M`, `4M`, `10M`, plus exact numbers. The **three 1M variants** are deliberate because they really differ: `1000000` (Anthropic/DeepSeek/Qwen), `1048576` (Google/Gemini, Kimi, GLM), `1050000` (OpenAI) — a gap of up to ~50K tokens.
 - `mcpServers` — two forms: stdio (`command`+`args`) and HTTP (`url`+optional `headers`). Transport details in [MCP & LSP](mcp-lsp.md).
 - `verifyCommand` — used by `--verify` when auto-detection finds nothing (detection order: `typecheck` -> `test` -> `tsconfig`).
-- `bashAllowlist` — comma/glob patterns of bash commands considered safe (`allowlist` mode).
+- `bashAllowlist` — comma/glob patterns of bash commands considered safe (`allowlist` mode). Precedence: env `MINICODE_BASH_ALLOWLIST` > `bashAllowlist` (config) > built-in defaults. It **replaces the entire** narrow list (it adds to the developer list), so when an override is active the built-in additions (e.g. `tree`/`du`/`df`/`date`/`uname`) are not used — include the patterns you need yourself.
 
 ## 15 gateway presets (including Custom URL)
 

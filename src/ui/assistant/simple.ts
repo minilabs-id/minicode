@@ -14,7 +14,7 @@ import type {
 import { t } from "../i18n/locale.ts"
 import { renderActivityPanel } from "../render/activity-panel.ts"
 import { renderDiffCard } from "../render/diff.ts"
-import { friendlyToolError } from "../render/errors.ts"
+import { friendlyToolErrorCanonical } from "../render/errors.ts"
 import { formatArgsPreview, formatProviderError, formatUsage } from "../render/format.ts"
 import { highlightCode } from "../render/highlight.ts"
 import { paintLedger, runMarker, statusWord } from "../render/ledger.ts"
@@ -621,9 +621,15 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
     const message = event.message ?? desc?.message ?? activity?.error?.message
     // v0.42: pesan kegagalan lewat redaksi ringkas kanonik (satu baris ≤120
     // kolom). Nama/target tetap tampil di `line`; detail penuh ada di log.
-    const detail = message
-      ? `: ${friendlyToolError(String(message).split(/[\r\n]/)[0] ?? "", target ? String(target) : undefined)}`
+    // v0.43: pesan tak dikenali ("" ) tak menghasilkan `: ` kosong / spasi ganda
+    // — baris ledger/status tetap tampil, tanpa redaksi error mentah.
+    const canonical = message
+      ? friendlyToolErrorCanonical(
+          String(message).split(/[\r\n]/)[0] ?? "",
+          target ? String(target) : undefined,
+        )
       : ""
+    const detail = canonical ? `: ${canonical}` : ""
     // F-AGENT-1: tool anak dirender sebagai baris run sendiri (`↳ <marker>`),
     // bukan dicampur ke baris root — identitas childSessionId/runId tiap run.
     // Child tanpa identitas run tetap tampil (kegagalan tak boleh hilang),
@@ -923,11 +929,14 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
       if (isError) {
         // v0.42: redaksi ringkas kanonik — exit N / idempotency / EIO /
         // bash-guard tak lagi bocor mentah ke scrollback. Detail di --verbose.
+        // v0.43: bila tak ada pola kanonik yang cocok, render baris ledger saja
+        // (tanpa ":" dan tanpa redaksi) — error mentah tak pernah tampil.
         ui.setActiveSection(null)
         const errorTarget = typeof args.path === "string" ? args.path : undefined
+        const canonical = friendlyToolErrorCanonical(String(r.content), errorTarget)
         wErr(
           c.error(
-            `  ${glyphs.arrow} ${humanToolLabel(name, activity)}${suffix}: ${friendlyToolError(String(r.content), errorTarget)}\n`,
+            `  ${glyphs.arrow} ${humanToolLabel(name, activity)}${suffix}${canonical ? `: ${canonical}` : ""}\n`,
           ),
         )
         return

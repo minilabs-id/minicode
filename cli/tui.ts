@@ -1476,10 +1476,12 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
   }
 
   async function copyLastTurn(count: number): Promise<void> {
-    // [Area A · PROMPT 06] Buffer /copy milik SESI ini (bukan singleton modul)
-    // — sesi lain di proses yang sama tak ikut tercampur.
-    const turns = ui
-      .getLastTurnTexts(count)
+    // v0.43: sumber `/copy` = apa yang BENAR-BENAR dirender di transkrip untuk
+    // 1..n turn terakhir (narasi assistant + rekap), bukan buffer `#lastTurnText`
+    // yang menampung tool output mentah terpotong. `transcript` berada di scope
+    // `runTui` yang sama, jadi sesi lain tak ikut tercampur.
+    const turns = transcript
+      .copyTurnTexts(count)
       .map((turn) => turn.trim())
       .filter(Boolean)
     const txt = turns.join("\n\n").trim()
