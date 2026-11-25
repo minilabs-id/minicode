@@ -2,7 +2,7 @@
 // yang skip bila EPERM — pola yang sama seperti tool-toctou).
 
 import { expect, test } from "bun:test"
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { readFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -17,8 +17,9 @@ import {
 import { trashDir, trashFile } from "../src/lib/trash.ts"
 
 function makeRoot(): string {
-  const d = mkdtempSync(join(tmpdir(), "minicode-safe-"))
-  return d
+  // Pakai realpathSync agar nama pendek 8.3 Windows (RUNNER~1) atau /var -> /private/var
+  // di macOS cocok dengan realpath yang dikembalikan trashFile/resolveSafePath.
+  return realpathSync(mkdtempSync(join(tmpdir(), "minicode-safe-")))
 }
 
 function canSymlink(): boolean {

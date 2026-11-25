@@ -73,8 +73,8 @@ describe("hardening audit 2026-11-24 — jail, tokenizer, trusted-exec", () => {
   })
 
   test("detectWindowsCmdQuotingHazard menangkap single-quote tak berpasangan sebelum operator", () => {
-    expect(detectWindowsCmdQuotingHazard("echo 'hello > .env")).not.toBeNull()
-    expect(detectWindowsCmdQuotingHazard("echo it's ok && echo done")).toBeNull()
+    expect(detectWindowsCmdQuotingHazard("echo 'hello > .env", "win32")).not.toBeNull()
+    expect(detectWindowsCmdQuotingHazard("echo it's ok && echo done", "win32")).toBeNull()
   })
 })
 

@@ -65,7 +65,24 @@ function execAlter(db: Database, sql: string): void {
   if (sessionDdlFaultForTest !== null && sessionDdlCallCount === sessionDdlFaultForTest) {
     throw new Error(`[test] session DDL fault injected at ALTER #${sessionDdlCallCount}`)
   }
-  db.exec(sql)
+  try {
+    const ok = withBusyRetrySync(() => {
+      db.exec(sql)
+      return true
+    })
+    if (ok === null) throw new Error(`ALTER busy timeout: ${sql}`)
+  } catch (e) {
+    // Proses konkuren lain bisa baru saja menambahkan kolom yang sama di antara
+    // PRAGMA table_info dan ALTER TABLE kita — kolom sudah ada, aman lanjut.
+    if (
+      String((e as Error)?.message ?? e)
+        .toLowerCase()
+        .includes("duplicate column name:")
+    ) {
+      return
+    }
+    throw e
+  }
 }
 
 /**
