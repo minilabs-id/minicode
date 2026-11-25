@@ -57,6 +57,7 @@ export const readImageTool: Tool = {
     const { handle, st } = await openSafeToolReadHandle(p, ctx)
     let buf: Buffer
     try {
+      if (!st.isFile()) throw new Error(`refusing to read non-regular file: ${p}`)
       if (st.size > LIMITS.READ_FILE_MAX_BYTES)
         throw new Error(`image too large: ${st.size} bytes (max 2M)`)
       buf = await handle.readFile()

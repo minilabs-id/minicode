@@ -28,6 +28,25 @@ function isSgr(s: string, i: number, len: number): boolean {
     const ch = s[k]!
     if (!(ch >= "0" && ch <= "9") && ch !== ";" && ch !== ":") return false
   }
+  // Tolak SGR 8 (conceal/invisible text) yang bisa menyembunyikan teks dari
+  // operator di terminal. Lewati sub-argumen warna extended (38/48/58;5;N atau ;2;R;G;B)
+  // agar indeks warna 8 (mis. `38;5;8`) tidak ikut terblokir.
+  const body = s.slice(i + 2, i + len - 1)
+  if (body.length > 0) {
+    const parts = body.split(";")
+    for (let p = 0; p < parts.length; p++) {
+      const head = parts[p]!.split(":")[0] ?? ""
+      const n = head === "" ? 0 : Number.parseInt(head, 10)
+      if (n === 8) return false
+      if (n === 38 || n === 48 || n === 58) {
+        if (!parts[p]!.includes(":")) {
+          const mode = Number.parseInt(parts[p + 1] ?? "", 10)
+          if (mode === 5) p += 2
+          else if (mode === 2) p += 4
+        }
+      }
+    }
+  }
   return true
 }
 
@@ -82,9 +101,13 @@ export function sanitizeAnsi(s: string): string {
     const cp = s.codePointAt(i)!
     if (
       code === 0xad ||
+      code === 0x061c ||
+      code === 0x200e ||
+      code === 0x200f ||
+      code === 0xfeff ||
       (code >= 0x202a && code <= 0x202e) ||
       (code >= 0x2060 && code <= 0x2069) ||
-      (cp >= 0xe0020 && cp <= 0xe007f)
+      (cp >= 0xe0000 && cp <= 0xe007f)
     ) {
       i += cp > 0xffff ? 2 : 1
       continue

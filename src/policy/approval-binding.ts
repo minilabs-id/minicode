@@ -15,8 +15,10 @@ import {
   readlinkSync,
 } from "node:fs"
 import { resolve } from "node:path"
+import { GIT_SAFE_BASE, gitFilterNeutralizersSync } from "../lib/git-hardening.ts"
 import { resolveTrustedExecutable } from "../lib/trusted-exec.ts"
 import { canonicalArgsHash } from "./no-progress.ts"
+import { sanitizeSpawnEnv } from "./scrub.ts"
 
 /** Tool yang TARGET-nya file di workspace — satu-satunya yang bisa di-fingerprint. */
 const FILE_TARGET_TOOLS = new Set(["write_file", "edit", "apply_patch", "delete_file", "move_file"])
@@ -129,15 +131,19 @@ export function fingerprintTarget(path: string): string {
 function captureGitDigest(cwd: string): string | null {
   try {
     const git = resolveTrustedExecutable("git")
-    const head = spawnSync(git, ["-c", "safe.directory=*", "rev-parse", "HEAD"], {
+    const neutral = gitFilterNeutralizersSync(cwd)
+    const env = sanitizeSpawnEnv(process.env)
+    const head = spawnSync(git, [...GIT_SAFE_BASE, ...neutral, "rev-parse", "HEAD"], {
       cwd,
       encoding: "utf8",
       timeout: 2_000,
+      env,
     })
-    const status = spawnSync(git, ["-c", "safe.directory=*", "status", "--porcelain"], {
+    const status = spawnSync(git, [...GIT_SAFE_BASE, ...neutral, "status", "--porcelain"], {
       cwd,
       encoding: "utf8",
       timeout: 2_000,
+      env,
     })
     if (status.status !== 0) return null
     const headOut = head.status === 0 ? head.stdout.trim() : "UNBORN"

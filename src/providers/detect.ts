@@ -200,7 +200,9 @@ async function tryFetchModels(
     const perAttempt = AbortSignal.timeout(LIMITS.DETECT_ATTEMPT_TIMEOUT_MS)
     const attemptSignal = signal ? AbortSignal.any([signal, perAttempt]) : perAttempt
     try {
-      const res = await fetch(url, { headers, signal: attemptSignal })
+      // redirect: "manual" mencegah header Authorization / x-api-key ikut
+      // diteruskan ke host lain lewat 3xx redirect.
+      const res = await fetch(url, { headers, signal: attemptSignal, redirect: "manual" })
       contacted = true // server menjawab (walau 404) — bukan jaringan mati
       // 401/403 = key salah, BUKAN "tanpa endpoint": catat agar pemanggil
       // tak menutupinya dengan fallback model (yang membuat key salah

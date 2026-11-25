@@ -1,4 +1,5 @@
 import type { Tool } from "#minicore"
+import { sanitizeIncoming } from "../daemon/sanitize.ts"
 import {
   callMcpTool,
   capMcpText,
@@ -9,7 +10,7 @@ import {
   mcpInventory,
   readMcpResource,
 } from "../mcp/client.ts"
-import { fenceUntrustedToolOutput, isAlreadyFenced } from "../policy/scrub.ts"
+import { fenceUntrustedToolOutput, isAlreadyFenced, scrubSecrets } from "../policy/scrub.ts"
 
 export const mcpListTool: Tool = {
   name: "mcp_list",
@@ -43,7 +44,8 @@ export const mcpListTool: Tool = {
         )
       }
     }
-    return lines.join("\n")
+    const content = sanitizeIncoming(scrubSecrets(lines.join("\n")))
+    return isAlreadyFenced(content) ? content : fenceUntrustedToolOutput("mcp_list", content)
   },
 }
 

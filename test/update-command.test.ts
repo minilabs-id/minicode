@@ -95,7 +95,10 @@ test("update: handoff melempar → ditangkap, tidak merusak TUI", async () => {
   })
   const { lines, value } = await captureOutput(() => handleBuiltinCommand("/update", ctx))
   expect(value.handled).toBe(true)
-  expect(lines.join("\n")).toContain("boom-from-api")
+  const text = lines.join("\n")
+  // formatError memetakan galat tak-terklasifikasi ke pesan ramah pengguna (bukan raw exception).
+  expect(text).toContain(t("cmd.updateFailed", { msg: "" }))
+  expect(text.length).toBeGreaterThan(t("cmd.updateFailed", { msg: "" }).length)
 })
 
 test("update: alasan tak terpercaya disanitasi (ANSI dibuang)", async () => {

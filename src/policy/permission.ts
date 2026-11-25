@@ -15,13 +15,14 @@ import {
   captureApprovalBinding,
   verifyApprovalBinding,
 } from "./approval-binding.ts"
-import { inspectBashCommand } from "./bash-guard.ts"
+import { inspectBashCommand, normalizeCommand, stripCaretEscapes } from "./bash-guard.ts"
 import {
   isCwdOutsideRoot,
   isOwnedHook,
   isOwnedHookReal,
   isRealPathOutsideRoot,
   isSensitive,
+  isSensitiveReal,
 } from "./jail.ts"
 import { scrubSecrets } from "./scrub.ts"
 // Tokenizer sadar-platform (POSIX: `\`/`'`; win32: `^`, `'` literal).
@@ -537,6 +538,84 @@ type BashListDecision = { ok: true } | { ok: false; reason: string; command: str
  * sendiri (pola + npx-safety), sementara bash-guard tetap memeriksa perintah
  * UTUH lebih dulu di pemanggil.
  */
+// Deteksi subcommand berbahaya `sed` (GNU `e` = eksekusi shell, `w`/`W` = tulis
+// berkas arbitrer, `r`/`R` = baca berkas arbitrer, `-f`/`--file` = skrip berkas).
+// Dibuat terpisah agar flag sah (`sed -n '1,10p' f`, `sed -r -e 's/a/b/g' f`)
+// tidak pernah false-positive.
+function isDangerousSed(seg: string): boolean {
+  if (!/^sed(?:\.exe)?\b/i.test(seg.trim())) return false
+  // Tokenisasi sederhana yang menghormati kutip agar skrip `'...'`/`"..."` utuh.
+  const toks: string[] = []
+  let i = 0
+  const s = seg.trim()
+  while (i < s.length) {
+    while (i < s.length && /\s/.test(s[i]!)) i++
+    if (i >= s.length) break
+    const q = s[i]
+    if (q === "'" || q === '"') {
+      let j = i + 1
+      while (j < s.length && s[j] !== q) {
+        if (q === '"' && s[j] === "\\" && j + 1 < s.length) j++
+        j++
+      }
+      toks.push(s.slice(i + 1, j))
+      i = j < s.length ? j + 1 : j
+    } else {
+      let j = i
+      while (j < s.length && !/\s/.test(s[j]!)) j++
+      toks.push(s.slice(i, j))
+      i = j
+    }
+  }
+  const scripts: string[] = []
+  let idx = 1
+  let expectExpr = false
+  while (idx < toks.length) {
+    const t = toks[idx]!
+    idx++
+    if (expectExpr) {
+      scripts.push(t)
+      expectExpr = false
+      continue
+    }
+    if (t === "-f" || t === "--file" || t.startsWith("--file=") || /^-[a-zA-Z]*f/.test(t)) {
+      return true
+    }
+    if (t === "-e" || t === "--expression") {
+      expectExpr = true
+      continue
+    }
+    if (t.startsWith("--expression=")) {
+      scripts.push(t.slice("--expression=".length))
+      continue
+    }
+    if (t.startsWith("-") && t !== "-") continue
+    if (scripts.length === 0) scripts.push(t)
+    break
+  }
+  for (const script of scripts) {
+    // Flag `e` atau `w` pada substitusi `s/a/b/e` / `s|a|b|w out`
+    if (
+      /(?:^|[;}\s])(?:\d*(?:,\d*)?\s*)?s([^\w\s])(?:\\.|(?!\1).)*\1(?:\\.|(?!\1).)*\1[0-9gipI]*[ewW]/.test(
+        script,
+      )
+    ) {
+      return true
+    }
+    // Perintah standalone `e` (execute), `w`/`W` (write file), `r`/`R` (read file)
+    for (const part of script.split(/[;\n]+/)) {
+      const stripped = part
+        .trim()
+        .replace(
+          /^(?:\/(?:\\.|[^/])*\/|\d+|\$)(?:\s*,\s*(?:\/(?:\\.|[^/])*\/|\d+|\$))?\s*!?\s*/,
+          "",
+        )
+      if (/^(?:e(?:\s|$)|[wWrR]\s*\S)/.test(stripped)) return true
+    }
+  }
+  return false
+}
+
 function decideBashCommand(cmd: string, list: readonly string[], root: string): BashListDecision {
   const cleaned = stripNeutralRedirections(cmd)
   if (!cleaned) return { ok: false, reason: "empty command", command: cmd }
@@ -592,16 +671,39 @@ function decideBashCommand(cmd: string, list: readonly string[], root: string): 
   }
   for (const seg of segments) {
     // `cd` di dalam workspace sah (model memakainya untuk monorepo); target di
-    // luar root ditolak supaya segmen berikutnya tidak berjalan di luar jail.
+    // luar root atau mengandung ekspansi env/tilde ditolak agar segmen berikutnya
+    // tidak berjalan di luar jail.
     if (/^cd\b/i.test(seg)) {
-      const target = seg
-        .replace(/^cd\b/i, "")
-        .trim()
-        .replace(/^(["'])(.*)\1$/, "$2")
+      const rawTarget = seg.replace(/^cd\b/i, "").trim()
+      // Flag `cd /d <dir>` pada cmd.exe: kupas `/d` agar target aslinya yang dicek.
+      const withoutSwitch = rawTarget.replace(/^\/d\s+/i, "").trim()
+      const target = stripCaretEscapes(withoutSwitch.replace(/^(["'])(.*)\1$/, "$2"))
       if (!target) return { ok: false, reason: "cd without target", command: cmd }
+      if (/%[^%\s]+%/.test(target) || target.includes("$") || target.startsWith("~"))
+        return { ok: false, reason: "jail: cd target with shell expansion", command: cmd }
       if (isCwdOutsideRoot(target, root) || isRealPathOutsideRoot(target, root))
         return { ok: false, reason: "jail: cwd outside workspace", command: cmd }
       continue
+    }
+    // `git branch` di allowlist untuk inspeksi cabang; flag mutasi/hapus
+    // (`-D`, `-d`, `-f`, `-m`, `-M`, `--delete`, `--force`, `--move`) ditolak.
+    if (
+      /^git\s+branch\b/i.test(seg) &&
+      /(?:^|\s)(?:-[a-z]*[dDfMm][a-z]*|--(?:delete|force|move|copy))\b/.test(seg)
+    ) {
+      return { ok: false, reason: "mutating git branch flag not allowed", command: seg }
+    }
+    // `npx -c` / `npm exec --call` mengeksekusi string shell arbitrer (setara `sh -c`).
+    if (
+      /^(?:npx|npm\s+exec)\s+(?:(?:-y|--yes|-q|--quiet|--no|--no-install|-p\s+\S+|--package(?:=|\s+)\S+)\s+)*(?:-c|--call)(?:=|\s|$)/i.test(
+        seg,
+      )
+    ) {
+      return { ok: false, reason: "npx/npm exec inline shell call not allowed", command: seg }
+    }
+    // `sed` pada allowlist hanya untuk baca/filter aman; `e`/`w`/`r`/`-f` ditolak.
+    if (isDangerousSed(seg)) {
+      return { ok: false, reason: "sed exec/file-io command not allowed", command: seg }
     }
     // `-i`/`--in-place` mengubah pembaca menjadi penulis; pola `sed -n *` punya
     // bentuk yang sama setelah normalisasi, jadi ditolak eksplisit di sini.
@@ -881,21 +983,24 @@ export function createPermissionHandler(
   // bashDenyReason (semua mode, termasuk celah `npx *` yang mematch seluruh
   // string `npx agent-browser --auto-connect` lewat allowlist).
   function isAgentBrowserAutoConnect(cmd: string): boolean {
-    return /\bagent-browser\b[\s\S]*--auto-connect\b/i.test(cmd)
+    const norm = normalizeCommand(cmd)
+    const re = /\bagent-browser\b[\s\S]*--auto-connect\b/i
+    return re.test(cmd) || re.test(norm)
   }
 
   // [AGENT-BROWSER-INSTALL-GATE] Owner 2026-11-23: `install` mengunduh/masang
   // browser → butuh KONFIRMASI USER, bukan allow bebas atau deny permanen.
-  // Menyangar 3 bentuk: `agent-browser install` (boleh diawali npx, mis.
-  // `npx -y agent-browser install`) dan `npm install|i|add ... agent-browser`
-  // (global maupun lokal). `npm install*` biasa TIDAK terkena — harus ada
-  // token `agent-browser`. Deteksi sengaja agak longgar (false positive =
-  // prompt ekstra, fail-safe); yang penting jangan sampai lolos tanpa tanya.
+  // Menyangar bentuk langsung (`agent-browser install`, boleh diawali npx/dlx)
+  // maupun package manager (`npm|pnpm|yarn|bun install|i|add ... agent-browser`).
+  // Cek bentuk mentah DAN ternormalisasi agar quoting/caret tidak melewatinya.
   function isAgentBrowserInstall(cmd: string): boolean {
-    const c = cmd.trim()
-    if (!/\bagent-browser\b/i.test(c)) return false
-    if (/\bagent-browser\s+install(?:\s|$)/i.test(c)) return true
-    if (/\bnpm\s+(?:install|i|add|in)\b[\s\S]*\bagent-browser\b/i.test(c)) return true
+    const candidates = [cmd.trim(), normalizeCommand(cmd).trim()]
+    for (const c of candidates) {
+      if (!/\bagent-browser\b/i.test(c)) continue
+      if (/\bagent-browser\s+install(?:\s|$)/i.test(c)) return true
+      if (/\b(?:npm|pnpm|yarn|bun)\s+(?:install|i|add|in)\b[\s\S]*\bagent-browser\b/i.test(c))
+        return true
+    }
     return false
   }
 
@@ -1060,7 +1165,10 @@ export function createPermissionHandler(
     // membengkak dan "always" menjadi blanket-allow untuk konten apa pun.
     if (!canPersistAlways(call.args)) return Promise.resolve()
     const argsJson = JSON.stringify(call.args)
-    const key = `${call.name}:${argsJson}`
+    const rawKey = `${call.name}:${argsJson}`
+    // Bila argumen mengandung `*`, bungkus dengan prefix `exact:` agar
+    // matchAllowlist tidak mengompilasi `*` menjadi wildcard regex `.*`.
+    const key = rawKey.includes("*") ? `exact:${rawKey}` : rawKey
     if (!sessionGrants.includes(key)) sessionGrants.push(key)
     allowlistCache = null
     // [AUDIT-FIX #2] Grant "always" untuk TOOL GATED tinggal di memori sesi
@@ -1150,10 +1258,9 @@ export function createPermissionHandler(
       // job yang izinnya sudah diberikan saat `bash` dijalankan. Meminta
       // konfirmasi untuk ini hanya melelahkan tanpa menambah keamanan.
       if (NO_PROMPT_TOOLS.has(call.name)) return "allow"
-      const list = await getAllowlist()
-      // [AGENT-CONTROL-4] Grant "always" untuk delegate_task TIDAK boleh
-      // dipakai ulang — meski broker menyuntik jawaban always (lihat saveAlways).
-      if (call.name !== "delegate_task" && matchAllowlist(call, list)) return "allow"
+      // Hard-deny (sandbox requirement & bash-guard) WAJIB berjalan SEBELUM
+      // allowlist agar entri allowlist / grant "always" tidak pernah mem-bypass
+      // zirah bash-guard atau persyaratan sandbox code_run.
       if (call.name === "code_run" && codeRunMissingSandbox()) {
         // Tolak sebelum prompt [y/n] agar operator tidak diminta menyetujui
         // tool yang langsung gagal karena MINICODE_SANDBOX belum aktif.
@@ -1163,7 +1270,12 @@ export function createPermissionHandler(
         const cmd = (args?.cmd as string) ?? ""
         const br = bashDenyReason(cmd, bashEffectiveCwd(args))
         if (br) return deny(call, `bash-guard: ${br}`)
-      } else if (isGated(call.name)) {
+      }
+      const list = await getAllowlist()
+      // [AGENT-CONTROL-4] Grant "always" untuk delegate_task TIDAK boleh
+      // dipakai ulang — meski broker menyuntik jawaban always (lihat saveAlways).
+      if (call.name !== "delegate_task" && matchAllowlist(call, list)) return "allow"
+      if (call.name !== "bash" && isGated(call.name)) {
         return await promptAskOr(call, () => deny(call, "gated approval unavailable"), signal)
       }
       const ans = await gatedPrompt(call, signal, askUser, false)
@@ -1275,14 +1387,15 @@ export function createPermissionHandler(
         for (const p of targets) {
           if (!p) return "deny"
           if (isRealPathOutsideRoot(p, root)) return deny(call, "jail: outside workspace")
-          if (isSensitive(p)) return deny(call, "jail: sensitive file")
+          if (isSensitive(p) || isSensitiveReal(p, root)) return deny(call, "jail: sensitive file")
         }
       }
       if (LSP_FILE_JAIL_TOOL_NAMES.has(call.name)) {
         // Semua tool LSP (termasuk lsp_rename) memakai `path`.
         const f = (earlyArgs?.path as string) ?? (earlyArgs?.file as string) ?? ""
         if (f && isRealPathOutsideRoot(f, root)) return deny(call, "jail: outside workspace")
-        if (f && isSensitive(f)) return deny(call, "jail: sensitive file")
+        if (f && (isSensitive(f) || isSensitiveReal(f, root)))
+          return deny(call, "jail: sensitive file")
       }
       const cwdArg = (earlyArgs?.cwd as string) ?? ""
       if (cwdArg && CWD_JAIL_TOOL_NAMES.has(call.name)) {
@@ -1294,7 +1407,7 @@ export function createPermissionHandler(
         for (const p of earlyArgs.paths as unknown[]) {
           if (typeof p !== "string") continue
           if (isRealPathOutsideRoot(p, root)) return deny(call, "jail: outside workspace")
-          if (isSensitive(p)) return deny(call, "jail: sensitive file")
+          if (isSensitive(p) || isSensitiveReal(p, root)) return deny(call, "jail: sensitive file")
         }
       }
       // KEPUTUSAN OWNER 2026-11-23: `.minicode/` kini BOLEH ditulis agen/model,

@@ -39,6 +39,10 @@ export interface GridRenderOptions {
   /** Minimum kolom proporsional (tabel markdown jawaban model) alih-alih
    * minimum atomik 1–3 kolom. Lihat `fairMinimums`. */
   fairMinimums?: boolean
+  /** Override margin kiri tabel kotak (default: `effectiveAssistantMargin(width)`).
+   * TUI fullscreen memakai margin frame tersendiri sehingga meneruskan `0` agar
+   * tidak kehilangan 3 kolom anggaran lebar secara ganda. */
+  outerMargin?: number
 }
 
 const DEFAULT_MAX_CELL_WIDTH = 50
@@ -315,8 +319,13 @@ export function renderGridTable(table: GridTable, options: GridRenderOptions = {
     : MIN_CONTENT_WIDTH
   // Overhead batas: format kotak `│ c │` memakan 2 kolom lebih banyak per baris
   // (baris batas `│` + padding) daripada format separator lama ` c ` + spasi.
-  // Margin kiri kotak tabel diselaraskan dengan margin area teks asisten.
-  const boxMargin = options.box ? effectiveAssistantMargin(width) : 0
+  // Margin kiri kotak tabel diselaraskan dengan margin area teks asisten,
+  // kecuali pemanggil (TUI frame-padded) eksplisit menimpa via `outerMargin`.
+  const resolvedMargin =
+    options.outerMargin !== undefined
+      ? Math.max(0, Math.trunc(options.outerMargin))
+      : effectiveAssistantMargin(width)
+  const boxMargin = options.box ? resolvedMargin : 0
   const overhead = options.box
     ? table.headers.length * 3 + 1 + boxMargin
     : table.headers.length * 3 - 1
@@ -336,7 +345,7 @@ export function renderGridTable(table: GridTable, options: GridRenderOptions = {
       ? null
       : fitWidths(natural, budget, minimums)
   if (!widths) {
-    const vMargin = options.box ? effectiveAssistantMargin(width) : 0
+    const vMargin = options.box ? resolvedMargin : 0
     const lines = renderVertical(table, Math.max(1, width - vMargin), ellipsis)
       .join("\n")
       .split("\n")
@@ -409,6 +418,7 @@ export function renderMarkdownTable(
   table: MarkdownTable,
   width = getTerminalWidth(),
   formatCell?: (value: string) => string,
+  outerMargin?: number,
 ): string {
   return renderGridTable(
     {
@@ -420,7 +430,15 @@ export function renderMarkdownTable(
     // membuat hanya garis atas yang tampil dan `wrap` mati sehingga sel
     // panjang dipotong ellipsis — keluhan pemilik. Kotak memberi batas tiap
     // baris/kolom; wrap menjaga info panjang tidak hilang.
-    { width, styleHeader: true, formatCell, box: true, wrap: true, fairMinimums: true },
+    {
+      width,
+      styleHeader: true,
+      formatCell,
+      box: true,
+      wrap: true,
+      fairMinimums: true,
+      ...(outerMargin !== undefined ? { outerMargin } : {}),
+    },
   )
 }
 

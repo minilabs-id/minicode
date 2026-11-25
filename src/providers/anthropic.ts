@@ -154,7 +154,13 @@ export function createAnthropicProvider(config: AnthropicConfig): ModelProvider 
 
       let response: Response
       try {
-        response = await fetch(endpoint, { method: "POST", headers, body, signal })
+        response = await fetch(endpoint, {
+          method: "POST",
+          headers,
+          body,
+          signal,
+          redirect: "manual",
+        })
       } catch (e) {
         if (e instanceof Error && e.name === "AbortError") throw e
         throw new ProviderError("network", e instanceof Error ? e.message : String(e))

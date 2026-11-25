@@ -57,9 +57,11 @@ export function splitShellSegments(
     }
     if (quote === "'") {
       // Hanya bisa terjadi di POSIX (win32 tak pernah membuka single quote).
+      // Di POSIX `/bin/sh` & `bash`, backslash di dalam single quote adalah
+      // literal — TIDAK meng-escape `'`. Memperlakukan `\'` sebagai escape
+      // membuat `echo '\' ; rm -rf src # '` terbaca satu segmen.
       cur += ch
-      if (ch === "\\" && next !== undefined) cur += cmd[++i] as string
-      else if (ch === "'") quote = null
+      if (ch === "'") quote = null
       continue
     }
     // Escape character di luar quote.

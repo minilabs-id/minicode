@@ -5,11 +5,16 @@
 
 import { type SpawnSyncReturns, spawnSync } from "node:child_process"
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
-import { homedir, tmpdir } from "node:os"
-import { dirname, join } from "node:path"
+import { tmpdir } from "node:os"
+import { dirname, isAbsolute, join } from "node:path"
+import { homeDir } from "../lib/db-path.ts"
+import { resolveTrustedExecutable } from "../lib/trusted-exec.ts"
+import { sanitizeSpawnEnv } from "./scrub.ts"
 
 const PKG_NAME = "minicode-ai"
-const CACHE_FILE = join(homedir(), ".minicode", "update-check.json")
+function cacheFilePath(): string {
+  return join(homeDir(), ".minicode", "update-check.json")
+}
 const TTL_MS = 24 * 60 * 60 * 1000
 const FETCH_TIMEOUT_MS = 2000
 /**
@@ -98,7 +103,7 @@ async function readCache(): Promise<Cache | null> {
     // Lazy import — hindari top-level `node:fs/promises` bareng `bun:sqlite`
     // yang di Bun Windows nge-trigger `kWriteMonkeyPatchDefense` (lihat 0.9.7).
     const { readFile } = await import("node:fs/promises")
-    const raw = await readFile(CACHE_FILE, "utf8")
+    const raw = await readFile(cacheFilePath(), "utf8")
     const j = JSON.parse(raw) as Cache
     if (typeof j.checkedAt === "number" && typeof j.latest === "string") return j
   } catch {}
@@ -108,11 +113,12 @@ async function readCache(): Promise<Cache | null> {
 async function writeCache(latest: string): Promise<void> {
   try {
     const { mkdir, writeFile, chmod } = await import("node:fs/promises")
-    await mkdir(join(homedir(), ".minicode"), { recursive: true })
-    await writeFile(CACHE_FILE, JSON.stringify({ checkedAt: Date.now(), latest }), "utf8")
+    const target = cacheFilePath()
+    await mkdir(dirname(target), { recursive: true })
+    await writeFile(target, JSON.stringify({ checkedAt: Date.now(), latest }), "utf8")
     // 0600 seperti trace/journal (bug-hunt 2026-09-19 H6): default umask bisa
     // world-readable. Isi kini non-rahasia, tapi konsistensi murah.
-    await chmod(CACHE_FILE, 0o600).catch(() => {})
+    await chmod(target, 0o600).catch(() => {})
   } catch {}
 }
 
@@ -271,23 +277,48 @@ function quoteShellArg(arg: string): string {
 }
 
 function resolveNpmExecutable(): NpmExec {
+  const nodeBin = (() => {
+    const resolved = resolveTrustedExecutable("node")
+    return isAbsolute(resolved) ? resolved : process.execPath
+  })()
   const fromEnv = process.env.npm_execpath?.trim()
-  if (fromEnv) {
-    if (/\.[cm]?js$/i.test(fromEnv))
-      return { cmd: process.execPath, prefixArgs: [fromEnv], shell: false }
+  if (fromEnv && isAbsolute(fromEnv)) {
+    if (/\.[cm]?js$/i.test(fromEnv) && existsSync(fromEnv))
+      return { cmd: nodeBin, prefixArgs: [fromEnv], shell: false }
     if (/\.(cmd|bat)$/i.test(fromEnv)) {
       const cli = join(dirname(fromEnv), "npm-cli.js")
-      if (existsSync(cli)) return { cmd: process.execPath, prefixArgs: [cli], shell: false }
-      return { cmd: fromEnv, prefixArgs: [], shell: true }
+      if (existsSync(cli)) return { cmd: nodeBin, prefixArgs: [cli], shell: false }
+      const nestedCli = join(dirname(fromEnv), "node_modules", "npm", "bin", "npm-cli.js")
+      if (existsSync(nestedCli)) return { cmd: nodeBin, prefixArgs: [nestedCli], shell: false }
+    } else if (existsSync(fromEnv)) {
+      return { cmd: fromEnv, prefixArgs: [], shell: false }
     }
-    return { cmd: fromEnv, prefixArgs: [], shell: false }
   }
+  const trustedNpm = resolveTrustedExecutable("npm")
   if (process.platform === "win32") {
-    const cli = join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js")
-    if (existsSync(cli)) return { cmd: process.execPath, prefixArgs: [cli], shell: false }
-    return { cmd: "npm.cmd", prefixArgs: [], shell: true }
+    const candidates = [
+      join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js"),
+      ...(isAbsolute(trustedNpm)
+        ? [
+            join(dirname(trustedNpm), "node_modules", "npm", "bin", "npm-cli.js"),
+            join(dirname(trustedNpm), "npm-cli.js"),
+          ]
+        : []),
+    ]
+    for (const cli of candidates) {
+      if (existsSync(cli)) return { cmd: nodeBin, prefixArgs: [cli], shell: false }
+    }
+    // Fail-closed: jangan pernah menjalankan `npm.cmd` telanjang lewat `shell: true`
+    // di cwd yang tak tepercaya (CWD hijacking + BatBadBut).
+    if (!isAbsolute(trustedNpm)) {
+      throw new Error("trusted npm executable not found on PATH")
+    }
+    return { cmd: trustedNpm, prefixArgs: [], shell: false }
   }
-  return { cmd: "npm", prefixArgs: [], shell: false }
+  if (!isAbsolute(trustedNpm)) {
+    throw new Error("trusted npm executable not found on PATH")
+  }
+  return { cmd: trustedNpm, prefixArgs: [], shell: false }
 }
 
 function tailText(s: string, max = STDERR_TAIL_CHARS): string {
@@ -296,21 +327,34 @@ function tailText(s: string, max = STDERR_TAIL_CHARS): string {
 }
 
 function defaultNpmRunner(): InstallRunner {
-  const exec = resolveNpmExecutable()
   return (cmd, args, opts) => {
+    let exec: NpmExec
+    try {
+      exec = resolveNpmExecutable()
+    } catch (err) {
+      return { status: null, error: errorMessage(err), command: [cmd, ...args].join(" ") }
+    }
     // runner yang di-inject menerima "npm" — jangan ubah argumen yang mereka lihat.
     // Mapping ke executable asli terjadi HANYA di sini.
-    const runCmd = cmd === "npm" ? exec.cmd : cmd
+    const runCmd = cmd === "npm" ? exec.cmd : resolveTrustedExecutable(cmd)
     const runArgs = cmd === "npm" ? [...exec.prefixArgs, ...args] : [...args]
     const command = [runCmd, ...runArgs].join(" ")
     const spawnArgs = exec.shell && cmd === "npm" ? runArgs.map(quoteShellArg) : runArgs
+    // Isolasi total: jangan pernah pakai cwd repo yang tak tepercaya (agar
+    // `<repo>/.npmrc` dan biner lokal tak pernah dieksekusi), strip secret env,
+    // dan netralkan userconfig npm yang bisa menyusup lewat env.
+    const safeEnv: NodeJS.ProcessEnv = {
+      ...sanitizeSpawnEnv(process.env),
+      npm_config_userconfig: process.platform === "win32" ? "NUL" : "/dev/null",
+    }
     try {
       const r: SpawnSyncReturns<string> = spawnSync(runCmd, spawnArgs, {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
         shell: exec.shell && cmd === "npm",
         timeout: NPM_SPAWN_TIMEOUT_MS,
-        ...(opts?.cwd ? { cwd: opts.cwd } : {}),
+        cwd: opts?.cwd ?? tmpdir(),
+        env: safeEnv,
       })
       const timedOut = !!(r.error && (r.error as NodeJS.ErrnoException).code === "ETIMEDOUT")
       return {
@@ -331,13 +375,15 @@ function defaultNpmRunner(): InstallRunner {
 // stderr npm = input tak terpercaya (token .npmrc, URL berkredensial, ANSI).
 // formatUpdateError satu-satunya gerbang — jangan pernah tampilkan stderr mentah.
 
-// ESC/BEL sengaja dipakai untuk membuang sekuens ANSI dari stderr npm.
-// biome-ignore lint/suspicious/noControlCharactersInRegex: pola ANSI memang memakai ESC/BEL
-const ANSI_OSC_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g
+// biome-ignore lint/suspicious/noControlCharactersInRegex: strip DCS/APC/PM/SOS & C0/C1 kontrol
+const ANSI_STR_SEQ_RE = /\x1b[\]PX^_][\s\S]*?(?:\x07|\x1b\\|$)/g
 // biome-ignore lint/suspicious/noControlCharactersInRegex: pola CSI memang memakai ESC
 const ANSI_CSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]/g
 // biome-ignore lint/suspicious/noControlCharactersInRegex: pola ESC tunggal
 const ANSI_SINGLE_RE = /\x1b[@-_]/g
+// biome-ignore lint/suspicious/noControlCharactersInRegex: C0 non-whitespace + DEL + C1 kontrol
+const CTRL_C0_C1_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g
+const BIDI_CTRL_RE = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g
 const CREDENTIAL_URL_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]*:[^\s"'<>]*@[^\s"'<>]*/gi
 const BARE_CREDENTIAL_RE = /\b[^\s:/@]+:[^\s/@]+@[^\s]+/g
 const BEARER_RE = /\bBearer\s+[^\s,;]+/gi
@@ -347,9 +393,11 @@ const SECRET_KV_RE =
 
 function redactUpdateText(input: string): string {
   return input
-    .replace(ANSI_OSC_RE, "")
+    .replace(ANSI_STR_SEQ_RE, "")
     .replace(ANSI_CSI_RE, "")
     .replace(ANSI_SINGLE_RE, "")
+    .replace(CTRL_C0_C1_RE, "")
+    .replace(BIDI_CTRL_RE, "")
     .replace(CREDENTIAL_URL_RE, "[redacted-url]")
     .replace(BARE_CREDENTIAL_RE, "[redacted]")
     .replace(BEARER_RE, "Bearer [redacted]")
@@ -470,6 +518,9 @@ export function installUpdate(version: string, runner?: InstallRunner): boolean 
     })
     if (signatures.status !== 0) return recordFailure("npm audit signatures", signatures)
     // Fail-closed: signature gagal = install gagal. TIDAK ADA fallback npm update.
+    // `defaultNpmRunner()` selalu menjatuhkan `opts?.cwd` yang kosong ke `tmpdir()`
+    // (bukan cwd workspace), sehingga `.npmrc` repo tak pernah dibaca dan kontrak
+    // runner inject (opts?.cwd absent untuk install -g) tetap terjaga.
     const globalInstall = run("npm", [
       "install",
       "-g",

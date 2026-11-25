@@ -72,6 +72,9 @@ export function matchAllowlist(call: ToolCall, allowlist: string[]): boolean {
   // prefix 'A'x195 + tail jinak vs tail jahat → kunci terpotong identik).
   const key = `${call.name}:${JSON.stringify(call.args)}`
   return allowlist.some((pat) => {
+    // Entri `exact:` ditulis `saveAlways` saat argumen memuat `*` literal agar
+    // klik "Always" pada `ls *.ts` tidak berubah menjadi wildcard `.*` global.
+    if (pat.startsWith("exact:")) return key === pat.slice("exact:".length)
     const re = allowlistRe(pat)
     if (pat.includes(":")) return re.test(key)
     return re.test(call.name) || re.test(key)

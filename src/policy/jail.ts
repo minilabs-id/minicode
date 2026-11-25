@@ -8,7 +8,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 // dan bila relevan akhir path. Ini menutup bug operator-precedence lama di mana
 // `node_modules` dan ekstensi `.pem/.key/.p12` match di mana saja tanpa anchor.
 export const SENSITIVE_RE =
-  /(?:^|[/\\])(?:\.env(?:\.[a-z0-9_.-]+)?(?:[/\\]|$)|\.git[/\\](?:config|credentials)(?:[/\\]|$)|\.git-credentials$|\.npmrc(?:\.[a-z0-9_-]+)?(?:[/\\]|$)|\.netrc(?:\.[a-z0-9_-]+)?(?:[/\\]|$)|\.ssh(?:[/\\]|$)|\.aws(?:[/\\]|$)|\.kube(?:[/\\]|$)|\.docker[/\\]config\.json$|id_(?:rsa|ecdsa|ed25519|dsa)(?:\.(?:pub|ppk))?$|credentials\.json$|\.minicode[/\\]auth\.json$|secrets?\.(?:yaml|yml|json)$|terraform(?:\.[a-z0-9_-]+)*\.tfvars$|node_modules(?:[/\\]|$)|system32[/\\]config[/\\](?:sam|system|security|software|default)(?:[/\\]|$)|ntds\.dit$)|\.(?:pem|key|p12|pfx|jks|keystore)$/i
+  /(?:^|[/\\])(?:\.env(?:\.[a-z0-9_.-]+)?(?:[/\\]|$)|\.git[/\\](?:config|credentials|hooks)(?:[/\\]|$)|\.git-credentials$|\.npmrc(?:\.[a-z0-9_-]+)?(?:[/\\]|$)|\.netrc(?:\.[a-z0-9_-]+)?(?:[/\\]|$)|\.ssh(?:[/\\]|$)|\.aws(?:[/\\]|$)|\.kube(?:[/\\]|$)|\.docker[/\\]config\.json$|id_(?:rsa|ecdsa|ed25519|dsa)(?:\.(?:pub|ppk))?$|credentials\.json$|\.minicode[/\\](?:auth|daemon-endpoint|daemon-lease|mcp-schema-pins)\.json$|secrets?\.(?:yaml|yml|json)$|terraform(?:\.[a-z0-9_-]+)*\.tfvars$|node_modules(?:[/\\]|$)|system32[/\\]config[/\\](?:sam|system|security|software|default)(?:[/\\]|$)|ntds\.dit$)|\.(?:pem|key|p12|pfx|jks|keystore)$/i
 
 const DOTDOT_SEG_RE = /(?:^|[/\\])\.\.(?:[/\\]|$)/
 
@@ -23,9 +23,11 @@ function cleanPathForMatch(p: string): string {
     .split(/([/\\]+)/)
     .map((seg, i) => {
       if (!seg || /^[/\\]+$/.test(seg) || seg === "." || seg === "..") return seg
-      // Pertahankan drive letter Windows (mis. "C:") di segmen pertama
-      const noAds =
-        i === 0 && /^[a-zA-Z]:$/.test(seg) ? seg : seg.replace(/(:[a-zA-Z0-9_.$-]+)+$/, "")
+      // Pertahankan drive letter Windows (mis. "C:") di segmen pertama.
+      // Kupas seluruh suffix mulai dari `:` pertama (menutup NTFS double-colon
+      // ADS seperti `.env::$DATA`, `hooks::$INDEX_ALLOCATION`, dan nama stream
+      // dengan karakter non-alfanumerik seperti `.env:a+b`).
+      const noAds = i === 0 && /^[a-zA-Z]:$/.test(seg) ? seg : seg.replace(/:.*$/, "")
       return noAds.replace(/[.\s]+$/, "")
     })
     .join("")
@@ -109,6 +111,11 @@ export function isOwnedStateReal(p: string, root: string): boolean {
 /** realpath-aware `isOwnedHook`: junction internal tak boleh menyamarkan hook. */
 export function isOwnedHookReal(p: string, root: string): boolean {
   return isOwnedReal(p, root, isOwnedHook)
+}
+
+/** realpath-aware `isSensitive`: symlink/junction internal ke file sensitif (mis. `.env` / `.git/hooks`) tetap tertangkap. */
+export function isSensitiveReal(p: string, root: string): boolean {
+  return isOwnedReal(p, root, isSensitive)
 }
 
 /**

@@ -48,6 +48,14 @@ export type DenyReason =
 export type FailCause =
   /** Kontrak salah: unknown tool + invalid args (model salah panggil). */
   | "invalid"
+  /**
+   * Tool dikenal tetapi disembunyikan WorkMode/PermissionMode aktif — ini
+   * bukan salah argumen; model perlu mengubah mode, bukan retry buta.
+   * Dipetakan ke kategori PERMISSION_ERROR di lapisan machine.
+   */
+  | "permission"
+  /** Keputusan operator/user yang perlu tindakan (USER_ERROR). */
+  | "user"
   /** Tool melempar / exit≠0 / executor error. */
   | "exec"
   /** Kategori provider (auth/rate_limit/network/…). */

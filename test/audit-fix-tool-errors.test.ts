@@ -3,15 +3,19 @@
 // sentinel "kosong/tidak ada" tetap string sukses; cap daftar wajib ditandai.
 // Hermetic: spy modus untuk LSP/MCP/verification, spawn git tiruan.
 
-import { afterEach, expect, mock, spyOn, test } from "bun:test"
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test"
 import type { ChildProcess, spawn } from "node:child_process"
 import { EventEmitter } from "node:events"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { PassThrough } from "node:stream"
+import { workModeVisible } from "../src/app/tool-layer.ts"
 import * as lspClient from "../src/lsp/client.ts"
 import * as mcpClient from "../src/mcp/client.ts"
+import { hiddenBuiltinToolMessage } from "../src/policy/tool-contract.ts"
+import { createPresentationAdapter } from "../src/presentation/adapter.ts"
+import type { DomainEvent, EventBusLike } from "../src/presentation/events.ts"
 import * as verification from "../src/session/verification.ts"
 import { runGit, setGitSpawnForTest } from "../src/tools/git.ts"
 import {
@@ -27,6 +31,8 @@ import {
   delegateTaskTool,
   setSubAgentSessionFactory,
 } from "../src/tools/task.ts"
+import { type ExecutorDeps, runCall } from "../vendor/minicore/src/core/executor.ts"
+import type { ToolCall } from "../vendor/minicore/src/core/types.ts"
 
 const dirs: string[] = []
 function tmp(): string {
@@ -217,4 +223,103 @@ test("M2: kegagalan exit code non-timeout tetap terdeteksi", async () => {
   setGitSpawnForTest(fakeGit(3, true))
   const out = await runGit(["status"], process.cwd(), new AbortController().signal)
   expect(out).toContain("exit 3")
+})
+
+// ── v0.43.3: `unknown tool: bash` → pesan actionable ──────────────────────────
+// Registry yang sudah difilter WorkMode membuat `bash` di DISCUSS tampak
+// seperti tool tak dikenal. Model lalu mengira salah argumen dan retry buta
+// (bukti: sesi 9f3fee62 seq 151). Yang diuji: redaksi + klasifikasi, BUKAN
+// pelonggaran izin (INV-WM1 tetap dijaga `workModeVisible`).
+
+const kernelCall = (name: string): ToolCall => ({ id: `hidden-${name}`, name, args: {} })
+const kernelDeps = (): ExecutorDeps =>
+  ({
+    registry: new Map(),
+    permissions: { check: async () => "allow" },
+    events: { emit: () => {} },
+    signal: new AbortController().signal,
+    state: { history: [], turnCount: 0, stepCount: 0, model: "m" },
+    maxResultTokens: 4000,
+  }) as unknown as ExecutorDeps
+
+function failedEvents(content: string): DomainEvent[] {
+  const handlers = new Map<string, Set<(e: unknown) => void>>()
+  const bus: EventBusLike & { emit: (type: string, payload: unknown) => void } = {
+    on(type, handler) {
+      const set = handlers.get(type) ?? new Set()
+      set.add(handler)
+      handlers.set(type, set)
+      return () => set.delete(handler)
+    },
+    emit(type, payload) {
+      for (const h of [...(handlers.get(type) ?? [])]) h(payload)
+    },
+  }
+  const adapter = createPresentationAdapter(bus, { sessionId: "hidden-tool-s" })
+  const events: DomainEvent[] = []
+  adapter.onEvent((e) => events.push(e))
+  const payload = {
+    execution: {
+      call: { id: "c-hidden", name: "bash", args: {} },
+      result: { isError: true, content },
+    },
+  }
+  bus.emit("execution:started", payload)
+  bus.emit("execution:completed", payload)
+  adapter.dispose()
+  return events
+}
+
+describe("hidden built-in tool → pesan actionable", () => {
+  test("tool benar-benar tak ada tetap `unknown tool: <n>` (kompatibel)", async () => {
+    const r = await runCall(kernelCall("tool_yang_tak_ada"), kernelDeps())
+    expect(String(r.content)).toBe("unknown tool: tool_yang_tak_ada")
+  })
+
+  test("seam kernel memakai redaksi actionable, tanpa mengubah urutan gate", async () => {
+    const r = await runCall(kernelCall("bash"), {
+      ...kernelDeps(),
+      hiddenToolMessage: (n: string) => hiddenBuiltinToolMessage(n, "DISCUSS", "auto"),
+    })
+    const text = String(r.content)
+    expect(r.isError).toBe(true)
+    expect(text).toContain("WorkMode DISCUSS")
+    expect(text).toContain("/mode build")
+    expect(text).toContain("/unrestric")
+    expect(text).not.toContain("unknown tool")
+    expect(text).not.toContain("invalid arguments")
+  })
+
+  test("helper hanya menandai built-in yang sedang disembunyikan mode", () => {
+    expect(hiddenBuiltinToolMessage("bash", "DISCUSS", "auto")).toMatch(/WorkMode DISCUSS/)
+    expect(hiddenBuiltinToolMessage("read_file", "DISCUSS", "auto")).toBeUndefined()
+    expect(hiddenBuiltinToolMessage("bash", "EXECUTE", "auto")).toBeUndefined()
+    expect(hiddenBuiltinToolMessage("tool_yang_tak_ada", "DISCUSS", "auto")).toBeUndefined()
+    expect(hiddenBuiltinToolMessage("srv.tool", "DISCUSS", "auto")).toBeUndefined()
+  })
+
+  test("INV-WM1: visibilitas WorkMode tidak berubah", () => {
+    expect(workModeVisible("bash", "DISCUSS", "auto")).toBe(false)
+    expect(workModeVisible("bash", "EXECUTE", "auto")).toBe(true)
+  })
+
+  test("adapter: hidden tool → cause `permission` + hint, bukan `invalid`", () => {
+    const msg = hiddenBuiltinToolMessage("bash", "DISCUSS", "auto")!
+    const failed = failedEvents(msg).find((e) => e.type === "tool.failed") as
+      | { cause?: string; hint?: string; message?: string }
+      | undefined
+    expect(failed).toBeTruthy()
+    expect(failed!.cause).toBe("permission")
+    expect(failed!.hint).toContain("/mode build")
+    expect(failed!.message).toContain("WorkMode DISCUSS")
+  })
+
+  test("adapter: `unknown tool` biasa tetap cause `invalid`", () => {
+    const failed = failedEvents("unknown tool: tool_yang_tak_ada").find(
+      (e) => e.type === "tool.failed",
+    ) as { cause?: string; hint?: string } | undefined
+    expect(failed).toBeTruthy()
+    expect(failed!.cause).toBe("invalid")
+    expect(failed!.hint).toBeUndefined()
+  })
 })

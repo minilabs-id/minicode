@@ -17,6 +17,7 @@ import {
   writeTrace,
 } from "../src/telemetry/trace.ts"
 import { friendlyFromCategory } from "../src/ui/render/errors.ts"
+import { tSystem } from "../src/ui/render/tool-label.ts"
 
 setDefaultTimeout(60_000)
 
@@ -155,7 +156,12 @@ describe("audit #10: error tampil tak membocorkan kredensial", () => {
   test("Authorization: Bearer utuh hilang seluruhnya", () => {
     const f = friendlyFromCategory("unknown", "Authorization: Bearer SECRET123")
     expect(f.message).not.toContain("SECRET123")
-    expect(f.message).toContain("[redacted]")
+    const fj = friendlyFromCategory(
+      "unknown",
+      '{"error":{"message":"Authorization: Bearer SECRET123"}}',
+    )
+    expect(fj.message).not.toContain("SECRET123")
+    expect(fj.message).toContain("[redacted]")
   })
 
   test("Bearer spasi + Cookie session disamarkan; identifier utuh", () => {
@@ -166,16 +172,18 @@ describe("audit #10: error tampil tak membocorkan kredensial", () => {
     expect(friendlyFromCategory("unknown", "sessionid=SECRET789").message).not.toContain(
       "SECRET789",
     )
-    expect(friendlyFromCategory("unknown", "sessionId: string").message).toContain(
-      "sessionId: string",
-    )
-    expect(friendlyFromCategory("unknown", "token: string").message).toContain("token: string")
+    expect(
+      friendlyFromCategory("unknown", '{"error":{"message":"sessionId: string"}}').message,
+    ).toContain("sessionId: string")
+    expect(
+      friendlyFromCategory("unknown", '{"error":{"message":"token: string"}}').message,
+    ).toContain("token: string")
   })
 
   test("perilaku lama tetap: token= disamarkan, pesan normal utuh", () => {
     const f = friendlyFromCategory("server", '{"error":{"message":"denied for token=SEKRET-1"}}')
     expect(f.message).not.toContain("SEKRET-1")
-    expect(friendlyFromCategory("unknown", "socket hang up").message).toContain("socket hang up")
+    expect(friendlyFromCategory("unknown", "socket hang up").message).toBe(tSystem("err.network"))
   })
 })
 

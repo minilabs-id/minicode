@@ -7,7 +7,11 @@ import { RECOVERY_RETRY_EVENT_KIND } from "../app/session.ts"
 import { loadConfig } from "../config.ts"
 import { LIMITS } from "../constants.ts"
 import { resolveLocalDbPath } from "../lib/db-path.ts"
-import { evaluateConsequence, isAceEnabled } from "../policy/consequence-engine.ts"
+import {
+  type AceFailureType,
+  evaluateConsequence,
+  isAceEnabled,
+} from "../policy/consequence-engine.ts"
 import { resolveContextWindow } from "../policy/context-window.ts"
 import type { NoProgressOptions } from "../policy/no-progress.ts"
 import type { RateLimiter } from "../policy/ratelimit.ts"
@@ -81,6 +85,12 @@ interface SubAgentHistoryEntry {
   /** Kegagalan `max_steps_exceeded` terakhir → eskalasi cap langkah. Hanya
    * diisi bila anak TERAKHIR memang mentok pagu (bukan kegagalan lama). */
   maxStepsExceeded?: { cap: number; observedSteps: number }
+  /** [v0.43.2] Jumlah kegagalan berturut-turut untuk kunci delegasi ini
+   * SEBELUM entri ini ditulis (di-reset ke 0 saat anak kembali sukses).
+   * Dipakai pemanggil untuk menghitung `repeatedFailureCount` dan kapan
+   * batas 3 retry tercapai. Bukan state global: ikut entri riwayat yang
+   * sudah dibatasi `SUB_AGENT_HISTORY_CAP` dan fail-soft seperti biasa. */
+  consecutiveFailures?: number
 }
 
 /** Reset cooldown untuk test — jangan dipakai produksi. */
@@ -100,10 +110,40 @@ const subAgentHistory = new Map<string, SubAgentHistoryEntry>()
 let providerCooldownUntil = 0
 const PROVIDER_COOLDOWN_MS = 60_000
 
+/**
+ * [v0.43.2 audit] Batas retry per SCOPE delegasi: 1 attempt awal + 3 retry =
+ * 4 attempt. KENAPA 3: cukup untuk menutup rotasi kunci / propagasi gateway
+ * yang pulih dalam beberapa detik, tapi menghentikan fan-out buta saat pola
+ * "401/429 terus" sudah jelas. Ini pagar PEMANGGIL — dihitung dari riwayat
+ * delegasi yang sama (bukan state global) dan diteruskan ke ACE lewat
+ * `retryLimitReached`. RECOVERY_ATTEMPT_QUOTA=6 di recovery-budget.ts adalah
+ * anggaran lapisan LAIN (per-call provider dalam satu turn) dan sengaja
+ * tidak diubah: mengecilkan itu = memotong pemulihan seluruh sesi.
+ *
+ * KENAPA cooldown 60 dtk yang SUDAH ADA cukup sebagai "jeda": gangguan auth/
+ * rate-limit biasanya dibuka kembali oleh jendela kuota/gateway dalam hitungan
+ * detik sampai ~1 menit. Menunggu 60 dtk membuat retry berikutnya jatuh pada
+ * jendela baru tanpa menambah state, timer, atau biaya baru. Jadi retry tetap
+ * terjadi (setelah jeda), hanya saja dibatasi 3 kali per scope.
+ */
+export const SUB_AGENT_MAX_ATTEMPTS = 4
+
+/**
+ * Pola gangguan provider yang mencakup auth/rate-limit (v0.43.2). Sebelumnya
+ * 401/429 tak dikenali → cooldown 60 dtk tak pernah aktif untuk error ini,
+ * sehingga induk langsung fan-out lagi dan kuota terbuang. `\b` pada angka
+ * mencegah "14013" ikut terbaca sebagai 401. Pola ini sengaja agak longgar
+ * (mis. "ratelimiter" ikut cocok): cooldown hanya best-effort & fail-soft,
+ * jadi lebih baik jeda satu kali ekstra daripada membuang kuota fan-out buta.
+ */
+const PROVIDER_OUTAGE_SIGNATURE =
+  /\b401\b|\b429\b|unauthorized|authentication_failed|rate.?limit|capacity_exhausted|too many requests/i
+
 /** Pesan provider yang menandakan gangguan sementara, bukan kesalahan prompt. */
 export function isProviderOutage(msg: string): boolean {
-  const s = msg.toLowerCase()
+  const s = (typeof msg === "string" ? msg : String(msg)).toLowerCase()
   return (
+    PROVIDER_OUTAGE_SIGNATURE.test(s) ||
     s.includes("temporarily unavailable") ||
     s.includes("connection stalled") ||
     s.includes("provider error") ||
@@ -111,6 +151,42 @@ export function isProviderOutage(msg: string): boolean {
     s.includes("quota_exceeded") ||
     s.includes("402:")
   )
+}
+
+// ── Klasifikasi kegagalan anak → ACE failureType ──────────────────────────────
+//
+// Pola sengaja SEMPIT & case-insensitive dengan batas kata: pesan provider tak
+// terpercaya (bisa berisi kuota, path, atau angka lain). Substring longgar
+// seperti /401|429/ tanpa `\b` membuat "retry 401 attempts" salah dikira auth.
+const RATE_LIMIT_SIGNATURE =
+  /\b429\b|\brate[ _-]?limit(?:ed|ing|s)?(?![a-z])|\btoo many requests\b|\bcapacity_exhausted\b/i
+const AUTH_FAILURE_SIGNATURE = /\b401\b|\bauth(?:entication)?[ _-]?fail(?:ed|ure)?\b/i
+
+/**
+ * Petakan kegagalan turn anak ke taksonomi ACE (murni, tanpa IO/clock).
+ *
+ * KEPUTUSAN 401: dipetakan ke `network_error` (transient), BUKAN `functional`.
+ * Alasan: pesan provider sendiri mengatakan "please try again; if it persists,
+ * contact support" — kredensial bisa ditolak karena rotasi key / propagasi
+ * gateway, bukan selalu salah permanen. Risikonya dicegah TIGA pengaman yang
+ * sengaja longgar (v0.43.2): cooldown 60 dtk sebagai jeda, batas 3 retry per
+ * scope delegasi (`SUB_AGENT_MAX_ATTEMPTS = 4`) lewat `retryLimitReached`, dan
+ * pagar engine 5 kegagalan identik tanpa bukti baru → `REQUEST_HUMAN`. Rule
+ * lama `REPEATED_NO_EVIDENCE` di ambang 2 tetap aktif untuk `CHANGE_STRATEGY`.
+ * Jadi retry tetap terjadi, tapi tak pernah buta/tanpa batas. 429 →
+ * `rate_limit`, timeout/abort tanpa tanda provider → `timeout`, sisanya →
+ * `functional`.
+ *
+ * URUTAN: tanda provider eksplisit di teks MENANG atas `childStatus`, karena
+ * `kind` terstruktur bisa bernilai `aborted` saat provider menolak request —
+ * mengklasifikasikannya sebagai timeout menyembunyikan akar masalah auth/rate.
+ */
+export function classifyChildFailureType(text: string, childStatus: ChildStatus): AceFailureType {
+  const msg = typeof text === "string" ? text : ""
+  if (RATE_LIMIT_SIGNATURE.test(msg)) return "rate_limit"
+  if (AUTH_FAILURE_SIGNATURE.test(msg)) return "network_error"
+  if (childStatus === "aborted" || childStatus === "timeout") return "timeout"
+  return "functional"
 }
 
 /** "Bentuk" delegasi: mode + sidik jari prompt. Dipakai untuk mengelompokkan
@@ -298,6 +374,8 @@ export interface SubAgentSpec {
   noProgress?: NoProgressOptions
   /** Warisan pengetatan bash-allowlist dari parent saat restrictBash aktif. */
   restrictBash?: boolean
+  /** Warisan allowlist bash operator dari parent config. */
+  bashAllowlist?: readonly string[]
   /** Warisan opt-in local config dari parent (fail-closed default false). */
   allowLocalConfig?: boolean
 }
@@ -427,19 +505,20 @@ export function setSubAgentWorkMode(fn: () => WorkMode | undefined): void {
   subAgentWorkModeFn = fn
 }
 
-/** WorkMode induk saat ini (live), undefined = EXECUTE (perilaku lama). */
+/** WorkMode induk saat ini (live); error di callback fail-closed ke DISCUSS. */
 export function subAgentWorkMode(): WorkMode {
   try {
     const v = subAgentWorkModeFn()
     return v === undefined ? "EXECUTE" : v === "EXECUTE" ? "EXECUTE" : "DISCUSS"
   } catch {
-    return "EXECUTE"
+    return "DISCUSS"
   }
 }
 
 export interface SubAgentGovernance {
   readonly restrictBash?: boolean
   readonly allowLocalConfig?: boolean
+  readonly bashAllowlist?: readonly string[]
 }
 
 let subAgentGovernanceFn: () => SubAgentGovernance = () => ({})
@@ -451,9 +530,10 @@ export function setSubAgentGovernance(fn: () => SubAgentGovernance): void {
 
 export function subAgentGovernance(): SubAgentGovernance {
   try {
-    return subAgentGovernanceFn() ?? {}
+    return subAgentGovernanceFn() ?? { restrictBash: true, allowLocalConfig: false }
   } catch {
-    return {}
+    // Fail-closed bila callback governance gagal: tahan bash dan tolak local config.
+    return { restrictBash: true, allowLocalConfig: false }
   }
 }
 
@@ -566,7 +646,14 @@ export const delegateTaskTool: Tool = {
     // N aksi tak-disetujui). Anak ask-parent tetap berguna untuk recon
     // (explore), sementara tulis/eksekusi kembali ke parent yang di-approve.
     const parentMode = (ctx as unknown as { permissionMode?: string }).permissionMode
-    const forcedExplore = parentMode === "plan" || parentMode === "readonly" || parentMode === "ask"
+    // Fail-closed: selain mode eksekusi yang dikenal (`auto`/`unrestricted`/`allow-all`/`allowlist`),
+    // termasuk `plan`/`readonly`/`ask` maupun nilai tak dikenal, paksa anak ke `explore`.
+    const forcedExplore =
+      parentMode !== undefined &&
+      parentMode !== "auto" &&
+      parentMode !== "unrestricted" &&
+      parentMode !== "allow-all" &&
+      parentMode !== "allowlist"
     const m = forcedExplore ? "explore" : ((mode as string) ?? "explore")
 
     // v7.34 — kunci "bentuk" delegasi + waktu mulai. Keduanya dipakai adaptivitas
@@ -574,6 +661,14 @@ export const delegateTaskTool: Tool = {
     // dipaksa explore tidak tertukar riwayatnya dengan anak plan.
     const historyKey = delegationKey(m, String(prompt))
     const priorEntry = readSubAgentHistory(historyKey)
+    // [v0.43.2] Jumlah kegagalan berturut SEBELUM attempt ini. Entri lama
+    // (sebelum field ini ada) atau data korup dianggap 0 → perilaku lama persis,
+    // tanpa migrasi. Fail-soft: bookkeeping tak pernah menggagalkan delegasi.
+    const rawPriorFailures = priorEntry?.consecutiveFailures
+    const priorFailureCount =
+      typeof rawPriorFailures === "number" && Number.isFinite(rawPriorFailures)
+        ? Math.max(0, Math.floor(rawPriorFailures))
+        : 0
     const delegationStartedAt = Date.now()
 
     // Validasi timeout per-delegate mengikuti pola fail-closed `src/app/session.ts`:
@@ -675,7 +770,7 @@ export const delegateTaskTool: Tool = {
     // Sub-agent tidak boleh menulis state milik parent: memory (persisten) dan
     // todo (rencana parent). Juga tidak boleh bersarang (delegate_task).
     // bash_output/bash_kill dibuang karena job id milik parent.
-    // git_commit dibuang: commit adalah keputusan tingkat-task, bukan sub-task.
+    // git_commit/git_push dibuang: keputusan riwayat bersama tingkat-task.
     const base = allTools.filter(
       (t) =>
         ![
@@ -956,6 +1051,7 @@ export const delegateTaskTool: Tool = {
           // lama (tanpa ceiling tambahan).
           workMode: childWorkMode,
           ...(gov.restrictBash ? { restrictBash: true } : {}),
+          ...(gov.bashAllowlist ? { bashAllowlist: [...gov.bashAllowlist] } : {}),
           ...(gov.allowLocalConfig ? { allowLocalConfig: true } : {}),
           maxSteps: cap,
           // Timeout per-delegate: caller boleh memperpanjang explorer lambat;
@@ -1277,14 +1373,28 @@ export const delegateTaskTool: Tool = {
           // byte-identik, receipt `state` tetap `committed` seperti dulu.
           childStatus = classifyChildStatus(e)
           // [Fase 7 / LOOP-INV-13/15] ACE verdict untuk jalur error: failure
-          // type dipetakan deterministik dari childStatus → verdict FAIL/BLOCKED
-          // sesuai consequence-engine. `timeout`/`aborted` = timeout; lainnya = functional.
+          // type dipetakan deterministik dari teks error + childStatus → verdict
+          // FAIL/BLOCKED sesuai consequence-engine. Provider 401/429 adalah
+          // gangguan sementara (bukan prompt anak salah) → RETRY_TRANSIENT;
+          // timeout/abort biasa tetap timeout; sisanya functional.
+          // [v0.43.2 audit] SEBELUM audit ini `repeatedFailureCount` tak pernah
+          // dikirim, sehingga rule engine mati dan klaim "terkunci setelah 2
+          // kegagalan" tak benar. Kini riwayat scope yang sama diumpankan:
+          // attempt ke-1/2/3 tetap RETRY_TRANSIENT, attempt ke-4 (prior 3
+          // kegagalan) ditandai `retryLimitReached` → REQUEST_HUMAN. Anggota
+          // ke-5+ juga ditahan pagar engine (ACE_REPEATED_FAILURE_LIMIT=5).
           // [Fase 9 / 9.1] Rollback switch: skip saat ACE disabled.
           if (isAceEnabled()) {
+            const failureType = classifyChildFailureType(msg, childStatus)
             childAceVerdict = evaluateConsequence({
               verificationPassed: false,
-              failureType:
-                childStatus === "aborted" || childStatus === "timeout" ? "timeout" : "functional",
+              failureType,
+              isTransientError:
+                failureType === "network_error" ||
+                failureType === "rate_limit" ||
+                failureType === "timeout",
+              repeatedFailureCount: priorFailureCount,
+              retryLimitReached: priorFailureCount + 1 >= SUB_AGENT_MAX_ATTEMPTS,
             })
           }
           // Sertakan teks partial (terpotong) pada timeout/error. String ini
@@ -1385,10 +1495,17 @@ export const delegateTaskTool: Tool = {
           (settledStatus === "max_steps_exceeded" && failureSteps !== null ? failureSteps : 0)
         const msEx =
           settledStatus === "max_steps_exceeded" ? { cap, observedSteps: steps } : undefined
+        const success = settledStatus === "returned"
+        // [v0.43.2] Hitung streak kegagalan untuk kunci yang SAMA. Sukses
+        // memutus streak (bukti baru — jangan hukum delegasi berikutnya karena
+        // kegagalan lama). Nilai ini dibaca attempt berikutnya lewat
+        // `priorFailureCount`; pagu tetap di `SUB_AGENT_MAX_ATTEMPTS`, bukan di sini.
+        const consecutiveFailures = success ? 0 : priorFailureCount + 1
         recordSubAgentHistory(historyKey, {
           steps,
           durationMs: Math.max(0, Date.now() - delegationStartedAt),
-          success: settledStatus === "returned",
+          success,
+          consecutiveFailures,
           ...(msEx ? { maxStepsExceeded: msEx } : {}),
         })
       } catch {}

@@ -81,6 +81,10 @@ export interface ConsequenceEvaluationInput {
   readonly isTransientError?: boolean
   /** Berapa kali kegagalan identik terjadi berturut-turut SEBELUM percobaan ini. */
   readonly repeatedFailureCount?: number
+  /** Pagar PEMANGGIL: retry pada scope yang sama sudah mencapai batas
+   * (mis. 3 retry + 1 attempt awal = 4 attempt untuk delegasi sub-agent).
+   * Bukan state global — pemanggil yang menghitung dari riwayatnya sendiri. */
+  readonly retryLimitReached?: boolean
   /** Agen membaca bukti diagnostik baru sejak kegagalan terakhir. */
   readonly newEvidenceSinceLastAttempt?: boolean
   /** Terhalang izin/approval atau dependensi eksternal yang tak bisa dipulihkan agen. */
@@ -94,6 +98,17 @@ export interface ConsequenceEvaluationInput {
 }
 
 const TRANSIENT_TYPES = new Set<AceFailureType>(["network_error", "rate_limit", "timeout"])
+
+/**
+ * [v0.43.2 audit] Pagar ENGINE untuk kegagalan identik berulang tanpa bukti baru.
+ *
+ * KENAPA 5 (bukan 2): ambang 2 di rule lama sengaja dipertahankan untuk
+ * `CHANGE_STRATEGY` (ganti cara, masih boleh mencoba), tapi sebagai pagar
+ * `REQUEST_HUMAN` angka 2 terlalu ketat — gangguan provider nyata sering pulih
+ * pada percobaan ke-3. Lima kegagalan tanpa satu pun bukti baru sudah cukup
+ * menjadi pola "tak membaik", tapi masih memberi ruang retry wajar.
+ */
+export const ACE_REPEATED_FAILURE_LIMIT = 5
 
 /**
  * Evaluasi deterministik. Urutan aturan adalah kontrak — jangan diubah tanpa
@@ -143,6 +158,29 @@ export function evaluateConsequence(input: ConsequenceEvaluationInput): Conseque
       failureClass: "PERMISSION_OR_EXTERNAL_BLOCKER",
       nextAction: "REQUEST_HUMAN",
       rationale: "permission denied or external dependency unavailable",
+      newEvidenceSinceLastAttempt: newEvidence,
+    }
+  }
+
+  // 4a. [v0.43.2 audit] Dua pagar retry yang sengaja LONGGAR. Keduanya
+  // didahulukan atas cabang transient supaya provider 401/429 yang gagal terus
+  // tidak berubah menjadi retry buta tanpa batas:
+  //   • retryLimitReached — pagar pemanggil (sub-agent: 3 retry + 1 attempt
+  //     awal = 4 attempt per scope delegasi). Dihitung pemanggil, bukan engine.
+  //   • repeatedFailureCount >= 5 — pagar engine untuk kegagalan identik tanpa
+  //     bukti baru. Ambang lama 2 tetap dipakai rule 6 untuk CHANGE_STRATEGY.
+  // Keduanya → REQUEST_HUMAN, BUKAN STOP_AND_REPORT: agen masih boleh
+  // menyertakan temuan partial; manusia yang memutuskan lanjut atau berhenti.
+  // EVALUATOR_TAMPER_ATTEMPT sudah ditangani rule 1 dan tak bisa ditimpa.
+  if (
+    input.retryLimitReached === true ||
+    ((input.repeatedFailureCount ?? 0) >= ACE_REPEATED_FAILURE_LIMIT && !newEvidence)
+  ) {
+    return {
+      verdict: "BLOCKED",
+      failureClass: "REPEATED_NO_EVIDENCE",
+      nextAction: "REQUEST_HUMAN",
+      rationale: `retry limit reached or ${input.repeatedFailureCount ?? 0} repeated failures without new evidence — request human`,
       newEvidenceSinceLastAttempt: newEvidence,
     }
   }

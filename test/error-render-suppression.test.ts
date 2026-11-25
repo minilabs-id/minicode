@@ -1,12 +1,11 @@
-// v0.43 — Permintaan owner: error yang TIDAK cocok dengan 13 pola kanonik
-// `friendlyToolError()` jangan ditampilkan mentah. Gerbang BARU
-// `friendlyToolErrorCanonical()` mengembalikan "" untuk cabang fallback, dan
-// dua situs render di printer linear memakainya agar tak ada `: ` kosong / spasi
-// ganda maupun `raw message` yang bocor ke stderr.
+// Error yang TIDAK cocok dengan pola kanonik TIDAK boleh membocorkan pesan mentah.
+// `friendlyToolErrorCanonical()` mengembalikan "" agar pemanggil punya kesempatan
+// jatuh ke `formatError`/`formatProviderError`, sedangkan `friendlyToolError()` dan
+// renderer baris tool menampilkan narasi fallback aman OS-locale (`msg.unknownToolError`).
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { attachSimpleLogger } from "../src/ui/assistant/simple.ts"
 import { resetLocaleState, setSessionLocale } from "../src/ui/i18n/locale.ts"
-import { friendlyToolErrorCanonical } from "../src/ui/render/errors.ts"
+import { friendlyToolError, friendlyToolErrorCanonical } from "../src/ui/render/errors.ts"
 import { __setSystemLocaleForTest, tSystem } from "../src/ui/render/tool-label.ts"
 import { UiSessionState } from "../src/ui/session-state.ts"
 import { createFakeBus, type FakeTty, installFakeTty } from "./helpers/tui-harness.ts"
@@ -26,8 +25,11 @@ afterEach(() => {
 })
 
 describe("friendlyToolErrorCanonical", () => {
-  test("fallback (tak dikenal) → string kosong", () => {
+  test("fallback (tak dikenal) → string kosong pada canonical, narasi aman pada friendlyToolError", () => {
     expect(friendlyToolErrorCanonical("boom")).toBe("")
+    const fallback = friendlyToolError("boom")
+    expect(fallback).toBe(tSystem("msg.unknownToolError"))
+    expect(fallback).not.toContain("boom")
   })
 
   test("sub-agent memakai redaksi kanonik locale OS", () => {
@@ -86,13 +88,13 @@ function renderLinearError(content: string): string {
 }
 
 describe("supresi redaksi error di printer linear", () => {
-  test("isError:true + 'boom' → error mentah tak tampil, tanpa ': ' kosong", () => {
+  test("isError:true + 'boom' → error mentah tak tampil, tampil narasi aman OS-locale", () => {
     const out = renderLinearError("boom")
     expect(out).not.toContain("boom")
     expect(out).not.toContain(": \n")
     expect(out).not.toContain(":  ")
-    // Baris ledger/status tool TETAP ada (hanya redaksi errornya yang hilang).
-    // humanToolLabel("bash") → "run command" (locale OS).
+    expect(out).toContain(tSystem("msg.unknownToolError"))
+    // Baris ledger/status tool TETAP ada; humanToolLabel("bash") → "run command" (locale OS).
     expect(out).toContain("run command")
   })
 

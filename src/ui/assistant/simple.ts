@@ -19,7 +19,7 @@ import { formatArgsPreview, formatProviderError, formatUsage } from "../render/f
 import { highlightCode } from "../render/highlight.ts"
 import { paintLedger, runMarker, statusWord } from "../render/ledger.ts"
 import { decorateMarkdown, type FenceMatch, parseFence, renderInline } from "../render/markdown.ts"
-import { effectiveAssistantMargin, MarkdownFlowStepper } from "../render/markdown-layout.ts"
+import { MarkdownFlowStepper } from "../render/markdown-layout.ts"
 import { MarkdownTableStream } from "../render/markdown-table.ts"
 import {
   cleanUntrusted,
@@ -30,7 +30,7 @@ import {
 } from "../render/sanitize.ts"
 import { renderMarkdownTable } from "../render/table-grid.ts"
 import { c, glyphs, stripAnsi } from "../render/theme.ts"
-import { humanToolLabel } from "../render/tool-label.ts"
+import { humanToolLabel, tSystem } from "../render/tool-label.ts"
 import { displayWidth, truncateToWidth } from "../render/width.ts"
 import { formatWrapped } from "../render/wrap.ts"
 import { runWithoutStatus } from "../runtime/statusline.ts"
@@ -368,9 +368,9 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
         fence = null
         answerFlow.onFenceClose()
       } else {
-        const margin = " ".repeat(effectiveAssistantMargin(w))
+        // v0.43: margin 3 kini milik frame TUI — jangan disuntik ke teks kode.
         const content = fence.lang ? highlightCode(line, fence.lang) : line
-        emitAnswer(line.trim() === "" ? "\n" : `${margin}${content}\n`)
+        emitAnswer(line.trim() === "" ? "\n" : `${content}\n`)
       }
       return
     }
@@ -629,7 +629,9 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
           target ? String(target) : undefined,
         )
       : ""
-    const detail = canonical ? `: ${canonical}` : ""
+    const narrative =
+      canonical || (message || status !== "completed" ? tSystem("msg.unknownToolError") : "")
+    const detail = narrative ? `: ${narrative}` : ""
     // F-AGENT-1: tool anak dirender sebagai baris run sendiri (`↳ <marker>`),
     // bukan dicampur ke baris root — identitas childSessionId/runId tiap run.
     // Child tanpa identitas run tetap tampil (kegagalan tak boleh hilang),
@@ -938,7 +940,9 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
         // (tanpa ":" dan tanpa redaksi) — error mentah tak pernah tampil.
         ui.setActiveSection(null)
         const errorTarget = typeof args.path === "string" ? args.path : undefined
-        const canonical = friendlyToolErrorCanonical(String(r.content), errorTarget)
+        const canonical =
+          friendlyToolErrorCanonical(String(r.content), errorTarget) ||
+          tSystem("msg.unknownToolError")
         wErr(
           c.error(
             `  ${glyphs.arrow} ${humanToolLabel(name, activity)}${suffix}${canonical ? `: ${canonical}` : ""}\n`,
@@ -1118,4 +1122,4 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
  * supaya TUI fullscreen, wizard, dan one-shot memakai SATU formatter kanonik
  * yang sama — TUI tak lagi menarik renderer linier hanya demi format error.
  */
-export { formatError } from "../render/errors.ts"
+export { formatError, formatMachineError } from "../render/errors.ts"

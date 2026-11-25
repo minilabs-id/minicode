@@ -104,6 +104,7 @@ async function firecrawlKeylessSearch(
       headers: keylessHeaders({ "content-type": "application/json" }),
       body: JSON.stringify({ query, limit: count }),
       signal: controller.signal,
+      redirect: "manual",
     })
     if (!res.ok) {
       await res.body?.cancel().catch(() => {})
@@ -129,7 +130,11 @@ async function firecrawlKeylessSearch(
 async function mwmblSearch(query: string, count: number, signal: AbortSignal): Promise<string> {
   return withKeylessRequest(signal, async (controller) => {
     const url = `https://api.mwmbl.org/api/v1/search/?s=${encodeURIComponent(query)}`
-    const res = await fetch(url, { headers: keylessHeaders(), signal: controller.signal })
+    const res = await fetch(url, {
+      headers: keylessHeaders(),
+      signal: controller.signal,
+      redirect: "manual",
+    })
     if (!res.ok) {
       await res.body?.cancel().catch(() => {})
       throw new Error(`HTTP ${res.status}`)
@@ -163,6 +168,7 @@ async function marginaliaSearch(
     const res = await fetch(url, {
       headers: keylessHeaders({ "API-Key": "public" }),
       signal: controller.signal,
+      redirect: "manual",
     })
     if (!res.ok) {
       await res.body?.cancel().catch(() => {})
@@ -207,7 +213,11 @@ async function fetchJsonKeyless<T>(
   headers: Record<string, string> = {},
 ): Promise<T> {
   return withKeylessRequest(signal, async (controller) => {
-    const res = await fetch(url, { headers: keylessHeaders(headers), signal: controller.signal })
+    const res = await fetch(url, {
+      headers: keylessHeaders(headers),
+      signal: controller.signal,
+      redirect: "manual",
+    })
     if (!res.ok) {
       await res.body?.cancel().catch(() => {})
       throw new Error(`HTTP ${res.status}`)
@@ -222,7 +232,11 @@ async function fetchTextKeyless(
   headers: Record<string, string> = {},
 ): Promise<string> {
   return withKeylessRequest(signal, async (controller) => {
-    const res = await fetch(url, { headers: keylessHeaders(headers), signal: controller.signal })
+    const res = await fetch(url, {
+      headers: keylessHeaders(headers),
+      signal: controller.signal,
+      redirect: "manual",
+    })
     if (!res.ok) {
       await res.body?.cancel().catch(() => {})
       throw new Error(`HTTP ${res.status}`)
@@ -689,6 +703,7 @@ export const webSearchTool: Tool = {
               search_depth: "basic",
             }),
             signal: controller.signal,
+            redirect: "manual",
           })
           if (res.ok) {
             const body = await readBodyCapped(res, controller)
@@ -733,6 +748,7 @@ export const webSearchTool: Tool = {
             {
               headers: { "X-Subscription-Token": braveKey, accept: "application/json" },
               signal: controller.signal,
+              redirect: "manual",
             },
           )
           if (res.ok) {
@@ -804,6 +820,7 @@ export const webSearchTool: Tool = {
         try {
           const res = await fetch(ddgUrl, {
             signal: controller.signal,
+            redirect: "manual",
             headers: {
               "user-agent": "Mozilla/5.0 (compatible; minicode/1.0)",
               "accept-language": "en-US,en;q=0.9",

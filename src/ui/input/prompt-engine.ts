@@ -396,6 +396,10 @@ export function decodeKeys(buf: Uint8Array): DecodedKey[] {
 export interface DecodedKey {
   key: PromptKey
   width: number
+  /** True bila event berasal dari bracketed paste (ESC[200~…ESC[201~). */
+  pasted?: boolean
+  /** False bila payload paste masih berlanjut di chunk berikutnya (mode overflow). */
+  pasteEnd?: boolean
 }
 
 // ── Streaming decoder ──
@@ -640,7 +644,12 @@ export function decodeKeysStream(chunk: Uint8Array, state: DecoderState): Decode
         if (hold === i) break
         const end = lastUtf8Boundary(buf, i, hold)
         if (end > i) {
-          out.push({ key: { type: "char", ch: decodeUtf8(buf.slice(i, end)) }, width: 0 })
+          out.push({
+            key: { type: "char", ch: decodeUtf8(buf.slice(i, end)) },
+            width: 0,
+            pasted: true,
+            pasteEnd: false,
+          })
           i = end
         } else if (isIncompleteUtf8Prefix(buf, i, hold)) {
           // Chunk berakhir di tengah code point: tahan ekornya di `pending`.
@@ -650,15 +659,29 @@ export function decodeKeysStream(chunk: Uint8Array, state: DecoderState): Decode
         } else {
           // Byte tak valid di awal: pancarkan U+FFFD satu byt dan maju supaya
           // loop tak mandek; sisa disambung chunk berikutnya.
-          out.push({ key: { type: "char", ch: "\ufffd" }, width: 0 })
+          out.push({
+            key: { type: "char", ch: "\ufffd" },
+            width: 0,
+            pasted: true,
+            pasteEnd: false,
+          })
           i++
         }
         continue
       }
       const end = lastUtf8Boundary(buf, i, term)
       if (end > i) {
-        out.push({ key: { type: "char", ch: decodeUtf8(buf.slice(i, end)) }, width: 0 })
+        out.push({
+          key: { type: "char", ch: decodeUtf8(buf.slice(i, end)) },
+          width: 0,
+          pasted: true,
+          pasteEnd: end === term,
+        })
         i = end
+        if (end === term) {
+          i = term + 6
+          state.pasteOverflow = false
+        }
         continue
       }
       if (i < term && isIncompleteUtf8Prefix(buf, i, term)) {
@@ -666,7 +689,9 @@ export function decodeKeysStream(chunk: Uint8Array, state: DecoderState): Decode
         // terminator — tahan dulu, lengkapi dengan chunk berikutnya.
         break
       }
-      // end === i → tepat di terminator: konsumsi dan keluar dari mode overflow.
+      // end === i → tepat di terminator: tutup blok paste overflow yang sedang
+      // diakumulasi di consumer, lalu keluar dari mode overflow.
+      out.push({ key: { type: "char", ch: "" }, width: 0, pasted: true, pasteEnd: true })
       i = term + 6
       state.pasteOverflow = false
       continue
@@ -710,7 +735,12 @@ export function decodeKeysStream(chunk: Uint8Array, state: DecoderState): Decode
             const start = i + 6
             const end = lastUtf8Boundary(buf, start, buf.length)
             if (end > start) {
-              out.push({ key: { type: "char", ch: decodeUtf8(buf.slice(start, end)) }, width: 0 })
+              out.push({
+                key: { type: "char", ch: decodeUtf8(buf.slice(start, end)) },
+                width: 0,
+                pasted: true,
+                pasteEnd: false,
+              })
             }
             // Tandai mode overflow supaya sisa payload (termasuk CR/Ctrl-C)
             // tetap dibaca literal sampai terminator tiba (audit VERIFIED).
@@ -720,7 +750,12 @@ export function decodeKeysStream(chunk: Uint8Array, state: DecoderState): Decode
           }
           break // penutup belum tiba — tahan
         }
-        out.push({ key: { type: "char", ch: decodeUtf8(buf.slice(i + 6, term)) }, width: 0 })
+        out.push({
+          key: { type: "char", ch: decodeUtf8(buf.slice(i + 6, term)) },
+          width: 0,
+          pasted: true,
+          pasteEnd: true,
+        })
         i = term + 6
         continue
       }

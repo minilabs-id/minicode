@@ -776,7 +776,7 @@ export const todoWriteTool: Tool = {
   name: "todo_write",
   // v7.33 (wire contract): tag PLAN (todo = rencana, bukan file/memori).
   description:
-    "PLAN: Write/replace the entire todo list (send the full list, never a delta). Use for 3+ steps: keep exactly one item in_progress. A full list with no taskId is auto-repaired ONLY when every item's content exactly matches an existing task (count included); any mismatch is REJECTED — call todo_read and echo every item's taskId (ids are never invented; omit taskId only for genuinely new items). Claiming completed while verification is failing/stale is REFUSED — it returns blocked with the reason; fix the check or re-verify first.",
+    "PLAN: Write/replace the entire todo list (send the full list, never a delta). Use for 3+ steps: keep exactly one item in_progress. A full list with no taskId is auto-repaired ONLY when every item's content exactly matches an existing task (count included); any mismatch is REJECTED — call todo_read and echo every item's taskId (ids are never invented; omit taskId only for genuinely new items). Completed/cancelled tasks are terminal (never reopen them to pending/in_progress); to start a new topic in the same session, keep existing terminal taskId(s) unchanged and append new items without taskId. Claiming completed while verification is failing/stale is REFUSED — it returns blocked with the reason; fix the check or re-verify first.",
   parameters: {
     type: "object",
     properties: {
@@ -866,12 +866,17 @@ export const todoWriteTool: Tool = {
         // indeks `rawDeclaredCompleted` yang dihitung lebih awal tetap selaras.
         list = repaired
       } else {
+        const preview = tasks
+          .slice(0, 10)
+          .map((t) => `${t.id}(${t.status.toLowerCase()})`)
+          .join(", ")
+        const more = tasks.length > 10 ? `, +${tasks.length - 10} more` : ""
         throw new TaskError(
           "TASK_IDENTITY_REQUIRED",
-          `this task already has ${tasks.length} canonical task(s), so this full declaration must identify them. ` +
+          `this task already has ${tasks.length} canonical task(s) [${preview}${more}], so this full declaration must identify them. ` +
             `An id-less list is only repaired when every item's content exactly matches an existing task; ` +
-            `call todo_read and re-send every item with its taskId (e.g. {"taskId":"t1", ...}); ` +
-            `omit taskId only on items that are genuinely new. ` +
+            `call todo_read and re-send existing items with their taskId (e.g. {"taskId":"t1", ...}) and never reopen completed/cancelled tasks to pending/in_progress. ` +
+            `To start a new topic in the same session, keep existing terminal taskId(s) unchanged and omit taskId only on genuinely new items. ` +
             `Nothing was written: the todo list and canonical tasks are unchanged.`,
         )
       }

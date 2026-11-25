@@ -80,6 +80,9 @@ interface Conn {
    * punya langganan terpisah (teardown satu tak mencabut yang lain). */
   subscriptionScope: string | null
   scopes: DaemonScope[]
+  /** Masa berlaku capability & nonce dari handshake — dicek ulang tiap operasi. */
+  capExp: number | null
+  capNonce: string | null
   subs: Map<string, Subscription>
   paused: boolean
   closed: boolean
@@ -124,6 +127,10 @@ export class DaemonServer {
   }
 
   async start(): Promise<{ port: number }> {
+    const h = this.#deps.host.trim()
+    if (h !== "127.0.0.1" && h !== "::1" && h !== "localhost") {
+      throw new Error(`daemon: menolak bind non-loopback host "${h}"`)
+    }
     const server = createServer({ noDelay: true }, (socket) => this.#onConnection(socket))
     this.#server = server
     await new Promise<void>((resolve, reject) => {
@@ -166,6 +173,8 @@ export class DaemonServer {
       consumerId: null,
       subscriptionScope: null,
       scopes: [],
+      capExp: null,
+      capNonce: null,
       subs: new Map(),
       paused: false,
       closed: false,
@@ -350,6 +359,8 @@ export class DaemonServer {
     }
     conn.state = "ready"
     conn.scopes = payload.scopes
+    conn.capExp = payload.exp
+    conn.capNonce = payload.n
     conn.consumerId = sanitizeLabel(payload.who, 120) || `consumer-${conn.id}`
     conn.subscriptionScope = `${conn.consumerId}${CONSUMER_SCOPE_SEP}conn-${conn.id}`
     this.#send(conn, {
@@ -365,7 +376,24 @@ export class DaemonServer {
     })
   }
 
+  /** Verifikasi ulang TTL & pencabutan capability pada koneksi persisten. */
+  #ensureCapAlive(conn: Conn): boolean {
+    const now = Date.now()
+    if (conn.capExp !== null && now > conn.capExp) {
+      this.#sendError(conn, "INVALID_CAPABILITY", "capability telah kedaluwarsa")
+      this.#teardown(conn)
+      return false
+    }
+    if (conn.capNonce !== null && this.#revokedNonces.has(conn.capNonce)) {
+      this.#sendError(conn, "INVALID_CAPABILITY", "capability telah dicabut")
+      this.#teardown(conn)
+      return false
+    }
+    return true
+  }
+
   #onSubscribe(conn: Conn, raw: Record<string, unknown>): void {
+    if (!this.#ensureCapAlive(conn)) return
     const sid = typeof raw.sid === "string" ? raw.sid : ""
     if (!sid) {
       this.#sendError(conn, "SESSION_MISMATCH", "sid wajib diisi")
@@ -509,6 +537,7 @@ export class DaemonServer {
   }
 
   #onControl(conn: Conn, raw: Record<string, unknown>): void {
+    if (!this.#ensureCapAlive(conn)) return
     const args = isRecord(raw.args) ? (sanitizeJsonObject(raw.args) as Record<string, unknown>) : {}
     const outcome = dispatchControl(
       {
@@ -520,6 +549,7 @@ export class DaemonServer {
       },
       {
         incarnation: this.#deps.incarnation,
+        ...(this.#deps.cwd !== undefined ? { cwd: this.#deps.cwd } : {}),
         actions: this.#deps.control.actions,
         approvals: this.#deps.approvals,
         telemetry: this.#deps.control.telemetry,

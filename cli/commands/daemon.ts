@@ -591,10 +591,14 @@ async function issueCapability(
       `daemon issue: --scopes wajib berisi salah satu dari: ${DAEMON_SCOPES.join(", ")}`,
     )
   }
-  if (ttlRaw !== undefined && (!/^\d+$/.test(ttlRaw) || Number(ttlRaw) <= 0)) {
+  const MAX_CAP_TTL_MS = 86_400_000
+  if (
+    ttlRaw !== undefined &&
+    (!/^\d+$/.test(ttlRaw) || Number(ttlRaw) <= 0 || Number(ttlRaw) > MAX_CAP_TTL_MS)
+  ) {
     failUser(
       json,
-      `daemon issue: --ttl harus bilangan bulat positif (milidetik), diterima "${ttlRaw}"`,
+      `daemon issue: --ttl harus bilangan bulat positif 1..${MAX_CAP_TTL_MS} (milidetik, maks 24 jam), diterima "${ttlRaw}"`,
     )
   }
   const ep = readEndpoint(cwd)

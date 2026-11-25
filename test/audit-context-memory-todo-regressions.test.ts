@@ -116,11 +116,21 @@ afterEach(async () => {
 
 describe("Fase 1 & 2 regressions: context projection, budget, calibration, compaction, & config scope", () => {
   test("deriveSummaryFromCanonical ignores plain user prose starting with 'Previous context:'", () => {
-    const res = deriveSummaryFromCanonical(
-      [{ role: "user", content: "Previous context: my notes about the bug" }] as never,
-      { keepRecentTurns: 1 },
-    )
-    expect(res).toBeNull()
+    // Prosa user memakai titik dua TANPA newline tepat setelahnya. Itu BUKAN
+    // ringkasan kernel: marker digest asli = "Previous context:\n" — `\n`-nya
+    // yang membedakan digest dari catatan biasa.
+    for (const prose of [
+      "Previous context: my notes",
+      "Previous context: my notes about the bug",
+      "Previous context:",
+      "Previous context: my notes\nstill prose",
+    ]) {
+      expect(
+        deriveSummaryFromCanonical([{ role: "user", content: prose }] as never, {
+          keepRecentTurns: 1,
+        }),
+      ).toBeNull()
+    }
     const match = deriveSummaryFromCanonical(
       [{ role: "user", content: "Previous context (summary)\n- user asked x" }] as never,
       { keepRecentTurns: 1 },
@@ -129,6 +139,18 @@ describe("Fase 1 & 2 regressions: context projection, budget, calibration, compa
       summaryText: "Previous context (summary)\n- user asked x",
       baseSeq: 1,
     })
+    // Digest mekanikal asli (titik dua + newline) tetap dikenali.
+    const digest = "Previous context:\n[mechanical summary; incomplete] FAKTA-LAMA"
+    expect(
+      deriveSummaryFromCanonical(
+        [
+          { role: "user", content: digest },
+          { role: "assistant", content: "tail 1" },
+          { role: "user", content: "tail 2" },
+        ] as never,
+        { keepRecentTurns: 2 },
+      ),
+    ).toEqual({ summaryText: digest, baseSeq: 1 })
   })
 
   test("createAggressiveBudgetPolicy scales >= 16k windows with contextBudgetFor and preserves < 16k test ratios", () => {

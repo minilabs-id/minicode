@@ -292,7 +292,7 @@ export async function buildSystemPrompt(
     [
       "\n# How to work",
       "- Read first, then act: inspect the file before editing it; locate symbols with glob/grep.",
-      "- Prefer the dedicated tools (read_file, edit, apply_patch, git_*) over bash for file and repo access.",
+      "- Prefer the dedicated tools (read_file with offset/limit, grep with path/contextLines, glob, edit, apply_patch, git_*) over bash for file and repo access — never use bash cat/sed/awk/head/tail/grep/python to read or edit files.",
       "- For tasks with 3+ steps, maintain the todo list; keep exactly one item in_progress.",
       // Dorong delegasi paralel sejak awal, tapi jangan menaruh angka step di
       // prompt (dulu mematikan eskalasi adaptif). Model mengirim `scope`,
@@ -342,7 +342,7 @@ export async function buildSystemPrompt(
     [
       "\n# Environment",
       `- Working directory: ${cwd}`,
-      `- Platform: ${process.platform}${process.platform === "win32" ? " (shell for bash tool: cmd.exe — use dir/echo %VAR%, not ls/pwd)" : ""}`,
+      `- Platform: ${process.platform}${process.platform === "win32" ? " (shell for bash tool: cmd.exe — use dir/echo %VAR%, not ls/pwd; single quotes '...' do NOT quote >/<|& and heredocs << fail in cmd.exe)" : ""}`,
       "- Relative paths in tools resolve against the working directory above.",
     ].join("\n"),
   )

@@ -2,16 +2,19 @@
 // terlihat manual, paling mahal saat salah (fakta hilang dari ringkasan).
 
 import { describe, expect, test } from "bun:test"
+import { estimateMessages } from "#minicore/core/tokens.ts"
 import type { Message } from "#minicore/core/types.ts"
 import { LIMITS } from "../src/constants.ts"
 import {
   compactWithLlm,
   composeBoundedSummary,
   createLlmCompaction,
+  mechanicalKeepResults,
   parseCompactKeepTurns,
   summaryCharBudgetForWindow,
   summaryInputCharBudget,
 } from "../src/policy/compaction.ts"
+import { minicodeEstimator } from "../src/policy/context.ts"
 
 /** ContextStore tiruan: hanya `messages` yang dibaca kompaksi. */
 const storeOf = (messages: Message[]) => ({ messages }) as never
@@ -191,7 +194,9 @@ describe("compactWithLlm", () => {
     await compactWithLlm(storeOf(messages), { keepRecentTurns: 1, provider: spy })
     expect(seenPrompt).toContain("read_file")
     expect(seenPrompt).toContain("export const x = 1")
-    expect(seenPrompt).toContain("KEEP FACTS")
+    expect(seenPrompt).toContain("<files>")
+    expect(seenPrompt).toContain("<observations>")
+    expect(seenPrompt).toContain("Quote file paths, numbers, identifiers")
   })
 
   test("hasil tool ERROR ditandai di ringkasan", async () => {
@@ -323,13 +328,28 @@ describe("compactWithLlm", () => {
       // Panjang summary realistis (LLM diminta "max 600 tokens" ≈ 2.400 char).
       const realistic = (cycle: number) =>
         `FAKTA siklus ${cycle}: berkas diubah, tes lulus. ${"detail penting. ".repeat(160)}`
-      let history: Message[] = convo(6)
+      // Guard P0-2: ringkasan ≥ input ditolak. Fixture memakai prefix panjang
+      // (percakapan nyata yang memicu kompaksi), bukan convo(6) yang pendek,
+      // supaya ringkasan uji tetap sah sebagai hasil kompresi.
+      const verbose = (): Message[] => {
+        const out: Message[] = []
+        for (let i = 0; i < 20; i++) {
+          out.push({ role: "user", content: `pertanyaan ${i} ${"x".repeat(300)}` })
+          out.push({ role: "assistant", content: `jawaban ${i} ${"y".repeat(300)}` })
+        }
+        return out
+      }
+      let history: Message[] = verbose()
       for (let cycle = 0; cycle < 12; cycle++) {
         history = [
           ...(await compactWithLlm(storeOf(history), {
             keepRecentTurns: 1,
             provider: fakeProvider(realistic(cycle)),
           })),
+          // Tiap siklus menyisipkan percakapan baru: prior ringkasan sengaja
+          // TIDAK masuk prefix, jadi prefix harus panjang sendiri agar guard
+          // anti-echo tak salah menolak ringkasan uji.
+          ...verbose(),
           { role: "user", content: `lanjutan ${cycle}` },
           { role: "assistant", content: `jawaban lanjutan ${cycle}` },
         ]
@@ -362,10 +382,53 @@ describe("compactWithLlm", () => {
     }
     const head = String(history[0]!.content)
     expect(head.length).toBeLessThanOrEqual(LIMITS.COMPACTION_SUMMARY_MAX_CHARS)
-    // Prior di-tail, jadi fakta siklus pertama (yang paling lama) boleh hilang
-    // sementara siklus terbaru pasti ada.
+    // Prior dipangkas dari head (fresh terakhir), jadi fakta siklus pertama
+    // (paling tua) boleh hilang sementara siklus terbaru pasti ada.
     expect(head).toContain("FAKTA 5")
     expect(head).not.toContain("FAKTA 0\n")
+  })
+
+  // Regresi P1-1: compose dulu menambah SUMMARY_HEADER tiap siklus dan mengambil
+  // EKOR prior. Simulasi 3 siklus: header dobel, f2 hilang, f1 (paling tua) justru
+  // bertahan. Sekarang header ditambahkan pemanggil sekali dan prior dipangkas dari
+  // HEAD, sehingga f3 + f2 selamat dan f1 dibuang.
+  test("3 siklus: header sekali, siklus terbaru menang, yang tua dibuang", async () => {
+    const fact = (n: number) => `FAKTA-F${n} ${"detail penting. ".repeat(160)}`
+    const texts = [fact(1), fact(2), fact(3)]
+    let call = 0
+    const provider = {
+      id: "cycle",
+      models: ["m"],
+      async *stream() {
+        yield { type: "text" as const, text: texts[Math.min(call++, texts.length - 1)]! }
+        yield { type: "finish" as const, reason: "stop" as const }
+      },
+    } as never
+    // Prefix panjang diperlukan agar guard "ringkasan < input" tak menolak fixture.
+    const verbose = (): Message[] => {
+      const out: Message[] = []
+      for (let i = 0; i < 20; i++) {
+        out.push({ role: "user", content: `pertanyaan ${i} ${"x".repeat(300)}` })
+        out.push({ role: "assistant", content: `jawaban ${i} ${"y".repeat(300)}` })
+      }
+      return out
+    }
+    let history: Message[] = verbose()
+    for (let cycle = 0; cycle < 3; cycle++) {
+      history = [
+        ...(await compactWithLlm(storeOf(history), { keepRecentTurns: 1, provider })),
+        ...verbose(),
+        { role: "user", content: `lanjutan ${cycle}` },
+        { role: "assistant", content: `jawaban lanjutan ${cycle}` },
+      ]
+    }
+    const head = String(history[0]!.content)
+    expect(head).toContain("FAKTA-F3")
+    expect(head).toContain("FAKTA-F2")
+    expect(head).not.toContain("FAKTA-F1")
+    // Marker utama tepat satu: header tak boleh ikut tersalin lewat prior.
+    expect(head.match(/Previous context \(/g) ?? []).toHaveLength(1)
+    expect(head.length).toBeLessThanOrEqual(LIMITS.COMPACTION_SUMMARY_MAX_CHARS)
   })
 })
 
@@ -471,18 +534,56 @@ describe("createLlmCompaction", () => {
     const budget = summaryCharBudgetForWindow(window)
     expect(budget).toBeGreaterThan(LIMITS.COMPACTION_SUMMARY_MAX_CHARS)
     const big = `RINGKASAN-PANJANG-${"S".repeat(40_000)}`
+    // Prefix harus lebih panjang dari ringkasan uji (guard anti-echo P0-2):
+    // pakai percakapan panjang seperti kondisi nyata saat jendela 1M penuh.
+    const verbose: Message[] = []
+    for (let i = 0; i < 140; i++) {
+      verbose.push({ role: "user", content: `pertanyaan ${i} ${"x".repeat(300)}` })
+      verbose.push({ role: "assistant", content: `jawaban ${i} ${"y".repeat(300)}` })
+    }
     const s = createLlmCompaction({
       provider: fakeProvider(big),
       getContextWindowTokens: () => window,
     })
     const out = await s.compactAsync!(
-      storeOf(convo(6)),
+      storeOf(verbose),
       { keepRecentTurns: 2 },
       new AbortController().signal,
     )
     const summaryLen = String(out[0]!.content).length
     expect(summaryLen).toBeGreaterThan(LIMITS.COMPACTION_SUMMARY_MAX_CHARS)
     expect(summaryLen).toBeLessThanOrEqual(budget)
+  })
+
+  test("P1-3: ringkasan LLM melewati target dipangkas, bukan diganti mekanikal", async () => {
+    // target = 0.5 × 2000 = 1000 token. Teks bergaya kode ≈ 2,4 char/token,
+    // jadi ~4k char > target: memicu cabang fit di boundCompactionResult.
+    const window = 2_000
+    const denseSummary = "const x = { a: 1, b: [2, 3] }; ".repeat(140)
+    const verbose: Message[] = []
+    for (let i = 0; i < 80; i++) {
+      verbose.push(
+        { role: "user", content: `pertanyaan ${i} ${"const y = [1,2]; ".repeat(30)}` },
+        { role: "assistant", content: `jawaban ${i} ${"x".repeat(200)}` },
+      )
+    }
+    const s = createLlmCompaction({
+      provider: fakeProvider(denseSummary),
+      getContextWindowTokens: () => window,
+    })
+    const out = await s.compactAsync!(
+      storeOf(verbose),
+      { keepRecentTurns: 1 },
+      new AbortController().signal,
+    )
+    const target = Math.floor(window * LIMITS.COMPACTION_SUMMARY_TARGET_RATIO)
+    expect(estimateMessages(out, minicodeEstimator)).toBeLessThanOrEqual(target)
+    // Isi LLM tetap dipakai (bukan dump mekanikal).
+    expect(String(out[0]!.content)).toContain("const x = { a: 1")
+    expect(String(out[0]!.content)).not.toContain("[mechanical summary;")
+    // Penanda ringan hanya di bukti, ikut ke kompaksi mekanikal berikutnya.
+    const next = mechanicalKeepResults(storeOf([...out, { role: "user", content: "lanjut" }]), 1)
+    expect(String(next[0]!.content)).toContain("[token-fitted]")
   })
 })
 
@@ -515,18 +616,53 @@ test("kompaksi mekanis merangkum tool output di dalam satu turn aktif", () => {
 })
 
 describe("F3.1 anti-thrash kompaksi LLM", () => {
-  // convo(10) + keep 9 = prefix 2 pesan → ringkasan mengganti 2 jadi 1:
-  // progres 1/20 = 5% < 10% = tak berprogres, dua kali = thrash.
-  const narrow = () => storeOf(convo(10))
   const sig = () => new AbortController().signal
   test("2× tak berprogres beruntun → jalur LLM mati sesi-ini (lempar ke mekanikal)", async () => {
-    // Gagal di kode lama: panggilan ketiga tetap memanggil provider (sukses).
-    const s = createLlmCompaction({ provider: fakeProvider("RINGKASAN") })
-    await s.compactAsync!(narrow(), { keepRecentTurns: 9 }, sig())
-    await s.compactAsync!(narrow(), { keepRecentTurns: 9 }, sig())
-    await expect(s.compactAsync!(narrow(), { keepRecentTurns: 9 }, sig())).rejects.toThrow(
+    // P1-2: progres kini diukur dari prefix (scope yang dikirim ke LLM), bukan
+    // seluruh store. `convo(10)` + keep=9 dulu dianggap thrash karena 1/20 dari
+    // store <10%; dengan denominator prefix, 2→1 = 50% → justru sehat. Thrash
+    // asli: prefix SATU pesan diganti ringkasan hampir sepanjang itu — cacah
+    // tetap dan token tak turun, dua kali berturut.
+    const s = createLlmCompaction({ provider: fakeProvider("S".repeat(110)) })
+    const stuck = () => storeOf([{ role: "user", content: "P".repeat(120) }, ...convo(5)])
+    await s.compactAsync!(stuck(), { keepRecentTurns: 5 }, sig())
+    await s.compactAsync!(stuck(), { keepRecentTurns: 5 }, sig())
+    await expect(s.compactAsync!(stuck(), { keepRecentTurns: 5 }, sig())).rejects.toThrow(
       /disabled after thrash/,
     )
+  })
+  test("P1-2: prefix kecil di store besar tak memicu thrash (denominator = prefix)", async () => {
+    // convo(65) = 130 pesan, keep=64 → prefix 2 pesan, ringkasan menggantinya
+    // jadi 1. Terhadap store progres cuma ~0,8% (BUG lama → LLM dimatikan),
+    // terhadap prefix progres 1/2 = 50% > ambang → LLM tetap aktif 3×.
+    const s = createLlmCompaction({ provider: fakeProvider("RINGKASAN PADAT") })
+    const big = () => storeOf(convo(65))
+    for (let i = 0; i < 3; i++) {
+      const out = await s.compactAsync!(big(), { keepRecentTurns: 64 }, sig())
+      expect(String(out[0]!.content)).toContain("RINGKASAN PADAT")
+      expect(out).toHaveLength(129)
+    }
+  })
+  test("ringkasan jauh lebih pendek dari prefix → progres token me-reset streak", async () => {
+    // Prefix satu pesan besar (30 token estimator) → ringkasan pendek + header
+    // (~24 token). Urutan: rendah → TINGGI → rendah. Kalau streak tak di-reset,
+    // putaran ketiga membuat 2× rendah dan LLM mati; dengan reset tetap hidup.
+    let call = 0
+    const provider = {
+      id: "seq",
+      models: ["m"],
+      async *stream() {
+        const texts = ["S".repeat(110), "RINGKASAN", "S".repeat(110)]
+        yield { type: "text" as const, text: texts[Math.min(call++, texts.length - 1)]! }
+        yield { type: "finish" as const, reason: "stop" as const }
+      },
+    } as never
+    const s = createLlmCompaction({ provider })
+    const small = () => storeOf([{ role: "user", content: "P".repeat(120) }, ...convo(5)])
+    await s.compactAsync!(small(), { keepRecentTurns: 5 }, sig())
+    await s.compactAsync!(small(), { keepRecentTurns: 5 }, sig())
+    const out = await s.compactAsync!(small(), { keepRecentTurns: 5 }, sig())
+    expect(String(out[0]!.content)).toContain("S".repeat(110))
   })
   test("kompaksi berprogres me-reset streak (tak pernah dimatikan)", async () => {
     const s = createLlmCompaction({ provider: fakeProvider("RINGKASAN PADAT") })

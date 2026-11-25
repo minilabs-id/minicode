@@ -346,6 +346,7 @@ describe("TUI table transcript", () => {
     const source = [`${tick.repeat(3)}`, "| a | b |", "| --- | --- |", `${tick.repeat(3)}`].join(nl)
     for (const part of source) bus.emit("provider:text", { text: part })
     bus.emit("turn:completed", {})
-    expect(transcript.view(80, 10, 0).map(stripAnsi)).toContain("   | a | b |")
+    // v0.43: margin 3 milik FRAME, bukan spasi pada teks tabel.
+    expect(transcript.view(80, 10, 0).map(stripAnsi)).toContain("| a | b |")
   })
 })

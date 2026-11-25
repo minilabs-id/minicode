@@ -161,7 +161,7 @@ export const readFileTool: Tool = {
   // v7.33 (wire contract): tag FILE SEARCH supaya model mengelompokkannya
   // dengan glob/grep tanpa membaca seluruh teks deskripsi.
   description:
-    "FILE SEARCH: Read a text file with line numbers (N: <line>) and a next-offset footer. Large files MUST be paged via offset/limit (max 2MB per file, 5000 lines/call, 2000 chars/line). Prefer this over `cat` in bash. Cannot read outside the workspace, secrets, or node_modules.",
+    "FILE SEARCH: Read a text file with line numbers (N: <line>) and a next-offset footer. Large files MUST be paged via offset/limit (max 2MB per file, 5000 lines/call, 2000 chars/line). Prefer this (with offset/limit) over bash cat/sed/awk/head/tail. Cannot read outside the workspace, secrets, or node_modules.",
   parameters: {
     type: "object",
     properties: {
@@ -179,6 +179,7 @@ export const readFileTool: Tool = {
     let raw: string
     try {
       if (st.isDirectory()) throw new Error(`path is a directory, not a file: ${p}`)
+      if (!st.isFile()) throw new Error(`refusing to read non-regular file: ${p}`)
 
       const paged = offset != null || limit != null
       // Hard cap absolut 50M bahkan untuk paged — cegah OOM 1GB via offset/limit

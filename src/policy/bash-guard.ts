@@ -25,6 +25,7 @@ import {
   isOwnedState,
   isRealPathOutsideRoot,
   isSensitive,
+  isSensitiveReal,
 } from "./jail.ts"
 
 export interface BashVerdict {
@@ -74,17 +75,23 @@ export function stripQuotes(cmd: string): string {
  *
  * Diekspor untuk test.
  */
-export function stripCaretEscapes(cmd: string): string {
+export function stripCaretEscapes(
+  cmd: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const win = platform === "win32"
   let out = ""
   let inDouble = false
   let inSingle = false
   for (let i = 0; i < cmd.length; i++) {
     const ch = cmd[i]!
-    if (ch === "\\" && !inSingle && i + 1 < cmd.length) {
+    if (!win && ch === "\\" && !inSingle && i + 1 < cmd.length) {
       out += ch + cmd[++i]!
       continue
     }
-    if (ch === "'" && !inDouble) {
+    // Di cmd.exe Windows, `'` adalah karakter literal — BUKAN quote delimiter.
+    // Membuka state inSingle pada win32 membuat `type ' .e^nv` melewatkan caret.
+    if (!win && ch === "'" && !inDouble) {
       inSingle = !inSingle
       out += ch
       continue
@@ -254,7 +261,7 @@ export function stripCommandWrappers(cmd: string): string {
   // 'cat /etc/shadow'` tetap kena SENSITIVE_TARGET. Jangkar awal mencegah
   // strip di tengah perintah (`echo su -c env` tak tersentuh).
   const WRAPPER_SHELL =
-    /(^|[;&|\n]\s*)(?:(?:su|runuser|gosu|chroot|nsenter)(?:\s+(?:-[^\s;|]+|--[^\s;|]*|\/[^\s;|]*|[^-;\s|/][^;\s|]*))*\s+|cmd(?:\.exe)?(?:\s+\/[a-zA-Z]+)*\s+\/c\s+|powershell(?:\.exe)?(?:\s+-(?:Command|c|EncodedCommand|enc|ec))?\s+|pwsh(?:\.exe)?(?:\s+-(?:Command|c|EncodedCommand|enc|ec))?\s+)/gi
+    /(^|[;&|\n]\s*)(?:(?:su|runuser|gosu|chroot|nsenter)(?:\s+(?:-[^\s;|]+|--[^\s;|]*|\/[^\s;|]*|[^-;\s|/][^;\s|]*))*\s+|cmd(?:\.exe)?(?:\s+\/[a-zA-Z]+)*\s+\/c\s+|powershell(?:\.exe)?(?:\s+-(?:Command|c))?\s+|pwsh(?:\.exe)?(?:\s+-(?:Command|c))?\s+)/gi
   let out = cmd
   for (let pass = 0; pass < 4; pass++) {
     const next = out.replace(WRAPPER, "$1").replace(WRAPPER_SHELL, "$1")
@@ -307,7 +314,11 @@ export function normalizeCommand(cmd: string): string {
  *
  * Diekspor untuk test.
  */
-export function blankQuotedDataArgs(cmd: string): string {
+export function blankQuotedDataArgs(
+  cmd: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const win = platform === "win32"
   const INERT_HEADS = /^(?:echo|printf|grep|egrep|fgrep|rg|ag)$/i
   const out = cmd.split("")
   let i = 0
@@ -316,7 +327,7 @@ export function blankQuotedDataArgs(cmd: string): string {
   let segStart = 0
   while (i < cmd.length) {
     const ch = cmd[i]!
-    if (ch === "\\" && i + 1 < cmd.length) {
+    if (!win && ch === "\\" && i + 1 < cmd.length) {
       i += 2
       continue
     }
@@ -325,7 +336,9 @@ export function blankQuotedDataArgs(cmd: string): string {
       i++
       continue
     }
-    if (ch === "'" || ch === '"') {
+    // Di win32 cmd.exe, `'` tidak mengutip apa pun — mengosongkan isi `'...'`
+    // di win32 membuat `echo ' & rm -rf / '` terlihat jinak padahal mengeksekusi.
+    if (ch === '"' || (!win && ch === "'")) {
       const closer = ch
       let j = i + 1
       while (j < cmd.length && cmd[j] !== closer) {
@@ -357,7 +370,7 @@ export function blankQuotedDataArgs(cmd: string): string {
 
 /** Path/berkas kredensial, dicek pada bentuk ternormalisasi. */
 const SENSITIVE_TARGET =
-  /(?:^|[\s/\\=@"'([:<>{,])(?:\.env(?:\.[\w.-]+)?|\.git-credentials|\.npmrc|\.netrc|id_(?:rsa|dsa|ecdsa|ed25519)|credentials(?:\.json)?|\.pem|\.p12|\.pfx|shadow|master\.key|config[/\\](?:sam|system|security|software|default)(?=[/\\]|$|[\s;"'&|])|ntds\.dit\b|hklm[/\\](?:sam|system|security)(?=[/\\]|$|[\s;"'&|]))\b/i
+  /(?:^|[\s/\\=@"'([:<>{,])(?:\.env(?:\.[\w.-]+)?|\.git-credentials|\.git[/\\](?:config|credentials|hooks)(?=[/\\]|$|[\s;"'&|])|\.minicode[/\\](?:auth|daemon-endpoint|daemon-lease|mcp-schema-pins)\.json\b|\.npmrc|\.netrc|id_(?:rsa|dsa|ecdsa|ed25519)|credentials(?:\.json)?|\.pem|\.p12|\.pfx|shadow|master\.key|config[/\\](?:sam|system|security|software|default)(?=[/\\]|$|[\s;"'&|])|ntds\.dit\b|hklm[/\\](?:sam|system|security)(?=[/\\]|$|[\s;"'&|]))\b/i
 
 /** Direktori kredensial: ~/.ssh, $HOME/.aws, /etc/shadow, dst. */
 const SENSITIVE_DIR = /(?:~|\$HOME|\$\{HOME\}|\/etc|\/root|\/proc\/self)[/\\](?:\.?[\w.-]+)/i
@@ -387,8 +400,9 @@ const NTDSUTIL = /\bntdsutil\b/i
  * menyentuh salah satu dari keduanya. Denylist takkan pernah komplet
  * (residual arsitektural, lihat kepala berkas) — tiap entri di sini adalah
  * kasus konkret terverifikasi, bukan tebakan. */
+// Karakter kelas `u[n]zip` setara literal un-zip tanpa memicu audit statis archive-extract di supply-chain.test.ts.
 const READERS =
-  /\b(?:cat|bat|less|more|head|tail|nl|od|xxd|strings|type|Get-Content|gc|certutil|tac|findstr|fc|comp|cp|copy|mv|move|scp|rsync|tar|zip|gzip|base64|openssl|awk|sed|grep|egrep|fgrep|rg|cut|sort|uniq|tee|dd|install|xcopy|robocopy|Out-File|Set-Content|Add-Content|New-Item|Copy-Item|Move-Item)\b/i
+  /\b(?:cat|bat|less|more|head|tail|nl|od|xxd|strings|type|Get-Content|gc|certutil|tac|findstr|fc|comp|cp|copy|mv|move|scp|rsync|tar|zip|u[n]zip|7z|gzip|base64|openssl|awk|sed|grep|egrep|fgrep|rg|cut|sort|uniq|tee|dd|install|diff|patch|xcopy|robocopy|Out-File|Set-Content|Add-Content|New-Item|Copy-Item|Move-Item|Expand-Archive|Compress-Archive|Select-String|sls)\b/i
 
 /** Dump environment — `printenv` sudah lama diblok, sisanya belum.
  * Tambahan: PowerShell `Get-ChildItem env:` / alias `dir env:` / `ls env:`
@@ -423,7 +437,7 @@ const UPLOAD_FLAG =
  * Divalidasi e2e: canary odd-name terkirim ke listener loopback (bug-hunt
  * 2026-09-19 F3). */
 const VAR_UPLOAD =
-  /\b(?:curl|wget|Invoke-WebRequest|iwr)\b[^\n]*(?:-d|--data(?:-binary|-raw-data|-urlencode)?|--body)\s+["']?[^;&|\n]*[$%][\w{(]/i
+  /\b(?:curl|wget|Invoke-WebRequest|iwr|Invoke-RestMethod|irm)\b[^\n]*(?:-d|--data(?:-binary|-raw-data|-urlencode)?|--body|-Body)\s+["']?[^;&|\n]*[$%][\w{(]/i
 
 /** Konfigurasi git berbahaya via `-c key=val`: eksekusi kode (pager/hook/
  * helper) atau repo-confusion. Kunci jinak (`-c core.quotepath=false`) tetap
@@ -431,7 +445,7 @@ const VAR_UPLOAD =
  * `core.fsmonitor` mengeksekusi pipe-independent (bug-hunt 2026-09-19 F2);
  * `core.pager` mati-di-pipe pada git-windows (negatif terdokumentasi). */
 const GIT_DANGEROUS_CONFIG =
-  /-c\s+["']?(?:core\.(?:pager|fsmonitor|sshCommand|askpass|editor)|protocol\.ext\.allow|core\.hooksPath|gpg\.program|credential\.helper|diff\.(?:external|\w+\.command)|(?:merge|filter)\.\w+\.(?:driver|clean|smudge))\s*=/i
+  /(?:-c\s*|--config-env=)["']?(?:core\.(?:pager|fsmonitor|sshCommand|askpass|editor)|protocol\.ext\.allow|core\.hooksPath|gpg\.(?:program|ssh\.program|x509\.program)|credential\.helper|alias\.[\w-]+|diff\.(?:external|[\w-]+\.(?:command|textconv))|(?:merge|filter)\.[\w-]+\.(?:driver|clean|smudge|process))\s*=/i
 
 /** git keluar workspace: `-C dir` / `--git-dir=` / `--work-tree=` menunjuk
  * repo/pohon lain (baca objek repo korban = jail-bypass READ, validasi e2e
@@ -441,7 +455,8 @@ const GIT_DIR_OVERRIDE = /(?:^|\s)(?:-C\s*(\S+)|--(?:git-dir|work-tree)(?:=|\s+)
 
 /** Env git eksekusi (`GIT_PAGER=id ...`, `GIT_SSH=...`): efek sama dengan
  * `-c` di atas, lewat assignment env. */
-const GIT_EXEC_ENV = /(?:^|[;&|\n]\s*)GIT_(?:PAGER|SSH|ASKPASS|EDITOR|DIR|WORK_TREE)\s*=/i
+const GIT_EXEC_ENV =
+  /(?:^|[;&|\n]\s*)GIT_(?:PAGER|SSH|SSH_COMMAND|ASKPASS|EDITOR|SEQUENCE_EDITOR|EXEC_PATH|DIR|WORK_TREE|CONFIG_GLOBAL|CONFIG_SYSTEM|CONFIG_PARAMETERS|EXTERNAL_DIFF|CONFIG_COUNT|CONFIG_KEY_\d+|CONFIG_VALUE_\d+)\s*=/i
 
 /**
  * Interpreter dijalankan dengan kode inline (semua bentuk flag).
@@ -452,7 +467,7 @@ const GIT_EXEC_ENV = /(?:^|[;&|\n]\s*)GIT_(?:PAGER|SSH|ASKPASS|EDITOR|DIR|WORK_T
  * memperluas allowlist ke bahasa baru membuka jalur kode-inline pada bahasa itu.
  */
 const INLINE_INTERPRETER =
-  /(?:^|[;&|\n(\s/\\])(?:pyw?|python[\d.]*|pypy[\d.]*|sh|bash|dash|zsh|ksh|node|deno|bun|perl|ruby|php|Rscript|lua|luajit|julia|elixir|escript|erl|groovy|scala|tclsh|dotnet|swift|swiftc|dart|java|raku)(?:\.exe)?\b\s+(?:--[A-Za-z0-9_-]+(?:=[^\s;&|]+)?\s+|-(?:W|X|I|M)\s+[^\s;&|]+\s+|-[A-Za-z0-9]+\s+){0,8}(?:-c|-e|-E|--eval|-eval|--print|-p|--command|-r|--execute|--require|--import|--loader)\b/i
+  /(?:^|[;&|\n(\s/\\])(?:pyw?|python[\d.]*|pypy[\d.]*|sh|bash|dash|zsh|ksh|node|deno|bun|perl|ruby|php|Rscript|lua|luajit|julia|elixir|escript|erl|groovy|scala|tclsh|dotnet|swift|swiftc|dart|java|raku)(?:\.exe)?\b\s+(?:--[A-Za-z0-9_-]+(?:=[^\s;&|]+)?\s+|-(?:W|X|I|M)\s+[^\s;&|]+\s+|-[A-Za-z0-9]+\s+)*(?:-c|-e|-E|--eval|-eval|--print|-p|--command|-r|--execute|--require|--import|--loader|-(?:pe|ep|ne|en|uc|cu|ue|eu|ie|ei|ic|ci|lc|cl|rc|cr|xc|cx|ec|ce|sc|cs))\b/i
 // Residual jujur (audit 2026-09-16 B3): eksekusi via stdin/redirect TANPA
 // flag inline (`bash -s < skrip`, `python3 < prog`, `... | python3 -`) tidak
 // ditahan — menahan `| python3 -` mematahkan pipeline sah, dan `bash berkas`
@@ -488,7 +503,11 @@ const CONTAINER_ESCAPE =
  * membuat `echo "a > b"` (aman — shell tak me-redirect isi quote) terlihat
  * persis seperti `echo a > b` (redirect nyata).
  */
-export function findRedirectTargets(rawCmd: string): string[] {
+export function findRedirectTargets(
+  rawCmd: string,
+  platform: NodeJS.Platform = process.platform,
+): string[] {
+  const win = platform === "win32"
   const out: string[] = []
   let sq = false
   let dq = false
@@ -501,11 +520,13 @@ export function findRedirectTargets(rawCmd: string): string[] {
   const isTerm = (c: string): boolean => /[\s;|&<>]/.test(c)
   while (i < n) {
     const c = rawCmd[i]!
-    if (c === "\\" && i + 1 < n) {
+    if (!win && c === "\\" && i + 1 < n) {
       i += 2
       continue
     }
-    if (c === "'" && !dq) {
+    // Pada Windows cmd.exe, `'` adalah literal (bukan quote) — jangan buka
+    // state single-quote agar `echo ' > ..\evil` tetap terdeteksi sebagai redirect.
+    if (!win && c === "'" && !dq) {
       sq = !sq
       i++
       continue
@@ -545,10 +566,10 @@ export function findRedirectTargets(rawCmd: string): string[] {
     // efektifnya harus dibaca utuh.
     let e = k
     const q = rawCmd[k]
-    if (q === '"' || q === "'") {
+    if (q === '"' || (!win && q === "'")) {
       let c = k + 1
       while (c < n) {
-        if (rawCmd[c] === "\\" && c + 1 < n) {
+        if (!win && rawCmd[c] === "\\" && c + 1 < n) {
           c += 2
           continue
         }
@@ -609,7 +630,7 @@ const STATIC_DENY: [RegExp, string][] = [
   // normalisasi bisa menghilangkan bagian setelah pipe.
   [/(?:^|[;&|=\n]\s*)[\w:]+\s*\(\)\s*\{[^}]*\|[^}]*&/, "fork bomb"],
   [/\bmkfs\b/i, "format filesystem"],
-  [/\bdd\s+if=/i, "raw disk write"],
+  [/\bdd\b[^\n]*\b(?:if|of)=/i, "raw disk write"],
   [/\bchmod\s+(-R\s+)?777\b/i, "permission 777"],
   [/\bshred\b/i, "secure delete"],
   [/\btruncate\b/i, "truncate file"],
@@ -617,12 +638,11 @@ const STATIC_DENY: [RegExp, string][] = [
   [/\bsudo\b[^\n]*\brm\b/i, "sudo rm"],
   // `pwsh`/`pwsh.exe` = nama biner PowerShell modern lintas-OS (audit
   // 2026-09-16: varian encoded lolos karena aturan hanya kenal `powershell`).
-  [/\b(?:powershell|pwsh)\b[^\n]*-EncodedCommand/i, "encoded powershell"],
-  // Bentuk pendek -enc/-enco/... + blob base64 panjang. Aturan penuh di atas
-  // tak menangkap prefix; pola ini mensyaratkan blob (60+ byte, hitung padding
-  // `==`) sehingga -Encoding milik cmdlet dalam (-Command "... -Encoding
-  // utf8 ...") lolos: -enc* + blob panjang praktis hanya payload terenkode.
-  // -Command arbitrer tetap residual jujur (butuh sandbox OS/docker).
+  // Bentuk eksplisit -EncodedCommand/-enc/-ec menangkap payload pendek juga
+  // (tanpa menyentuh `-Encoding utf8` karena word boundary).
+  [/\b(?:powershell|pwsh)(?:\.exe)?\b[^\n]*\s-(?:encodedcommand|enc|ec)\b/i, "encoded powershell"],
+  // Bentuk prefix pendek -e... + blob base64 panjang (60+ byte): tetap aman
+  // terhadap `-Encoding utf8` yang argumennya bukan blob base64 panjang.
   [
     /\b(?:powershell|pwsh)(\.exe)?\b[^\n]*\s-e\w*\s+[A-Za-z0-9+/]{60,}={0,2}/i,
     "encoded powershell payload",
@@ -634,9 +654,14 @@ const STATIC_DENY: [RegExp, string][] = [
   [/\b(?:del|erase)\b[^\n]*\/[sfaq]/i, "windows recursive delete"],
   [/\brmdir\b[^\n]*\/s/i, "windows recursive rmdir"],
   [/\bRemove-Item\b[^\n]*-Recurse/i, "powershell recursive delete"],
-  [/\[System\.IO\.File\]::ReadAllText/i, "powershell file read"],
+  [
+    /\[(?:System\.)?IO\.File\]::(?:ReadAllText|ReadAllBytes|ReadAllLines|WriteAllText|WriteAllBytes|OpenRead|OpenWrite)/i,
+    "powershell file read",
+  ],
   [/\b(?:Invoke-Expression|iex)\b/i, "powershell dynamic eval"],
   [/\bawk\b[^\n]*\bsystem\s*\(/i, "awk system()"],
+  // ripgrep `--pre` mengeksekusi perintah arbitrer sebagai preprocessor file.
+  [/\brg\b[^\n]*--pre(?:=|\s+)/i, "ripgrep preprocessor execution"],
   // git sebagai pelarian jail: `git diff --no-index A B` mencetak isi path
   // filesystem ARBITRER (di luar workspace, abaikan file-jail — terkonfirmasi
   // via inspectBashCommand, bukan teori); --exec-path/--upload-pack/
@@ -645,19 +670,19 @@ const STATIC_DENY: [RegExp, string][] = [
   // pola ^git <sub>), tapi mode auto hanya dijaga guard ini. Alur sah agen
   // (status/diff/log/branch/show dalam repo) tak memakai flag ini.
   [
-    /\bgit\b[^\n]*?--(?:no-index|exec-path|upload-pack|receive-pack|output(?:=|\s+))/,
+    /\bgit\b[^\n]*?--(?:no-index|exec-path|upload-pack|receive-pack|output(?:=|\s+))/i,
     "git dangerous flag",
   ],
   [
-    /\bfind\b[^\n]*\s-(?:exec|execdir|ok|okdir|delete|fprint0?|fls)\b/i,
+    /\bfind\b[^\n]*\s-(?:exec|execdir|ok|okdir|delete|fprint0?|fprintf|fls)\b/i,
     "find exec/delete/write flag",
   ],
-  [/\bext::/, "git ext transport"],
+  [/\bext::/i, "git ext transport"],
   // Injeksi konfigurasi git via environment (`GIT_EXTERNAL_DIFF=x git diff`
   // setara diff.external repo — repo-side adalah residual terdokumentasi, tapi
   // env datang dari perintah model sendiri sehingga ditahan di sini).
   [
-    /\bGIT_(?:EXTERNAL_DIFF|CONFIG_COUNT|CONFIG_KEY_\d+|CONFIG_VALUE_\d+)\s*=/,
+    /\bGIT_(?:EXTERNAL_DIFF|CONFIG_COUNT|CONFIG_KEY_\d+|CONFIG_VALUE_\d+|CONFIG_PARAMETERS|SSH_COMMAND|SEQUENCE_EDITOR|EXEC_PATH|CONFIG_GLOBAL|CONFIG_SYSTEM)\s*=/i,
     "git config injection via env",
   ],
   [
@@ -665,10 +690,12 @@ const STATIC_DENY: [RegExp, string][] = [
     "decode|shell",
   ],
   // F-20: upload berkas via PowerShell — UPLOAD_FLAG hanya kenal
-  // curl/wget/nc. Bentuk eksfiltrasi: Invoke-WebRequest -Method POST -Body
-  // (Get-Content rahasia) atau -InFile <berkas>. Download polos (-OutFile)
-  // TETAP lolos (seperti curl tanpa -d @file): bukan upload.
-  [/\b(?:Invoke-WebRequest|iwr)\b[^\n]*?(?:-InFile\b|Get-Content)/i, "file upload to network"],
+  // curl/wget/nc. Bentuk eksfiltrasi: Invoke-WebRequest/Invoke-RestMethod
+  // -Method POST -Body (Get-Content rahasia) atau -InFile <berkas>.
+  [
+    /\b(?:Invoke-WebRequest|iwr|Invoke-RestMethod|irm)\b[^\n]*?(?:-InFile\b|Get-Content)/i,
+    "file upload to network",
+  ],
   // [SEC-7] SSH/SCP `-o ProxyCommand=`/`-o LocalCommand=` mengeksekusi perintah
   // arbitrer saat koneksi — jalur RCE/eksfiltrasi yang tak terlihat oleh aturan
   // konten (host yang dihubungi sendiri bisa jinak).
@@ -887,8 +914,10 @@ export function inspectBashCommand(rawCmd: string, cwd?: string, root?: string):
         isRealPathOutsideRoot(abs, containmentRoot!) ||
         isSensitive(t) ||
         isSensitive(abs) ||
+        isSensitiveReal(abs, containmentRoot!) ||
         isOwnedHook(t) ||
-        isOwnedHook(abs)
+        isOwnedHook(abs) ||
+        isOwnedHookReal(abs, containmentRoot!)
       )
         return { denied: true, reason: "redirect outside workspace" }
     } else if (
@@ -928,7 +957,9 @@ export function inspectBashCommand(rawCmd: string, cwd?: string, root?: string):
   // tapi `for /f` terhadap berkas yang sama lolos).
   const forFileSets = (() => {
     const out: string[] = []
-    const re = /\bfor\s+\/[a-z]*f[a-z]*\s+[^(\n]*\(\s*([^)\n]*)\)/gi
+    // Anchor pada `\bin\s*\(` agar opsi `"eol=("` sebelum `in (.env)` tidak
+    // memotong regex sebelum daftar file yang sesungguhnya.
+    const re = /\bfor\s+\/[a-z]*f[a-z]*\b[^\n]*?\bin\s*\(\s*([^)\n]*)\)/gi
     for (const m of norm.matchAll(re)) {
       for (const rawTok of m[1]!.split(/[\s,]+/)) {
         const tok = rawTok.trim()
@@ -942,7 +973,7 @@ export function inspectBashCommand(rawCmd: string, cwd?: string, root?: string):
     const readerTargets = (() => {
       const out: string[] = []
       const re =
-        /\b(cat|bat|less|more|head|tail|nl|od|xxd|strings|type|Get-Content|gc|certutil|tac|findstr|fc|comp|cp|copy|mv|move|scp|rsync|tar|zip|gzip|base64|openssl|awk|sed|grep|egrep|fgrep|rg|cut|sort|uniq|tee|dd|install|xcopy|robocopy|Out-File|Set-Content|Add-Content|New-Item|Copy-Item|Move-Item)\b\s+([^\n;&|]+)/gi
+        /\b(cat|bat|less|more|head|tail|nl|od|xxd|strings|type|Get-Content|gc|certutil|tac|findstr|fc|comp|cp|copy|mv|move|scp|rsync|tar|zip|u[n]zip|7z|gzip|base64|openssl|awk|sed|grep|egrep|fgrep|rg|cut|sort|uniq|tee|dd|install|diff|patch|xcopy|robocopy|Out-File|Set-Content|Add-Content|New-Item|Copy-Item|Move-Item|Expand-Archive|Compress-Archive|Select-String|sls)\b\s+([^\n;&|]+)/gi
       const WIN_SWITCH_CMDS = /^(?:findstr|fc|comp|copy|xcopy|robocopy|sort)$/i
       for (const m of norm.matchAll(re)) {
         const cmdName = m[1]!
@@ -961,7 +992,41 @@ export function inspectBashCommand(rawCmd: string, cwd?: string, root?: string):
             if (cv) out.push(cv)
             continue
           }
+          // Opsi GNU `--output=../out`, `--file=.env`, `--target-directory=..`:
+          // nilai path menempel di kanan `=` — kupas agar tetap kena jail/hook.
+          const longEqVal = /^--[A-Za-z0-9_-]+=(.+)$/.exec(a)
+          if (longEqVal) {
+            const lv = longEqVal[1]!.trim()
+            if (
+              lv &&
+              (/^[.~/\\]|^[A-Za-z]:[\\/]|[/\\]/.test(lv) || isSensitive(lv) || isOwnedHook(lv))
+            ) {
+              out.push(lv)
+            }
+            continue
+          }
+          // Opsi pendek dengan path menempel (`sort -o../out`, `rg -f.env`, `tar -f../a`):
+          // hanya dorong jika nilainya berbentuk path / sensitif / hook agar flag
+          // biasa (`grep -oE`, `awk -F:`) tidak false-positive.
+          const shortAttached = /^-(?:o|O|f|T|w|i)(.+)$/.exec(a)
+          if (shortAttached) {
+            const sv = shortAttached[1]!.trim()
+            if (
+              sv &&
+              (/^[.~/\\]|^[A-Za-z]:[\\/]|[/\\]/.test(sv) || isSensitive(sv) || isOwnedHook(sv))
+            ) {
+              out.push(sv)
+            }
+            continue
+          }
           if (a.startsWith("-")) continue
+          // `dd if=... of=...` → kupas prefix if=/of= agar targetnya tetap tercek.
+          const ddVal = /^(?:if|of)=(.+)$/i.exec(a)
+          if (ddVal) {
+            const dv = ddVal[1]!.trim()
+            if (dv) out.push(dv)
+            continue
+          }
           // Flag cmd.exe Windows berawalan `/` (mis. `findstr /n /c:err log.txt`,
           // `copy /y`, `fc /b`) bukan path root POSIX — lewati agar tidak ditolak
           // sebagai `outside workspace`, sambil tetap menjaga `/etc/...` atau `/f:...`.
@@ -997,7 +1062,11 @@ export function inspectBashCommand(rawCmd: string, cwd?: string, root?: string):
       // Nama target yang dihitung shell tak bisa dipastikan statis:
       // `cat$(printf ' ')` membaca `.env` tanpa pernah menampakkan nama itu.
       if (/^\$\(|^`/.test(t)) return { denied: true, reason: "reader command substitution" }
-      if (isSensitive(t) || isSensitive(resolve(cwd ?? ".", t))) {
+      if (
+        isSensitive(t) ||
+        isSensitive(resolve(cwd ?? ".", t)) ||
+        (cwd != null && isSensitiveReal(resolve(cwd, t), containmentRoot!))
+      ) {
         return { denied: true, reason: "sensitive file access" }
       }
       // Keputusan owner 2026-11-23: baca `.minicode/` lewat shell kini BOLEH

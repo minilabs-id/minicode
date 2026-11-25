@@ -159,14 +159,17 @@ async function waitForScreenText(
   tui: TuiPtyHandle,
   needle: string,
   timeoutMs = 15_000,
-): Promise<{ row: number; endX: number }> {
+): Promise<{ row: number; startX: number; endX: number }> {
   const start = Date.now()
   for (;;) {
     const screen = parseScreenBuffer(tui.raw(), PTY_COLS, PTY_ROWS)
     const idx = screen.findIndex((line) => line.includes(needle))
     if (idx >= 0) {
-      // Kolom ujung = panjang baris terender + 1 (1-based, seperti terminal).
-      return { row: idx + 1, endX: (screen[idx]!.length ?? 0) + 1 }
+      const line = screen[idx]!
+      const col = line.indexOf(needle)
+      // Kolom mulai & ujung 1-based; hindari margin kiri 3 kolom saat drag mouse.
+      const startX = Math.max(1, col + 1)
+      return { row: idx + 1, startX, endX: Math.max(startX + needle.length, line.length + 1) }
     }
     if (Date.now() - start > timeoutMs) {
       throw new Error(
@@ -321,8 +324,8 @@ describe("PTY: boot & kontrak layar", () => {
         // sama dengan "transport tak mengantar SGR", tapi akar masalahnya
         // berbeda: transport-nya sehat. Pola yang sama (baris target dari
         // layar) dipakai test/tui-app.test.ts untuk fake TTY.
-        const { row, endX } = await waitForScreenText(tui, "selected line")
-        tui.send(`\x1b[<0;1;${row}M\x1b[<32;${endX};${row}M\x1b[<0;${endX};${row}m\x03`)
+        const { row, startX, endX } = await waitForScreenText(tui, "selected line")
+        tui.send(`\x1b[<0;${startX};${row}M\x1b[<32;${endX};${row}M\x1b[<0;${endX};${row}m\x03`)
         await tui.waitFor((raw) => raw.includes("\x1b]52;c;"), 10000)
         expect(tui.raw()).toContain(Buffer.from("selected line", "utf8").toString("base64"))
         tui.send("\x04")

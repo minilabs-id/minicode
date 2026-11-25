@@ -326,6 +326,15 @@ export async function hasProviderInLocalConfig(
   return localCfg.providers.some((p) => p.id === providerId)
 }
 
+// Provenance in-memory untuk provider yang berasal dari `.minicode/config.json`
+// repo lokal. Dipakai buildProviderListAsync untuk menolak peminjaman keystore
+// OS global / token OAuth global oleh baseUrl yang ditentukan repo.
+const localConfigProviders = new WeakSet<ProviderEntry>()
+
+export function isLocalConfigProvider(p: ProviderEntry): boolean {
+  return localConfigProviders.has(p)
+}
+
 export async function loadConfig(
   cwd = process.cwd(),
   opts: { allowLocal?: boolean } = {},
@@ -354,6 +363,7 @@ export async function loadConfig(
   // saja (fail-closed). Tulis eksplisit (--local) tak terpengaruh.
   if (opts.allowLocal) {
     localCfg = await loadLocalConfigOnly(cwd)
+    for (const p of localCfg.providers) localConfigProviders.add(p)
   }
   // generic merge helper — deduplicate DRY
   function mergeByKey<T>(global: T[], local: T[], keyFn: (v: T) => string): T[] {

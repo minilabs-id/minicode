@@ -61,13 +61,13 @@ function setup(minimizeActivity = false, tools: ToolDef[] = [{ id: "c1", name: "
   }
 }
 
-// Baris rekap = 3 spasi margin + angka kategori, tanpa prefix simbol;
-// baris tool (`› …`) tidak cocok dengan pola ini.
+// Baris rekap = angka kategori di kolom 0 (margin 3 milik FRAME sejak v0.43,
+// bukan spasi pada teks), tanpa prefix simbol; baris tool (`› …`) tidak cocok.
 function recapLines(lines: string[]): string[] {
-  return lines.filter((l) => /^ {3}\d+\s+\p{L}/u.test(l))
+  return lines.filter((l) => /^\d+\s+\p{L}/u.test(l))
 }
 function recapIndex(lines: string[], category: string): number {
-  return lines.findIndex((l) => /^ {3}\d+\s+\p{L}/u.test(l) && l.includes(category))
+  return lines.findIndex((l) => /^\d+\s+\p{L}/u.test(l) && l.includes(category))
 }
 
 describe("footer narasi: tool → narasi → rekap → tool", () => {
@@ -278,7 +278,7 @@ describe("regresi render rekap (v0.43.0)", () => {
     h.finish() // commit narasi
 
     const rows = h.t.view(80, 40, 0)
-    const recapAt = rows.findIndex((l) => /^ {3}\d+\s+\p{L}/u.test(l))
+    const recapAt = rows.findIndex((l) => /^\d+\s+\p{L}/u.test(l))
     expect(recapAt).toBeGreaterThanOrEqual(0)
     expect(rows[recapAt + 1]).toBe("")
     expect(rows[recapAt + 2]).toContain("NARASI-SESUDAH")

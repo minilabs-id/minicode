@@ -26,7 +26,7 @@ import {
 import { decorateMarkdown, renderInline } from "../src/ui/render/markdown.ts"
 import { reasoning, setReasoningVisible } from "../src/ui/render/reasoning.ts"
 import { stripAnsi } from "../src/ui/render/theme.ts"
-import { humanToolLabel } from "../src/ui/render/tool-label.ts"
+import { humanToolLabel, tSystem } from "../src/ui/render/tool-label.ts"
 import { displayWidth } from "../src/ui/render/width.ts"
 import { formatWrapped, justifyLine, visibleLen, wordWrap } from "../src/ui/render/wrap.ts"
 import { registerStatusLine, runWithoutStatus } from "../src/ui/runtime/statusline.ts"
@@ -440,13 +440,16 @@ describe("format: formatError", () => {
     expect(out).toContain("rate-limiting")
   })
 
-  test("Error biasa tetap memakai message-nya", () => {
-    expect(formatError(new Error("meledak"))).toBe("meledak")
+  test("Error biasa tak dikenal jatuh ke narasi aman OS-locale", () => {
+    const out = formatError(new Error("meledak"))
+    expect(out).toContain(tSystem("err.unknown"))
+    expect(out).not.toContain("meledak")
   })
 
-  test("nilai lain di-stringify", () => {
-    expect(formatError("teks")).toBe("teks")
-    expect(formatError(42)).toBe("42")
+  test("nilai lain tak dikenal jatuh ke narasi aman tanpa bocor mentah", () => {
+    expect(formatError("teks")).toContain(tSystem("err.unknown"))
+    expect(formatError("teks")).not.toContain("teks")
+    expect(formatError(42)).toContain(tSystem("err.unknown"))
   })
 })
 

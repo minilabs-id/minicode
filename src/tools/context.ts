@@ -142,6 +142,7 @@ export async function walkWorkspaceFiles(
       if (
         (!opts.relaxed && isPathOutsideRoot(real, resolve(opts.root))) ||
         isSensitive(real) ||
+        isSensitive(full) ||
         isSensitive(rel)
       )
         continue

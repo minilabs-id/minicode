@@ -24,11 +24,17 @@ function isPrivateIPv4(host: string): boolean {
   if (!m) return false
   const a = Number(m[1])
   const b = Number(m[2])
+  const c = Number(m[3])
+  const d = Number(m[4])
+  if (a > 255 || b > 255 || c > 255 || d > 255) return true
   if (a === 127 || a === 10 || a === 0) return true // loopback / priv10 / this-network
   if (a === 192 && b === 168) return true
   if (a === 172 && b >= 16 && b <= 31) return true
   if (a === 169 && b === 254) return true // link-local (cloud metadata IMDS)
   if (a === 100 && b >= 64 && b <= 127) return true // CGNAT 100.64/10
+  if (a === 192 && b === 0 && c === 0) return true // IETF protocol assignments 192.0.0.0/24
+  if (a === 198 && (b === 18 || b === 19)) return true // benchmarking 198.18.0.0/15
+  if (a >= 224) return true // multicast 224.0.0.0/4 & reserved 240.0.0.0/4
   return false
 }
 
@@ -49,11 +55,49 @@ function low32IPv4(tail: string): string | null {
   return [hiN >>> 8, hiN & 0xff, loN >>> 8, loN & 0xff].join(".")
 }
 
+/** Ekspansi alamat IPv6 literal (termasuk bentuk non-kompresi `0:0:0:0:0:0:0:1`) ke 8 hextet. */
+function expandIPv6Hextets(h: string): number[] | null {
+  if (!h.includes(":")) return null
+  // Pisahkan suffix dotted IPv4 bila ada (mis. `0:0:0:0:0:ffff:127.0.0.1`).
+  let work = h
+  const lastColon = work.lastIndexOf(":")
+  const tail = work.slice(lastColon + 1)
+  if (tail.includes(".")) {
+    const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(tail)
+    if (!m) return null
+    const oct = [Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4])]
+    if (oct.some((o) => o > 255)) return null
+    const hi = ((oct[0]! << 8) | oct[1]!).toString(16)
+    const lo = ((oct[2]! << 8) | oct[3]!).toString(16)
+    work = `${work.slice(0, lastColon + 1)}${hi}:${lo}`
+  }
+  const halves = work.split("::")
+  if (halves.length > 2) return null
+  const left = halves[0] ? halves[0].split(":") : []
+  const right = halves.length === 2 && halves[1] ? halves[1].split(":") : []
+  const missing = halves.length === 2 ? 8 - (left.length + right.length) : 0
+  if (missing < 0 || (halves.length === 1 && left.length !== 8)) return null
+  const full = [...left, ...Array<string>(missing).fill("0"), ...right]
+  if (full.length !== 8) return null
+  const nums: number[] = []
+  for (const part of full) {
+    if (!/^[0-9a-f]{1,4}$/.test(part)) return null
+    nums.push(Number.parseInt(part, 16))
+  }
+  return nums
+}
+
 export function isPrivateHost(host: string): boolean {
-  const h = host.toLowerCase().replace(/^\[|\]$/g, "")
+  const h = host
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "")
+    .replace(/\.+$/, "")
   if (!h) return true
   if (h === "localhost" || h.endsWith(".localhost")) return true
   if (h.endsWith(".internal") || h.endsWith(".local")) return true
+  // Bentuk IPv4 alternatif tanpa URL normalization (integer 2130706433, hex
+  // 0x7f000001, oktal 0177.0.0.1) — fail-closed.
+  if (/^(?:\d+|0x[0-9a-f]+)$/i.test(h) || /^0\d+(?:\.\d+){1,3}$/.test(h)) return true
   if (h === "::1" || h === "::") return true
   // IPv4-mapped (::ffff:0:0/96) dan IPv4-translated (::ffff:0:0:0/96): alamat
   // IPv4 ada di 32 bit terakhir. Parser menuliskan ini sebagai heksadesimal,
@@ -68,8 +112,32 @@ export function isPrivateHost(host: string): boolean {
     const v4 = low32IPv4(h.slice(2))
     if (v4) return isPrivateIPv4(v4)
   }
+  // Normalisasi penuh IPv6: tutup bentuk non-kompresi (`0:0:0:0:0:0:0:1`,
+  // `0:0:0:0:0:ffff:7f00:1`), multicast (`ff00::/8`), site-local (`fec0::/10`),
+  // unique-local (`fc00::/7`), dan link-local (`fe80::/10`).
+  const v6 = expandIPv6Hextets(h)
+  if (v6) {
+    const first = v6[0]!
+    const allZeroPrefix6 = v6.slice(0, 6).every((x) => x === 0)
+    const allZeroPrefix5 = v6.slice(0, 5).every((x) => x === 0)
+    if (allZeroPrefix6 && v6[6] === 0 && (v6[7] === 0 || v6[7] === 1)) return true // :: / ::1
+    if (allZeroPrefix5 && v6[5] === 0xffff) {
+      const v4 = [v6[6]! >>> 8, v6[6]! & 0xff, v6[7]! >>> 8, v6[7]! & 0xff].join(".")
+      return isPrivateIPv4(v4)
+    }
+    if (allZeroPrefix6 && (v6[6] !== 0 || v6[7] !== 0)) {
+      const v4 = [v6[6]! >>> 8, v6[6]! & 0xff, v6[7]! >>> 8, v6[7]! & 0xff].join(".")
+      if (isPrivateIPv4(v4)) return true
+    }
+    if ((first & 0xfe00) === 0xfc00) return true // fc00::/7 unique-local
+    if ((first & 0xffc0) === 0xfe80) return true // fe80::/10 link-local
+    if ((first & 0xffc0) === 0xfec0) return true // fec0::/10 deprecated site-local
+    if ((first & 0xff00) === 0xff00) return true // ff00::/8 multicast
+  }
   if (/^f[cd][0-9a-f]{2}:/.test(h)) return true // fc00::/7 unique-local
   if (/^fe[89ab][0-9a-f]{0,1}:/.test(h)) return true // fe80::/10 link-local
+  if (/^fe[c-f][0-9a-f]{0,1}:/.test(h)) return true // fec0::/10 site-local
+  if (/^ff[0-9a-f]{0,2}:/.test(h)) return true // ff00::/8 multicast
   return isPrivateIPv4(h)
 }
 
@@ -81,7 +149,7 @@ export async function isPrivateHostWithDns(
   opts: { strict?: boolean; timeoutMs?: number; noCache?: boolean } = {},
 ): Promise<boolean> {
   if (isPrivateHost(hostname)) return true
-  if (/^[\d.]+$/.test(hostname) || hostname.includes(":")) return false
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(hostname) || hostname.includes(":")) return false
   const timeoutMs = opts.timeoutMs ?? (opts.strict ? 1000 : 400)
   if (!opts.noCache) {
     const cached = dnsCache.get(hostname)

@@ -46,6 +46,7 @@ import {
   planRecovery,
   type RecoveryDecision,
 } from "../src/policy/recovery-budget.ts"
+import { WRITE_TOOLS } from "../src/policy/tool-contract.ts"
 import {
   budgetExceededError,
   createUsageCollector,
@@ -658,8 +659,14 @@ export function resolveWorkModeForIdentity(
  * berbagi kunci → yang kedua ditolak (fail-closed). Ini lebih aman daripada
  * membiarkan efek non-idempoten ter-apply dua kali saat recovery.
  */
-export function productionIdempotencyKey(tool: string, args: unknown, generation: number): string {
-  return `${tool}:${hashArgs(args ?? {})}:gen${generation}`
+export function productionIdempotencyKey(
+  tool: string,
+  args: unknown,
+  generation: number,
+  mutationEpoch?: number,
+): string {
+  const suffix = typeof mutationEpoch === "number" && mutationEpoch > 0 ? `:m${mutationEpoch}` : ""
+  return `${tool}:${hashArgs(args ?? {})}:gen${generation}${suffix}`
 }
 
 /**
@@ -1897,6 +1904,13 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   // Dibaca oleh closure idempotencyKeyFor di bawah — lihat
   // productionIdempotencyKey untuk penalaran lengkapnya.
   let recoveryGeneration = 0
+  // Naik tiap kali tool mutasi berkas berhasil agar verifikasi ulang bash
+  // (mis. `bun test` sebelum dan sesudah edit) dalam turn sama tidak ditolak
+  // sebagai duplikat, sementara retry tanpa perubahan tetap ter-dedup.
+  // Memakai `WRITE_TOOLS` tunggal dari tool-contract.ts (mencakup edit,
+  // write_file, apply_patch, delete_file, move_file, git_restore/checkout,
+  // lsp_rename) supaya tidak ada daftar manual kedua yang bisa drift.
+  let workspaceMutationEpoch = 0
   const {
     sessionTools,
     evidenceMode,
@@ -1916,7 +1930,13 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
         // dan seluruh dedup durabel MATI di produksi (hanya dipanggil test).
         // Sekarang setiap tool covered memakai kunci yang stabil per recovery
         // window: retry efek yang sudah committed ditolak, bukan dijalankan ulang.
-        idempotencyKeyFor: (tool, args) => productionIdempotencyKey(tool, args, recoveryGeneration),
+        idempotencyKeyFor: (tool, args) =>
+          productionIdempotencyKey(
+            tool,
+            args,
+            recoveryGeneration,
+            tool === "bash" ? workspaceMutationEpoch : undefined,
+          ),
       },
       // F-03 (P5 §C2): background bash job diikat ke sid kanonik sesi ini —
       // instance yang diikat sid tidak pernah dipasok lewat argumen tool.
@@ -1967,6 +1987,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   setSubAgentGovernance(() => ({
     restrictBash,
     allowLocalConfig: allowLocalConfig === true,
+    ...(cfg.bashAllowlist ? { bashAllowlist: cfg.bashAllowlist } : {}),
   }))
 
   let permissions: PermissionControl | undefined
@@ -2544,6 +2565,9 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     try {
       const call = e.execution?.call as { id?: unknown; name?: unknown; args?: unknown } | undefined
       if (!call || typeof call.id !== "string" || typeof call.name !== "string") return
+      if (!e.execution?.result?.isError && WRITE_TOOLS.has(call.name)) {
+        workspaceMutationEpoch++
+      }
       const childId = (e as { forwardedChild?: unknown }).forwardedChild
       const scopeSession = typeof childId === "string" && childId ? childId : sessionId
       const turn = typeof session.state?.turnCount === "number" ? session.state.turnCount : null
@@ -2573,8 +2597,14 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     } catch {}
   })
   // ── Auto-verify & self-heal ──
+  // Auto-deteksi skrip repo (package.json / Makefile / dll.) HANYA boleh jalan
+  // saat repo sudah dipercaya (--allow-local-config) agar membuka repo asing
+  // dengan --verify tidak otomatis mengeksekusi skrip repo tak tepercaya.
   const verifyCommand = verify
-    ? (process.env.MINICODE_VERIFY_CMD ?? cfg.verifyCommand ?? detectVerifyCommand(cwd) ?? "")
+    ? (process.env.MINICODE_VERIFY_CMD ??
+      cfg.verifyCommand ??
+      (allowLocalConfig === true ? detectVerifyCommand(cwd) : undefined) ??
+      "")
     : ""
   const verifyActive = verifyCommand.length > 0
   if (verifyActive) {
@@ -3519,6 +3549,14 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       // `durableHistory[0]` adalah baris yang baru saja dipersist. Pencocokan
       // saat resume memakai teks PERSIS, sehingga pesan user asli tak pernah
       // salah didaftarkan sebagai ringkasan.
+      //
+      // Teks ini JUGA diteruskan ke produsen proyeksi di bawah. Kompaksi LLM
+      // mengganti baris pertama store dengan ringkasan hasil model; itulah
+      // satu-satunya versi yang benar-benar dibaca model. Tanpa diteruskan,
+      // produsen jatuh ke fold mekanis dan setelah turn baru / ganti model
+      // konteksnya jadi jauh lebih miskin — meski history_summaries menyimpan
+      // teks LLM yang sama persis.
+      let runtimeSummaryText: string | undefined
       try {
         const firstDurable = durableHistory[0] as Message | undefined
         if (
@@ -3527,6 +3565,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
           typeof firstDurable.content === "string" &&
           firstDurable.content.length > 0
         ) {
+          runtimeSummaryText = firstDurable.content
           saveHistorySummary(
             sessionId,
             DEFAULT_THREAD_ID,
@@ -3541,11 +3580,15 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       // fenced). Menulis HANYA `history_projections` dari state kanonik yang
       // baru dipersist; TIDAK menyentuh `messages`/head/run. Kegagalan di sini
       // tidak pernah menggagalkan persist (proyeksi boleh tetap absen/basi).
-      // Ringkasan memakai teks fold yang SUDAH ADA (kernel) via produsen.
+      // Bila baris pertama hasil kompaksi adalah ringkasan LLM, teksnya
+      // dikirim verbatim bersama baseSeq=1 (seq kanonik tempat ringkasan itu
+      // ditulis). Produsen memvalidasi marker; bila tak ada ringkasan baru,
+      // ia memakai provenance ringkasan sebelumnya, lalu fallback fold mekanis.
       try {
         const produced = produceSummaryProjection(sessionId, cwd, {
           expectedEpoch,
           policy: { keepRecentTurns: keepRecentTurns && keepRecentTurns > 0 ? keepRecentTurns : 2 },
+          ...(runtimeSummaryText ? { summaryText: runtimeSummaryText, baseSeq: 1 } : {}),
         })
         if (produced.produced) {
           process.stderr.write(

@@ -29,6 +29,7 @@ import { grepTool } from "../src/tools/grep.ts"
 import { readFileTool } from "../src/tools/read_file.ts"
 import { writeFileTool } from "../src/tools/write_file.ts"
 import { formatError } from "../src/ui/assistant/simple.ts"
+import { tSystem } from "../src/ui/render/tool-label.ts"
 
 // Fase 0A — cleanup berbasis PATH DIMILIKI, bukan enumerasi bare-name di cwd.
 //
@@ -599,7 +600,8 @@ test("21 formatError memetakan AgentError ke pesan yang bisa ditindaklanjuti", (
   expect(out.toLowerCase()).toContain("budget")
   expect(out).toContain("--budget") // saran tindakan disertakan
   expect(out).not.toContain("budget_exceeded") // nama kode tidak dibocorkan
-  expect(formatError(undefined as unknown)).toBe("undefined")
+  expect(formatError(undefined as unknown)).toContain(tSystem("err.unknown"))
+  expect(formatError(undefined as unknown)).not.toBe("undefined")
 })
 
 // ── 22 Usage / Cost ──────────────────────────────────────────────────────────

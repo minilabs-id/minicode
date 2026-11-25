@@ -141,6 +141,10 @@ export async function fetchPinnedUrl(url: URL, init: PinnedRequestInit): Promise
               .split(",")
               .map((s) => s.trim().toLowerCase())
               .filter((s) => s && s !== "identity")
+            // Batasi rantai decompression (anti zip/gzip-bomb berlapis).
+            if (encodings.length > 4) {
+              throw new Error(`too many content-encoding layers: ${encodings.length}`)
+            }
             for (const encoding of encodings.reverse()) {
               const decoder =
                 encoding === "gzip" || encoding === "x-gzip"

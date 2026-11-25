@@ -24,6 +24,15 @@ export interface ExecutorDeps {
   readonly cwd?: string;
   readonly sessionId?: string;
   readonly permissionMode?: string;
+  /**
+   * Host seam (additive, optional): jelaskan tool built-in yang sengaja
+   * TIDAK terdaftar di registry karena disembunyikan mode runtime (mis.
+   * `bash` di WorkMode DISCUSS). Tanpa ini kernel hanya melihat "tak ada di
+   * registry" dan mengembalikan `unknown tool`, yang membuat model mengira
+   * salah argumen lalu retry buta. Mengembalikan `undefined` = pakai redaksi
+   * lama, sehingga perilaku existing caller tak berubah.
+   */
+  readonly hiddenToolMessage?: (name: string) => string | undefined;
 }
 
 export interface ToolExecutor {
@@ -42,7 +51,13 @@ export async function runCall(call: ToolCall, deps: ExecutorDeps): Promise<ToolR
   throwIfAborted(deps.signal);
   const safeCall = snapshotToolCall(call);
   const tool = deps.registry.get(safeCall.name);
-  if (!tool) return errorResult(safeCall, `unknown tool: ${safeCall.name}`);
+  if (!tool) {
+    // Bedakan "tool memang tak ada" dari "tool dikenal tapi disembunyikan
+    // mode": host memberi penjelasan lewat seam opsional. Cek ini SENGAJA
+    // sebelum permission check (urutan kernel lama tak diubah).
+    const hint = deps.hiddenToolMessage?.(safeCall.name);
+    return errorResult(safeCall, hint?.trim() ? hint : `unknown tool: ${safeCall.name}`);
+  }
 
   // The permission handler is user/policy code and may throw. Treat a crash
   // exactly like a tool error: a deterministic error result (observation),

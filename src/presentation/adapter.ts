@@ -12,6 +12,7 @@
 // sama dengan isolasi per-handler di events kernel). Dual-subscribe dengan
 // sink lama — perilaku user NOL berubah pada Fase 1.
 
+import { HIDDEN_TOOL_ACTION_HINT, HIDDEN_TOOL_MESSAGE_RE } from "../policy/tool-contract.ts"
 import { type CanonicalAssignmentTable, decodeCanonicalAssignments } from "../task/assignment.ts"
 import { classifyToolResult, denyReasonOf, summarizeArgs } from "../telemetry/trace.ts"
 import { setActiveDelegateCallId } from "../tools/task.ts"
@@ -267,7 +268,18 @@ function isSubAgentFailureSummary(content: unknown): boolean {
   return /^\[sub-agent [^\]\n]*error\]/.test(text.trimStart())
 }
 
+/**
+ * Tool built-in yang disembunyikan WorkMode punya redaksi khusus dari kernel
+ * (seam `hiddenToolMessage`). Ini BUKAN `unknown tool` biasa dan BUKAN salah
+ * argumen — bedakan supaya model tidak retry buta (bukti: sesi 9f3fee62).
+ */
+function isModeHiddenTool(content: unknown): boolean {
+  const text = typeof content === "string" ? content : contentText(content)
+  return HIDDEN_TOOL_MESSAGE_RE.test(text.trimStart())
+}
+
 function mapToolFailCause(content: unknown): FailCause {
+  if (isModeHiddenTool(content)) return "permission"
   const t = String(typeof content === "string" ? content : String(content ?? ""))
   if (/^\s*(unknown tool|invalid arguments)/i.test(t)) return "invalid"
   if (/max_steps|budget|context[\s\S]{0,20}exceed/i.test(t)) return "agent"
@@ -957,6 +969,7 @@ export function createPresentationAdapter(
         durationMs: t0 !== undefined ? Math.max(0, Date.now() - t0) : 0,
         cause: mapToolFailCause(r.content),
         message: firstLine(r.content, 200),
+        ...(isModeHiddenTool(r.content) ? { hint: HIDDEN_TOOL_ACTION_HINT } : {}),
         expandRef: { toolCallId: id, idx: 0 },
         ...(drift ? { schemaDrift: drift } : {}),
       })
@@ -1169,6 +1182,7 @@ export function createPresentationAdapter(
           // Kegagalan anak adalah kegagalan agen, bukan eksekusi shell.
           cause: delegateFailure ? "agent" : mapToolFailCause(result.content),
           message: firstLine(result.content, 200),
+          ...(isModeHiddenTool(result.content) ? { hint: HIDDEN_TOOL_ACTION_HINT } : {}),
           expandRef: { toolCallId: call.id, idx: 0 },
           ...(drift ? { schemaDrift: drift } : {}),
         }),

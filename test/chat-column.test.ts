@@ -191,7 +191,7 @@ describe("satu sumber geometri: chatWidth/composerWidth", () => {
 })
 
 describe("TuiApp frame ter-centre", () => {
-  test("cols=200: tiap baris tepat 200 kolom, 50/100/50, tanpa separator", async () => {
+  test("cols=200: tiap baris tepat 200 kolom, chat 53/97/50, footer 50/100/50", async () => {
     const { app } = setup(200, 30)
     const runP = app.run()
     await tty!.ready()
@@ -200,11 +200,19 @@ describe("TuiApp frame ter-centre", () => {
     expect(raw).toHaveLength(30)
     for (const line of raw) {
       expect(displayWidth(stripSgr(line))).toBe(200)
-      expect(line.startsWith(" ".repeat(50))).toBe(true)
       expect(line.endsWith(" ".repeat(50))).toBe(true)
     }
+    // v0.43: margin 3 adalah padding FRAME — baris chat mulai di kolom 53
+    // (padLeft 50 + 3), footer dikecualikan dan tetap mulai di kolom 50.
+    for (const line of raw.slice(0, -1)) {
+      expect(line.startsWith(" ".repeat(53))).toBe(true)
+    }
+    expect(raw[raw.length - 1]!.startsWith(" ".repeat(50))).toBe(true)
+    expect(raw[raw.length - 1]!.startsWith(" ".repeat(53))).toBe(false)
     const text = tty!.screen().join("\n")
-    expect(text).not.toContain("│")
+    // v0.43: composer dibingkai kotak tipis — `│` HANYA boleh muncul sebagai
+    // chrome kotak (3 baris: atas/tengah/bawah), bukan panel samping.
+    expect(text).toContain("╭")
     expect(text).not.toContain("Thinking")
     expect(text).not.toContain("Activity")
     await tty!.send(KEY.ctrlD)
@@ -267,7 +275,7 @@ describe("TuiApp mouse ter-translasi", () => {
       await tty!.waitForScreen((rows) => rows.some((l) => l.includes(sentinel)))
       const y = tty!.screen().findIndex((l) => l.includes(sentinel)) + 1
       expect(y).toBeGreaterThan(0)
-      // k=4 = awal teks setelah margin 3 kolom; k=10 = tengah teks.
+      // k=4 = awal teks (margin 3 kini padding frame); k=10 = tengah teks.
       await tty!.send(`\x1b[<0;${padLeft + 4};${y}M`)
       await tty!.send(`\x1b[<32;${padLeft + 10};${y}M`)
       await tty!.send(`\x1b[<0;${padLeft + 10};${y}m`)

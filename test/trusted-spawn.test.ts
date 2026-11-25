@@ -95,5 +95,5 @@ test("resolveSpawnTarget: membungkus .cmd/.bat di Windows lewat cmd.exe, biner b
       platform: "win32",
       resolveExec: () => "npx.CMD",
     }),
-  ).toThrow(/unsafe control character/)
+  ).toThrow(/unsafe (?:control )?character/)
 })

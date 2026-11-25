@@ -17,6 +17,12 @@ import { createWriteMemoryTool } from "../tools/memory.ts"
 
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
+// Pemilik visibilitas tool mengekspos redaksi "tool disembunyikan mode" supaya
+// executor bisa memberi pesan actionable. Logikanya tetap SATU di
+// tool-contract.ts (sumber yang sama dengan `workModeVisible` di bawah), jadi
+// tak ada daftar kedua yang bisa drift. Tidak mengubah izin/WorkMode.
+export { hiddenBuiltinToolMessage } from "../policy/tool-contract.ts"
+
 export type ToolScope = "full" | "explore"
 
 const MCP_WIRE_TOOLS = ["mcp_list", "mcp_call", "mcp_read", "mcp_prompt"] as const

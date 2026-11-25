@@ -239,7 +239,12 @@ describe("/lang end-to-end", () => {
       )
       expect(frame.some((l) => l.includes("Esc cancel"))).toBe(true)
       await tty.send(KEY.esc, 90)
-      await tty.waitForScreen((f) => f.some((l) => l.includes("minicode ›")))
+      await tty.waitForScreen(
+        (f) =>
+          !f.some((l) => l.includes("Esc cancel")) &&
+          !f.slice(0, -5).some((l) => l.includes("│")) &&
+          f.some((l) => l.includes("00.00.00")),
+      )
       // Output readout TIDAK boleh bocor ke transkrip chat.
       expect(tty.screen().join("\n")).not.toContain("Session lang-test")
       await tty.send("/exit")
@@ -268,7 +273,12 @@ describe("/lang end-to-end", () => {
       expect(out).toContain("/update")
       for (const n of ["/mode", "/lang", "/view"]) expect(out, n).toContain(n)
       await tty.send(KEY.esc, 90)
-      await tty.waitForScreen((f) => f.some((l) => l.includes("minicode ›")))
+      await tty.waitForScreen(
+        (f) =>
+          !f.some((l) => l.includes("Esc cancel")) &&
+          !f.slice(0, -5).some((l) => l.includes("│")) &&
+          f.some((l) => l.includes("00.00.00")),
+      )
       await tty.send("/exit")
       await tty.send(KEY.enter)
       await runP

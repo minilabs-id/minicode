@@ -6,7 +6,12 @@ import type { ToolCall, ToolResult } from "#minicore/core/types.ts"
 import { LIMITS } from "../constants.ts"
 // [Fase 2 / TOOL-01] Klasifikasi konkurensi diturunkan dari SATU registry
 // kontrak tool — dulu dua Set manual di file ini yang bisa menyimpang.
-import { contractForTool, EXCLUSIVE_TOOLS, WRITE_TOOLS } from "./tool-contract.ts"
+import {
+  contractForTool,
+  EXCLUSIVE_TOOLS,
+  hiddenBuiltinToolMessage,
+  WRITE_TOOLS,
+} from "./tool-contract.ts"
 
 function isWrite(call: ToolCall): boolean {
   return WRITE_TOOLS.has(call.name) || EXCLUSIVE_TOOLS.has(call.name)
@@ -154,6 +159,15 @@ export function parallelExecutor(
       ...rawDeps,
       registry: liveRegistry,
       ...(effectivePm !== undefined ? { permissionMode: effectivePm } : {}),
+      // seam aditif kernel: registry sudah difilter mode, jadi `bash` di
+      // DISCUSS tak ada di sana. Beri redaksi actionable supaya model tak
+      // mengira salah argumen. Izin/WorkMode TIDAK berubah (INV-WM1).
+      hiddenToolMessage: (name: string) =>
+        hiddenBuiltinToolMessage(
+          name,
+          liveWorkMode === "DISCUSS" ? "DISCUSS" : "EXECUTE",
+          effectivePm,
+        ),
     }
     // P0.2 (G-MEM-TRACK / Invariant #2 & #3): saat WorkMode DISCUSS,
     // `read_memory` menerima `permissionMode: "readonly"` per-sesi agar tidak

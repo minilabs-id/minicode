@@ -72,6 +72,81 @@ export function capMarked(text: string, cap: number): string {
     : text
 }
 
+// Seam pengujian untuk mempercepat verifikasi idle watchdog tanpa menunggu 120 dtk.
+let bashIdleTimeoutOverrideMs: number | null = null
+export function setBashIdleTimeoutForTest(ms: number | null): void {
+  bashIdleTimeoutOverrideMs = ms
+}
+
+/**
+ * Deteksi sintaks POSIX yang berbahaya di `cmd.exe` Windows:
+ *  - Single-quote `'...'` di luar `"..."` BUKAN pembatas kutip di `cmd.exe`,
+ *    sehingga operator `>`, `<`, `|`, `&` di dalamnya dieksekusi oleh shell
+ *    (mis. `awk 'NR>=340'` membuat berkas sampah `340` dan `awk` hang menunggu stdin).
+ *  - Heredoc POSIX (`<<EOF`, `<<'PY'`) tidak didukung `cmd.exe`.
+ */
+export function detectWindowsCmdQuotingHazard(
+  cmd: string,
+  platform: NodeJS.Platform = process.platform,
+): string | null {
+  if (platform !== "win32") return null
+  let inDoubleQuote = false
+  for (let i = 0; i < cmd.length; i++) {
+    const ch = cmd[i]!
+    if (inDoubleQuote) {
+      if (ch === '"') {
+        // Hitung backslash tepat sebelum `"` agar argumen runtime seperti
+        // `bun -e "write(\"x\")"` tidak menutup kutip terlalu dini. Namun di
+        // cmd.exe, `\` BUKAN escape kutip: path Windows berujung backslash
+        // (`"C:\dir\" && ...`) benar-benar menutup kutip bila diikuti batas
+        // argumen (spasi/akhir string/operator shell).
+        let bs = 0
+        for (let k = i - 1; k >= 0 && cmd[k] === "\\"; k--) bs++
+        const next = cmd[i + 1]
+        const closesCmdArg = next === undefined || /[\s&|><);]/.test(next)
+        if (bs % 2 === 0 || closesCmdArg) inDoubleQuote = false
+      }
+      continue
+    }
+    // Di luar kutip ganda, `^` di cmd.exe meng-escape tepat satu karakter setelahnya.
+    if (ch === "^" && i + 1 < cmd.length) {
+      i++
+      continue
+    }
+    if (ch === '"') {
+      inDoubleQuote = true
+      continue
+    }
+    // Case B: POSIX heredoc (`<<EOF`, `<<-'PY'`) di luar kutip ganda.
+    if (ch === "<" && cmd[i + 1] === "<") {
+      const rest = cmd.slice(i)
+      if (/^<<-?\s*(?:['"][A-Za-z0-9_.-]+['"]|[A-Za-z_][A-Za-z0-9_.-]*)/.test(rest)) {
+        return (
+          "cmd.exe quoting hazard: POSIX heredoc (<<) is not supported on Windows cmd.exe. " +
+          'Use write_file/edit for file edits, or run a quoted inline script (`bun -e "..."`).'
+        )
+      }
+    }
+    // Case A: single-quote `'` di luar kutip ganda yang diikuti operator shell.
+    // cmd.exe tidak memperlakukan `'` sebagai quote: baik pasangan `'...'` maupun
+    // `'` tak berpasangan sebelum `[><|&]` (mis. `echo 'x > .env`) tetap mengeksekusi
+    // operatornya. Abaikan apostrof di tengah kata (mis. `it's`).
+    if (ch === "'" && (i === 0 || !/[A-Za-z0-9]/.test(cmd[i - 1]!))) {
+      const closeIdx = cmd.indexOf("'", i + 1)
+      const tail = closeIdx !== -1 ? cmd.slice(i + 1, closeIdx) : cmd.slice(i + 1)
+      if (/[><|&]/.test(tail)) {
+        return (
+          "cmd.exe quoting hazard: single quotes ('...') do NOT quote >/<|& on Windows cmd.exe " +
+          "and can redirect files or hang stdin. Use read_file (offset/limit), grep (path/contextLines), " +
+          'edit, or wrap arguments in double quotes ("...") / powershell -NoProfile -Command "...".'
+        )
+      }
+      if (closeIdx !== -1) i = closeIdx
+    }
+  }
+  return null
+}
+
 // ── Background jobs ──
 // Perlu untuk dev server / watcher / test panjang: proses hidup melewati batas
 // satu turn, output-nya diambil bertahap lewat bash_output.
@@ -276,13 +351,14 @@ function makeBashTool(ownerSid: string | null): Tool {
     // tool; yang HARUS tetap ada adalah aturan "jangan retry buta" (penting
     // untuk command ber-efek samping) dan petunjuk Windows (dipindah ke `cmd`).
     description:
-      "SHELL: Run a shell command (30s timeout, 20k output cap, exit prefixed). background:true for long jobs — collect via bash_output, stop via bash_kill. Prefer git_status/git_diff/git_log and read_file/edit over raw shell; on Windows use dir /b or Get-Content, not for %f / more. On allowlist denial do NOT retry blindly: switch to read_file/edit or ask the operator to rerun with --allow-all/--sandbox docker.",
+      "SHELL: Run a shell command (30s timeout, 20k output cap, exit prefixed). background:true for long jobs — collect via bash_output, stop via bash_kill. Prefer read_file, grep, glob, edit, apply_patch, and git_status/git_diff over raw shell. On allowlist denial do NOT retry blindly: switch to read_file/edit or ask the operator to rerun with --allow-all/--sandbox docker.",
     parameters: {
       type: "object",
       properties: {
         cmd: {
           type: "string",
-          description: "command to run (Windows: cmd.exe syntax — dir, echo %VAR%, type)",
+          description:
+            "command to run (Windows: cmd.exe syntax — use double quotes \"...\", NOT single quotes '...' around >/<|& or heredoc <<)",
         },
         cwd: {
           type: "string",
@@ -316,12 +392,13 @@ function makeBashTool(ownerSid: string | null): Tool {
       // untuk isolasi penuh; lihat permission.ts jail + safe-open.ts.
       // Unrestricted: default timeout jauh lebih lega; timeoutMs eksplisit
       // tetap menang.
-      const timeout =
+      const hasExplicitTimeout =
         typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0
-          ? timeoutMs
-          : relaxed
-            ? LIMITS.UNRESTRICTED_BASH_TIMEOUT_MS
-            : LIMITS.BASH_DEFAULT_TIMEOUT_MS
+      const timeout = hasExplicitTimeout
+        ? timeoutMs
+        : relaxed
+          ? LIMITS.UNRESTRICTED_BASH_TIMEOUT_MS
+          : LIMITS.BASH_DEFAULT_TIMEOUT_MS
 
       if (background === true) {
         // Sandbox tidak diterapkan di jalur background: container/namespace
@@ -332,6 +409,8 @@ function makeBashTool(ownerSid: string | null): Tool {
             "background:true is not supported while --sandbox is active (the process must outlive the turn)",
           )
         }
+        const hazard = detectWindowsCmdQuotingHazard(cmd as string)
+        if (hazard) throw new Error(hazard)
         const id = startBackground(cmd as string, effectiveCwd, ownerSid, relaxed)
         // F-07: echo perintah di-scrub seperti output foreground — command line
         // bisa membawa secret (`curl -H "Authorization: Bearer …"`), dan versi
@@ -395,6 +474,13 @@ function makeBashTool(ownerSid: string | null): Tool {
         )
       }
 
+      const hazard = detectWindowsCmdQuotingHazard(cmd as string)
+      if (hazard) throw new Error(hazard)
+
+      const idleBase = bashIdleTimeoutOverrideMs ?? LIMITS.BASH_IDLE_TIMEOUT_MS
+      const idleLimitMs =
+        !hasExplicitTimeout && idleBase > 0 && idleBase < timeout ? idleBase : null
+
       return await new Promise((resolveOut, reject) => {
         const startedAt = Date.now()
         // [Fase 2 / LOOP-INV-07] Dua sebab penghentian yang HARUS dibedakan:
@@ -403,6 +489,8 @@ function makeBashTool(ownerSid: string | null): Tool {
         // sehingga model tak punya sinyal untuk berhenti mengulang perintah
         // destruktif yang mungkin sudah setengah berjalan.
         let timedOut = false
+        let idleTimedOut = false
+        let settled = false
         const p = spawn(cmd as string, {
           shell: true,
           // F-24: selalu effectiveCwd (sessionRoot bila arg cwd absen), bukan
@@ -410,6 +498,9 @@ function makeBashTool(ownerSid: string | null): Tool {
           // terhadap sessionRoot — eksekusi harus di direktori yang sama.
           cwd: effectiveCwd,
           env: sanitizeSpawnEnv(process.env, undefined, relaxed),
+          // Tutup stdin agar perintah pembaca stdin menerima EOF seketika dan
+          // tidak menggantung hingga batas timeout (kasus live `awk` tanpa input).
+          stdio: ["ignore", "pipe", "pipe"],
           // Cancellation is owned below and settles only after process close.
           // detached agar shell jadi group leader → killTree bisa bunuh
           // seluruh grup (POSIX kill(-pid)). Tanpa ini cucu yatim menahan pipe.
@@ -428,35 +519,28 @@ function makeBashTool(ownerSid: string | null): Tool {
             })
           } catch {}
         }
-        p.stdout.on("data", (d: Buffer) => emitChunk(buf.append("out", d)))
-        p.stderr.on("data", (d: Buffer) => emitChunk(buf.append("err", d)))
         // v7.32 (L2): SATU jalur cleanup dipanggil dari error DAN close.
         // Dulu `p.on("error", reject)` hanya settle promise; bila `close`
         // tak pernah menyusul (mis. spawn ENOENT / kill gagal), timer 30 dtk
         // dan abort listener tetap hidup menahan referensi proses mati.
         // Idempoten (cleanedUp) agar aman bila error diikuti close.
         let killTimer: ReturnType<typeof setTimeout> | undefined
+        let idleTimer: ReturnType<typeof setTimeout> | undefined
+        let settleTimer: ReturnType<typeof setTimeout> | undefined
         let t: ReturnType<typeof setTimeout> | undefined
-        const onAbort = () => {
-          if (t) clearTimeout(t)
-          if (killTimer) clearTimeout(killTimer)
-          // Kill the group before close can release executor quarantine.
-          killTree(p)
-        }
         let cleanedUp = false
         const cleanup = () => {
           if (cleanedUp) return
           cleanedUp = true
           ctx.signal.removeEventListener("abort", onAbort)
           if (t) clearTimeout(t)
+          if (idleTimer) clearTimeout(idleTimer)
           if (killTimer) clearTimeout(killTimer)
+          if (settleTimer) clearTimeout(settleTimer)
         }
-
-        p.on("error", (e) => {
-          cleanup()
-          reject(e)
-        })
-        p.on("close", (code) => {
+        const settleFromCurrentState = (code: number | null) => {
+          if (settled) return
+          settled = true
           cleanup()
           const text = buf.text()
           if (ctx.signal.aborted) {
@@ -469,11 +553,16 @@ function makeBashTool(ownerSid: string | null): Tool {
             // mengubah message menjadi ToolResult{isError:true}.
             const elapsed = Date.now() - startedAt
             const partial = text.length > 4000 ? `…${text.slice(-4000)}` : text
+            const idleAttr = idleTimedOut && idleLimitMs !== null ? ` idle_ms=${idleLimitMs}` : ""
+            const reasonLine =
+              idleTimedOut && idleLimitMs !== null
+                ? `Command produced no output for ${idleLimitMs} ms and was cut off by the idle watchdog.`
+                : `Command was cut off by the ${timeout} ms timeout.`
             reject(
               new Error(
                 `[TOOL_OUTCOME state=UNKNOWN reason=TIMEOUT side_effect_tier=LOCAL_ENV_MUTATION ` +
-                  `duration_ms=${elapsed} timeout_ms=${timeout}]\n` +
-                  `Command was cut off by the ${timeout} ms timeout. Its side effects are UNKNOWN ` +
+                  `duration_ms=${elapsed} timeout_ms=${timeout}${idleAttr}]\n` +
+                  `${reasonLine} Its side effects are UNKNOWN ` +
                   `(the command may have partially run). Do NOT re-run a side-effecting command ` +
                   `before inspecting workspace/process state.\n` +
                   (partial
@@ -485,9 +574,11 @@ function makeBashTool(ownerSid: string | null): Tool {
           }
           if (code !== 0) resolveOut(`exit ${code}\n${text}`)
           else resolveOut(text)
-        })
-        t = setTimeout(() => {
-          timedOut = true
+        }
+        const triggerKill = () => {
+          if (cleanedUp || settled) return
+          if (t) clearTimeout(t)
+          if (idleTimer) clearTimeout(idleTimer)
           // Windows: SIGTERM hanya membunuh cmd.exe wrapper — cucu (node -e)
           // bisa belum lahir (spawn lambat) atau yatim sambil menahan pipe.
           // Eskalasi taskkill /pid-shell-yang-sudah-mati lalu gagal total.
@@ -496,10 +587,88 @@ function makeBashTool(ownerSid: string | null): Tool {
           // sempat cleanup; SIGKILL grup menyusul bila 2 detik tak cukup.
           if (process.platform === "win32") killTree(p)
           else signalProcessGroupGraceful(p.pid, p)
-          killTimer = setTimeout(() => {
-            killTree(p)
-          }, 2000)
+          if (!killTimer) {
+            killTimer = setTimeout(() => {
+              killTree(p)
+              // Putus handle pipe bila cucu yatim masih memegang descriptor.
+              try {
+                p.stdout?.destroy()
+              } catch {}
+              try {
+                p.stderr?.destroy()
+              } catch {}
+            }, 2000)
+            try {
+              ;(killTimer as unknown as { unref?: () => void }).unref?.()
+            } catch {}
+          }
+          // Backstop bila `close` tidak kunjung terbit setelah tree-kill + destroy.
+          if (!settleTimer) {
+            settleTimer = setTimeout(() => {
+              settleFromCurrentState(null)
+            }, 3000)
+            try {
+              ;(settleTimer as unknown as { unref?: () => void }).unref?.()
+            } catch {}
+          }
+        }
+        const resetIdleTimer = () => {
+          if (idleLimitMs === null || cleanedUp || settled || timedOut) return
+          if (idleTimer) clearTimeout(idleTimer)
+          idleTimer = setTimeout(() => {
+            timedOut = true
+            idleTimedOut = true
+            triggerKill()
+          }, idleLimitMs)
+          try {
+            ;(idleTimer as unknown as { unref?: () => void }).unref?.()
+          } catch {}
+        }
+        const onAbort = () => {
+          if (cleanedUp || settled) return
+          if (t) clearTimeout(t)
+          if (idleTimer) clearTimeout(idleTimer)
+          if (killTimer) clearTimeout(killTimer)
+          // Kill the group before close can release executor quarantine.
+          killTree(p)
+          try {
+            p.stdout?.destroy()
+          } catch {}
+          try {
+            p.stderr?.destroy()
+          } catch {}
+          if (!settleTimer) {
+            settleTimer = setTimeout(() => {
+              settleFromCurrentState(null)
+            }, 3000)
+            try {
+              ;(settleTimer as unknown as { unref?: () => void }).unref?.()
+            } catch {}
+          }
+        }
+
+        p.stdout?.on("data", (d: Buffer) => {
+          resetIdleTimer()
+          emitChunk(buf.append("out", d))
+        })
+        p.stderr?.on("data", (d: Buffer) => {
+          resetIdleTimer()
+          emitChunk(buf.append("err", d))
+        })
+        p.on("error", (e) => {
+          if (settled) return
+          settled = true
+          cleanup()
+          reject(e)
+        })
+        p.on("close", (code) => {
+          settleFromCurrentState(code)
+        })
+        t = setTimeout(() => {
+          timedOut = true
+          triggerKill()
         }, timeout)
+        resetIdleTimer()
         ctx.signal.addEventListener("abort", onAbort, { once: true })
         if (ctx.signal.aborted) onAbort()
       })

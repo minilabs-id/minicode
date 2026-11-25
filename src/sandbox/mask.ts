@@ -2,6 +2,7 @@ import {
   chmodSync,
   type Dirent,
   existsSync,
+  lstatSync,
   mkdtempSync,
   readdirSync,
   rmSync,
@@ -74,13 +75,26 @@ export function discoverSandboxMaskTargets(cwd: string): SandboxMaskTargets {
     for (const ent of entries) {
       const name = ent.name
       const full = join(dir, name)
-      if (ent.isDirectory()) {
+      let isDir = ent.isDirectory()
+      let isFileOrLink = ent.isFile() || ent.isSymbolicLink()
+      // Fallback untuk FS yang mengembalikan DT_UNKNOWN pada readdir (XFS/NFS/FUSE):
+      // tanpa lstatSync, `.env` di FS tersebut tidak pernah terdeteksi untuk dimasking.
+      if (!isDir && !isFileOrLink) {
+        try {
+          const st = lstatSync(full)
+          isDir = st.isDirectory()
+          isFileOrLink = st.isFile() || st.isSymbolicLink()
+        } catch {
+          continue
+        }
+      }
+      if (isDir) {
         if (depth < MAX_SCAN_DEPTH && !SKIP_DIRS.has(name)) {
           queue.push({ dir: full, depth: depth + 1 })
         }
         continue
       }
-      if ((ent.isFile() || ent.isSymbolicLink()) && isSensitiveEnvFileName(name)) {
+      if (isFileOrLink && isSensitiveEnvFileName(name)) {
         const rel = relative(abs, full).replace(/\\/g, "/")
         if (rel && !rel.startsWith("..")) envFiles.push(rel)
       }
@@ -118,13 +132,17 @@ export function allocateEmptyMaskFile(needed: boolean): {
         } catch {}
       },
     }
-  } catch {
+  } catch (err) {
     if (tempDir) {
       try {
         rmSync(tempDir, { recursive: true, force: true })
       } catch {}
     }
-    return { path: null, cleanup: () => {} }
+    // Fail-closed: bila file `.env*` ditemukan tetapi berkas masker kosong
+    // gagal dibuat, jangan pernah meluncurkan sandbox tanpa masker.
+    throw new Error(
+      `failed to allocate sandbox .env mask file: ${err instanceof Error ? err.message : String(err)}`,
+    )
   }
 }
 

@@ -49,10 +49,10 @@ function build(minimizeActivity: boolean, secondStatus: UiToolStatus = "complete
   return { transcript, uiState, emit }
 }
 
-// Baris rekap = 3 spasi margin + angka kategori (tanpa prefix simbol);
-// baris tool memakai `› …` dan tidak cocok dengan pola ini.
+// Baris rekap = angka kategori di kolom 0 (margin 3 milik FRAME sejak v0.43,
+// bukan spasi pada teks); baris tool (`› …`) tidak cocok dengan pola ini.
 function recapLines(text: string): string[] {
-  return text.split("\n").filter((l) => /^ {3}\d+\s+\p{L}/u.test(l))
+  return text.split("\n").filter((l) => /^\d+\s+\p{L}/u.test(l))
 }
 
 describe("activity fold (minimizeActivity)", () => {

@@ -87,12 +87,12 @@ describe("v7.30: kwitansi perintah di footer, bukan transkrip", () => {
     const visible = tty
       .screen()
       .map((line, index) => ({ line, row: index + 1 }))
-      // v0.33: baris transkrip pakai margin kiri 3.
+      // v0.43: margin 3 milik frame — transkrip mulai di kolom 4 layar.
       .filter((item) => item.line.trimStart().startsWith("baris-"))
     const start = visible[0]!.row
     const picked = visible[Math.min(2, visible.length - 1)]!
     const endX = picked.line.length + 1
-    await tty.send(`\x1b[<0;1;${start}M`)
+    await tty.send(`\x1b[<0;4;${start}M`)
     await tty.send(`\x1b[<32;${endX};${picked.row}M`)
     await tty.send(`\x1b[<0;${endX};${picked.row}m`)
     await tty.send(KEY.ctrlC)

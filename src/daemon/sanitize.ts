@@ -17,23 +17,24 @@
 const ESC = String.fromCharCode(27)
 const BEL = String.fromCharCode(7)
 
-// OSC: ESC ] … (BEL | ESC \). Dicek SEBELUM CSI: body OSC sering memuat "ESC ["
-// sehingga urutan membalikkan hasilnya jadi sisa teks nyasar.
-const OSC = new RegExp(`${ESC}\\][^${ESC}${BEL}]*(?:${BEL}|${ESC}\\\\)`, "g")
+// OSC/DCS/APC/PM/SOS (termasuk yang tidak diakhiri terminator di akhir string).
+// Dicek SEBELUM CSI agar payload di dalamnya tidak menyisakan teks nyasar.
+const STR_SEQ = new RegExp(`${ESC}[\\]PX^_][\\s\\S]*?(?:${BEL}|${ESC}\\\\|$)`, "g")
 // CSI: ESC [ params intermediate final.
 const CSI = new RegExp(`${ESC}\\[[0-9;?]*[ -/]*[@-~]`, "g")
 // Escape lain (ESC SP F …) — cukup buang dua-byte-nya.
 const OTHER_ESC = new RegExp(`${ESC}[ -/]*[@-~]`, "g")
-// C0 tanpa \n \t (kebutuhan teks biasa) + DEL. Ditulis lewat `new RegExp`
-// bukan literal regex: literal akan memaksa byte kontrol ke dalam sumber
-// (melanggar aturan yang sama seperti komentar di atas), sementara
-// `noControlCharactersInRegex` justru melarang literal semacam itu.
+// C0 (termasuk \r, kecuali \n \t) + DEL + C1 (0x80–0x9F, termasuk 8-bit CSI 0x9B)
+// + kontrol BiDi/format tak terlihat.
 // biome-ignore lint/complexity/useRegexLiterals: lihat alasan di atas.
-const CTRL = new RegExp("[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]", "g")
+const CTRL = new RegExp(
+  "[\\u0000-\\u0008\\u000B-\\u000D\\u000E-\\u001F\\u007F-\\u009F\\u061C\\u200E\\u200F\\u202A-\\u202E\\u2066-\\u2069\\uFEFF]",
+  "g",
+)
 
 export function sanitizeIncoming(s: string): string {
   if (typeof s !== "string" || s.length === 0) return ""
-  return s.replace(OSC, "").replace(CSI, "").replace(OTHER_ESC, "").replace(CTRL, "")
+  return s.replace(STR_SEQ, "").replace(CSI, "").replace(OTHER_ESC, "").replace(CTRL, "")
 }
 
 /** Batasi panjang + basuh — untuk field yang nanti ikut dicetak/disimpan. */

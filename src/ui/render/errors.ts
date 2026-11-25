@@ -7,7 +7,6 @@
 // berisi `metadata`, `provider_error_code`, `limit_source`, dan URL dokumentasi
 // — di dalam frame TUI selebar 100 kolom.
 
-import { t } from "../i18n/locale.ts"
 import { sanitizeAnsiLine } from "./sanitize.ts"
 import { tSystem } from "./tool-label.ts"
 import { truncateToWidth } from "./width.ts"
@@ -130,9 +129,9 @@ function redactSecrets(s: string): string {
   )
 }
 
-// Mapping kategori formal -> pesan user-friendly. Detail provider disertakan
-// sebagai satu kalimat bila ada (itu yang memberi tahu model mana yang limit,
-// atau tool mana yang tidak didukung) — bukan seluruh body.
+// Mapping kategori formal -> pesan user-friendly (mengikuti bahasa OS via tSystem).
+// Detail provider disertakan sebagai satu kalimat bila ada (itu yang memberi tahu
+// model mana yang limit, atau tool mana yang tidak didukung) — bukan seluruh body.
 export function friendlyFromCategory(category: string, detail: string): FriendlyError {
   // Detail datang dari body error provider (proxy tak terpercaya): redact dulu
   // lalu sanitasi satu-baris agar ESC[2J/OSC/alternate-screen tak bisa lolos
@@ -146,11 +145,11 @@ export function friendlyFromCategory(category: string, detail: string): Friendly
 
   switch (category) {
     // Deteksi kata kunci TETAP Inggris: body error provider berbahasa Inggris
-    // apa pun locale UI. Yang diterjemahkan hanya pesan/fix tampil.
+    // apa pun locale UI. Yang diterjemahkan hanya pesan/fix tampil (via tSystem).
     case "rate_limit":
       return {
-        message: withDetail(t("err.rateLimit")),
-        fix: hint ?? t("err.rateLimitFix"),
+        message: withDetail(tSystem("err.rateLimit")),
+        fix: hint ?? tSystem("err.rateLimitFix"),
       }
     case "auth": {
       const low = truth.toLowerCase()
@@ -162,109 +161,237 @@ export function friendlyFromCategory(category: string, detail: string): Friendly
         low.includes("credit limit")
       ) {
         return {
-          message: withDetail(t("err.balance")),
-          fix: hint ?? t("err.balanceFix"),
+          message: withDetail(tSystem("err.balance")),
+          fix: hint ?? tSystem("err.balanceFix"),
         }
       }
       return {
-        message: withDetail(t("err.auth")),
-        fix: hint ?? t("err.authFix"),
+        message: withDetail(tSystem("err.auth")),
+        fix: hint ?? tSystem("err.authFix"),
       }
     }
     case "server":
       return {
-        message: withDetail(t("err.server")),
-        fix: hint ?? t("err.serverFix"),
+        message: withDetail(tSystem("err.server")),
+        fix: hint ?? tSystem("err.serverFix"),
       }
     case "network":
       return {
-        message: withDetail(t("err.network")),
-        fix: hint ?? t("err.networkFix"),
+        message: withDetail(tSystem("err.network")),
+        fix: hint ?? tSystem("err.networkFix"),
       }
     case "invalid_request":
       return {
-        message: withDetail(t("err.invalid")),
-        fix: hint ?? t("err.invalidFix"),
+        message: withDetail(tSystem("err.invalid")),
+        fix: hint ?? tSystem("err.invalidFix"),
       }
     case "context_length_exceeded":
       return {
-        message: withDetail(t("err.context")),
-        fix: hint ?? t("err.contextFix"),
+        message: withDetail(tSystem("err.context")),
+        fix: hint ?? tSystem("err.contextFix"),
       }
     case "content_filter":
       return {
-        message: withDetail(t("err.filter")),
-        fix: hint ?? t("err.filterFix"),
+        message: withDetail(tSystem("err.filter")),
+        fix: hint ?? tSystem("err.filterFix"),
       }
     default: {
       // Kategori "unknown" menampung status HTTP lain (mis. 402 dari vendor
-      // yang frozen) — kenali pola tagihan/limit dari TEKS agar pesannya
-      // tetap actionable, bukan dump mentah.
-      const low = truth.toLowerCase()
-      if (
-        low.includes("insufficient balance") ||
-        low.includes("credits") ||
-        low.includes("billing") ||
-        low.includes("quota") ||
-        low.includes("credit limit") ||
-        low.includes("requires more credits") ||
-        low.includes("fewer max_tokens")
-      ) {
+      // yang frozen) atau error lain — klasifikasikan agar pesannya tetap
+      // actionable, dan jangan pernah membocorkan body mentah ke UI.
+      const classified = classifyGenericError(truth)
+      if (classified) {
         return {
-          message: withDetail(t("err.balance")),
-          fix: hint ?? t("err.balanceFix"),
-        }
-      }
-      if (
-        low.includes("rate limit") ||
-        low.includes("rate_limit") ||
-        low.includes("429") ||
-        low.includes("freeusagelimit") ||
-        low.includes("try again later")
-      ) {
-        return {
-          message: withDetail(t("err.rateLimit")),
-          fix: hint ?? t("err.rateLimitFix"),
+          message: withDetail(classified.message),
+          ...((hint ?? classified.fix) ? { fix: hint ?? classified.fix } : {}),
         }
       }
       if (providerDetail) return { message: providerDetail, ...(hint ? { fix: hint } : {}) }
-      // truth sudah sanitize satu-baris; potong per kolom agar CJK/emoji tak
-      // meluap dan tak belah SGR/surrogate.
-      return { message: truncateToWidth(truth, 160, "…") }
+      return { message: tSystem("err.unknown"), fix: tSystem("err.unknownFix") }
     }
   }
 }
 
-// Fallback string-only (AgentError: timeout/aborted/max_steps, dst.)
-export function friendlyError(raw: string): FriendlyError {
-  const lower = raw.toLowerCase()
-  if (lower.includes("timed out") || lower.includes("timeout"))
-    return {
-      message: t("err.timeout"),
-      fix: t("err.timeoutFix"),
-    }
-  if (lower.includes("max steps") || lower.includes("max_steps"))
-    return {
-      message: t("err.steps"),
-      fix: t("err.stepsFix"),
-    }
+/**
+ * Klasifikasikan pesan error generik menjadi narasi singkat + saran (locale OS).
+ * Dipakai bersama oleh `friendlyError()` dan cabang `unknown` pada
+ * `friendlyFromCategory()` agar cakupan kategori konsisten di seluruh UI.
+ */
+function classifyGenericError(safeText: string): FriendlyError | null {
+  const lower = safeText.toLowerCase()
+  if (lower.includes("timed out") || lower.includes("timeout") || lower.includes("etimedout")) {
+    return { message: tSystem("err.timeout"), fix: tSystem("err.timeoutFix") }
+  }
+  if (lower.includes("max steps") || lower.includes("max_steps")) {
+    return { message: tSystem("err.steps"), fix: tSystem("err.stepsFix") }
+  }
   // [Live Hardening 0.13.x] Satu-satunya throw kernel ber-kind budget_exceeded
   // tanpa flag operator adalah kehabisan jendela konteks SETELAH kompaksi
-  // ("context window exceeded after compaction", vendor loop). Catch-all
-  // "budget" di bawah memmask pesan itu menjadi "Session budget exceeded"
-  // dan menyarankan --budget — saran yang salah total (uji live tiprouter:
-  // riwayat membengkak ~72k token hingga critical). Kenali lebih dulu.
-  if (lower.includes("context window"))
-    return { message: t("err.context"), fix: t("err.contextFix") }
-  if (lower.includes("budget")) return { message: t("err.budget"), fix: t("err.budgetFix") }
-  if (lower.includes("busy")) return { message: t("err.busy"), fix: t("err.busyFix") }
-  if (lower.includes("aborted")) return { message: t("err.aborted") }
-  const { detail } = extractProviderDetail(redactSecrets(raw))
-  // detail sudah sanitize via firstSentence; redact tak menambah ANSI, tapi
-  // bungkus lagi agar idempoten bila pemanggil mengirim mentah di masa depan.
-  if (detail) return { message: sanitizeAnsiLine(redactSecrets(detail)) }
-  const safe = sanitizeAnsiLine(redactSecrets(raw))
-  return { message: truncateToWidth(safe, 160, "…") }
+  // ("context window exceeded after compaction", vendor loop). Kenali sebelum "budget".
+  if (
+    lower.includes("context window") ||
+    lower.includes("context length") ||
+    lower.includes("maximum context") ||
+    lower.includes("too many tokens")
+  ) {
+    return { message: tSystem("err.context"), fix: tSystem("err.contextFix") }
+  }
+  if (lower.includes("budget")) {
+    return { message: tSystem("err.budget"), fix: tSystem("err.budgetFix") }
+  }
+  if (lower.includes("busy") || lower.includes("already running")) {
+    return { message: tSystem("err.busy"), fix: tSystem("err.busyFix") }
+  }
+  if (lower.includes("aborted") || lower.includes("cancelled")) {
+    return { message: tSystem("err.aborted") }
+  }
+  if (
+    lower.includes("insufficient balance") ||
+    lower.includes("credits") ||
+    lower.includes("billing") ||
+    lower.includes("quota") ||
+    lower.includes("credit limit") ||
+    lower.includes("requires more credits") ||
+    lower.includes("fewer max_tokens") ||
+    /\b402\b/.test(lower)
+  ) {
+    return { message: tSystem("err.balance"), fix: tSystem("err.balanceFix") }
+  }
+  if (
+    lower.includes("rate limit") ||
+    lower.includes("rate_limit") ||
+    lower.includes("ratelimit") ||
+    lower.includes("rate limited") ||
+    lower.includes("too many requests") ||
+    lower.includes("freeusagelimit") ||
+    lower.includes("try again later") ||
+    /\b429\b/.test(lower)
+  ) {
+    return { message: tSystem("err.rateLimit"), fix: tSystem("err.rateLimitFix") }
+  }
+  if (
+    lower.includes("content filter") ||
+    lower.includes("content_filter") ||
+    lower.includes("safety filter") ||
+    lower.includes("moderation")
+  ) {
+    return { message: tSystem("err.filter"), fix: tSystem("err.filterFix") }
+  }
+  if (
+    lower.includes("unauthorized") ||
+    lower.includes("forbidden") ||
+    lower.includes("invalid api key") ||
+    lower.includes("incorrect api key") ||
+    lower.includes("authentication") ||
+    /\bauth\b/.test(lower) ||
+    /\b401\b/.test(lower) ||
+    /\b403\b/.test(lower)
+  ) {
+    return { message: tSystem("err.auth"), fix: tSystem("err.authFix") }
+  }
+  if (
+    lower.includes("err_tls") ||
+    lower.includes("certificate") ||
+    lower.includes("self signed") ||
+    /\b(?:ssl|tls)\b/.test(lower)
+  ) {
+    return { message: tSystem("err.tls"), fix: tSystem("err.tlsFix") }
+  }
+  if (
+    lower.includes("econnrefused") ||
+    lower.includes("enotfound") ||
+    lower.includes("econnreset") ||
+    lower.includes("eai_again") ||
+    lower.includes("ehostunreach") ||
+    lower.includes("enetunreach") ||
+    lower.includes("connection refused") ||
+    /\brefused\b/.test(lower) ||
+    lower.includes("network") ||
+    lower.includes("fetch failed") ||
+    lower.includes("socket hang up")
+  ) {
+    return { message: tSystem("err.network"), fix: tSystem("err.networkFix") }
+  }
+  if (
+    /\b5\d\d\b/.test(lower) ||
+    lower.includes("internal server error") ||
+    lower.includes("bad gateway") ||
+    lower.includes("service unavailable") ||
+    lower.includes("overloaded")
+  ) {
+    return { message: tSystem("err.server"), fix: tSystem("err.serverFix") }
+  }
+  if (
+    lower.includes("permission denied") ||
+    lower.includes("outside workspace") ||
+    lower.includes("eacces") ||
+    lower.includes("eperm") ||
+    lower.includes("authorization changed")
+  ) {
+    return { message: tSystem("err.permission"), fix: tSystem("err.permissionFix") }
+  }
+  if (lower.includes("enoent") || lower.includes("file not found") || /\bnot found\b/.test(lower)) {
+    return { message: tSystem("err.notFound"), fix: tSystem("err.notFoundFix") }
+  }
+  if (
+    /\b(?:enospc|ebusy|erofs|eisdir|enotdir|emfile)\b/.test(lower) ||
+    lower.includes("binary file")
+  ) {
+    return { message: tSystem("err.fsError"), fix: tSystem("err.fsErrorFix") }
+  }
+  if (
+    lower.includes("syntaxerror") ||
+    lower.includes("json.parse") ||
+    lower.includes("unexpected token") ||
+    lower.includes("invalid json") ||
+    lower.includes("malformed json")
+  ) {
+    return { message: tSystem("err.parse"), fix: tSystem("err.parseFix") }
+  }
+  if (
+    lower.includes("not a git repository") ||
+    lower.includes("merge conflict") ||
+    lower.includes("non-fast-forward") ||
+    lower.includes("index.lock")
+  ) {
+    return { message: tSystem("err.git"), fix: tSystem("err.gitFix") }
+  }
+  if (
+    lower.includes("not configured") ||
+    lower.includes("no provider") ||
+    lower.includes("api key missing") ||
+    lower.includes("requires minicode_sandbox")
+  ) {
+    return { message: tSystem("err.config"), fix: tSystem("err.configFix") }
+  }
+  if (
+    lower.includes("too many background jobs") ||
+    lower.includes("too many active background jobs") ||
+    lower.includes("batch limit reached")
+  ) {
+    return { message: tSystem("err.toolLimit"), fix: tSystem("err.toolLimitFix") }
+  }
+  return null
+}
+
+// Fallback string-only (AgentError: timeout/aborted/max_steps, dst.) — selalu
+// lewat redaksi + sanitasi + klasifikasi narasi (bahasa OS), tak bocor mentah.
+export function friendlyError(raw: string): FriendlyError {
+  const safe = sanitizeAnsiLine(redactSecrets(String(raw ?? "")))
+  const { detail, hint } = extractProviderDetail(safe)
+  const classified = classifyGenericError(safe)
+  if (classified) {
+    const message =
+      detail && detail.toLowerCase() !== classified.message.toLowerCase()
+        ? `${classified.message}: ${detail}`
+        : classified.message
+    const fix = hint ?? classified.fix
+    return fix ? { message, fix } : { message }
+  }
+  if (detail) {
+    return { message: sanitizeAnsiLine(redactSecrets(detail)), ...(hint ? { fix: hint } : {}) }
+  }
+  return { message: tSystem("err.unknown"), fix: tSystem("err.unknownFix") }
 }
 
 /**
@@ -296,6 +423,7 @@ const TOOL_SUBAGENT_RE = /sub[- ]?agent|turn exceeded|child tools?:/i
 const TOOL_NO_PROVIDER_SUBAGENT_RE = /^no provider for sub[- ]?agent\b/i
 // Guard internal diperiksa sebelum pola permission denied di grup baru.
 const TOOL_GUARD_RE = /bash-guard internal error/i
+const TOOL_SHELL_QUOTING_RE = /^cmd\.exe quoting hazard:/i
 // `.includes("exit code")` lama mentrigger pada teks tanpa angka; sekarang
 // harus ada kode numerik nyata (`exit 1`, `exit code -2`, `exit +7`).
 const TOOL_EXIT_RE = /\bexit(?:\s+code)?\s+[+-]?\d+\b/i
@@ -305,41 +433,70 @@ const TOOL_ZERO_EXIT_RE = /\bexit(?:\s+code)?\s+[+-]?0+\b/i
 const TOOL_EIO_RE = /\beio\b/i
 
 /**
- * Delapan pola baru, diurutkan: yang lebih spesifik didahulukan agar
- * `tool not found` tak jadi `targetNotFound`, dan `turn exceeded` sudah
- * diserap cabang sub-agent di atas. Anchor `^`/`\b` mencegah substring
- * longgar (`grep: permission denied (in fixture)`, `set timeout 30s`).
+ * 15 pola tool kanonik (total 21 bersama 6 jalur presedensi di atas),
+ * diurutkan: yang lebih spesifik didahulukan agar `tool not found` tak jadi
+ * `targetNotFound`, dan `turn exceeded` sudah diserap cabang sub-agent di
+ * atas. Anchor `^`/`\b` mencegah substring longgar (`grep: permission denied
+ * (in fixture)`, `set timeout 30s`).
  */
 const TOOL_ERROR_PATTERNS = [
   { re: /^unknown tool:|\btool not found\b/i, key: "msg.toolNotFound" },
   {
-    re: /^(?:permission denied|permission error|not authorized|outside workspace|blocked )\b/i,
+    re: /^(?:permission denied|permission error|not authorized|outside workspace|blocked |cwd outside workspace|path outside workspace|cannot search sensitive|authorization changed)\b/i,
     key: "msg.permissionDenied",
   },
-  { re: /^invalid arguments:/i, key: "msg.invalidArgs" },
+  { re: /^invalid arguments:|^invalid regex:|ReDoS-prone/i, key: "msg.invalidArgs" },
   {
-    re: /\btimed out\b|\bETIMEDOUT\b|^(?:MCP|LSP)\b.*\btimed out\b|^turn exceeded\b/i,
+    re: /\btimed out\b|\bETIMEDOUT\b|^(?:MCP|LSP)\b.*\btimed out\b|^turn exceeded\b|\[TOOL_OUTCOME[^\]]*reason=TIMEOUT/i,
     key: "msg.toolTimeout",
   },
   {
-    re: /^file not found\b|\bENOENT\b|\bnot found in\b|\bsource not found\b|\bcwd not found\b|\bnot found$/i,
+    re: /canonical task sync failed|\bTASK_IDENTITY_REQUIRED\b|\bTASK_AUTHORITY_VIOLATION\b|illegal task transition|non-canonical taskId|already has \d+ canonical task/i,
+    key: "msg.planSyncFailed",
+  },
+  {
+    re: /^oldString == newString\b|^oldString found multiple times\b|\bpatch failed\b|\bhunk failed\b|\bcannot apply patch\b/i,
+    key: "msg.editMismatch",
+  },
+  {
+    re: /^file not found\b|\bENOENT\b|\bnot found in\b|\bsource not found\b|\bcwd not found\b|\bjob "[^"]*" not found\b|\bnot found$/i,
     key: "msg.targetNotFound",
   },
   {
-    re: /\bno provider for sub[- ]?agent\b|\bnot configured\b|\bunavailable\b|\brefusing direct execution\b/i,
+    re: /\bno provider for sub[- ]?agent\b|\bnot configured\b|\bunavailable\b|\brefusing direct execution\b|\brequires MINICODE_SANDBOX\b/i,
     key: "msg.notConfigured",
   },
   { re: /^HTTP 4\d\d|^HTTP 5\d\d|^fetch 429|\brate limited\b/i, key: "msg.requestFailed" },
   { re: /^aborted\b|\bcancelled \(empty answer\)|^ask_user cancelled\b/i, key: "msg.cancelled" },
+  {
+    re: /\b(?:EACCES|EPERM|EROFS|EBUSY|EISDIR|ENOTDIR|EEXIST|ENOSPC|EMFILE)\b|^cannot read binary file\b|\bfile too large\b/i,
+    key: "msg.fsAccess",
+  },
+  {
+    re: /\b(?:ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH|ERR_TLS_[A-Z0-9_]+|UNABLE_TO_VERIFY_LEAF_SIGNATURE|SELF_SIGNED_CERT_IN_CHAIN)\b|\bsocket hang up\b|\bfetch failed\b/i,
+    key: "msg.networkTool",
+  },
+  {
+    re: /^(?:SyntaxError|JSON\.parse)\b|\binvalid JSON\b|\bmalformed JSON\b|\bUnexpected token\b|\binvalid URL\b/i,
+    key: "msg.parseError",
+  },
+  {
+    re: /\bnot a git repository\b|\bmerge conflict\b|^CONFLICT \(|\bnon-fast-forward\b|\bindex\.lock\b|\bdetached HEAD\b/i,
+    key: "msg.gitError",
+  },
+  {
+    re: /^(?:MCP|LSP)\b|\bserver not connected\b|\btoo many (?:active )?background jobs\b|\bbatch limit reached\b/i,
+    key: "msg.integrationError",
+  },
 ] as const
 
 /**
- * SATU-SATUNYA sumber deteksi 13 pola kanonik (presedensi
- * `duplicate → subagent → guard → exit → EIO → 8 pola baru`). Dipakai bersama
- * oleh dua gerbang tampil:
- *  - friendlyToolError()          → fallback ke pesan mentah (perilaku lama).
- *  - friendlyToolErrorCanonical() → fallback ke "" (jangan tampilkan yang tak
- *    dikenali — permintaan owner: error tanpa pola kanonik tak usah muncul).
+ * SATU-SATUNYA sumber deteksi 21 pola kanonik (presedensi
+ * `duplicate → subagent → guard → shellQuoting → exit → EIO → 15 pola`).
+ * Dipakai bersama oleh dua gerbang tampil:
+ *  - friendlyToolError()          → fallback ke narasi aman `msg.unknownToolError`.
+ *  - friendlyToolErrorCanonical() → fallback ke "" agar pemanggil (app.ts,
+ *    simple.ts, recovery-warning.ts) tetap bisa memisahkan fallthrough vs ledger.
  *
  * Mengembalikan redaksi kanonik BELUM disanitasi, atau `undefined` bila tak ada
  * pola yang cocok. Regex modul-scope di atas tanpa flag `g` aman dipakai
@@ -356,6 +513,7 @@ function canonicalToolError(message: string, target?: string): string | undefine
     return tSystem("msg.subagentFailed")
   }
   if (TOOL_GUARD_RE.test(raw)) return tSystem("msg.guardError")
+  if (TOOL_SHELL_QUOTING_RE.test(raw)) return tSystem("msg.shellQuoting")
   if (TOOL_EXIT_RE.test(raw) && !TOOL_ZERO_EXIT_RE.test(raw))
     return tSystem("msg.cmdFailed", { target: targetText })
   if (TOOL_EIO_RE.test(raw)) return tSystem("msg.toolFailed")
@@ -364,15 +522,12 @@ function canonicalToolError(message: string, target?: string): string | undefine
 }
 
 /**
- * v0.43 — Redaksi kanonik SAJA untuk kegagalan tool di lapisan tampil.
+ * Redaksi kanonik SAJA untuk kegagalan tool.
  *
- * Bedanya dengan friendlyToolError(): bila pesan TIDAK cocok dengan salah satu
- * dari 13 pola kanonik, fungsi ini mengembalikan `""` — jangan tampilkan `raw
- * message` yang tidak dikenali sama sekali. Baris ledger/status tool tetap bisa
- * dirender oleh pemanggil; yang hilang hanyalah redaksi errornya.
- *
- * Cabang kanonik identik dengan friendlyToolError() (locale OS via tSystem,
- * lewat redaksi → sanitasi → potong 120 kolom).
+ * Mengembalikan "" bila pesan tidak cocok satu pun dari 21 pola kanonik, agar
+ * pemanggil yang punya fallback lebih kaya (`app.ts → formatError`,
+ * `simple.ts → formatProviderError`, `recovery-warning.ts → withheld`) tetap
+ * dapat berjalan, sementara renderer baris tool memakai `msg.unknownToolError`.
  */
 export function friendlyToolErrorCanonical(message: string, target?: string): string {
   const canonical = canonicalToolError(message, target)
@@ -382,8 +537,8 @@ export function friendlyToolErrorCanonical(message: string, target?: string): st
 
 export function friendlyToolError(message: string, target?: string): string {
   const canonical = canonicalToolError(message, target)
-  // Fallback ke pesan mentah dipertahankan demek kompatibilitas test/API lama.
-  const text = canonical ?? friendlyError(String(message ?? "")).message
+  // Fallback ke narasi aman OS-locale; tidak pernah membocorkan pesan mentah.
+  const text = canonical ?? tSystem("msg.unknownToolError")
   return truncateToWidth(sanitizeAnsiLine(redactSecrets(text)), 120, "…")
 }
 
@@ -428,4 +583,54 @@ export function formatError(e: unknown): string {
   }
   // Sisanya (string yang dilempar, objek tanpa message): TETAP lewat redaksi.
   return formatFriendly(friendlyError(String(e)))
+}
+
+/**
+ * Error untuk permukaan protokol mesin (ACP JSON-RPC, dsb.): tetap meredaksi
+ * secret dan mensanitasi ANSI/satu-baris, serta tetap memetakan kategori yang
+ * dikenali, tetapi TIDAK mengganti pesan error konkret tak-terklasifikasi
+ * dengan narasi generik manusia (`--verbose`).
+ */
+export function formatMachineError(e: unknown): string {
+  const obj = e as { kind?: string; category?: string; message?: string } | undefined
+  if (obj?.category) {
+    const truth = sanitizeAnsiLine(redactSecrets(String(obj.message ?? "").trim()))
+    if (obj.category === "unknown") {
+      const { detail, hint } = extractProviderDetail(truth)
+      const classified = classifyGenericError(truth)
+      if (classified) {
+        const message =
+          detail && detail.toLowerCase() !== classified.message.toLowerCase()
+            ? `${classified.message}: ${detail}`
+            : classified.message
+        const fix = hint ?? classified.fix
+        return formatFriendly(fix ? { message, fix } : { message })
+      }
+      if (detail) return formatFriendly({ message: detail, ...(hint ? { fix: hint } : {}) })
+      return truncateToWidth(truth, 160, "…") || tSystem("err.unknown")
+    }
+    return formatFriendly(friendlyFromCategory(obj.category, obj.message ?? ""))
+  }
+  const raw = obj?.kind
+    ? `${obj.kind}: ${obj.message ?? ""}`
+    : e instanceof Error
+      ? e.message.trim()
+        ? e.message
+        : String(e)
+      : typeof obj?.message === "string" && obj.message.trim()
+        ? obj.message
+        : String(e)
+  const safe = sanitizeAnsiLine(redactSecrets(raw))
+  const { detail, hint } = extractProviderDetail(safe)
+  const classified = classifyGenericError(safe)
+  if (classified) {
+    const message =
+      detail && detail.toLowerCase() !== classified.message.toLowerCase()
+        ? `${classified.message}: ${detail}`
+        : classified.message
+    const fix = hint ?? classified.fix
+    return formatFriendly(fix ? { message, fix } : { message })
+  }
+  if (detail) return sanitizeAnsiLine(redactSecrets(detail))
+  return truncateToWidth(safe, 160, "…") || tSystem("err.unknown")
 }

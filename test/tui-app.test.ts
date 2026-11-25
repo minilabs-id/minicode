@@ -134,6 +134,7 @@ function setup(
       calls.push(text)
       if (text === "/exit") return { quit: true }
       if (text === "/boom") throw new Error("gagal disengaja")
+      if (text === "/ratelimit") throw Object.assign(new Error("429"), { category: "rate_limit" })
       // [P0 UI Security] Error yang memuat credential — jalur TUI TAK BOLEH
       // menampilkannya mentah (values = sentinel palsu, bukan credential nyata).
       if (text === "/leak")
@@ -248,7 +249,8 @@ describe("TuiApp", () => {
     await tty!.ready()
     await tty!.waitForOutput((o) => o.includes("00.00.00"))
     expect(tty!.screen()).toHaveLength(14)
-    expect(tty!.screen()[12]).toBe("") // spacer memisahkan composer dan footer
+    expect(tty!.screen()[10]).toMatch(/^ {3}╭─+╮$/) // bingkai atas kotak tipis composer (default 1 baris)
+    expect(tty!.screen()[12]).toMatch(/^ {3}╰─+╯$/) // bingkai bawah kotak tipis composer
     expect(tty!.all()).toContain("\x1b[?1049h")
     expect(tty!.all()).toContain("\x1b[?1002h")
     expect(tty!.all()).toContain("\x1b[?1006h")
@@ -278,7 +280,8 @@ describe("TuiApp", () => {
     const text = frame.join("\n")
     expect(text).not.toContain("Thinking")
     expect(text).not.toContain("Activity")
-    expect(text).not.toContain("│")
+    // Tidak ada pembatas vertikal sidebar di area transkrip (di atas bingkai composer).
+    expect(frame.slice(0, -5).join("\n")).not.toContain("│")
     // Footer tetap hadir, ikut ter-centre bersama chat.
     expect(frame[frame.length - 1]).toContain("Discuss")
     const raw = rawFrameLines(tty!.all())
@@ -299,9 +302,10 @@ describe("TuiApp", () => {
     const raw = rawFrameLines(tty!.all())
     expect(raw).toHaveLength(20)
     for (const line of raw) expect(stripSgr(line)).toHaveLength(80)
-    // Baris composer diawali margin 3 kolom, BUKAN 40 spasi padding.
-    const composerLine = raw.find((l) => stripSgr(l).includes("minicode")) ?? ""
-    expect(stripSgr(composerLine).startsWith("   minicode")).toBe(true)
+    // v0.43: 3 spasi margin FRAME kiri/kanan mengapit bingkai kotak tipis composer.
+    const topLine = raw.find((l) => stripSgr(l).includes("╭───")) ?? ""
+    expect(stripSgr(topLine)).toMatch(/^ {3}╭─+╮ {3}$/)
+    expect(raw[16] ?? "").not.toContain("\x1b[48;")
     await tty!.send(KEY.ctrlD)
     await runP
   })
@@ -484,15 +488,14 @@ describe("TuiApp", () => {
     await tty!.send("x".repeat(40))
     // Gagal-di-kode-lama: 40 karakter dalam satu chunk = 40 paint.
     expect(paints() - before).toBe(1)
-    // v7.42: prompt diawali margin kiri 3 kolom (ASSISTANT_LEFT_MARGIN) mengikuti
-    // teks asisten; caret DECSCUSR menempel di `›` (tanpa spasi trailing).
-    expect(screenText()).toContain(`   minicode ›${"x".repeat(40)}`)
+    // v0.43: teks diketik berada di dalam bingkai kotak tipis tanpa prefix (`   │ ... │`).
+    expect(screenText()).toContain(`   │ ${"x".repeat(40)}`)
     await tty!.send(KEY.ctrlU)
     await tty!.send(KEY.ctrlD)
     await runP
   })
   test("ketik + Enter: submit terpanggil + prompt menjadi history di transkrip", async () => {
-    const { app, calls, screenText } = setup()
+    const { app, calls } = setup()
     const runP = app.run()
     await tty!.ready()
     await tty!.waitForOutput((o) => o.includes("00.00.00"))
@@ -509,15 +512,13 @@ describe("TuiApp", () => {
     // indented (`  halo`) dan tanpa box outline yang mengapitnya.
     expect(rows.filter((line) => line.includes("halo"))).toHaveLength(1)
     expect(rows).not.toContain("  halo")
-    // v7.42: baris composer (dan gema transkrip) kini diawali 3 spasi margin;
-    // lookup eksplisit memakai margin penuh agar tak tertukar dengan baris lain.
-    const composerIdx = rows.indexOf("   minicode ›")
-    expect(composerIdx).toBeGreaterThan(echoIdx)
     // Pemisah kosong pasca-gema tetap satu baris (bukan dua tepi card).
     expect(rows[echoIdx + 1]).toBe("")
     await new Promise((r) => setTimeout(r, 20))
-    // v7.42: jangkar regex mengikuti margin baru — anchor ^…$ tetap utuh.
-    expect(screenText()).toMatch(/^ {3}minicode ›$/m)
+    // v0.43: composer idle bersih tanpa prefix `minicode ›` di dalam kotak tipis (default 1 baris).
+    expect(rows[10]).toMatch(/^ {3}╭─+╮$/)
+    expect(rows[11]).toMatch(/^ {3}│ +│$/)
+    expect(rows[12]).toMatch(/^ {3}╰─+╯$/)
     await tty!.send(KEY.ctrlD)
     await runP
   })
@@ -536,15 +537,21 @@ describe("TuiApp", () => {
     await tty!.send(KEY.ctrlD)
     await runP
   })
-  test("submit melempar → baris error tampil, sesi lanjut (tak ada jalur diam)", async () => {
-    const { app, calls } = setup()
+  test("submit melempar → baris error narasi aman tampil, sesi lanjut (tak ada jalur diam)", async () => {
+    const { app, calls, screenText } = setup()
     const runP = app.run()
     await tty!.ready()
     await tty!.waitForOutput((o) => o.includes("00.00.00"))
     await tty!.send("/boom")
     await tty!.send(KEY.enter)
-    await tty!.waitForScreen((frame) => frame.some((line) => line.includes("gagal disengaja")))
+    await tty!.waitForScreen((frame) => frame.some((line) => line.includes(tSystem("err.unknown"))))
+    expect(screenText()).not.toContain("gagal disengaja")
     expect(calls).toEqual(["/boom"])
+    await tty!.send("/ratelimit")
+    await tty!.send(KEY.enter)
+    await tty!.waitForScreen((frame) =>
+      frame.some((line) => line.includes(tSystem("err.rateLimit"))),
+    )
     await tty!.send(KEY.ctrlD)
     await tty!.send(KEY.backspace)
     await tty!.send(KEY.backspace)
@@ -554,7 +561,7 @@ describe("TuiApp", () => {
     await tty!.send(KEY.ctrlD)
     await runP
   })
-  test("[P0] error memuat credential → TUI tak menampilkan tokennya", async () => {
+  test("[P0] error memuat credential → TUI tak menampilkan tokennya maupun teks mentah", async () => {
     // Jalur TUI NYATA (App.doSubmit → host.submit melempar). Kode lama
     // pushing `e.message` mentah → bearer token tampil utuh di layar.
     const { app, calls, screenText } = setup()
@@ -563,14 +570,13 @@ describe("TuiApp", () => {
     await tty!.waitForOutput((o) => o.includes("00.00.00"))
     await tty!.send("/leak")
     await tty!.send(KEY.enter)
-    await tty!.waitForScreen((frame) => frame.some((line) => line.includes("proxy menolak")))
+    await tty!.waitForScreen((frame) => frame.some((line) => line.includes(tSystem("err.unknown"))))
     // Yang diuji adalah APA YANG TERLIHAT, bukan byte mentah: diff per sel
     // boleh memecah teks menjadi beberapa run CUP tanpa mengubah layar.
     const shown = screenText()
     expect(shown).not.toContain(SENTINEL_BEARER)
-    expect(shown).toContain("[redacted]")
-    // Bagian yang aman tetap tampil — pesan error tak jadi generik.
-    expect(shown).toContain("proxy menolak")
+    expect(shown).not.toContain("proxy menolak")
+    expect(shown).toContain(tSystem("err.unknown"))
     expect(calls).toEqual(["/leak"])
     await tty!.send(KEY.ctrlD)
     for (let i = 0; i < 5; i++) await tty!.send(KEY.backspace)
@@ -644,7 +650,8 @@ describe("TuiApp", () => {
     expect(last).toContain("Auto")
     expect(last).toContain("1k")
     expect(last.indexOf("1k")).toBeLessThan(last.lastIndexOf("Auto"))
-    expect(frame[frame.length - 2]).toBe("")
+    expect(frame[frame.length - 4]).toMatch(/^ {3}╭─+╮$/)
+    expect(frame[frame.length - 2]).toMatch(/^ {3}╰─+╯$/)
     expect(last).toContain("00.00.00")
     expect(last).not.toContain("•")
     await tty!.send(KEY.ctrlD)
@@ -662,11 +669,12 @@ describe("TuiApp", () => {
     await tty!.send("/slow")
     await tty!.send(KEY.enter)
     await waitForCall(calls, "/slow")
-    const composer = () => tty!.screen().find((line) => line.includes("minicode ›")) ?? ""
+    // v0.43: composer bersih tanpa prefix `minicode ›` di dalam bingkai kotak tipis (default 1 baris).
+    const rule = () => tty!.screen()[10] ?? ""
+    const composer = () => tty!.screen()[11] ?? ""
     const footer = () => tty!.screen().find((line) => /\d{2}\.\d{2}\.\d{2}/.test(line)) ?? ""
-    // v7.42: margin 3 kolom mengikuti promptFirst(); composer TETAP bersih —
-    // tanpa dots/label/elapsed. Hanya leading margin baris prompt yang berubah.
-    expect(composer()).toBe("   minicode ›")
+    expect(rule()).toMatch(/^ {3}╭─+╮$/)
+    expect(composer()).toMatch(/^ {3}│ +│$/)
     expect(tty!.screen().some((line) => /^\s*\.{1,3}\s*$/.test(line))).toBe(false)
     expect(screenText()).not.toMatch(/\b(Working|Thinking|Running)\b/)
     expect(footer()).not.toMatch(/\.{1,3}\s+00.00.00/)
@@ -674,8 +682,8 @@ describe("TuiApp", () => {
     // Timer berjalan di footer dengan format tetap HH.MM.SS; composer tak berubah.
     expect(footer()).toMatch(/\d{2}\.\d{2}\.\d{2}/)
     expect(footer()).not.toMatch(/\d+s/)
-    // v7.42: samakan margin prompt dengan layout baru; invariant bersih dipertahankan.
-    expect(composer()).toBe("   minicode ›")
+    expect(rule()).toMatch(/^ {3}╭─+╮$/)
+    expect(composer()).toMatch(/^ {3}│ +│$/)
     expect(screenText()).not.toMatch(/\b(Working|Thinking|Running)\b/)
     await releaseSlow()
     await tty!.send(KEY.ctrlD)
@@ -711,10 +719,11 @@ describe("TuiApp", () => {
       await waitForCall(calls, "/slow")
       bus.emit("provider:extension", { kind: "reasoning", data: { text: "hmm" } })
       await new Promise((r) => setTimeout(r, 40))
-      const composer = () => tty!.screen().find((line) => line.includes("minicode ›")) ?? ""
+      const composer = () => tty!.screen()[11] ?? ""
       const first = composer()
-      // v7.42: margin 3 kolom pada prompt; composer tanpa dots tetap dijaga.
-      expect(first).toBe("   minicode ›")
+      // v0.43: composer bersih tanpa prefix & tanpa dots di dalam kotak tipis.
+      expect(first).toMatch(/^ {3}│ +│$/)
+      expect(tty!.screen()[10] ?? "").toMatch(/^ {3}╭─+╮$/)
       expect(tty!.screen().some((line) => /^\s*\.{1,3}\s*$/.test(line))).toBe(false)
       await new Promise((r) => setTimeout(r, 500))
       expect(composer()).toBe(first)
@@ -740,13 +749,14 @@ describe("TuiApp", () => {
     await tty!.send("/slow")
     await tty!.send(KEY.enter)
     await waitForCall(calls, "/slow")
-    const composer = () => tty!.screen().find((line) => line.includes("minicode ›")) ?? ""
+    const composer = () => tty!.screen()[11] ?? ""
 
     bus.emit("provider:extension", { kind: "reasoning", data: { text: "hmm" } })
     await new Promise((r) => setTimeout(r, 40))
     const before = composer()
-    // v7.42: prompt bermargin 3 kolom; reasoning/text tak menyusup ke composer.
-    expect(before).toBe("   minicode ›")
+    // v0.43: composer bersih tanpa prefix; reasoning/text tak menyusup ke composer.
+    expect(before).toMatch(/^ {3}│ +│$/)
+    expect(tty!.screen()[10] ?? "").toMatch(/^ {3}╭─+╮$/)
     expect(tty!.screen().some((line) => /^\s*\.{1,3}\s*$/.test(line))).toBe(false)
     expect(screenText()).not.toContain("… thinking")
     expect(screenText()).not.toMatch(/\b(Working|Thinking|Running)\b/)
@@ -785,9 +795,9 @@ describe("TuiApp", () => {
       tsStart: Date.now() - 3000,
     })
     app.repaint()
-    const composer = tty!.screen().find((line) => line.includes("minicode ›")) ?? ""
-    // v7.42: margin 3 kolom pada prompt; snapshot tool tetap tak merender di sini.
-    expect(composer).toBe("   minicode ›")
+    const composer = tty!.screen()[11] ?? ""
+    // v0.43: snapshot tool tetap tak merender di composer.
+    expect(composer).toMatch(/^ {3}│ +│$/)
     expect(composer).not.toContain("read_file")
     expect(composer).not.toMatch(/\(\d+s\)/)
     const footer = tty!.screen().find((line) => /\d{2}\.\d{2}\.\d{2}/.test(line)) ?? ""
@@ -868,8 +878,8 @@ describe("TuiApp", () => {
     await tty!.send(KEY.mouseWheelUpSgr)
     // v0.33: wheel di-coalescing 16 ms — tunggu repaint sebelum cek.
     await tty!.waitForScreen((frame) => !frame.some((line) => line.includes("baris-29")))
-    // v7.42: baris prompt kini diawali margin 3 kolom.
-    expect(screenText()).toContain("   minicode ›x")
+    // v0.43: baris prompt di dalam bingkai kotak tipis (`   │ x … │`).
+    expect(screenText()).toContain("   │ x ")
     await tty!.send(KEY.mouseWheelDownSgr)
     await tty!.waitForScreen((frame) => frame.some((line) => line.includes("baris-29")))
     await tty!.send(KEY.backspace)
@@ -900,10 +910,9 @@ describe("TuiApp", () => {
     await tty!.send(KEY.up)
 
     // "/help" adalah command, sehingga TIDAK di-echo ke transkrip — satu-satunya
-    // kemunculan "minicode › /help" adalah composer. Absennya berarti navigasi
+    // kemunculan "   /help" adalah composer. Absennya berarti navigasi
     // sukses menyeberangi entri command menuju prompt terlama (bukan tersangkut).
-    // v7.42: samakan dengan margin 3 kolom pada baris prompt composer.
-    expect(screenText()).not.toContain("   minicode ›/help")
+    expect(screenText()).not.toContain("   /help")
     await tty!.send(KEY.esc) // kosongkan baris recall agar Ctrl+D (baris kosong) bisa quit
     await tty!.send(KEY.ctrlD)
     await runP
@@ -926,13 +935,14 @@ describe("TuiApp", () => {
     const start = visible[0]!.row
     const end = visible[Math.min(2, visible.length - 1)]!.row
     const endX = (visible[Math.min(2, visible.length - 1)]!.line.length ?? 0) + 1
-    await tty!.send(`\x1b[<0;1;${start}M`)
+    // v0.43: margin 3 milik frame — kolom 1..3 adalah padding, mulai klik di 4.
+    await tty!.send(`\x1b[<0;4;${start}M`)
     await tty!.send(`\x1b[<32;${endX};${end}M`)
     await tty!.send(`\x1b[<0;${endX};${end}m`)
     expect(tty!.all()).toContain("\x1b[7m")
     await tty!.send(KEY.ctrlC)
-    // Composer tetap 2 baris → viewport 7 baris, ekor = baris-23..29.
-    expect(copied[0]).toBe("baris-23\nbaris-24\nbaris-25")
+    // Composer default 1 baris → viewport 8 baris (rows=12), ekor = baris-22..29.
+    expect(copied[0]).toBe("baris-22\nbaris-23\nbaris-24")
     // v7.30: kwitansi salin di footer (toast), BUKAN baris transkrip permanen.
     const rows = tty!.screen()
     expect(rows[rows.length - 1]).toContain(tSystem("msg.copied"))
@@ -959,7 +969,8 @@ describe("TuiApp", () => {
     const start = visible[0]!.row
     const end = visible[1]!.row
     const endX = visible[1]!.line.length + 1
-    await tty!.send(`\x1b[<0;1;${start}M`)
+    // v0.43: margin 3 milik frame — kolom 1..3 adalah padding, mulai klik di 4.
+    await tty!.send(`\x1b[<0;4;${start}M`)
     await tty!.send(`\x1b[<32;${endX};${end}M`)
     await tty!.send(`\x1b[<0;${endX};${end}m`)
     await tty!.send(KEY.ctrlC)
@@ -975,30 +986,29 @@ describe("TuiApp", () => {
     await tty!.ready()
     await tty!.waitForOutput((o) => o.includes("00.00.00"))
     await tty!.send("hello")
-    // Prefix prompt kini 13 kolom (3 margin + `minicode ›` 10 kolom, tanpa
-    // spasi trailing). Klik kolom 16 = tepat di antara "he" dan "llo" — grapheme
-    // target sama, geser −1 mengikuti displayWidth(prefix) yang baru.
-    const promptRow = tty!.screen().findIndex((line) => line.includes("minicode ›hello")) + 1
+    // Awal interior composer = 5 kolom (margin 3 + border `│ ` 2 kolom).
+    // Klik kolom 8 (= 3 + 2 + 2 karakter + 1) mendarat di antara "he" dan "llo".
+    const promptRow = tty!.screen().findIndex((line) => line.includes("   │ hello")) + 1
     expect(promptRow).toBeGreaterThan(0)
-    await tty!.send(`\x1b[<0;16;${promptRow}M\x1b[<0;16;${promptRow}m`)
+    await tty!.send(`\x1b[<0;8;${promptRow}M\x1b[<0;8;${promptRow}m`)
     await tty!.send("X")
-    expect(tty!.screen().join("\n")).toContain("   minicode ›heXllo")
+    expect(tty!.screen().join("\n")).toContain("   │ heXllo")
     expect(copied).toEqual([])
     await tty!.send(KEY.ctrlU)
     await tty!.send(KEY.ctrlD)
     await runP
   })
 
-  test("CJK/emoji: caret dihitung per kolom, menempel setelah glif prefix", async () => {
+  test("CJK/emoji: caret dihitung per kolom pada blok bebas-prefix", async () => {
     const { app, screenText } = setup()
     const runP = app.run()
     await tty!.ready()
     await tty!.waitForOutput((o) => o.includes("00.00.00"))
-    // `你` dan `😀` masing-masing 2 kolom → badan 4 kolom. Prefix 13 kolom
-    // (`minicode ›`, tanpa spasi trailing) → caret di kolom 18, bukan 19.
+    // `你` dan `😀` masing-masing 2 kolom → badan 4 kolom. Margin 3 + `│ ` 2 kol
+    // → caret di baris 12 (1-baris composer) kolom 10 (3 + 2 + 4 + 1).
     await tty!.send("你😀")
-    expect(screenText()).toContain("   minicode ›你😀")
-    expect(tty!.all()).toContain("\x1b[11;18H")
+    expect(screenText()).toContain("   │ 你😀")
+    expect(tty!.all()).toContain("\x1b[12;10H")
     await tty!.send(KEY.ctrlU)
     await tty!.send(KEY.ctrlD)
     await runP
@@ -1112,10 +1122,8 @@ describe("TuiApp", () => {
     await new Promise((r) => setTimeout(r, 40))
     const frame = tty!.screen()
     expect(frame).toHaveLength(rowsBefore)
-    const draftRow = frame.find((line) => line.includes("minicode ›draf")) ?? ""
-    // v7.42: margin 3 kolom mengikuti promptFirst(); draf & larangan progres
-    // ("step 2/5") tetap diuji persis seperti sebelumnya.
-    expect(draftRow).toBe("   minicode ›draf")
+    // v0.43: composer dibingkai kotak tipis; draft ada di baris interior kotak.
+    expect(frame.some((line) => /│\s*draf\s*│/.test(line))).toBe(true)
     // Tak ada progres "step 2/5" di composer maupun di layar.
     expect(screenText()).not.toContain("step 2/5")
     // Indikator busy ada di footer: timer berjalan (bukan di composer).
@@ -1155,9 +1163,9 @@ describe("TuiApp", () => {
     await new Promise((r) => setTimeout(r, 40))
     const frame = tty!.screen()
     expect(frame).toHaveLength(rowsBefore)
-    const draftRow = frame.find((line) => line.includes("minicode ›draf")) ?? ""
-    // v7.42: margin 3 kolom pada baris prompt; larangan tool/elapsed tetap utuh.
-    expect(draftRow).toBe("   minicode ›draf")
+    const draftRow = frame.find((line) => /│ draf +│/.test(line)) ?? ""
+    // v0.43: composer di dalam kotak tipis bebas-prefix; larangan tool/elapsed tetap utuh.
+    expect(draftRow).toMatch(/^ {3}│ draf +│$/)
     // Nama tool dan elapsed TIDAK boleh muncul di baris draft.
     expect(draftRow).not.toContain("read_file")
     expect(draftRow).not.toMatch(/\(\d+s\)/)
@@ -1213,7 +1221,7 @@ describe("TuiApp", () => {
     app.suspend()
     await new Promise((r) => setTimeout(r, 120))
     app.resume()
-    expect(screenText()).toContain("›x")
+    expect(screenText()).toContain("   │ x ")
     await tty!.send(KEY.backspace)
     await tty!.send(KEY.ctrlD)
     await runP
@@ -1231,7 +1239,8 @@ describe("TuiApp", () => {
       app.suspend()
       expect(app.isSuspended()).toBe(true)
       const dimmedFrame = tty!.screen()
-      expect(dimmedFrame[dimmedFrame.length - 2]).toBe("")
+      expect(dimmedFrame[dimmedFrame.length - 4]).toMatch(/^ {3}╭─+╮$/)
+      expect(dimmedFrame[dimmedFrame.length - 2]).toMatch(/^ {3}╰─+╯$/)
       expect(dimmedFrame[dimmedFrame.length - 1]).toContain("Discuss")
       expect(dimmedFrame[dimmedFrame.length - 1]).toContain("Auto")
       // Mono: scrimMode() = "none", jadi tak ada SGR redup/backdrop.
@@ -1239,11 +1248,11 @@ describe("TuiApp", () => {
       // Ketikan selama suspend TIDAK masuk baris input (anti double-handling
       // dengan view popup yang memegang stdin).
       await tty!.send("x")
-      expect(screenText()).not.toContain("›x")
+      expect(screenText()).not.toContain("   │ x ")
       app.resume()
       expect(app.isSuspended()).toBe(false)
       await tty!.send("y")
-      expect(screenText()).toContain("›y")
+      expect(screenText()).toContain("   │ y ")
       await tty!.send(KEY.backspace)
       await tty!.send(KEY.ctrlD)
       await runP
@@ -1481,16 +1490,17 @@ describe("TuiApp", () => {
   })
   test("kursor baris-wrap tengah: kolom tepat, bukan EOL", async () => {
     // Gagal-di-kode-lama: baris tengah selalu diparkir di ujung baris.
-    // Prefix adaptif 1 kolom (`›` / `·`) pada chat 30 kolom: 50 "a" →
-    // baris 29 + 21; 20 'left' dari ekor mendarat di grapheme ke-30 (baris 1).
-    // Kolom = prefix lanjutan 1 + 1 grapheme + 1 = 3, baris 12 (composer ke-2).
+    // Pada chat 30 kolom tanpa prefix: boxW = 27, innerW = 25 → 50 'a' ter-wrap
+    // 25 + 25 (2 baris, winStart = 0). 20 'left' dari ekor mendarat di
+    // offset 30 (baris visual 1, kolom interior 5). CUP absolut: baris 12,
+    // kolom = margin 3 + 5 + 1 = 9.
     const { app } = setup({ columns: 30, rows: 14 })
     const runP = app.run()
     await tty!.ready()
     await tty!.waitForScreen((f) => f.some((l) => l.length > 0))
     await tty!.send("a".repeat(50))
     for (let i = 0; i < 20; i++) await tty!.send(KEY.left)
-    expect(tty!.all()).toContain("\x1b[12;3H")
+    expect(tty!.all()).toContain("\x1b[12;9H")
     await tty!.send(KEY.ctrlU)
     await tty!.send(KEY.ctrlD)
     await runP
@@ -1517,28 +1527,31 @@ describe("TuiApp", () => {
     await runP
     void app
   })
-  test("idle awal: prompt tampil; Esc membersihkan isi, prompt tetap tampil", async () => {
+  test("idle awal: blok composer tampil; Esc membersihkan isi, blok tetap tampil", async () => {
     const { app, screenText } = setup()
     const runP = app.run()
     await tty!.ready()
     await tty!.waitForOutput((o) => o.includes("00.00.00"))
-    // v7.42: anchor ^…$ kini menyertakan margin 3 kolom; prompt idle tetap ada.
-    expect(screenText()).toMatch(/^ {3}minicode ›$/m)
-    // Audit caret: prefix `minicode ›` = 13 kolom → kursorDECSCUSR tepat
-    // sesudah `›` (kolom 14), bukan kolom 15 seperti saat ada spasi trailing.
-    expect(tty!.all()).toContain("\x1b[11;14H")
+    // v0.43: bingkai kotak tipis keliling composer (`╭─╮`/`│ │`/`╰─╯`), default 1 baris isi,
+    // bebas prefix; caret idle mendarat di baris 12 kolom 6 (3 margin + 2 `│ ` + 1).
+    expect(screenText()).toMatch(/^ {3}╭─+╮$/m)
+    expect(tty!.screen()[11]).toMatch(/^ {3}│ +│$/)
+    expect(tty!.screen()[12]).toMatch(/^ {3}╰─+╯$/)
+    expect(tty!.all()).toContain("\x1b[12;6H")
     expect(screenText()).toContain("00.00.00")
     await tty!.send(KEY.left)
-    expect(screenText()).toMatch(/^ {3}minicode ›$/m)
-    // Audit 2026-11-12 (I13): prompt idle TIDAK boleh hilang setelah Esc —
-    // layar tanpa prompt terbaca sebagai sesi mati.
+    expect(screenText()).toMatch(/^ {3}╭─+╮$/m)
+    expect(tty!.screen()[11]).toMatch(/^ {3}│ +│$/)
+    // Audit 2026-11-12 (I13): area composer idle TIDAK boleh hilang setelah Esc —
+    // layar tanpa area input terbaca sebagai sesi mati.
     await tty!.send(KEY.esc, 90)
-    expect(screenText()).toMatch(/^ {3}minicode ›$/m)
+    expect(screenText()).toMatch(/^ {3}╭─+╮$/m)
+    expect(tty!.screen()[11]).toMatch(/^ {3}│ +│$/)
     await tty!.send("a")
-    // v7.42: baris prompt diawali 3 spasi margin.
-    expect(screenText()).toContain("   minicode ›a")
+    expect(tty!.screen()[11]).toMatch(/^ {3}│ a +│$/)
     await tty!.send(KEY.backspace)
-    expect(screenText()).toContain("   minicode ›")
+    expect(tty!.screen()[11]).toMatch(/^ {3}│ +│$/)
+    expect(screenText()).toMatch(/^ {3}╭─+╮$/m)
     expect(screenText()).not.toContain("ask anything")
     await tty!.send(KEY.ctrlD)
     await runP
@@ -1638,7 +1651,7 @@ describe("TuiApp", () => {
     await tty!.ready()
     await tty!.waitForOutput((o) => o.includes("00.00.00"))
     const rows = tty!.screen()
-    const bodyText = rows.slice(0, -2).join("\n")
+    const bodyText = rows.slice(0, -5).join("\n")
     // Renderer flat: logo 14x9 dan hint idle dihapus — transkrip awalnya polos.
     expect(bodyText).not.toContain("▄▄▄")
     expect(bodyText).not.toContain("██▀▀█▄")
@@ -1646,14 +1659,13 @@ describe("TuiApp", () => {
     expect(bodyText).not.toContain("type a message to start")
     expect(bodyText).not.toContain("/help for commands")
     expect(bodyText).not.toContain("Shift+Tab")
-    // v7.42: composer tetap hidup; baris prompt kini diawali margin 3 kolom.
-    expect(rows.some((r) => r.includes("   minicode ›"))).toBe(true)
+    // v0.43: bingkai kotak tipis keliling composer; tetap hidup tanpa logo/hint.
+    expect(rows.some((r) => /^ {3}╭─+╮$/.test(r))).toBe(true)
     expect(rows[rows.length - 1]).toContain("Discuss")
     expect(rows[rows.length - 1]).toContain("Auto")
     expect(rows[rows.length - 1]).toContain("00.00.00")
     await tty!.send("a")
-    // v7.42: margin 3 kolom pada prompt composer.
-    expect(screenText()).toContain("   minicode ›a")
+    expect(screenText()).toContain("   │ a ")
     expect(screenText()).not.toContain("██▀▀█▄")
     expect(screenText()).not.toContain("type a message to start")
     await tty!.send(KEY.backspace)
@@ -1676,8 +1688,8 @@ describe("TuiApp", () => {
     await tty!.send(KEY.tab)
     expect(cycles).toBe(0)
     expect(calls).toEqual([])
-    // v7.42: prompt bermargin 3 kolom setelah pelengkapan slash.
-    expect(screenText()).toContain("   minicode ›/model")
+    // v0.43: teks lengkap tampil di dalam bingkai kotak composer setelah pelengkapan slash.
+    expect(screenText()).toContain("   │ /model ")
     // Dropdown sudah tertutup -> Tab berikutnya memutar WorkMode.
     await tty!.send(KEY.tab)
     expect(cycles).toBe(1)
@@ -1691,18 +1703,18 @@ describe("TuiApp", () => {
     const runP = app.run()
     await tty!.ready()
     await tty!.waitForScreen((f) => f.some((l) => l.length > 0))
-    // Prefix adaptif 1 kolom (`›` / `·`) pada chat 30 kolom: baris 0 memuat
-    // 29 karakter (28 'a' + 1 'b'), baris lanjutan 12 'b' — jelas beda dari
-    // baris pertama.
-    await tty!.send("a".repeat(28) + "b".repeat(13))
+    // Pada chat 30 kolom tanpa prefix: contentCols = 24 (30 - 6), innerW = 20 (24 - 4)
+    // → baris 0 memuat 20 'a', baris lanjutan memuat 3 'a' + 13 'b' = 16 karakter.
+    await tty!.send("a".repeat(23) + "b".repeat(13))
     const row2Index = tty!.screen().findIndex((l) => l.includes("bbbbbbbbbbbb"))
     expect(row2Index).toBeGreaterThan(0)
-    // Klik kolom ke-4 (prefix 1 + 2 grapheme) pada baris lanjutan → sesudah
-    // dua 'b'. Grapheme target sama; hanya sisa barisnya yang bertambah.
-    await tty!.send(`\x1b[<0;4;${row2Index + 1}M\x1b[<0;4;${row2Index + 1}m`)
+    // Margin 3 + border `│ ` 2 kol → klik kolom 8 (3 + 2 + 2 karakter + 1)
+    // mendarat setelah 2 'a' pada baris composer ke-2.
+    await tty!.send(`\x1b[<0;8;${row2Index + 1}M\x1b[<0;8;${row2Index + 1}m`)
     await tty!.send("X")
     const joined = tty!.screen().join("\n")
-    expect(joined).toContain("bbXbbbbbbbb")
+    // Lebar interior 20 → baris lanjutan memuat 3 'a' + 13 'b'; X menyisip jadi 2 'a' + X + 1 'a'.
+    expect(joined).toMatch(/aaXab+/)
     await tty!.send(KEY.ctrlU)
     await tty!.send(KEY.ctrlD)
     await runP
@@ -1718,11 +1730,11 @@ describe("TuiApp", () => {
     expect(screenText()).toContain("    model")
     await tty!.send("boom")
     await tty!.send(KEY.enter)
-    await tty!.waitForScreen((rows) => rows.some((l) => l.includes("gagal disengaja")))
+    await tty!.waitForScreen((rows) => rows.some((l) => l.includes(tSystem("err.unknown"))))
     expect(screenText()).not.toContain("    model")
     await tty!.send("abc")
-    // v7.42: baris prompt diawali margin 3 kolom.
-    expect(screenText()).toContain("   minicode ›abc")
+    // v0.43: teks prompt di dalam bingkai kotak tipis (margin 3 + `│ `).
+    expect(screenText()).toContain("   │ abc ")
     await tty!.send(KEY.ctrlU)
 
     // Masuk turn `/slow` lalu batalkan via Esc: tidak ada popup sisa, input berikutnya utuh.
@@ -1788,36 +1800,34 @@ describe("TuiApp", () => {
     // bukan card indented — tunggu itu sebelum mengisi prompt panjang.
     await tty!.waitForScreen((rows) => rows.some((l) => l.includes("minicode › histori-lama")))
 
-    // Prefix adaptif 1 kolom (`›` / `·`) pada chat 30 kolom. Tiga baris
-    // logis (dipisah \n) masing-masing satu baris visual, semua punya ruang
-    // untuk satu karakter tambahan — jadi navigasi ↑/↓ tak menggeser wrap.
-    await tty!.send(`${"a".repeat(20)}\n${"b".repeat(20)}\n${"c".repeat(20)}`)
+    // Composer bebas prefix pada chat 30 kolom (`contentCols = 24`, `innerW = 20`).
+    // Tiga baris logis (dipisah \n) masing-masing 19 char, sehingga menyisip 1
+    // karakter tambahan tetap muat di satu baris visual tanpa menggeser wrap.
+    await tty!.send(`${"a".repeat(19)}\n${"b".repeat(19)}\n${"c".repeat(19)}`)
     // Up dari baris 2 → baris 1: desiredCol dijaga, Y mendarat di ekor 'b'.
     await tty!.send(KEY.up)
     await tty!.send("Y")
-    expect(tty!.screen().join("\n")).toContain(`·${"b".repeat(20)}Y`)
+    expect(tty!.screen().join("\n")).toContain(`   │ ${"b".repeat(19)}Y`)
 
     // Down kembali ke baris 2: Z tetap di ekor 'c'.
     await tty!.send(KEY.down)
     await tty!.send("Z")
-    expect(tty!.screen().join("\n")).toContain(`·${"c".repeat(20)}Z`)
+    expect(tty!.screen().join("\n")).toContain(`   │ ${"c".repeat(19)}Z`)
 
     // Up dua kali ke baris 0: desiredCol terjaga, X di ekor 'a'.
     await tty!.send(KEY.up)
     await tty!.send(KEY.up)
     await tty!.send("X")
-    expect(tty!.screen().join("\n")).toContain(`›${"a".repeat(20)}X`)
+    expect(tty!.screen().join("\n")).toContain(`   │ ${"a".repeat(19)}X`)
 
     // Sudah di baris visual paling atas → Up berikutnya memanggil histori lama.
     // v7.29: gema lama sudah ada di transkrip, jadi yang dibuktikan harus
-    // baris COMPOSER (terakhir), bukan kemunculan pasif di viewport.
+    // baris COMPOSER (tepat setelah bingkai atas `╭─╮`), bukan kemunculan pasif.
     await tty!.send(KEY.up)
-    const composerRow =
-      tty!
-        .screen()
-        .filter((l) => l.startsWith("›"))
-        .at(-1) ?? ""
-    expect(composerRow).toContain("›histori-lama")
+    const recallFrame = tty!.screen()
+    const ruleIdx = recallFrame.findIndex((l) => /^ {3}╭─+╮$/.test(l))
+    expect(ruleIdx).toBeGreaterThanOrEqual(0)
+    expect(recallFrame[ruleIdx + 1]).toMatch(/^ {3}│ histori-lama +│$/)
     await tty!.send(KEY.ctrlU)
     await tty!.send(KEY.ctrlD)
     await runP
@@ -1828,31 +1838,30 @@ describe("TuiApp", () => {
     const runP = app.run()
     await tty!.ready()
     await tty!.waitForScreen((f) => f.some((l) => l.length > 0))
-    // Prefix adaptif 1 kolom (`›` / `·`) pada chat 30 kolom: 6 baris visual
-    // (> COMPOSER_MAX_ROWS 2) menyembunyikan baris 0; jendela menampilkan
-    // baris 4..5. Tiap baris logis memuat 20 digit.
-    // Baris logis dipisah \n supaya jalur wrap penuh dipakai (prefix hadir di
-    // tiap baris). 6 baris visual (> COMPOSER_MAX_ROWS 2) → jendela di ekor.
+    // Pada chat 30 kolom (`contentCols = 24`, `innerW = 20`), 6 baris logis
+    // (> COMPOSER_MAX_ROWS 2) menyembunyikan baris 0; jendela menampilkan baris
+    // 4..5. Tiap baris logis memuat 19 digit di dalam kotak tipis (`   │ ... │`).
     await tty!.send(
-      `${"0".repeat(20)}\n${"1".repeat(20)}\n${"2".repeat(20)}\n${"3".repeat(20)}\n${"4".repeat(20)}\n${"5".repeat(20)}`,
+      `${"0".repeat(19)}\n${"1".repeat(19)}\n${"2".repeat(19)}\n${"3".repeat(19)}\n${"4".repeat(19)}\n${"5".repeat(19)}`,
     )
     const screen = tty!.screen()
-    const row4 = screen.findIndex((l) => l.includes(`·${"4".repeat(20)}`))
+    const row4 = screen.findIndex((l) => l.includes(`   │ ${"4".repeat(19)}`))
     expect(row4).toBeGreaterThan(0)
-    // Klik kolom ke-5 (prefix 1 + 3 digit) pada baris ke-4 → menyisip di
-    // baris yang diklik (bukan baris 0).
-    await tty!.send(`\x1b[<0;5;${row4 + 1}M\x1b[<0;5;${row4 + 1}m`)
+    // Margin 3 + border `│ ` 2 kol → klik kolom 9 (= 3 + 2 + 3 digit + 1) pada
+    // baris ke-4 → menyisip di baris yang diklik.
+    await tty!.send(`\x1b[<0;9;${row4 + 1}M\x1b[<0;9;${row4 + 1}m`)
     await tty!.send("M")
-    expect(tty!.screen().join("\n")).toContain(`·444M${"4".repeat(17)}`)
+    expect(tty!.screen().join("\n")).toContain(`   │ 444M${"4".repeat(16)}`)
 
     // Navigasi panah Up menggulir jendela ke baris 0, klik tetap akurat.
     for (let i = 0; i < 4; i++) await tty!.send(KEY.up)
-    const row0 = tty!.screen().findIndex((l) => l.includes(`›${"0".repeat(20)}`))
+    const row0 = tty!.screen().findIndex((l) => l.includes(`   │ ${"0".repeat(19)}`))
     expect(row0).toBeGreaterThanOrEqual(0)
-    // Kolom ke-17 = prefix 1 + 15 digit '0' → A mendarat di grapheme ke-16.
-    await tty!.send(`\x1b[<0;17;${row0 + 1}M\x1b[<0;17;${row0 + 1}m`)
+    // Margin 3 + border `│ ` 2 kol → kolom 21 (= 15 + 3 + 2 + 1) = setelah 15 digit '0'
+    // → A mendarat di grapheme ke-16.
+    await tty!.send(`\x1b[<0;21;${row0 + 1}M\x1b[<0;21;${row0 + 1}m`)
     await tty!.send("A")
-    expect(tty!.screen().join("\n")).toContain(`›${"0".repeat(15)}A${"0".repeat(5)}`)
+    expect(tty!.screen().join("\n")).toContain(`   │ ${"0".repeat(15)}A${"0".repeat(4)}`)
     await tty!.send(KEY.ctrlU)
     await tty!.send(KEY.ctrlD)
     await runP
@@ -1920,31 +1929,28 @@ describe("TuiApp", () => {
 
   test("kursor ↑/↓ memakai composerWidth (chat 120/200 kolom), bukan cols layar", async () => {
     for (const { columns, cap } of [
-      { columns: 120, cap: 56 },
-      { columns: 200, cap: 96 },
+      { columns: 120, cap: 50 },
+      { columns: 200, cap: 90 },
     ]) {
       const { app } = setup({ columns, rows: 24 })
       const runP = app.run()
       await tty!.ready()
       await tty!.waitForScreen((f) => f.some((l) => l.length > 0))
-      // composerWidth = cap progresif(chatCols) = 60 / 125 (chat 60/100).
-      // Baris 0 memuat `cap-10` 'a', baris 1 `cap` 'b', baris 2 sepuluh 'c'.
+      // composerBoxWidth = 54 / 94 (chatCols - 6 margin simetris); innerW = 50 / 90
+      // (dikurangi chrome kotak `│ ` + ` │` = 4 kol). Baris 'b' sepanjang `cap`
+      // mengisi satu baris penuh di atas 'c'.
       await tty!.send(`${"a".repeat(cap - 10)}\n${"b".repeat(cap)}\n${"c".repeat(10)}`)
-      // ↑ dari ekor HARUS mendarat di baris 'b' (wrap 60/100), bukan histori
-      // atau baris 'a' (wrap 120/200 kalau memakai cols mentah).
+      // ↑ dari ekor HARUS mendarat di baris 'b' (innerW 50/90), bukan histori
+      // atau baris 'a'.
       await tty!.send(KEY.up)
       await tty!.send("X")
-      // Baris 'b' penuh → X menggeser ekor ke wrap berikutnya; cukup buktikan
-      // X mendarat setelah 10 'b' pada baris visual yang dikunjungi ↑.
-      expect(tty!.screen().join("\n")).toContain(`  ·${"b".repeat(10)}X${"b".repeat(3)}`)
-      // ↓ kembali ke ekor: Y mendarat setelah 'c'. (Draft diulang agar
-      // penyisipan X yang memecah baris 'b' tak menggeser indeks visual.)
+      expect(tty!.screen().join("\n")).toContain(`│ ${"b".repeat(10)}X${"b".repeat(3)}`)
       await tty!.send(KEY.ctrlU)
       await tty!.send(`${"a".repeat(cap - 10)}\n${"b".repeat(cap)}\n${"c".repeat(10)}`)
       await tty!.send(KEY.up)
       await tty!.send(KEY.down)
       await tty!.send("Y")
-      expect(tty!.screen().join("\n")).toContain(`  ·${"c".repeat(10)}Y`)
+      expect(tty!.screen().join("\n")).toContain(`│ ${"c".repeat(10)}Y`)
       await tty!.send(KEY.ctrlU)
       await tty!.send(KEY.ctrlD)
       await runP
@@ -1983,22 +1989,17 @@ describe("TuiApp", () => {
     await runP
   })
 
-  test("v0.43 composer 2 baris tetap: prompt tak bergeser idle→ketik→busy→selesai (60×14, I1)", async () => {
-    // Audit: dulu composerH mengikuti `editing`, jadi saat submit (editing=false)
-    // viewH membesar 1 dan composerTop turun 1 baris; finally mengembalikannya.
-    // Sekarang composerH dikunci 2 di semua state → prompt diam di tempat.
+  test("v0.43 composer dinamis 1–2 baris: 1 baris di idle/ketik/busy/selesai, melebar 2 baris saat >1 baris (60×14, I1)", async () => {
     const { app, calls, releaseSlow } = setup({ columns: 60, rows: 14, gateText: "halo" })
     const runP = app.run()
     await tty!.ready()
     await tty!.waitForOutput((o) => o.includes("00.00.00"))
 
     const screen = () => tty!.screen()
-    // Gema user di transkrip JUGA memuat "minicode ›", jadi ambil kemunculan
-    // TERAKHIR — composer selalu di bawah transkrip, tepat atas spacer+footer.
+    // Baris composer 0 tepat di bawah bingkai atas kotak tipis (`╭─╮`), bebas prefix.
     const composerRow = () => {
-      const rows = screen()
-      for (let i = rows.length - 1; i >= 0; i--) if (rows[i]!.includes("minicode ›")) return i
-      return -1
+      const idx = screen().findIndex((l) => /^ {3}╭─+╮$/.test(l))
+      return idx >= 0 ? idx + 1 : -1
     }
     const footerRow = () => screen().findIndex((l) => /\d{2}\.\d{2}\.\d{2}/.test(l))
     // I1: satu repaint = tepat satu stdout.write, di setiap state.
@@ -2008,22 +2009,22 @@ describe("TuiApp", () => {
       expect(tty!.chunks().length - before).toBe(1)
     }
 
-    // 1) idle, draft kosong
+    // 1) idle, draft kosong: default 1 baris isi (baris 11), bingkai bawah di 12.
     repaintOnce()
     const rowIdle = composerRow()
-    expect(rowIdle).toBeGreaterThan(0)
+    expect(rowIdle).toBe(11)
     expect(screen()).toHaveLength(14)
-    expect(screen()[rowIdle + 1]!.trim()).toBe("") // baris ke-2 composer dikosongkan
+    expect(screen()[rowIdle + 1]!).toMatch(/^ {3}╰─+╯$/)
     expect(footerRow()).toBe(13)
 
-    // 2) mengetik "halo" — draft satu baris tetap dikompres ke 2 baris composer
+    // 2) mengetik "halo" (1 baris) — tetap 1 baris isi, posisi sama.
     await tty!.send("halo")
-    expect(screen().some((l) => l.includes("minicode ›halo"))).toBe(true)
+    expect(screen()[rowIdle]).toMatch(/^ {3}│ halo +│$/)
     repaintOnce()
     const rowTyped = composerRow()
     expect(rowTyped).toBe(rowIdle)
     expect(screen()).toHaveLength(14)
-    expect(screen()[rowTyped + 1]!.trim()).toBe("")
+    expect(screen()[rowTyped + 1]!).toMatch(/^ {3}╰─+╯$/)
     expect(footerRow()).toBe(13)
 
     // 3) submit → busy (host.submit digate agar state busy bisa diamati)
@@ -2033,17 +2034,27 @@ describe("TuiApp", () => {
     const rowBusy = composerRow()
     expect(rowBusy).toBe(rowIdle)
     expect(screen()).toHaveLength(14)
-    expect(screen()[rowBusy + 1]!.trim()).toBe("")
+    expect(screen()[rowBusy + 1]!).toMatch(/^ {3}╰─+╯$/)
     expect(footerRow()).toBe(13)
 
-    // 4) turn selesai (editing=true lagi)
+    // 4) turn selesai (editing=true lagi): tetap 1 baris isi.
     await releaseSlow()
     repaintOnce()
     const rowDone = composerRow()
     expect(rowDone).toBe(rowIdle)
     expect(screen()).toHaveLength(14)
-    expect(screen()[rowDone + 1]!.trim()).toBe("")
+    expect(screen()[rowDone + 1]!).toMatch(/^ {3}╰─+╯$/)
     expect(footerRow()).toBe(13)
+
+    // 5) ketik 2 baris → kotak melebar ke 2 baris isi (baris 10..11), bingkai bawah tetap 12.
+    await tty!.send("baris1\nbaris2")
+    expect(composerRow()).toBe(10)
+    expect(screen()[10]).toMatch(/^ {3}│ baris1 +│$/)
+    expect(screen()[11]).toMatch(/^ {3}│ baris2 +│$/)
+    expect(screen()[12]).toMatch(/^ {3}╰─+╯$/)
+    expect(footerRow()).toBe(13)
+    await tty!.send(KEY.ctrlU)
+    expect(composerRow()).toBe(rowIdle)
 
     await tty!.send(KEY.ctrlD)
     await runP
@@ -2088,17 +2099,18 @@ describe("TuiApp", () => {
     await runP
   })
 
-  test("Ctrl+A dengan draft/menu aktif tetap berperilaku seperti Home", async () => {
+  test("Ctrl+A dengan draft aktif memilih seluruh teks composer; Ctrl+C menyalin, ketikan mengganti", async () => {
     const { app, copied, screenText } = setup({ columns: 60, rows: 14 })
     const runP = app.run()
     await tty!.ready()
     await tty!.waitForOutput((o) => o.includes("00.00.00"))
     await tty!.send("abcd")
-    await tty!.send(KEY.ctrlA) // home: caret ke awal baris
+    await tty!.send(KEY.ctrlA)
+    await tty!.send(KEY.ctrlC)
+    expect(copied).toEqual(["abcd"])
     await tty!.send("X")
-    expect(screenText()).toContain("Xabcd")
-    await tty!.send(KEY.ctrlC) // bukan select-all → tak ada salinan
-    expect(copied).toHaveLength(0)
+    expect(screenText()).toContain("   │ X ")
+    expect(screenText()).not.toContain("abcd")
     await tty!.send(KEY.ctrlU)
     await tty!.send(KEY.ctrlD)
     await runP
@@ -2158,14 +2170,12 @@ describe("TuiApp", () => {
     await runP
   })
 
-  test("prefix prompt adaptif ambang 37 kolom (37/40 panjang, 36 pendek)", async () => {
+  test("blok composer bebas prefix di layar lebar maupun sempit (tanpa minicode ›/›/·)", async () => {
     const trace = async (columns: number): Promise<string[]> => {
       const { app } = setup({ columns, rows: 14 })
       const runP = app.run()
       await tty!.ready()
       await tty!.waitForOutput((o) => o.includes("00.00.00"))
-      // Newline eksplisit memaksa prefix lanjutan (`·`) dipakai penuh,
-      // bukan jalur wrap inkremental yang mewarisi baris tanpa prefix.
       await tty!.send(`${"a".repeat(20)}\n${"b".repeat(20)}`)
       const lines = tty!.screen().filter((l) => l.trim().length > 0)
       await tty!.send(KEY.ctrlU)
@@ -2175,15 +2185,16 @@ describe("TuiApp", () => {
       tty = null
       return lines
     }
-    for (const columns of [37, 40]) {
+    // v0.43: baik di cols 41/44 maupun layar sempit 40, baris composer tampil
+    // di dalam kotak tipis (`╭─╮`/`│ │`/`╰─╯`, margin 3) tanpa prefix.
+    for (const columns of [41, 44, 40]) {
       const lines = await trace(columns)
-      expect(lines.some((l) => l.startsWith("   minicode ›"))).toBe(true)
-      expect(lines.some((l) => l.startsWith("  ·"))).toBe(true)
+      const ruleIdx = lines.findIndex((l) => /^ {3}╭─+╮$/.test(l))
+      expect(ruleIdx).toBeGreaterThanOrEqual(0)
+      expect(lines[ruleIdx + 1]).toMatch(new RegExp(`^ {3}│ ${"a".repeat(20)} +│$`))
+      expect(lines[ruleIdx + 2]).toMatch(new RegExp(`^ {3}│ ${"b".repeat(20)} +│$`))
+      expect(lines.some((l) => l.includes("minicode ›") || /^ +[›·]/.test(l))).toBe(false)
     }
-    const narrow = await trace(36)
-    expect(narrow.some((l) => l.startsWith("›"))).toBe(true)
-    expect(narrow.some((l) => l.startsWith("·"))).toBe(true)
-    expect(narrow.some((l) => l.startsWith("   minicode ›"))).toBe(false)
   })
 
   test("klik menu tidak merusak seleksi transkrip", async () => {
@@ -2259,7 +2270,10 @@ describe("TuiApp", () => {
 
     const stable = tags.slice(4) // NAR-04..NAR-11 hadir di semua fase
     const positions = () => stable.map((tag) => tty!.screen().findIndex((l) => l.includes(tag)))
-    const composerRow = () => tty!.screen().findIndex((l) => l.includes("minicode ›"))
+    const composerRow = () => {
+      const i = tty!.screen().findIndex((l) => /^ {3}╭─+╮$/.test(l))
+      return i >= 0 ? i + 1 : -1
+    }
     const height = () => tty!.screen().length
     const before = positions()
     const compBefore = composerRow()
@@ -2311,7 +2325,10 @@ describe("TuiApp", () => {
     await tty!.ready()
     await tty!.waitForScreen((f) => f.some((l) => l.includes("NARASI-AWAL")))
 
-    const composerRow = () => tty!.screen().findIndex((l) => l.includes("minicode ›"))
+    const composerRow = () => {
+      const i = tty!.screen().findIndex((l) => /^ {3}╭─+╮$/.test(l))
+      return i >= 0 ? i + 1 : -1
+    }
     const height = () => tty!.screen().length
     const compBefore = composerRow()
     const heightBefore = height()
@@ -2413,12 +2430,12 @@ describe("TuiApp", () => {
     activities = []
     app.repaint()
     expect(positions()).not.toEqual(baseline) // ratchet mengunci, history tetap naik
-    expect(tty!.screen()[8]?.trim()).toBe("") // baris bawah kosong
+    expect(tty!.screen()[9]?.trim()).toBe("") // baris bawah viewport (viewH=10) kosong
 
     bus.emit("turn:started", { turn: 1 })
     app.repaint()
     expect(positions()).toEqual(baseline) // reset → jendela balik ke ekor
-    expect(tty!.screen()[8]).toContain("NAR-11") // tak ada baris kosong hantu
+    expect(tty!.screen()[9]).toContain("NAR-11") // tak ada baris kosong hantu
 
     await tty!.send(KEY.ctrlD)
     await runP
@@ -2439,7 +2456,7 @@ describe("TuiApp", () => {
     await tty!.ready()
     await tty!.waitForScreen((f) => f.some((l) => l.includes("NAR-11")))
 
-    // Empat aktivitas live → tail dipotong jadi 3 baris → floor = 12 + 3 - 9 = 6.
+    // Empat aktivitas live → tail dipotong jadi 3 baris → floor = 12 + 3 - 10 = 5 (viewH=10).
     activities = [
       liveActivity("call-1"),
       liveActivity("call-2"),
@@ -2449,19 +2466,19 @@ describe("TuiApp", () => {
     app.repaint()
     activities = []
     app.repaint()
-    // Terkunci di 6: NAR-06 jadi baris pertama yang terlihat.
-    expect(tty!.screen().findIndex((l) => l.includes("NAR-06"))).toBe(0)
+    // Terkunci di 5: NAR-05 jadi baris pertama yang terlihat.
+    expect(tty!.screen().findIndex((l) => l.includes("NAR-05"))).toBe(0)
 
     // Prompt baru: doSubmit me-reset floor. Gema panjang menambah 5 baris
-    // (blank + 3 baris wrap + blank) → maxBack = 17 - 9 = 8 > floor lama 6.
-    // Tanpa reset jendela tetap di 6 dan NAR-06 masih tampil; dengan reset
-    // followTail() menggeser ke ekor (8) sehingga NAR-06 hilang.
+    // (blank + 3 baris wrap + blank) → maxBack = 17 - 10 = 7 > floor lama 5.
+    // Tanpa reset jendela tetap di 5 dan NAR-05 masih tampil; dengan reset
+    // followTail() menggeser ke ekor (7) sehingga NAR-05 hilang.
     const prompt = `baru ${"x".repeat(100)}`
     await tty!.send(prompt)
     await tty!.send(KEY.enter)
     await waitForCall(calls, prompt)
     await new Promise((r) => setTimeout(r, 20))
-    expect(tty!.screen().findIndex((l) => l.includes("NAR-06"))).toBe(-1)
+    expect(tty!.screen().findIndex((l) => l.includes("NAR-05"))).toBe(-1)
     expect(screenText()).toContain("baru")
 
     await tty!.send(KEY.ctrlD)
@@ -2507,12 +2524,17 @@ describe("TuiApp", () => {
     await tty!.ready()
     await tty!.waitForScreen((f) => f.some((l) => l.includes("MEN-1")))
 
+    const composerRow = () => {
+      const i = tty!.screen().findIndex((l) => /^ {3}╭─+╮$/.test(l))
+      return i >= 0 ? i + 1 : -1
+    }
     const heightBefore = tty!.screen().length
-    const compBefore = tty!.screen().findIndex((l) => l.includes("minicode ›"))
+    const compBefore = composerRow()
+    expect(compBefore).toBeGreaterThan(0)
     await tty!.send("/")
     expect(menuNames(screenText())).toContain("model")
     expect(tty!.screen().length).toBe(heightBefore)
-    expect(tty!.screen().findIndex((l) => l.includes("minicode ›"))).toBe(compBefore)
+    expect(composerRow()).toBe(compBefore)
     await tty!.send(KEY.ctrlU)
     expect(menuNames(screenText())).not.toContain("model")
     await tty!.send(KEY.ctrlD)

@@ -3,7 +3,7 @@ import type { FileHandle } from "node:fs/promises"
 import { open, realpath, stat as statPath } from "node:fs/promises"
 import { homedir, tmpdir } from "node:os"
 import { basename, dirname, isAbsolute, join, parse, relative, resolve } from "node:path"
-import { isPathOutsideRoot, isSensitive } from "../policy/jail.ts"
+import { isOwnedHook, isPathOutsideRoot, isSensitive } from "../policy/jail.ts"
 
 // O_NOFOLLOW mencegah open mengikuti symlink pada POSIX. Windows tidak
 // menyediakan flag Node yang setara; semua platform juga membandingkan dev+ino
@@ -222,6 +222,8 @@ export async function assertSafeWriteTarget(
   const realAbs = fileReal ?? resolve(realDir, basename(abs))
   if (!relaxed && isPathOutsideRoot(realAbs, realRoot))
     throw new Error(`symlink points outside workspace: ${abs}`)
+  if (!relaxed && isSensitive(realAbs)) throw new Error(`blocked sensitive file: ${abs}`)
+  if (!relaxed && isOwnedHook(realAbs)) throw new Error(`blocked hook path: ${abs}`)
   return realAbs
 }
 
@@ -316,11 +318,14 @@ export async function assertDeletableTarget(
   const realRoot = await realpath(scope.root).catch(() => resolve(scope.root))
   const realCwd = await realpath(process.cwd()).catch(() => resolve(process.cwd()))
 
+  const samePath = (a: string, b: string): boolean =>
+    process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b
+
   if (isRootLike(real)) throw new Error(`delete: refusing filesystem root: ${real}`)
   for (const p of protectedPaths())
-    if (real === p) throw new Error(`delete: refusing protected path: ${real}`)
-  if (real === realRoot) throw new Error(`delete: refusing scope root: ${real}`)
-  if (real === realCwd) throw new Error(`delete: refusing process.cwd(): ${real}`)
+    if (samePath(real, p)) throw new Error(`delete: refusing protected path: ${real}`)
+  if (samePath(real, realRoot)) throw new Error(`delete: refusing scope root: ${real}`)
+  if (samePath(real, realCwd)) throw new Error(`delete: refusing process.cwd(): ${real}`)
   if (isPathOutsideRoot(real, realRoot))
     throw new Error(`delete: target outside allowed root: ${real}`)
   if (opts.recursive && depthOf(real) <= depthOf(realRoot))

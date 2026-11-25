@@ -676,7 +676,12 @@ describe("7. command /mode (TUI end-to-end)", () => {
       await tty.send(KEY.left)
       await tty.send(KEY.esc, 90)
       await tty.send(KEY.esc, 90)
-      await tty.waitForScreen((f) => f.some((l) => l.includes("minicode ›")))
+      await tty.waitForScreen(
+        (f) =>
+          !f.some((l) => l.includes("Esc cancel")) &&
+          !f.slice(0, -5).some((l) => l.includes("│")) &&
+          f.some((l) => l.includes("00.00.00")),
+      )
       expect(control.getWorkMode()).toBe("EXECUTE")
       expect(session.permissions?.getMode()).toBe("ask")
     } finally {

@@ -16,14 +16,18 @@ const SECRET_PATTERNS: RegExp[] = [
   /\b(AIza[A-Za-z0-9_-]{35,})\b/g,
   // GitHub tokens (all variants)
   /\b((?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,})\b/g,
-  // AWS access key
-  /\b(AKIA[0-9A-Z]{16})\b/g,
+  // AWS access key & STS temporary key
+  /\b((?:AKIA|ASIA)[0-9A-Z]{16})\b/g,
+  // Stripe live keys & GitLab PAT
+  /\b(sk_live_[A-Za-z0-9]{16,}|glpat-[A-Za-z0-9_-]{20,})\b/g,
   // Private key PEM blocks — lazy dot-all, aman karena terbatas ukuran file (2MB)
-  /-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----/g,
+  /-----BEGIN (?:ENCRYPTED |RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----[\s\S]*?-----END (?:ENCRYPTED |RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----/g,
   // Generic api_key / secret / token = <value> — whitelist test/example/mock
   /\b(?:api[_-]?key|apikey|secret[_-]?key|access[_-]?token|auth[_-]?token|password)\s*[:=]\s*["']?[A-Za-z0-9_-]{16,}["']?/gi,
-  // Database connection strings with password
-  /\b(?:postgresql|postgres|mysql|mongodb|redis):\/\/[^:\s]+:[^@\s]+@[^\s]+/gi,
+  // Daemon bootstrap secret di .minicode/daemon-endpoint.json
+  /"bootstrap"\s*:\s*"[A-Za-z0-9+/=_-]{16,}"/gi,
+  // Connection strings & HTTP/HTTPS URLs with embedded credentials (user:pass@host)
+  /\b(?:https?|postgresql|postgres|mysql|mongodb(?:\+srv)?|rediss?|amqps?):\/\/[^:\s/]+:[^@\s/]+@[^\s]+/gi,
   // Bearer token header
   /\bbearer\s+[A-Za-z0-9._-]{20,}\b/gi,
   // Bearer token header — BENTUK SPASI PENDEK (temuan audit #10 §11,
@@ -146,7 +150,8 @@ export const SECRET_ENV_RE = new RegExp(
     `^${LLM_VENDOR}_[A-Z0-9_]*${CREDENTIAL_WORD}`,
     "^(?:AWS|GCP|AZURE|GITHUB|GITLAB|SUPABASE|STRIPE|TWILIO|SENDGRID|SLACK|NPM|DOCKER)_[A-Z0-9_]*" +
       `${CREDENTIAL_WORD}`, // vendor + penanda rahasia, bukan vendor telanjang
-    "^(?:DATABASE|POSTGRES|POSTGRESQL|MYSQL|MONGO|MONGODB|REDIS)_(?:URL|URI|PASSWORD|DSN)$",
+    "^(?:DATABASE|POSTGRES|POSTGRESQL|MYSQL|MONGO|MONGODB|REDIS|AMQP)_(?:URL|URI|PASSWORD|PASS|PWD|DSN)$",
+    "^(?:MYSQL_PWD|PGPASS(?:WORD)?|DB_PASS|GIT_ASKPASS|RAILS_MASTER_KEY|APP_KEY|SUPABASE_SERVICE_KEY)$",
     "^AGENT_[A-Z_]*KEY$",
   ].join("|"),
   "i",
@@ -155,6 +160,10 @@ export const SECRET_ENV_RE = new RegExp(
 /** Kredensial git yang boleh lolos ke child HANYA di mode `unrestricted`
  * (push/remote via token/SSH agent). Nama TETAP, bukan wildcard. */
 const GIT_CREDENTIAL_ALLOW_RE = /^(?:GITHUB_TOKEN|GH_TOKEN|SSH_AUTH_SOCK)$/i
+
+/** Proxy URL berkredensial (`http://user:pass@proxy`) tidak boleh bocor ke child. */
+const PROXY_ENV_RE = /^(?:HTTP|HTTPS|ALL)_PROXY$/i
+const URL_WITH_CREDS_RE = /:\/\/[^:\s/]+:[^@\s/]+@/
 
 export function stripSecretsEnv(
   env: NodeJS.ProcessEnv,
@@ -168,6 +177,7 @@ export function stripSecretsEnv(
       continue
     }
     if (SECRET_ENV_RE.test(k)) continue
+    if (PROXY_ENV_RE.test(k) && typeof v === "string" && URL_WITH_CREDS_RE.test(v)) continue
     out[k] = v
   }
   return out

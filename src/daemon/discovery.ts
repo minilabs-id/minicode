@@ -15,9 +15,13 @@
 //      ada kandidat, belum terbukti.
 
 import { execFileSync } from "node:child_process"
+import { randomBytes } from "node:crypto"
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs"
-import { resolve } from "node:path"
+import { userInfo } from "node:os"
+import { isAbsolute, resolve } from "node:path"
 import { resolveLocalDbPath } from "../lib/db-path.ts"
+import { resolveTrustedExecutable } from "../lib/trusted-exec.ts"
+import { sanitizeSpawnEnv } from "../policy/scrub.ts"
 
 export const ENDPOINT_FILE = "daemon-endpoint.json"
 export const LEASE_FILE = "daemon-lease.json"
@@ -94,34 +98,46 @@ export function __setDiscoveryAclProbeForTest(fn: ((path: string) => void) | nul
   aclProbe = fn
 }
 
-function hardenAcl(path: string): void {
-  aclProbe?.(path)
+function hardenAcl(path: string, probeTarget = path): void {
+  aclProbe?.(probeTarget)
   if (process.platform !== "win32") return
-  const user = process.env.USERNAME
-  if (!user) return
+  let user = ""
   try {
-    execFileSync("icacls", [path, "/inheritance:r", "/grant:r", `${user}:F`], {
+    user = userInfo().username
+  } catch {
+    return
+  }
+  if (!user) return
+  const icacls = resolveTrustedExecutable("icacls")
+  if (!isAbsolute(icacls)) return
+  try {
+    execFileSync(icacls, [path, "/inheritance:r", "/grant:r", `${user}:F`], {
       stdio: "ignore",
       windowsHide: true,
+      env: sanitizeSpawnEnv(process.env),
     })
   } catch {}
 }
 
 /**
- * Tulis atomik (tmp + rename) supaya pembaca tak pernah melihat file separuh.
+ * Tulis atomik (tmp O_EXCL + ACL + rename) supaya pembaca tak pernah melihat
+ * file separuh maupun secret ber-ACL terbuka sebelum rename.
  *
- * E-20: `rename` mengganti inode, jadi ACL lama TIDAK melekat ke berkas baru.
- * Karena itu hardening ACL harus menjadi keputusan EKSPLISIT per pemanggil:
- * - endpoint = bootstrap secret, sekali/start → hardenAcl: true;
- * - lease = hanya incarnation/pid/updatedAt, BUKAN secret dan ditulis tiap
- *   heartbeat → hardenAcl: false (jangan panggil icacls berulang kali).
- * Mode 0600 dipertahankan untuk keduanya.
+ * E-20: `rename` mengganti inode, jadi ACL dipasang pada tmp SEBELUM rename
+ * untuk endpoint (bootstrap secret), sementara lease cukup 0600 tanpa icacls.
  */
 function writeAtomic(path: string, value: unknown, opts: { hardenAcl: boolean }): void {
-  const tmp = `${path}.${process.pid}.tmp`
-  writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
-  renameSync(tmp, path)
-  if (opts.hardenAcl) hardenAcl(path)
+  const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`
+  try {
+    writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: "wx" })
+    if (opts.hardenAcl) hardenAcl(tmp, path)
+    renameSync(tmp, path)
+  } catch (err) {
+    try {
+      unlinkSync(tmp)
+    } catch {}
+    throw err
+  }
 }
 
 export function writeEndpoint(ep: DaemonEndpoint, cwd?: string): string {
@@ -149,7 +165,13 @@ export function readEndpoint(cwd?: string): DaemonEndpoint | null {
     ) {
       return null
     }
-    return { ...raw, host: typeof raw.host === "string" ? raw.host : "127.0.0.1" }
+    const host = typeof raw.host === "string" ? raw.host.trim() : "127.0.0.1"
+    // Endpoint daemon wajib loopback agar file endpoint yang dimanipulasi
+    // tidak dapat mengarahkan klien + capability ke host remote.
+    if (host !== "127.0.0.1" && host !== "::1" && host !== "localhost") {
+      return null
+    }
+    return { ...raw, host }
   } catch {
     return null
   }
@@ -231,12 +253,17 @@ export function discover(cwd?: string, now = Date.now()): DiscoveryResult {
     }
   }
   const age = now - lease.updatedAt
-  if (!Number.isFinite(age) || age > LEASE_STALE_MS) {
+  // Tolak lease dengan timestamp jauh di masa depan (skew > 5 dtk) agar file
+  // lease tak bisa dipalsukan menjadi "segar selamanya".
+  if (!Number.isFinite(age) || age > LEASE_STALE_MS || age < -5_000) {
     return {
       status: "stale",
       endpoint,
       lease,
-      reason: `lease ${Math.round(age)}ms > ${LEASE_STALE_MS}ms (segarnya habis)`,
+      reason:
+        age < -5_000
+          ? `lease updatedAt berada di masa depan (${Math.round(-age)}ms)`
+          : `lease ${Math.round(age)}ms > ${LEASE_STALE_MS}ms (segarnya habis)`,
       endpointPath: endpointPathResolved,
       leasePath: leasePathResolved,
     }

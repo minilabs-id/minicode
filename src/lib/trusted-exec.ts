@@ -88,16 +88,19 @@ function resolveUncached(name: string): string {
   return name
 }
 
-function quoteWinCmdArg(arg: string): string {
-  if (/[\r\n\0]/.test(arg)) {
-    throw new Error("trusted-exec: unsafe control character in cmd.exe shim argument")
+export function quoteWinCmdArg(arg: string): string {
+  // Tolak kontrol baris, NUL, tanda kutip ganda (BatBadBut / CVE-2024-27980:
+  // cmd.exe tak mengenal `\"` sehingga `"` memecah kutip dan menginjeksi
+  // operator shell), serta `!` (ekspansi delayed variable).
+  if (/[\r\n\0"!]/.test(arg)) {
+    throw new Error("trusted-exec: unsafe character in cmd.exe shim argument")
   }
   if (/^[A-Za-z0-9_./:=+-]+$/.test(arg)) return arg
   // Pisahkan di `%` agar `cmd.exe` tidak melakukan ekspansi `%VAR%` di dalam
   // tanda kutip ganda: tiap potongan aman dikutip, `%` disisip di luar kutip
   // sebagai `^%` tanpa menghasilkan `""` berurutan yang dibaca MSVCRT sebagai `"`.
   const quoteSegment = (seg: string): string =>
-    seg === "" ? "" : `"${seg.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, "$1$1")}"`
+    seg === "" ? "" : `"${seg.replace(/(\\+)$/, "$1$1")}"`
   if (arg.includes("%")) {
     const out = arg
       .split("%")
@@ -105,7 +108,7 @@ function quoteWinCmdArg(arg: string): string {
       .join("^%")
     return out || '""'
   }
-  return `"${arg.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, "$1$1")}"`
+  return `"${arg.replace(/(\\+)$/, "$1$1")}"`
 }
 
 /**

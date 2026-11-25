@@ -241,7 +241,7 @@ export const TOOL_CONTRACTS: readonly ToolContractMetadata[] = [
     journalMutation: true,
     jailTarget: "cwd",
   }),
-  ex("git_push", "exclusive", { gatedByDefault: true, journalMutation: true }),
+  ex("git_push", "exclusive", { gatedByDefault: true, journalMutation: true, jailTarget: "cwd" }),
   // `delegate_task` adalah artefak perencanaan: izin dibuka di ceiling PLAN,
   // tapi anak dipaksa explore/read-only di task.ts (permission hanya gerbang).
   ex("delegate_task", "parallel-read", {
@@ -424,3 +424,58 @@ export function classifyContractTool(name: string): "mutation" | "none" | "unkno
   if (c === undefined) return "unknown"
   return c.journalMutation ? "mutation" : "none"
 }
+
+// ── Pesan actionable untuk tool yang disembunyikan mode ──────────────────────
+// Kernel melihat registry yang sudah difilter WorkMode/PermissionMode, jadi
+// `bash` di DISCUSS tampak sebagai "tool tak dikenal". Model lalu menyimpulkan
+// salah argumen dan retry buta (bukti: sesi 9f3fee62 seq 151). Ini BUKAN
+// pelebaran izin: tool tetap tak bisa dipanggil, yang berubah hanya redaksi
+// error. Predikat visibilitas di bawah MENCERMINkan `workModeVisible` di
+// tool-layer.ts dari sumber yang sama (TOOL_CONTRACTS), supaya tak ada dua
+// daftar yang bisa drift.
+
+/** Predikat visibilitas untuk tool built-in (mirror `workModeVisible`, tanpa MCP). */
+function builtinVisibleInMode(
+  name: string,
+  workMode: "DISCUSS" | "EXECUTE",
+  permissionMode?: string,
+): boolean {
+  if (workMode === "DISCUSS") {
+    if (permissionMode === "readonly" || permissionMode === "allowlist")
+      return READONLY_TOOL_NAMES.has(name)
+    return READONLY_TOOL_NAMES.has(name) || PLAN_EXTRA_TOOL_NAMES.has(name)
+  }
+  if (permissionMode === "readonly") return READONLY_TOOL_NAMES.has(name)
+  if (permissionMode === "plan")
+    return READONLY_TOOL_NAMES.has(name) || PLAN_EXTRA_TOOL_NAMES.has(name)
+  if (permissionMode === "allowlist") return !GATED_TOOLS.has(name) && name !== "code_run"
+  if (name === "ask_user" && permissionMode === "auto") return false
+  return true
+}
+
+/**
+ * Pesan kernel untuk tool built-in yang dikenal tetapi sengaja disembunyikan
+ * oleh WorkMode/PermissionMode saat ini. `undefined` berarti tool itu benar-
+ * benar tak dikenal (biarkan kernel memakai `unknown tool: <name>`).
+ */
+export function hiddenBuiltinToolMessage(
+  name: string,
+  workMode: "DISCUSS" | "EXECUTE",
+  permissionMode?: string,
+): string | undefined {
+  // Nama bertitik = tool MCP runtime, bukan built-in yang disembunyikan mode.
+  // `contractForTool` mengembalikan `mcp_call` untuk nama itu, jadi harus
+  // dikecualikan eksplisit agar tak mengklaim MCP sebagai hidden built-in.
+  if (name.includes(".") || contractForTool(name) === undefined) return undefined
+  if (builtinVisibleInMode(name, workMode, permissionMode)) return undefined
+  const mode = workMode === "DISCUSS" ? "DISCUSS" : "EXECUTE"
+  return `tool '${name}' tidak tersedia di WorkMode ${mode}; operator: /mode build atau /unrestric. Tidak perlu mengulang perintah.`
+}
+
+/** Deteksi redaksi di atas di lapisan presentasi (bukan `unknown tool` biasa). */
+export const HIDDEN_TOOL_MESSAGE_RE =
+  /^tool\s+'[^'\n]+'\s+(?:tidak tersedia|is not available)\s+(?:di|in)\s+WorkMode\b/i
+
+/** Aksi singkat untuk lampiran `hint` pada event `tool.failed`. */
+export const HIDDEN_TOOL_ACTION_HINT =
+  "Ganti WorkMode ke BUILD (/mode build) atau aktifkan akses penuh (/unrestric). Jangan ulangi perintah yang sama."

@@ -15,6 +15,7 @@ import {
   createDecoderState,
   createKeyStreamPump,
   createState,
+  type DecodedKey,
   type DecoderState,
   type KeyStreamPump,
   type PromptKey,
@@ -27,12 +28,30 @@ import {
   chatWidth as chatWidthFromGeometry,
   composerWidth as composerWidthFromChat,
 } from "../render/chat-column.ts"
-import { appendWrapped, shaveWrapped } from "../render/composer-wrap.ts"
+import {
+  allocatePasteToken,
+  appendWordWrapped,
+  cleanPastedText,
+  countPastedLines,
+  expandPasteTokens,
+  findPasteTokenAtCursor,
+  highlightPasteTokens,
+  shaveWordWrapped,
+  shouldCollapsePaste,
+  wrapComposerLine,
+} from "../render/composer-wrap.ts"
 import { formatError, friendlyToolErrorCanonical } from "../render/errors.ts"
 import { listRow } from "../render/list.ts"
 import { ASSISTANT_LEFT_MARGIN } from "../render/markdown-layout.ts"
 import { sanitizeAnsi, sanitizeAnsiLine, stripSgr } from "../render/sanitize.ts"
-import { c, glyphs, scrimMode, scrimSgr } from "../render/theme.ts"
+import {
+  c,
+  composerBoxGlyphs,
+  glyphs,
+  paintComposerBorder,
+  scrimMode,
+  scrimSgr,
+} from "../render/theme.ts"
 import { tSystem } from "../render/tool-label.ts"
 import {
   chunkByWidth,
@@ -124,6 +143,20 @@ const RETRY_TOAST_MS = 4_000
  */
 const COMPOSER_MAX_ROWS = 2
 /**
+ * Chrome horizontal bingkai kotak tipis composer: 2 kol kiri (`│ `) + 2 kol
+ * kanan (` │`, atau `↑│`/`↓│` saat draft > 2 baris).
+ */
+const COMPOSER_BOX_LEFT_COLS = 2
+const COMPOSER_BOX_RIGHT_COLS = 2
+const COMPOSER_BOX_CHROME_COLS = COMPOSER_BOX_LEFT_COLS + COMPOSER_BOX_RIGHT_COLS
+/**
+ * Margin kanan frame chat/composer — disamakan dengan margin kiri
+ * (`ASSISTANT_LEFT_MARGIN` = 3) agar kolom chat simetris. Footer dikecualikan.
+ */
+const FRAME_RIGHT_MARGIN = ASSISTANT_LEFT_MARGIN
+const FRAME_HORIZONTAL_MARGIN = ASSISTANT_LEFT_MARGIN + FRAME_RIGHT_MARGIN
+const MAX_HISTORY_PASTE_ENTRIES = 20
+/**
  * Tombol yang tetap dilayani saat turn berjalan: penyusun teks + Enter (antre).
  * Semua tombol mode/overlay lain sengaja ditahan (lihat handleKey) supaya
  * tidak ada state UI yang berubah di tengah turn.
@@ -148,18 +181,10 @@ const MAX_DROPDOWN_ROWS = 8
 const MIN_ROWS = 10
 const MIN_COLS = 20
 
-// Prefix adaptif: prefix panjang `minicode ›` memakan 13 kolom (3 margin +
-// 10 label), jadi hanya dipakai bila ruang isi `w - 13 >= 24` (w ≥ 37).
-// Di bawah itu pakai `›` / `·` supaya ruang wrap tidak termakan label.
-// Kedua prefix TANPA spasi trailing supaya caret DECSCUSR menempel di glif
-// (`›` / `·`) — klausa v0.36/v7.30. `w` = composerWidth() satu-sumber
-// (cap progresif di chat-column.ts); posisi caret memakai displayWidth(pf)+1.
-const PROMPT_LONG_PREFIX_COLS = ASSISTANT_LEFT_MARGIN + 10
-const PROMPT_MIN_BODY_COLS = 24
-const promptLong = (w: number): boolean => w - PROMPT_LONG_PREFIX_COLS >= PROMPT_MIN_BODY_COLS
-const promptFirst = (w: number): string =>
-  promptLong(w) ? `${" ".repeat(ASSISTANT_LEFT_MARGIN)}minicode ${glyphs.arrow}` : glyphs.arrow
-const promptCont = (w: number): string => (promptLong(w) ? `  ${glyphs.dot}` : glyphs.dot)
+// Blok composer tampil polos tanpa prefix `minicode ›` / `›` / `·` agar rapi;
+// gema di transkrip (`Transcript.pushUser`) tetap memakai `minicode › `.
+const promptFirst = (): string => ""
+const promptCont = (): string => ""
 const TIMER_TEXT = "00.00.00"
 const DOT_INTERVAL_MS = 200
 /** v7.29: peta laju stream teks → interval kedip spark (sama seperti turn-status). */
@@ -246,6 +271,8 @@ interface FrameLayout {
   cols: number
   /** Lebar area chat — maksimal setengah cols saat ter-centre. */
   chatCols: number
+  /** Lebar isi setelah dikurangi margin frame 3 (wrap/klik/caret). */
+  contentCols: number
   /** Padding kiri/kanan kolom chat (kolom, bukan karakter). */
   padLeft: number
   padRight: number
@@ -254,6 +281,8 @@ interface FrameLayout {
   transcriptRows: TranscriptRow[]
   transcriptTop: number
   composerTop: number
+  /** Jumlah baris isi composer yang sedang dirender pada frame ini (1 default, 2 saat >1 baris). */
+  composerRowsShown: number
   composerLines: string[]
   composerOffset: number
   /**
@@ -287,6 +316,14 @@ const EMPTY_COMPOSER_LAYOUT: ComposerLayout = { rows: [], visIdx: 0, col: 1, vis
 interface SelectionState {
   anchor: TranscriptPoint
   focus: TranscriptPoint
+  dragging: boolean
+}
+
+interface ComposerSelectionState {
+  /** Indeks grapheme (0..pointLength(line)) jangkar seleksi di composer. */
+  anchor: number
+  /** Indeks grapheme (0..pointLength(line)) fokus seleksi di composer. */
+  focus: number
   dragging: boolean
 }
 
@@ -391,8 +428,18 @@ export class TuiApp {
   /** Jangkar baris viewport saat lebar chat berubah (resize). */
   private pendingScrollAnchor: TranscriptPoint | null = null
   private history: string[] = []
+  private historyPastes: (ReadonlyMap<string, string> | undefined)[] = []
   private histIdx = -1
   private draft = ""
+  private draftPastes = new Map<string, string>()
+  /** Pemetaan token placeholder ringkas → payload paste penuh untuk draft aktif. */
+  private pastedBlocks = new Map<string, string>()
+  /** Buffer akumulasi bracketed paste lintas-chunk (mode overflow > MAX_PASTE_BYTES)
+   * agar satu paste besar tetap menjadi SATU placeholder, bukan terbelah dua. */
+  private pendingPasteBuf: string | null = null
+  /** Offset gulir manual jendela composer saat user memutar wheel di atas kotak
+   * berisi >2 baris visual; `null` = ikuti posisi kursor otomatis. */
+  private composerScrollOffset: number | null = null
   private editing = true
   private busy = false
   /** v7.29: laju stream teks → interval kedip spark. */
@@ -469,6 +516,7 @@ export class TuiApp {
   private bracketedPasteOn = false
   private releaseBackdrop: (() => void) | null = null
   private selection: SelectionState | null = null
+  private composerSelection: ComposerSelectionState | null = null
   private lastLayout: FrameLayout | null = null
   /**
    * Lebar chat dari frame terakhir. Dipakai oleh semua jalur scroll/indikator
@@ -598,6 +646,7 @@ export class TuiApp {
         // (preferredCol) supaya klik/panah setelah resize tak meleset.
         this.stopAutoScroll()
         if (this.selection) this.selection.dragging = false
+        if (this.composerSelection) this.composerSelection.dragging = false
         this.preferredCol = null
         // Ratchet per turn mengunci scrollBack lama; setelah geometri berubah,
         // angka itu basi (wrap ulang mengubah total). Buang agar viewport bisa
@@ -942,20 +991,53 @@ export class TuiApp {
     this.state = { ...this.state, menuOpen: false, sel: -1 }
   }
 
-  private handleKeys(keys: { key: PromptKey }[]): boolean {
+  private handleKeys(keys: DecodedKey[]): boolean {
     // Garda suspend: timer flush lone-ESC yang dipersenjatai SEBELUM suspend
     // tetap menembak setelah popup terbuka (listener dilepas, timer tidak).
     // Tanpa ini repaint penuh App 50ms kemudian menimpa region popup +
     // memutasi state di belakang view. Gagal-di-kode-lama.
     if (this.suspended > 0) return false
+    const coalesced: DecodedKey[] = []
+    for (const item of keys) {
+      if (item.pasted && item.key.type === "char") {
+        // Akumulasi payload paste lintas-chunk saat `pasteEnd === false`
+        // (mode overflow) supaya tidak terpecah menjadi dua placeholder.
+        this.pendingPasteBuf = (this.pendingPasteBuf ?? "") + item.key.ch
+        if (item.pasteEnd === false) continue
+        const full = this.pendingPasteBuf
+        this.pendingPasteBuf = null
+        if (full.length > 0) {
+          coalesced.push({
+            key: { type: "char", ch: full },
+            width: 0,
+            pasted: true,
+            pasteEnd: true,
+          })
+        }
+        continue
+      }
+      if (this.pendingPasteBuf !== null) {
+        const flushed = this.pendingPasteBuf
+        this.pendingPasteBuf = null
+        if (flushed.length > 0) {
+          coalesced.push({
+            key: { type: "char", ch: flushed },
+            width: 0,
+            pasted: true,
+            pasteEnd: true,
+          })
+        }
+      }
+      coalesced.push(item)
+    }
     // Satu chunk stdin = satu key-event di decoder (burst/paste), jadi semua
     // key di sini digabung menjadi satu paint. finally WAJIB menurunkan depth
     // walau handler melempar, supaya paint berikutnya tidak tertahan selamanya.
     this.paintBatchDepth++
     try {
-      for (const { key } of keys) {
+      for (const item of coalesced) {
         if (this.quitRequested) return true
-        this.handleKey(key)
+        this.handleKey(item.key, item.pasted === true)
       }
       return this.quitRequested
     } finally {
@@ -970,14 +1052,15 @@ export class TuiApp {
     this.paintCurrent()
   }
 
-  private handleKey(key: PromptKey): void {
+  private handleKey(key: PromptKey, pasted = false): void {
     if (key.type !== "esc") this.lastIdleEscapeAt = 0
     if (key.type === "mouse") {
       this.handleMouse(key)
       return
     }
     if (key.type === "wheelup" || key.type === "wheeldown") {
-      // Wheel SELALU menggulir chat, termasuk saat kursor ada di padding.
+      // Wheel SELALU menggulir chat — kecuali saat dropdown `/` terbuka atau
+      // kursor berada di atas kotak composer yang berisi >2 baris visual.
       if (
         !this.tooSmall() &&
         !this.isBusy() &&
@@ -989,6 +1072,7 @@ export class TuiApp {
         this.applyEngine({ type: key.type === "wheelup" ? "up" : "down" })
         return
       }
+      if (this.scrollComposerWheel(key)) return
       // v7.28 anchor atas: wheelup = ke atas/lama (scrollBack mengecil).
       // Wheel = 3 BARIS, bukan setengah halaman — gulir terasa meluncur,
       // bukan meloncat. Banyak event digabung jadi satu repaint di bawah.
@@ -1023,14 +1107,21 @@ export class TuiApp {
       this.applyEngine(key)
       return
     }
-    // Ctrl+A (key `selectAll` dari decoder) = SELECT-ALL transkrip, bukan
-    // sekadar Home. Pengecualian: menu/draft aktif → perlakukan seperti Home
-    // (perilaku lama, jangan regresi editing). Esc tetap membersihkan seleksi.
+    // Ctrl+A (key `selectAll` dari decoder) = SELECT-ALL teks composer bila draft
+    // berisi, atau SELECT-ALL transkrip bila composer kosong.
     if (key.type === "selectAll") {
-      if (this.state.menuOpen || this.state.line.length > 0) {
-        this.applyEngine({ type: "home" })
+      if (this.state.line.length > 0) {
+        const len = pointLength(this.state.line)
+        this.selection = null
+        this.stopAutoScroll()
+        this.composerSelection = { anchor: 0, focus: len, dragging: false }
+        this.state = { ...this.state, cursor: len }
+        this.preferredCol = null
+        this.editing = true
+        this.paintCurrent()
         return
       }
+      this.composerSelection = null
       const range = this.transcript.selectionRange()
       if (range) {
         this.selection = { anchor: range.first, focus: range.last, dragging: false }
@@ -1040,6 +1131,10 @@ export class TuiApp {
       return
     }
     if (key.type === "ctrl-c") {
+      if (this.composerSelection) {
+        if (this.composerSelection.dragging) this.composerSelection.dragging = false
+        if (this.copyComposerSelection()) return
+      }
       if (this.selection) {
         // Ctrl+C di tengah drag = salin seleksi yang sudah ada, BUKAN no-op
         // dan bukan abort. Lepaskan drag dulu supaya timer auto-scroll mati.
@@ -1049,6 +1144,13 @@ export class TuiApp {
         }
         this.copySelection()
       }
+      return
+    }
+    // Esc saat ada seleksi teks composer (ketika tidak busy) = batalkan seleksi dulu.
+    if (key.type === "esc" && !this.isBusy() && this.composerSelectionRange()) {
+      this.lastIdleEscapeAt = 0
+      this.composerSelection = null
+      this.paintCurrent()
       return
     }
     // Abort/batal: Esc — berlaku juga saat layar menciut (jalan keluar saat
@@ -1096,6 +1198,10 @@ export class TuiApp {
       this.lastIdleEscapeAt = 0
       if (this.state.line || this.editing) {
         this.state = createState()
+        this.pastedBlocks.clear()
+        this.composerSelection = null
+        this.composerScrollOffset = null
+        this.composerCache = null
         this.preferredCol = null
         this.histIdx = -1
         // Prompt TETAP tampil setelah Esc: kontrak I13 mensyaratkan prompt
@@ -1171,15 +1277,84 @@ export class TuiApp {
     // paragraf wrap panjang maupun multiline `\n`), sambil menjaga kolom layar.
     // Hanya picu navigasi histori bila sudah di baris visual pertama/terakhir.
     if ((key.type === "up" || key.type === "down") && !this.state.menuOpen) {
+      const hadCompSel = this.composerSelectionRange() !== null
+      this.composerSelection = null
       const dir = key.type === "up" ? -1 : 1
       if (this.moveCursorVertical(dir)) return
+      const prevHistIdx = this.histIdx
       this.historyNav(dir)
+      if (hadCompSel && this.histIdx === prevHistIdx) this.paintCurrent()
       return
+    }
+    if ((key.type === "left" || key.type === "right") && this.composerSelectionRange()) {
+      const range = this.composerSelectionRange()!
+      this.composerSelection = null
+      this.state = { ...this.state, cursor: key.type === "left" ? range.start : range.end }
+      this.preferredCol = null
+      this.paintCurrent()
+      return
+    }
+    if ((key.type === "backspace" || key.type === "delete") && this.deleteComposerSelection()) {
+      this.selection = null
+      this.editing = true
+      this.disarmAbortQuit()
+      this.followTail()
+      this.paintCurrent()
+      return
+    }
+    if (pasted && key.type === "char") {
+      const cleaned = cleanPastedText(key.ch)
+      if (!cleaned) return
+      this.deleteComposerSelection()
+      if (shouldCollapsePaste(cleaned)) {
+        const token = allocatePasteToken(countPastedLines(cleaned), this.pastedBlocks)
+        this.pastedBlocks.set(token, cleaned)
+        this.applyEngine({ type: "char", ch: token })
+        return
+      }
+      // Paste pendek tetap melewati `cleaned` agar normalisasi `\u2028/\u2029`
+      // dan pembersihan byte kontrol C1 tetap diterapkan.
+      this.applyEngine({ type: "char", ch: cleaned })
+      return
+    } else if (key.type === "char" || key.type === "ctrl-j") {
+      this.deleteComposerSelection()
+    }
+    if ((key.type === "backspace" || key.type === "delete") && this.pastedBlocks.size > 0) {
+      const hit = findPasteTokenAtCursor(
+        this.state.line,
+        this.state.cursor,
+        this.pastedBlocks,
+        key.type,
+      )
+      if (hit) {
+        const nextLine = this.state.line.slice(0, hit.utfStart) + this.state.line.slice(hit.utfEnd)
+        const menuOpen = nextLine.startsWith("/")
+        const hintCount = menuOpen ? this.host.listCommands(nextLine).length : 0
+        this.state = {
+          line: nextLine,
+          cursor: hit.gStart,
+          sel: menuOpen ? Math.min(Math.max(this.state.sel, -1), hintCount - 1) : -1,
+          menuOpen,
+        }
+        this.pruneUnusedPasteBlocks()
+        this.composerScrollOffset = null
+        this.composerCache = null
+        this.selection = null
+        this.preferredCol = null
+        this.editing = true
+        this.disarmAbortQuit()
+        this.followTail()
+        this.paintCurrent()
+        return
+      }
     }
     this.applyEngine(key)
   }
 
   private applyEngine(key: PromptKey): void {
+    const hadComposerSelection = this.composerSelection !== null
+    this.composerSelection = null
+    this.composerScrollOffset = null
     this.preferredCol = null
     if (["char", "backspace", "delete", "enter", "ctrl-j"].includes(key.type)) this.selection = null
     const hints = (line: string) => (line.startsWith("/") ? this.host.listCommands(line) : [])
@@ -1197,7 +1372,10 @@ export class TuiApp {
     this.state = state
     // Baris berubah = user mengedit draft. Jendela "Esc lagi = quit" dari abort
     // sebelumnya harus mati: Esc berikutnya bermakna hapus draft, bukan quit.
-    if (!lineUnchanged) this.disarmAbortQuit()
+    if (!lineUnchanged) {
+      this.disarmAbortQuit()
+      this.pruneUnusedPasteBlocks()
+    }
     if (action === "submit") {
       void this.doSubmit(state.line)
     } else if (action === "cancel") {
@@ -1205,6 +1383,7 @@ export class TuiApp {
     } else if (action === "render" || action === "none") {
       if (action === "render" && key.type === "char") this.editing = true
       if (
+        !hadComposerSelection &&
         cursorOnly &&
         action === "render" &&
         lineUnchanged &&
@@ -1248,10 +1427,11 @@ export class TuiApp {
       return
     }
     const composer = this.composerLayout()
-    const visibleRows = COMPOSER_MAX_ROWS
-    // Bila kursor berpindah ke luar jendela composer (input > 2 baris), lukis
-    // ulang penuh agar `composerOffset` & baris tampil ikut bergulir.
+    const visibleRows = layout.composerRowsShown
+    // Bila kursor berpindah ke luar jendela composer (input > 2 baris), atau
+    // offset gulir manual aktif, lukis ulang penuh agar baris tampil ikut bergulir.
     if (
+      this.composerScrollOffset !== null ||
       composer.visIdx < layout.composerOffset ||
       composer.visIdx >= layout.composerOffset + visibleRows
     ) {
@@ -1260,8 +1440,12 @@ export class TuiApp {
     }
     const row = Math.max(1, layout.cursor.row + (composer.visIdx - prevVisIdx))
     // Fast path panah: CUP absolut, jadi harus menyertakan padding kiri chat.
+    // Margin 3 milik frame + 2 kolom border kiri blok composer (`│ `).
     // (Bedakan dari `moveCursor()` modal yang memakai koordinat screen mentah.)
-    const col = Math.max(1, composer.col + layout.padLeft)
+    const col = Math.max(
+      1,
+      composer.col + layout.padLeft + ASSISTANT_LEFT_MARGIN + COMPOSER_BOX_LEFT_COLS,
+    )
     try {
       screen.moveCursor(row, col)
     } catch (error) {
@@ -1275,7 +1459,13 @@ export class TuiApp {
   }
 
   private async doSubmit(rawLine: string): Promise<void> {
-    const line = rawLine.trim()
+    const activePastes = new Map(this.pastedBlocks)
+    this.pastedBlocks.clear()
+    this.composerSelection = null
+    this.composerScrollOffset = null
+    this.composerCache = null
+    const displayLine = rawLine.trim()
+    const expandedLine = expandPasteTokens(rawLine, activePastes).trim()
     // Enter saat turn berjalan = antre, BUKAN turn kedua yang balapan dengan
     // yang sedang jalan. Draft dibersihkan dan baris status aktivitas kembali
     // tampil; pesannya dikirim controller setelah turn ini selesai.
@@ -1286,9 +1476,9 @@ export class TuiApp {
       this.histIdx = -1
       this.editing = true
       this.disarmAbortQuit()
-      if (line) {
-        this.rememberHistory(line)
-        this.host.enqueue?.(line)
+      if (expandedLine) {
+        this.rememberHistory(displayLine, activePastes)
+        this.host.enqueue?.(expandedLine)
       }
       this.followTail()
       this.paintCurrent()
@@ -1301,7 +1491,7 @@ export class TuiApp {
     this.editing = false
     this.abortHintOn = false
     this.disarmAbortQuit()
-    if (!line) {
+    if (!expandedLine) {
       // Enter pada baris kosong tetap idle: prompt harus langsung kembali
       // (I13), bukan menghilang sampai ketikan berikutnya.
       this.editing = true
@@ -1309,15 +1499,16 @@ export class TuiApp {
       this.paintCurrent()
       return
     }
-    this.rememberHistory(line)
+    this.rememberHistory(displayLine, activePastes)
     // Built-in commands and shortcuts belong to the composer history, not the
     // conversation transcript. The command result remains independently
     // visible when it carries useful user-facing information.
-    if (!line.startsWith("/")) {
+    if (!expandedLine.startsWith("/")) {
       // v7.29: prompt masuk transkrip sebagai history biasa (tanpa card).
       // Wrap gema memakai lebar CHAT (bukan cols terminal): kalau tidak,
       // prompt panjang ter-wrap dua kali — sekadar di pushUser lebar terminal,
-      // lalu lagi oleh projectText pada kolom chat yang ter-centre.
+      // lalu lagi oleh projectText pada kolom chat yang ter-centre. Paste
+      // dipertahankan sebagai placeholder ringkas di transkrip agar log tetap rapi.
       this.transcript.pushUser(rawLine, this.chatWidth())
     }
     // Prompt user baru = awal turn baru. Ratchet dari turn sebelumnya dilepas
@@ -1334,7 +1525,7 @@ export class TuiApp {
     this.followTail()
     this.paintCurrent()
     try {
-      const res = await this.host.submit(line)
+      const res = await this.host.submit(expandedLine)
       if (res?.quit) this.quit()
     } catch (e) {
       // [P0 UI Security] Pesan error = TEKS TAK DIPERCAYA: bisa memuat body
@@ -1392,6 +1583,8 @@ export class TuiApp {
     if (!this.currentScreen || this.quitRequested) return
     if (this.suspended++ > 0) return
     if (this.selection) this.selection.dragging = false
+    if (this.composerSelection) this.composerSelection.dragging = false
+    this.pendingPasteBuf = null
     this.decoder.pending = []
     this.setMouseMode("wheel")
     try {
@@ -1546,21 +1739,33 @@ export class TuiApp {
    * hitung dari geometri dengan input yang sama seperti buildLayout.
    */
   private chatWidth(): number {
+    // Margin kiri 3 + kanan 3 adalah padding FRAME (simetris), jadi lebar isi =
+    // chatCols - 6. Semua jalur wrap/scroll memakai angka ini supaya teks tak
+    // meluap ke padding kanan.
     if (this.lastChatCols != null) return this.lastChatCols
-    if (this.lastLayout) return this.lastLayout.chatCols
+    if (this.lastLayout) return this.lastLayout.contentCols
     const cols = Math.max(1, this.currentScreen?.cols || process.stdout.columns || 80)
     const rows = Math.max(1, this.currentScreen?.rows || process.stdout.rows || 24)
-    return chatWidthFromGeometry(chatColumnGeometry(rows, cols))
+    return Math.max(
+      1,
+      chatWidthFromGeometry(chatColumnGeometry(rows, cols)) - FRAME_HORIZONTAL_MARGIN,
+    )
+  }
+
+  /** Lebar blok composer penuh termasuk padding horizontal interior (`│ … │`). */
+  private composerBoxWidth(): number {
+    const content = this.chatWidth()
+    return Math.max(1, Math.min(content, composerWidthFromChat(content)))
   }
 
   /**
-   * Lebar wrap composer SATU-SUMBER. Geometri (cap progresif + lantai) tinggal
-   * di `chat-column.ts`; semua situs composer — wrap, cache, kursor vertikal,
-   * klik mouse, dan komposisi frame — memanggil helper ini supaya tak ada dua
-   * lebar yang divergen.
+   * Lebar teks interior composer SATU-SUMBER (= lebar blok dikurangi chrome
+   * padding horizontal `  ` kiri + `  ` kanan). Semua situs composer — wrap,
+   * cache, kursor vertikal, klik mouse, dan komposisi frame — memanggil helper
+   * ini supaya tak ada dua lebar yang divergen.
    */
   private composerWidth(): number {
-    return composerWidthFromChat(this.chatWidth())
+    return Math.max(1, this.composerBoxWidth() - COMPOSER_BOX_CHROME_COLS)
   }
 
   private isBusy(): boolean {
@@ -1577,9 +1782,43 @@ export class TuiApp {
 
   // ── Histori prompt (memori sesi; tak persist ke berkas REPL) ──
 
-  private rememberHistory(line: string): void {
-    if (this.history[this.history.length - 1] !== line) this.history.push(line)
-    if (this.history.length > 200) this.history.splice(0, this.history.length - 200)
+  /** Buang token paste yang sudah terhapus dari draft agar tak ter-ekspansi salah. */
+  private pruneUnusedPasteBlocks(): void {
+    if (!this.pastedBlocks.size) return
+    for (const key of this.pastedBlocks.keys()) {
+      if (!this.state.line.includes(key)) this.pastedBlocks.delete(key)
+    }
+  }
+
+  private rememberHistory(line: string, pastes?: ReadonlyMap<string, string>): void {
+    const used = new Map<string, string>()
+    if (pastes?.size) {
+      for (const [k, v] of pastes) {
+        if (line.includes(k)) used.set(k, v)
+      }
+    }
+    const entryPastes = used.size > 0 ? used : undefined
+    if (this.history[this.history.length - 1] !== line) {
+      this.history.push(line)
+      this.historyPastes.push(entryPastes)
+    } else {
+      // Baris tampilan sama (mis. sama-sama `{paste text 19 lines}`): simpan
+      // payload paste terbaru agar recall mengulang isi yang mutakhir.
+      this.historyPastes[this.historyPastes.length - 1] = entryPastes
+    }
+    if (this.history.length > 200) {
+      const overflow = this.history.length - 200
+      this.history.splice(0, overflow)
+      this.historyPastes.splice(0, overflow)
+    }
+    // Batasi payload paste tersimpan di histori supaya memori sesi tetap terikat.
+    let keptPastes = 0
+    for (let i = this.historyPastes.length - 1; i >= 0; i--) {
+      if (this.historyPastes[i]) {
+        keptPastes++
+        if (keptPastes > MAX_HISTORY_PASTE_ENTRIES) this.historyPastes[i] = undefined
+      }
+    }
   }
 
   /** Salinan histori prompt sesi ini (untuk perintah `/history` di TUI). */
@@ -1592,18 +1831,19 @@ export class TuiApp {
     if (this.histIdx === -1) {
       if (dir > 0) return
       this.draft = this.state.line
+      this.draftPastes = new Map(this.pastedBlocks)
       this.histIdx = this.history.length - 1
     } else {
       const next = this.histIdx + dir
       if (next < 0) return
       if (next >= this.history.length) {
         this.histIdx = -1
-        this.setLine(this.draft)
+        this.setLine(this.draft, this.draftPastes)
         return
       }
       this.histIdx = next
     }
-    this.setLine(this.history[this.histIdx] ?? "")
+    this.setLine(this.history[this.histIdx] ?? "", this.historyPastes[this.histIdx])
   }
 
   private historySearch(): void {
@@ -1611,13 +1851,13 @@ export class TuiApp {
     for (let i = this.history.length - 1; i >= 0; i--) {
       const h = this.history[i]!
       if (h !== prefix && h.startsWith(prefix)) {
-        this.setLine(h)
+        this.setLine(h, this.historyPastes[i])
         return
       }
     }
   }
 
-  private setLine(line: string): void {
+  private setLine(line: string, pastes?: ReadonlyMap<string, string>): void {
     // Bangun ulang state lewat engine (aturan menu/sel ikut terjaga). Baris
     // berubah = kembali ke ekor (paritas ketikan — viewport tidak diam).
     // Recall/history juga mengubah draft → matikan jendela quit pasca-abort.
@@ -1634,6 +1874,11 @@ export class TuiApp {
     // (/model) akan membuka menu; tanpa koreksi ini, ↑↓ berikutnya dinavigasi ke
     // menu (sel), bukan history, dan user terkunci tak bisa melewati entri command.
     this.state = { ...state, menuOpen: false, sel: -1 }
+    this.pastedBlocks = new Map(pastes ?? [])
+    this.pruneUnusedPasteBlocks()
+    this.composerSelection = null
+    this.composerScrollOffset = null
+    this.composerCache = null
     this.preferredCol = null
     this.editing = true
     this.paintCurrent()
@@ -1819,8 +2064,7 @@ export class TuiApp {
     // Idle: prompt tetap tampil. Dulu baris kosong menggantikannya sehingga
     // setelah Esc/Enter-kosong layar terlihat mati (I13: prompt tampil saat
     // boot/idle) — audit 2026-11-12, MEDIUM-4.
-    const w = this.composerWidth()
-    if (!this.editing) return [chunkByWidth(promptFirst(w), w)[0] ?? ""]
+    if (!this.editing) return [""]
     return this.composerLayout().rows
   }
 
@@ -1842,14 +2086,14 @@ export class TuiApp {
   }
 
   /**
-   * Composer dikunci 2 baris di SEMUA state (idle, mengetik, busy, habis submit).
-   * Reservasi ini mencegah prompt naik-turun saat `editing` berubah di
-   * doSubmit/finally: dulu `composerH` menyusut jadi 1 saat busy, `viewH`
-   * membesar satu, dan `composerTop` turun satu baris. Baris ke-2 sengaja
-   * dikosongkan bila draft cuma satu baris / sedang busy (padding di buildLayout).
+   * Tinggi isi composer dinamis 1–2 baris: default 1 baris (kosong / draft 1
+   * baris / tidak sedang menyunting), melebar jadi 2 baris saat draft wrap atau
+   * multiline > 1 baris, dan tetap dibatasi 2 baris dengan gulir internal bila
+   * draft ≥ 3 baris.
    */
   private composerHeight(_busy = this.busy): number {
-    return COMPOSER_MAX_ROWS
+    if (!this.editing) return 1
+    return Math.min(COMPOSER_MAX_ROWS, Math.max(1, this.composerLayout().rows.length))
   }
 
   // ── Paint ──
@@ -2013,7 +2257,7 @@ export class TuiApp {
     const w = this.composerWidth()
     const line = this.state.line
     const cursor = this.state.cursor
-    const pf = promptFirst(w)
+    const pf = promptFirst()
     const cached = this.composerCache
     if (
       cached?.editing &&
@@ -2039,7 +2283,7 @@ export class TuiApp {
     // kosong saat !editing dianggap cache hit dan dipakai pemanggil baru.
     if (cached.visual && cached.visual.length > 0)
       return cached as ComposerLayout & { visual: ComposerVisualRow[] }
-    const pf = promptFirst(w)
+    const pf = promptFirst()
     const full = this.layoutComposer(this.state.line, this.state.cursor, w)
     this.composerCache = {
       line: this.state.line,
@@ -2054,7 +2298,7 @@ export class TuiApp {
 
   /** Pindahkan kursor ke baris visual di atas/bawah dalam composer (menjaga kolom). */
   private moveCursorVertical(dir: -1 | 1): boolean {
-    if (this.isBusy() || !this.editing || !this.state.line) return false
+    if (!this.editing || !this.state.line) return false
     // Pakai composerWidth() (lebar chat dibatasi 100), BUKAN cols mentah —
     // kalau tidak, wrap kursor vertikal beda dengan frame pada 120/200 kolom.
     const { visual, visIdx, col } = this.composerVisual()
@@ -2062,9 +2306,47 @@ export class TuiApp {
     if (targetIdx < 0 || targetIdx >= visual.length) return false
     const desiredCol = this.preferredCol ?? Math.max(0, col - 1)
     this.preferredCol = desiredCol
+    this.composerScrollOffset = null
     this.state = { ...this.state, cursor: cursorAtVisualRowColumn(visual[targetIdx]!, desiredCol) }
     this.selection = null
     this.paintCurrent()
+    return true
+  }
+
+  /**
+   * Gulir jendela composer via mouse wheel saat pointer berada di atas kotak
+   * composer dan draft memiliki >2 baris visual. Mengembalikan `true` bila
+   * event dikonsumsi composer agar transkrip chat tidak ikut tergeser.
+   */
+  private scrollComposerWheel(key: Extract<PromptKey, { type: "wheelup" | "wheeldown" }>): boolean {
+    if (this.tooSmall() || !this.editing || !this.lastLayout) return false
+    if (typeof key.x !== "number" || typeof key.y !== "number") return false
+    const layout = this.lastLayout
+    const chatX = key.x - layout.padLeft - ASSISTANT_LEFT_MARGIN
+    if (chatX < 1 || chatX > layout.contentCols) return false
+    // Bingkai atas di baris 1-based `composerTop`, isi `composerRowsShown` baris,
+    // bingkai bawah di `composerTop + composerRowsShown + 1`.
+    if (key.y < layout.composerTop || key.y > layout.composerTop + layout.composerRowsShown + 1) {
+      return false
+    }
+    const { visual, visIdx, col } = this.composerVisual()
+    const shown = layout.composerRowsShown
+    if (visual.length <= shown) return false
+    const maxOff = Math.max(0, visual.length - shown)
+    const curOff = Math.max(0, Math.min(maxOff, this.composerScrollOffset ?? layout.composerOffset))
+    const dir = key.type === "wheelup" ? -1 : 1
+    const nextOff = Math.max(0, Math.min(maxOff, curOff + dir))
+    this.composerScrollOffset = nextOff
+    if (visIdx < nextOff || visIdx >= nextOff + shown) {
+      const targetRow = dir < 0 ? nextOff : nextOff + shown - 1
+      const desiredCol = this.preferredCol ?? Math.max(0, col - 1)
+      this.state = {
+        ...this.state,
+        cursor: cursorAtVisualRowColumn(visual[targetRow]!, desiredCol),
+      }
+      this.composerSelection = null
+    }
+    if (nextOff !== curOff) this.paintCurrent()
     return true
   }
 
@@ -2095,9 +2377,10 @@ export class TuiApp {
     if (cursor !== pointLength(line) || cached.cursor !== pointLength(prevLine)) return null
     let rows: string[] | null
     if (line.startsWith(prevLine)) {
-      rows = appendWrapped(prevRows, line.slice(prevLine.length), w)
+      rows = appendWordWrapped(prevRows, line.slice(prevLine.length), w)
     } else if (prevLine.startsWith(line)) {
-      rows = shaveWrapped(prevRows, prevLine.slice(line.length), w)
+      if (this.pastedBlocks.size > 0) return null
+      rows = shaveWordWrapped(prevRows, prevLine.slice(line.length), w)
     } else {
       return null
     }
@@ -2108,13 +2391,13 @@ export class TuiApp {
   }
 
   /**
-   * Wrap composer + posisi kursor dalam SATU lintasan. Semantiknya sama
-   * dengan gabungan inputRows + cursorIndex lama: prefix per baris logis,
-   * potong per kolom, kursor di baris visual yang memuat targetWidth.
+   * Wrap composer + posisi kursor dalam SATU lintasan berbasis batas kata.
+   * Prefix per baris logis dijaga utuh; token placeholder paste aktif
+   * dipertahankan atomik agar tidak terpotong antarbaris.
    */
   private layoutComposer(line: string, cursor: number, w: number): ComposerLayout {
-    const pf = promptFirst(w)
-    const pc = promptCont(w)
+    const pf = promptFirst()
+    const pc = promptCont()
     const pfCols = displayWidth(pf)
     // Prompt kosong SELALU satu baris utuh — sama dengan jalur lama. Tanpa
     // special-case, terminal sempit (w < lebar prefix) memecah prefix jadi dua
@@ -2145,10 +2428,11 @@ export class TuiApp {
     const visual: ComposerVisualRow[] = []
     const rows: string[] = []
     const logical = line.split("\n")
+    const atomicTokens = this.pastedBlocks.size > 0 ? this.pastedBlocks : undefined
     let cursorBase = 0
     for (let li = 0; li < logical.length; li++) {
       const prefix = li === 0 ? pf : pc
-      const wrapped = chunkByWidth(`${prefix}${logical[li] ?? ""}`, w)
+      const wrapped = wrapComposerLine(prefix, logical[li] ?? "", w, atomicTokens)
       let prefixRemaining = prefix
       for (let wi = 0; wi < wrapped.length; wi++) {
         const rowText = wrapped[wi] ?? ""
@@ -2267,37 +2551,27 @@ export class TuiApp {
     } catch {}
   }
 
-  private movePromptCursor(
+  private resolveComposerCursor(
     layout: FrameLayout,
     key: Extract<PromptKey, { type: "mouse" }>,
-  ): boolean {
-    if (this.isBusy() || !this.editing) return false
-    // Translasi x layar → x dalam kolom chat. Klik di padding BUKAN klik
-    // composer: kembalikan false supaya caller membersihkan seleksi & repaint.
-    const chatX = key.x - layout.padLeft
-    if (chatX < 1 || chatX > layout.chatCols) return false
+    clamp: boolean,
+  ): number | null {
+    // Translasi x layar → x dalam kolom isi chat. Margin 3 milik frame, lalu
+    // dikurangi 2 kolom padding kiri blok composer.
+    const chatX = key.x - layout.padLeft - ASSISTANT_LEFT_MARGIN
+    if (!clamp && (chatX < 1 || chatX > layout.contentCols)) return null
     const relativeRow = key.y - 1 - layout.composerTop
-    const targetRow = layout.composerOffset + relativeRow
+    const shownRows = layout.composerRowsShown
+    if (!clamp && (relativeRow < 0 || relativeRow >= shownRows)) return null
+    const clampedRel = Math.max(0, Math.min(shownRows - 1, relativeRow))
     const { visual } = this.composerVisual()
-    const shownRows = COMPOSER_MAX_ROWS
-    if (
-      relativeRow < 0 ||
-      relativeRow >= shownRows ||
-      targetRow < 0 ||
-      targetRow >= visual.length
-    ) {
-      return false
-    }
-    this.state = {
-      ...this.state,
-      cursor: cursorAtVisualRowColumn(visual[targetRow]!, chatX - 1),
-    }
-    this.preferredCol = null
-    this.histIdx = -1
-    this.editing = true
-    this.selection = null
-    this.paintCurrent()
-    return true
+    if (!visual.length) return null
+    let targetRow = layout.composerOffset + clampedRel
+    if (!clamp && (targetRow < 0 || targetRow >= visual.length)) return null
+    targetRow = Math.max(0, Math.min(visual.length - 1, targetRow))
+    const clampedChatX = Math.max(1, Math.min(layout.contentCols, chatX))
+    const innerCol = Math.max(0, clampedChatX - 1 - COMPOSER_BOX_LEFT_COLS)
+    return cursorAtVisualRowColumn(visual[targetRow]!, innerCol)
   }
 
   /**
@@ -2363,9 +2637,10 @@ export class TuiApp {
     if (key.button !== 0 && !(key.action === "release" && key.button === null)) return
     const layout = this.lastLayout
     if (!layout) return
-    // Satu translasi x layar → x kolom chat, dipakai kelima situs mouse.
-    const chatX = key.x - layout.padLeft
-    const inPadding = chatX < 1 || chatX > layout.chatCols
+    // Satu translasi x layar → x kolom isi chat, dipakai kelima situs mouse.
+    // Margin 3 milik frame (padding), jadi dikurangi sebelum hit-test.
+    const chatX = key.x - layout.padLeft - ASSISTANT_LEFT_MARGIN
+    const inPadding = chatX < 1 || chatX > layout.contentCols
     const rowIndex = key.y - 1 - layout.transcriptTop
     const insideTranscript = rowIndex >= 0 && rowIndex < layout.transcriptRows.length
     // Dropdown di-overlay di atas transkrip: klik di area menu HARUS dipetakan
@@ -2375,6 +2650,7 @@ export class TuiApp {
       menu !== null && !inPadding && key.y >= menu.top && key.y < menu.top + menu.count
     if (key.action === "press") {
       if (menuHit && menu) {
+        this.composerSelection = null
         if (!this.isBusy() && this.state.menuOpen) {
           const idx = menu.firstIndex + (key.y - menu.top)
           const hints = this.host.listCommands(this.state.line)
@@ -2386,8 +2662,23 @@ export class TuiApp {
         return
       }
       if (!insideTranscript) {
-        if (this.movePromptCursor(layout, key)) return
+        if (!this.isBusy() && this.editing) {
+          const pos = this.resolveComposerCursor(layout, key, false)
+          if (pos !== null) {
+            this.state = { ...this.state, cursor: pos }
+            this.preferredCol = null
+            this.composerScrollOffset = null
+            this.histIdx = -1
+            this.editing = true
+            this.selection = null
+            this.stopAutoScroll()
+            this.composerSelection = { anchor: pos, focus: pos, dragging: true }
+            this.paintCurrent()
+            return
+          }
+        }
         this.selection = null
+        this.composerSelection = null
         this.stopAutoScroll()
         this.paintCurrent()
         return
@@ -2396,6 +2687,7 @@ export class TuiApp {
       // klik pada baris non-selectable) — jangan jadikan anchor seleksi baru.
       if (inPadding) {
         this.selection = null
+        this.composerSelection = null
         this.stopAutoScroll()
         this.paintCurrent()
         return
@@ -2403,28 +2695,53 @@ export class TuiApp {
       const point = this.resolveTranscriptPoint(layout, rowIndex, chatX - 1)
       if (!point) {
         this.selection = null
+        this.composerSelection = null
         this.stopAutoScroll()
         this.paintCurrent()
         return
       }
+      this.composerSelection = null
       this.selection = { anchor: point, focus: point, dragging: true }
       this.updateAutoScroll(layout, key)
       this.paintCurrent()
       return
     }
     if (key.action === "drag") {
+      if (this.composerSelection?.dragging) {
+        const pos = this.resolveComposerCursor(layout, key, true)
+        if (pos !== null) {
+          this.composerSelection.focus = pos
+          this.state = { ...this.state, cursor: pos }
+          this.preferredCol = null
+          this.scheduleSelectionPaint()
+        }
+        return
+      }
       if (!this.selection?.dragging) return
       // Drag melintas area menu: jangan perluas seleksi ke baris tertutup menu.
       if (menuHit) return
       this.updateAutoScroll(layout, key)
       // Drag ke padding di-clamp ke tepi chat: seleksi tetap kontinu.
-      const x = Math.max(1, Math.min(layout.chatCols, chatX))
+      const x = Math.max(1, Math.min(layout.contentCols, chatX))
       const point = this.resolveTranscriptPoint(layout, rowIndex, x - 1)
       if (point) this.selection.focus = point
       this.scheduleSelectionPaint()
       return
     }
     if (key.action === "release") {
+      if (this.composerSelection?.dragging) {
+        const pos = this.resolveComposerCursor(layout, key, true)
+        if (pos !== null) {
+          this.composerSelection.focus = pos
+          this.state = { ...this.state, cursor: pos }
+        }
+        this.composerSelection.dragging = false
+        if (this.composerSelection.anchor === this.composerSelection.focus) {
+          this.composerSelection = null
+        }
+        this.paintCurrent()
+        return
+      }
       if (!this.selection?.dragging) return
       if (menuHit) {
         this.selection.dragging = false
@@ -2432,7 +2749,7 @@ export class TuiApp {
         this.paintCurrent()
         return
       }
-      const x = Math.max(1, Math.min(layout.chatCols, chatX))
+      const x = Math.max(1, Math.min(layout.contentCols, chatX))
       const point = this.resolveTranscriptPoint(layout, rowIndex, x - 1)
       if (point) this.selection.focus = point
       this.selection.dragging = false
@@ -2508,10 +2825,66 @@ export class TuiApp {
     // seleksi drag tak bisa diperpanjang melewati viewport.
     // X untuk auto-scroll sudah dalam koordinat chat (autoScrollCol dipakai
     // sebagai offset relatif baris transkrip, bukan kolom layar absolut).
-    const chatX = Math.max(1, Math.min(layout.chatCols, key.x - layout.padLeft))
+    const chatX = Math.max(
+      1,
+      Math.min(layout.contentCols, key.x - layout.padLeft - ASSISTANT_LEFT_MARGIN),
+    )
     if (rowIndex <= 0) this.startAutoScroll(-1, chatX)
     else if (rowIndex >= n - 1) this.startAutoScroll(1, chatX)
     else this.stopAutoScroll()
+  }
+
+  private composerSelectionRange(): { start: number; end: number } | null {
+    const sel = this.composerSelection
+    if (!sel) return null
+    const max = pointLength(this.state.line)
+    const a = Math.max(0, Math.min(max, sel.anchor))
+    const b = Math.max(0, Math.min(max, sel.focus))
+    if (a === b) return null
+    return { start: Math.min(a, b), end: Math.max(a, b) }
+  }
+
+  private deleteComposerSelection(): boolean {
+    const range = this.composerSelectionRange()
+    if (!range) {
+      this.composerSelection = null
+      return false
+    }
+    const units = toGraphemes(this.state.line)
+    units.splice(range.start, range.end - range.start)
+    const nextLine = units.join("")
+    const menuOpen = nextLine.startsWith("/")
+    const hintCount = menuOpen ? this.host.listCommands(nextLine).length : 0
+    this.state = {
+      line: nextLine,
+      cursor: range.start,
+      sel: menuOpen ? Math.min(Math.max(this.state.sel, -1), hintCount - 1) : -1,
+      menuOpen,
+    }
+    this.composerSelection = null
+    this.composerScrollOffset = null
+    this.pruneUnusedPasteBlocks()
+    this.composerCache = null
+    this.preferredCol = null
+    return true
+  }
+
+  private copyComposerSelection(): boolean {
+    const range = this.composerSelectionRange()
+    if (!range) return false
+    const raw = toGraphemes(this.state.line).slice(range.start, range.end).join("")
+    const text = expandPasteTokens(raw, this.pastedBlocks)
+    if (!text) return false
+    if (text.length > MAX_SELECTION_CHARS || utf8ByteLength(text) > MAX_SELECTION_BYTES) {
+      this.showToast(tSystem("msg.copyTooLarge"))
+      return true
+    }
+    let copied = false
+    try {
+      copied = this.host.copySelection(text)
+    } catch {}
+    this.showToast(tSystem(copied ? "msg.copied" : "msg.copyFailed"))
+    return true
   }
 
   private copySelection(): void {
@@ -2560,24 +2933,26 @@ export class TuiApp {
     // jadi tak perlu hitung dua kali dengan tinggi berbeda.
     const geom = chatColumnGeometry(height, width)
     const chatCols = geom.chatCols
+    // Margin kiri 3 + kanan 3 milik frame: lebar isi (wrap, viewport, composer,
+    // klik) lebih kecil 6 dari lebar frame. Footer tetap memakai `chatCols` penuh.
+    const contentCols = Math.max(1, chatCols - FRAME_HORIZONTAL_MARGIN)
     const padLeft = geom.padLeft
     const padRight = geom.padRight
     const prevChatCols = this.lastChatCols
-    this.lastChatCols = chatCols
+    this.lastChatCols = contentCols
 
     // v7.29: card prompt DIHAPUS — prompt kini menjadi history biasa di
     // transkrip (lihat `projectRows`). Biarkan cardRows kosong; semua turunan
     // `cardH` di bawah (viewH, cursorRow, composerTop) otomatis collapse ke 0,
     // sehingga tinggi frame & pemetaan mouse tetap konsisten.
-    const menuView = this.menuRows(height, chatCols, busy)
+    const menuView = this.menuRows(height, contentCols, busy)
     const allComposer = this.composerRows(snap, busy, now)
     const contentBudget = Math.max(1, height - 3)
     let menu = menuView.lines
-    // Composer TETAP 2 baris di semua state — TIDAK bergantung pada
-    // `composerLive(busy)`/`editing`. Kalau tinggi mengikuti `editing`, prompt
-    // bergeser satu baris di transisi submit → busy → selesai (viewH berubah).
-    // Jendela geser `composerOffset` menangani draft panjang; dropdown overlay.
-    let composerH = COMPOSER_MAX_ROWS
+    // Tinggi isi composer dinamis 1–2 baris: default 1 baris (kosong / 1 baris
+    // teks), melebar ke 2 baris saat teks wrap / multiline > 1 baris, dan
+    // bergulir di dalam jendela 2 baris bila teks ≥ 3 baris.
+    let composerH = Math.min(COMPOSER_MAX_ROWS, Math.max(1, allComposer.length))
     if (menu.length + composerH > contentBudget) {
       menu = menu.slice(0, Math.max(0, contentBudget - 1))
       composerH = Math.max(1, contentBudget - menu.length)
@@ -2590,7 +2965,7 @@ export class TuiApp {
     // v7.28: indikator "baris baru" muncul saat user TIDAK berada di ekor.
     // Ambangnya memakai VIEWH FINAL yang sama dengan frame (bukan hitungan
     // terpisah yang bisa melenceng saat menu/draft berubah).
-    const maxBackForIndicator = Math.max(0, this.transcript.wrappedLength(chatCols) - viewH)
+    const maxBackForIndicator = Math.max(0, this.transcript.wrappedLength(contentCols) - viewH)
     const awayFromTail = this.scrollBack < maxBackForIndicator
     const newCount = awayFromTail ? this.transcript.total() - this.scrollBase : 0
     // Baris indikator WAJIB dipotong ke lebar frame seperti baris lain: teks
@@ -2626,7 +3001,7 @@ export class TuiApp {
     // Rebase scroll saat lebar berubah: indeks baris mentah melompat ketika
     // wrap berubah. Simpan anchor (id, offset) dari baris viewport pertama di
     // lebar LAMA, lalu cari lagi posisinya di lebar BARU.
-    if (prevChatCols != null && prevChatCols !== chatCols && !this.pinnedToTail) {
+    if (prevChatCols != null && prevChatCols !== contentCols && !this.pinnedToTail) {
       const oldVp = this.transcript.viewport(
         prevChatCols,
         this.lastLayout?.viewH ?? viewH,
@@ -2642,7 +3017,7 @@ export class TuiApp {
     // Pakai `viewH` yang SAMA dengan viewport di bawah agar tidak ada selisih
     // geometri dengan `viewportHeight()`.
     if (this.pendingScrollAnchor) {
-      const idx = this.transcript.indexOfPoint(this.pendingScrollAnchor, chatCols)
+      const idx = this.transcript.indexOfPoint(this.pendingScrollAnchor, contentCols)
       this.pendingScrollAnchor = null
       if (idx >= 0) this.scrollBack = idx
     } else if (this.pinnedToTail && !this.selection) {
@@ -2651,11 +3026,11 @@ export class TuiApp {
       // `MAX_LIVE_TAIL_ROWS`), jadi narasi committed tak terdorong keluar
       // viewport. Saat live hilang `total` menyusut tetapi floor menahan
       // jendela: posisi baris committed di layar tetap, bawah boleh kosong.
-      const maxBack = Math.max(0, this.transcript.wrappedLength(chatCols) - viewH)
+      const maxBack = Math.max(0, this.transcript.wrappedLength(contentCols) - viewH)
       this.scrollBack = Math.max(maxBack, this.turnScrollFloor)
       this.turnScrollFloor = Math.max(this.turnScrollFloor, this.scrollBack)
     }
-    const viewport = this.transcript.viewport(chatCols, viewH, this.scrollBack)
+    const viewport = this.transcript.viewport(contentCols, viewH, this.scrollBack)
     if (
       this.selection &&
       (!this.transcript.hasSource(this.selection.anchor.id) ||
@@ -2706,38 +3081,84 @@ export class TuiApp {
     // lebih jujur daripada dekorasi. Komposer tetap menjadi satu-satunya
     // petunjuk bahwa aplikasi siap menerima input.
 
-    const pf = promptFirst(this.composerWidth())
+    const pf = promptFirst()
     let shownComposer: string[]
     let cursorRow: number
     let cursorCol = 1
     let composerOffset = 0
     if (this.composerLive(busy)) {
-      // Composer memakai composerWidth() satu-sumber (chat dibatasi 100 kolom).
+      // Composer memakai composerWidth() satu-sumber (lebar interior blok).
       const cursor = this.composerLayout()
-      const winStart = Math.max(0, Math.min(allComposer.length - composerH, cursor.visIdx))
+      const maxOff = Math.max(0, allComposer.length - composerH)
+      let winStart: number
+      if (this.composerScrollOffset !== null && maxOff > 0) {
+        winStart = Math.max(0, Math.min(maxOff, this.composerScrollOffset))
+        this.composerScrollOffset = winStart
+      } else {
+        this.composerScrollOffset = null
+        // Pertahankan jendela sebelumnya selama kursor masih di dalamnya; baru
+        // geser seminimal mungkin saat kursor keluar batas atas/bawah.
+        const prevOff = Math.max(0, Math.min(maxOff, this.lastLayout?.composerOffset ?? 0))
+        if (cursor.visIdx < prevOff) winStart = cursor.visIdx
+        else if (cursor.visIdx >= prevOff + composerH) winStart = cursor.visIdx - composerH + 1
+        else winStart = prevOff
+      }
       composerOffset = winStart
       shownComposer = allComposer.slice(winStart, winStart + composerH)
-      // Baris komposer dijamin tepat `composerH` supaya frame tak berubah
-      // walau draft hanya satu baris — transkrip tidak bergeser saat mengetik.
       while (shownComposer.length < composerH) shownComposer.push("")
-      // +1 untuk baris kosong pemisah transkrip ↔ composer.
-      cursorRow = viewH + 1 + cardH + (cursor.visIdx - winStart) + 1
+      // +1 untuk baris tutup atas blok composer.
+      const cursorRel = Math.max(0, Math.min(composerH - 1, cursor.visIdx - winStart))
+      cursorRow = viewH + 1 + cardH + cursorRel + 1
       cursorCol = cursor.col
     } else {
       shownComposer = allComposer.slice(0, composerH)
       while (shownComposer.length < composerH) shownComposer.push("")
       cursorRow = viewH + 1 + cardH + 1
-      // v7.30: SELALU parkir caret tepat setelah prompt, termasuk saat busy
-      // dengan editing=false (cabang ini). Dulu `if (!busy)` membuat cursorCol
-      // tetap 1 saat submit → caret tampil SEBELUM prompt (`| minicode ›`).
       cursorCol = displayWidth(pf) + 1
     }
-    if (this.composerLive(busy) && composerOffset === 0 && shownComposer[0]?.startsWith(pf)) {
-      shownComposer = [
-        `${c.accent(pf)}${shownComposer[0]!.slice(pf.length)}`,
-        ...shownComposer.slice(1),
-      ]
-    }
+    const boxW = this.composerBoxWidth()
+    const innerW = Math.max(1, boxW - COMPOSER_BOX_CHROME_COLS)
+    const hasAbove = this.composerLive(busy) && composerOffset > 0
+    const hasBelow =
+      this.composerLive(busy) && composerOffset + shownComposer.length < allComposer.length
+    const box = composerBoxGlyphs()
+    const topBorder = paintComposerBorder(box.tl + box.h.repeat(Math.max(0, boxW - 2)) + box.tr)
+    const bottomBorder = paintComposerBorder(box.bl + box.h.repeat(Math.max(0, boxW - 2)) + box.br)
+    const vBar = paintComposerBorder(box.v)
+    const compSel = this.composerLive(busy) ? this.composerSelectionRange() : null
+    const compVisual = compSel ? this.composerVisual().visual : undefined
+    const boxedComposer = shownComposer.map((rawRow, idx) => {
+      let styledRow = highlightPasteTokens(rawRow, this.pastedBlocks, (s) => c.info(s))
+      if (compSel && compVisual) {
+        const vRow = compVisual[composerOffset + idx]
+        if (vRow) {
+          const oStart = Math.max(vRow.startCursor, compSel.start)
+          const oEnd = Math.min(vRow.endCursor, compSel.end)
+          if (oEnd > oStart) {
+            const bodyUnits = toGraphemes(vRow.body)
+            const colStart =
+              vRow.prefixCols + displayWidth(bodyUnits.slice(0, oStart - vRow.startCursor).join(""))
+            const colEnd =
+              vRow.prefixCols + displayWidth(bodyUnits.slice(0, oEnd - vRow.startCursor).join(""))
+            styledRow = highlightColumns(styledRow, colStart, colEnd)
+          } else if (
+            compSel.start < vRow.startCursor &&
+            compSel.end > vRow.endCursor &&
+            vRow.body === ""
+          ) {
+            styledRow = "\x1b[7m \x1b[27m"
+          }
+        }
+      }
+      const paddedInner = padToWidth(truncateToWidth(styledRow, innerW), innerW)
+      const rightCell =
+        idx === 0 && hasAbove
+          ? c.gray(glyphs.up)
+          : idx === shownComposer.length - 1 && hasBelow
+            ? c.gray(glyphs.down)
+            : " "
+      return `${vBar} ${paddedInner}${rightCell}${vBar}`
+    })
 
     const started = this.turnStartedAt || now
     const sparkInterval = this.streamIntervalMs > 0 ? this.streamIntervalMs : DOT_INTERVAL_MS
@@ -2775,12 +3196,12 @@ export class TuiApp {
     }
     const frame = [
       ...body,
-      // Napas WAJIB antara transkrip dan composer — dulu composer menempel
-      // langsung ke baris teks terakhir saat transkrip penuh.
-      "",
+      // Bingkai kotak tipis bersudut lengkung (`╭─╮`/`│ │`/`╰─╯`) tanpa latar
+      // warna — menggantikan dua baris pemisah kosong sehingga viewH & I1 utuh.
+      topBorder,
       ...cardRows,
-      ...shownComposer,
-      "",
+      ...boxedComposer,
+      bottomBorder,
       indicatorLine
         ? truncateToWidth(indicatorLine, chatCols)
         : truncateToWidth(retryLine ? `${c.warning(retryLine)}  ${footer}` : footer, chatCols),
@@ -2792,33 +3213,43 @@ export class TuiApp {
     const out = frame.slice(-height)
     // Satu frame, satu write: chat ter-centre lewat padding spasi di kedua sisi.
     // Padding ditulis di frame yang SAMA (bukan write terpisah) supaya kontrak
-    // satu-write & writer-inventory tetap hijau. Berlaku untuk SEMUA baris out,
-    // termasuk footer dan spacer — kalau tidak, tepi kanan bergetar tiap baris.
+    // satu-write & writer-inventory tetap hijau. Margin 3 adalah PADDING FRAME
+    // untuk baris chat/composer — bukan spasi pada teks (v0.43). Footer/indicator
+    // DIKECUALIKAN: mulai di `padLeft` (kolom 0 saat chat penuh) dengan lebar
+    // `chatCols` seperti sebelumnya, bukan penuh `cols`.
+    const footerRow = out.length - 1
     for (let r = 0; r < out.length; r++) {
-      // padToWidth menjaga chat selalu `chatCols` kolom: teks pendek tak bikin
+      const isFooter = r === footerRow
+      const leftPad = isFooter ? padLeft : padLeft + ASSISTANT_LEFT_MARGIN
+      // Margin kanan 3 simetris dengan kiri untuk baris chat/composer (v0.43).
+      const rightPad = isFooter ? padRight : padRight + FRAME_RIGHT_MARGIN
+      const rowWidth = isFooter ? chatCols : contentCols
+      // padToWidth menjaga tiap baris tetap lebar `cols`: teks pendek tak bikin
       // padding kanan bergeser saat isi berubah (kontrak render lama).
       out[r] =
-        " ".repeat(padLeft) +
-        padToWidth(truncateToWidth(out[r] ?? "", chatCols), chatCols) +
-        " ".repeat(padRight)
+        " ".repeat(leftPad) +
+        padToWidth(truncateToWidth(out[r] ?? "", rowWidth), rowWidth) +
+        " ".repeat(rightPad)
     }
     return {
       frame: out,
       cursor: {
         row: Math.max(1, Math.min(height, cursorRow + topPad - crop)),
-        // CUP absolut: composer digambar di dalam kolom chat yang ter-centre.
-        col: Math.max(1, cursorCol + padLeft),
+        // CUP absolut: composer berada di kolom chat + margin 3 + border kiri `│ ` (2 kol).
+        col: Math.max(1, cursorCol + padLeft + ASSISTANT_LEFT_MARGIN + COMPOSER_BOX_LEFT_COLS),
       },
       cols: Math.max(10, width),
       chatCols,
+      contentCols,
       padLeft,
       padRight,
       viewH,
       transcriptRows: bodyRows,
       // Padding transkrip ditambahkan di ATAS (lihat overlay) → geser pemetaan.
       transcriptTop: topPad - crop + (viewH - bodyRows.length),
-      // +1 = baris kosong pemisah (lihat frame) — klik composer harus naik 1.
+      // +1 = baris bingkai atas composer (lihat frame) — klik composer harus naik 1.
       composerTop: topPad - crop + viewH + 1 + cardH,
+      composerRowsShown: composerH,
       composerLines: allComposer,
       composerOffset,
       // Baris 1-based dari overlay menu di layar (dipakai handleMouse).

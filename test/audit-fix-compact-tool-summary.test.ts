@@ -38,12 +38,12 @@ function setup(opts: { minimizeActivity?: boolean; activityPanel?: boolean } = {
 }
 
 /**
- * Baris ringkas = margin kiri + angka kategori (tanpa prefix simbol). Pola
- * `^ {3}\d+\s+\p{L}` membedakan rekap dari baris ledger biasa (`› label target`),
- * yang kini memakai label manusiawi bahasa SISTEM dan tak punya angka kategori.
+ * Baris ringkas = angka kategori (tanpa prefix simbol). v0.43: margin 3 milik
+ * FRAME, jadi teks transkrip mulai di kolom 0. Pola `^\d+\s+\p{L}` membedakan
+ * rekap dari baris ledger biasa (`› label target`) yang tak punya angka kategori.
  */
 function summaryLines(lines: string[]): string[] {
-  return lines.filter((l) => /^ {3}\d+\s+\p{L}/u.test(l))
+  return lines.filter((l) => /^\d+\s+\p{L}/u.test(l))
 }
 
 describe("compact tool summary per turn", () => {
@@ -161,7 +161,7 @@ describe("compact tool summary per turn", () => {
     const summaries = summaryLines(transcript.view(120, 300, 0).map(stripAnsi))
     const cumulative = summaries.at(-1)!
     // Baris terakhir = akumulator KUMULATIF, satu baris angka kategori.
-    expect(cumulative).toMatch(/^ {3}\d+\s+\p{L}/u)
+    expect(cumulative).toMatch(/^\d+\s+\p{L}/u)
     expect(cumulative).toContain("2 command")
     expect(cumulative).toContain("118 read")
     expect(cumulative).toContain("1 other")

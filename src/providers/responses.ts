@@ -144,7 +144,13 @@ export function createResponsesProvider(config: ResponsesConfig): ModelProvider 
       }
       let res: Response
       try {
-        res = await fetch(endpoint, { method: "POST", headers, body, signal })
+        res = await fetch(endpoint, {
+          method: "POST",
+          headers,
+          body,
+          signal,
+          redirect: "manual",
+        })
       } catch (e) {
         if (e instanceof Error && e.name === "AbortError") throw e
         throw new ProviderError("network", e instanceof Error ? e.message : String(e))

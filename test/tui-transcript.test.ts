@@ -2,8 +2,9 @@
 import { describe, expect, test } from "bun:test"
 import { readFileSync } from "node:fs"
 import type { UiPresentationActivity, UiPresentationSnapshot } from "../src/ui/contract.ts"
+import { t } from "../src/ui/i18n/locale.ts"
 import { paintLedger } from "../src/ui/render/ledger.ts"
-import { glyphs, stripAnsi } from "../src/ui/render/theme.ts"
+import { c, glyphs, stripAnsi } from "../src/ui/render/theme.ts"
 import { humanToolLabel, tSystem } from "../src/ui/render/tool-label.ts"
 import { displayWidth } from "../src/ui/render/width.ts"
 import { Transcript } from "../src/ui/tui/transcript.ts"
@@ -57,7 +58,7 @@ describe("Transcript", () => {
     bus.emit("provider:text", { text: "dunia" })
     bus.emit("turn:completed", {})
     expect(t.size()).toBe(1)
-    expect(t.view(40, 3, 0)[0]).toBe("   halo dunia")
+    expect(t.view(40, 3, 0)[0]).toBe("halo dunia")
     expect(t.view(40, 3, 0).slice(1)).toEqual(["", ""])
   })
   test("attempt provider gagal dihapus dari jawaban live dan diberi penanda", () => {
@@ -200,9 +201,9 @@ describe("Transcript", () => {
     })
     bus.emit("turn:completed", {})
     const out = t.view(80, 20, 0).join("\n").trim()
-    expect(out).toContain("Ringkasan\n\n   Paragraf.")
+    expect(out).toContain("Ringkasan\n\nParagraf.")
     expect(out).not.toContain("Paragraf.\n\n\n")
-    expect(out).toContain("const a = 1\n\n   const b = 2")
+    expect(out).toContain("const a = 1\n\nconst b = 2")
   })
   test("jawaban streaming mempertahankan blank line di fence yang belum lengkap", () => {
     const { bus, t } = setup()
@@ -246,10 +247,10 @@ describe("Transcript", () => {
     t.pushInfo(["a", "b", "c", "d"])
     // v7.28 anchor atas: `scrollBack = 0` = kepala, konten di Atas dan sisa
     // tinggi viewport diisi baris kosong DI BAWAH (bukan di atas seperti dulu).
-    // v0.33: semua baris transkrip — termasuk info — pakai margin kiri 3.
-    expect(t.view(40, 6, 0)).toEqual(["   a", "   b", "   c", "   d", "", ""])
+    // v0.43: margin 3 milik FRAME — transkrip polos di kolom 0.
+    expect(t.view(40, 6, 0)).toEqual(["a", "b", "c", "d", "", ""])
     // scrollBack naik menggulir KE BAWAH menuju ekor: 2 → baris "c","d".
-    expect(t.view(40, 2, 2)).toEqual(["   c", "   d"])
+    expect(t.view(40, 2, 2)).toEqual(["c", "d"])
   })
   test("cap 5000 membuang tertua dan menambahkan marker", () => {
     const { t } = setup()
@@ -260,7 +261,7 @@ describe("Transcript", () => {
     // kepala (scrollBack = 0), bukan di ekor. Di ekor (scrollBack = maks) ada
     // baris terbaru — kedua ujung tetap diverifikasi.
     expect(t.view(100, 1, 0)[0]).toContain("10 early lines")
-    expect(t.view(100, 1, 5000)[0]).toBe("   l5009")
+    expect(t.view(100, 1, 5000)[0]).toBe("l5009")
   })
   test("total() monotonik kebal evict (basis indikator F-08)", () => {
     // size() menyusut saat cap membuang tertua → newCount negatif/hilang.
@@ -278,9 +279,9 @@ describe("Transcript", () => {
     const rows = t.viewport(40, 8, 0).rows
     const alpha = rows.find((row) => row.text.includes("alpha"))!
     const prompt = rows.find((row) => row.text.includes("minicode"))!
-    // v0.33: 3 kolom pertama adalah margin (chrome), bukan teks sumber.
-    const alphaStart = t.pointAt(alpha, 3)!
-    const alphaEnd = t.pointAt(alpha, 8)!
+    // v0.43: margin adalah padding FRAME — teks sumber mulai di kolom 0.
+    const alphaStart = t.pointAt(alpha, 0)!
+    const alphaEnd = t.pointAt(alpha, 5)!
     expect(t.selectionText(alphaStart, alphaEnd)).toBe("alpha")
     const promptStart = t.pointAt(prompt, 11)!
     expect(t.selectionText(promptStart, promptStart)).toBe("")
@@ -288,11 +289,11 @@ describe("Transcript", () => {
   test("selection wrapped tetap satu logical source tanpa newline artefaktual", () => {
     const { t } = setup()
     t.pushInfo(["abcdefghijklmnopqrst"])
-    // Lebar viewport naik 10 → 13 agar lebar AREA TEKS tetap 10 setelah
-    // margin 3; kolom seleksi juga digeser 3 (chrome margin).
-    const rows = t.viewport(13, 4, 0).rows.filter((row) => row.selectable)
-    const start = t.pointAt(rows[0]!, 4)!
-    const end = t.pointAt(rows[1]!, 13)!
+    // v0.43: margin milik frame — lebar teks = lebar viewport (10), kolom
+    // seleksi tak lagi digeser 3.
+    const rows = t.viewport(10, 4, 0).rows.filter((row) => row.selectable)
+    const start = t.pointAt(rows[0]!, 1)!
+    const end = t.pointAt(rows[1]!, 10)!
     expect(t.selectionText(start, end)).toBe("bcdefghijklmnopqrst")
   })
   test("baris wrapped tetap copy tanpa prefix chrome", () => {
@@ -517,6 +518,106 @@ describe("v0.43 — baris ledger error ringkas (tanpa duplikasi status/child)", 
   })
 })
 
+describe("v0.43 retry sukses menimpa kegagalan (bukan append)", () => {
+  test("tool gagal → retry sukses: SATU baris ledger hijau, tanpa failed/boom", () => {
+    const oldId = "read-1"
+    const newId = "read-2"
+    const snapshot: UiPresentationSnapshot = {
+      activities: [
+        activity({ toolCallId: oldId, name: "read_file", target: "a.ts", status: "failed" }),
+        activity({
+          toolCallId: newId,
+          name: "read_file",
+          target: "a.ts",
+          status: "completed",
+          supersedes: oldId,
+        }),
+      ],
+      turns: [],
+    }
+    const { t: tr, emit } = setupPresentation(snapshot)
+    emit("tool.failed", {
+      seq: 1,
+      turnId: 1,
+      toolCallId: oldId,
+      status: "failed",
+      message: "boom",
+    })
+    const before = tr.view(120, 20, 0).map(stripAnsi).join("\n")
+    expect(before).toContain(humanToolLabel("read_file"))
+    expect(before).toContain("failed")
+
+    emit("tool.completed", { seq: 2, turnId: 1, toolCallId: newId, status: "completed" })
+    emit("turn.completed", { seq: 3, turnId: 1 })
+
+    const painted = tr.view(120, 20, 0)
+    const led = painted.filter((l) => stripAnsi(l).includes(humanToolLabel("read_file")))
+    expect(led).toHaveLength(1)
+    const plain = stripAnsi(led[0]!)
+    expect(plain).not.toContain("failed")
+    expect(plain).not.toContain("boom")
+    // Penanda attempt kedua tetap tampil: baris TUNGGAL ini jujur bahwa
+    // keberhasilannya datang setelah retry, bukan hapus jejak attempt pertama.
+    expect(plain).toContain(t("ts.retry"))
+    expect(led[0]).toBe(paintLedger("completed", plain))
+
+    // Rekap turn tak menghitung dua toolCallId sebagai dua tool.
+    const recaps = painted.map(stripAnsi).filter((l) => /^\d+\s+\p{L}/u.test(l))
+    expect(recaps.filter((l) => l.includes(t("ts.toolCategory.read")))).toHaveLength(1)
+    expect(recaps.join("\n")).toContain(`1 ${t("ts.toolCategory.read")}`)
+  })
+
+  test("sub-agent gagal (1 child) → retry sukses: agregat ✦ 0 failed & biru", () => {
+    const parentId = "delegate-1"
+    const oldChild = "child-1"
+    const newChild = "child-2"
+    const child = (toolCallId: string, status: "failed" | "completed", supersedes?: string) =>
+      activity({
+        toolCallId,
+        name: "read_file",
+        target: "a.ts",
+        status,
+        parentToolCallId: parentId,
+        childSessionId: "sub_1",
+        runId: "run_1",
+        label: "explore-1",
+        ...(supersedes ? { supersedes } : {}),
+      })
+    const snapshot: UiPresentationSnapshot = {
+      activities: [
+        activity({ toolCallId: parentId, name: "delegate_task", label: "delegate_task" }),
+        child(oldChild, "failed"),
+        child(newChild, "completed", oldChild),
+      ],
+      turns: [],
+    }
+    const { t: tr, emit } = setupPresentation(snapshot)
+    emit("tool.completed", { seq: 1, turnId: 1, toolCallId: parentId, status: "completed" })
+    emit("tool.failed", {
+      seq: 2,
+      turnId: 1,
+      toolCallId: oldChild,
+      status: "failed",
+      message: "timeout 180000ms",
+    })
+    const before = tr.view(120, 20, 0).map(stripAnsi).join("\n")
+    expect(before).toContain(`1 ${t("ts.agentReason.timeout")}`)
+
+    emit("tool.completed", { seq: 3, turnId: 1, toolCallId: newChild, status: "completed" })
+
+    const painted = tr.view(120, 20, 0)
+    const aggs = painted.filter((l) => stripAnsi(l).includes(glyphs.agentIcon))
+    expect(aggs).toHaveLength(1)
+    const plain = stripAnsi(aggs[0]!)
+    // Hitungan failure dikurangi, bukan menumpuk; agregat balik ke status normal.
+    expect(plain).toContain(t("ts.agentSummary", { agents: 1, tools: 2, failed: 0 }))
+    expect(plain).not.toContain(t("ts.agentReason.timeout"))
+    expect(aggs[0]).toBe(c.info(plain))
+    // Tak ada baris child merah mandiri yang tertinggal.
+    expect(painted.map(stripAnsi).join("\n")).not.toContain(`1 ${t("ts.agentReason.timeout")}`)
+  })
+})
+
 describe("Transcript.replayHistory (resume)", () => {
   test("membangun ulang echo user + jawaban model", () => {
     const { t } = setup()
@@ -560,8 +661,8 @@ describe("Transcript UI audit regressions (Fase 3.2-3.4)", () => {
       const rows = t.view(40, 4, 0)
       // v7.29: prompt kini history — gema `minicode > …` (ASCII) tampil di
       // transkrip dengan tepat SATU jeda sebelum dan sesudahnya.
-      // v7.42: echo user mengikuti margin kiri seragam (3 kolom).
-      expect(rows).toEqual(["   jawaban", "", "   minicode > pertanyaan dua", ""])
+      // v0.43: margin 3 milik FRAME — echo user polos di kolom 0.
+      expect(rows).toEqual(["jawaban", "", "minicode > pertanyaan dua", ""])
       // Kill-switch ASCII tetap berlaku: panah '›' tak boleh muncul.
       expect(rows.some((l) => l.includes("›"))).toBe(false)
     } finally {
@@ -589,15 +690,14 @@ describe("Transcript UI audit regressions (Fase 3.2-3.4)", () => {
     // v7.29: prompt kini history — baris gema `minicode › hello world` benar-benar
     // ada di viewport (dulu disembunyikan demi card), tapi chrome tetap dikecualikan
     // dari sumber seleksi seperti sebelum kartu diperkenalkan.
-    // v7.42: margin +3 → teks `minicode › hello world` mulai di kolom 3,
-    // sumber (hello) mulai di kolom 11+3=14.
+    // v0.43: margin milik frame — sumber (hello) mulai di kolom 11 (dulu 14).
     const prompt = rows.find((r) => r.text.includes("minicode › hello world"))!
-    expect(prompt.displayStart).toBe(14)
-    const start = t.pointAt(prompt, 14)!
-    const end = t.pointAt(prompt, 19)!
+    expect(prompt.displayStart).toBe(11)
+    const start = t.pointAt(prompt, 11)!
+    const end = t.pointAt(prompt, 16)!
     expect(t.selectionText(start, end)).toBe("hello")
-    expect(t.columnAtOffset(prompt, start.offset)).toBe(14)
-    expect(t.columnAtOffset(prompt, end.offset)).toBe(19)
+    expect(t.columnAtOffset(prompt, start.offset)).toBe(11)
+    expect(t.columnAtOffset(prompt, end.offset)).toBe(16)
   })
 
   test("mouse selection pada baris markdown inline selaras dengan kolom tampilan", () => {
@@ -606,12 +706,12 @@ describe("Transcript UI audit regressions (Fase 3.2-3.4)", () => {
     bus.emit("turn:completed", {})
     const rows = t.viewport(60, 4, 0).rows
     const mdRow = rows.find((r) => r.text.includes("Use"))!
-    expect(mdRow.displayStart).toBe(3)
-    expect(mdRow.displayEnd).toBe(15)
-    const start = t.pointAt(mdRow, 3)!
-    const end = t.pointAt(mdRow, 15)!
+    expect(mdRow.displayStart).toBe(0)
+    expect(mdRow.displayEnd).toBe(12)
+    const start = t.pointAt(mdRow, 0)!
+    const end = t.pointAt(mdRow, 12)!
     expect(t.selectionText(start, end)).toBe("Use **bold** end")
-    expect(t.columnAtOffset(mdRow, end.offset)).toBe(15)
+    expect(t.columnAtOffset(mdRow, end.offset)).toBe(12)
     // Menarik mulai kolom margin kiri (0) tetap mendarat di awal konten logis.
     expect(t.pointAt(mdRow, 0)!.offset).toBe(start.offset)
   })
@@ -634,14 +734,14 @@ describe("Transcript UI audit regressions (Fase 3.2-3.4)", () => {
     expect(subIdx).toBe(p1Idx + 1)
     expect(p2Idx).toBeGreaterThan(subIdx + 1)
 
-    // Setiap baris lanjutan sub-item wajib menjorok >= 8 kolom (margin 3 + indent 3 + "- " 2).
+    // v0.43: margin 3 milik frame — indent lanjutan sub-item = 3 (sumber) + 2 ("- ") = 5.
     const subRows = rows.filter(
-      (r) => r.selectable && (r.text.includes("- sub item") || /^\s{8}\S/.test(r.text)),
+      (r) => r.selectable && (r.text.includes("- sub item") || /^\s{5}\S/.test(r.text)),
     )
     expect(subRows.length).toBeGreaterThanOrEqual(2)
     for (let i = 1; i < subRows.length; i++) {
-      expect(subRows[i]!.text).toMatch(/^\s{8}\S/)
-      expect(subRows[i]!.displayStart).toBe(8)
+      expect(subRows[i]!.text).toMatch(/^\s{5}\S/)
+      expect(subRows[i]!.displayStart).toBe(5)
     }
 
     // Drag selection lintas baris terbungkus menyalin teks asli tanpa spasi gantung sintetis.
@@ -659,8 +759,8 @@ describe("Transcript UI audit regressions (Fase 3.2-3.4)", () => {
     const selectable = rows.filter((r) => r.selectable)
     expect(selectable.length).toBe(2)
     const headerRow = selectable[0]!
-    // v0.33: tabel ber-kotak & ber-margin 3; margin adalah chrome, bukan teks.
-    expect(headerRow.displayStart).toBe(3)
+    // v0.43: margin tabel milik frame — displayStart kembali ke 0.
+    expect(headerRow.displayStart).toBe(0)
     expect(headerRow.plainBody).toBeDefined()
     expect(headerRow.plainBody!).not.toMatch(/^\s/)
 
@@ -692,13 +792,13 @@ describe("Transcript UI audit regressions (Fase 3.2-3.4)", () => {
     const { t } = setup()
     t.pushUser("x".repeat(120), 60)
     const rows = t.viewport(60, 10, 0).rows
-    // width = 60-4 = 56, prefix 14 → tiap baris isi 42 char → 120 = 42+42+36.
+    // v0.43: width = 60-1 = 59, prefix 11 → isi 48 char → 120 = 48+48+24.
     const withX = rows.filter((r) => r.text.includes("x"))
     expect(withX).toHaveLength(3)
     expect(withX[0]!.text).toContain("minicode")
     for (const r of withX.slice(1)) {
-      // Lanjutan tetap menjorok 3 kolom (margin asisten), bukan kolom 0.
-      expect(r.text.startsWith("   ")).toBe(true)
+      // Margin milik frame — baris lanjutan mulai di kolom 0.
+      expect(r.text.startsWith("x")).toBe(true)
     }
   })
 
@@ -896,7 +996,7 @@ describe("v0.40 — baris live tool tetap tail transien (bukan commit-in-place)"
     expect(before.maxBack).toBe(1)
     expect(before.firstIndex).toBe(1)
     expect(before.rows).toHaveLength(h)
-    expect(before.rows.map((r) => r.text).slice(0, 3)).toEqual(["   dua", "   tiga", "   empat"])
+    expect(before.rows.map((r) => r.text).slice(0, 3)).toEqual(["dua", "tiga", "empat"])
     expect(before.rows[3]!.text).toContain("grep")
 
     // Tool selesai tanpa ledger: baris live hilang, total menyusut jadi 4
@@ -938,11 +1038,11 @@ describe("v0.40 — baris live tool tetap tail transien (bukan commit-in-place)"
     expect(vp.totalRows).toBe(6)
     expect(vp.maxBack).toBe(3)
     expect(vp.firstIndex).toBe(2)
-    expect(vp.rows.map((r) => r.text)).toEqual(["   c", "   d", "   e"])
-    expect(t.view(w, h, 2)).toEqual(["   c", "   d", "   e"])
+    expect(vp.rows.map((r) => r.text)).toEqual(["c", "d", "e"])
+    expect(t.view(w, h, 2)).toEqual(["c", "d", "e"])
     // s = maxBack → ekor; s = 0 → kepala.
-    expect(t.view(w, h, 3)).toEqual(["   d", "   e", "   f"])
-    expect(t.view(w, h, 0)).toEqual(["   a", "   b", "   c"])
+    expect(t.view(w, h, 3)).toEqual(["d", "e", "f"])
+    expect(t.view(w, h, 0)).toEqual(["a", "b", "c"])
   })
 
   test("v0.43: tail live dibatasi 3 aktivitas terakhir walau 20 running", () => {

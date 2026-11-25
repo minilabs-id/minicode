@@ -164,9 +164,10 @@ const TOKENS = {
   // `success` (green): string harus tampak jingga-salm ala VS Code, sementara
   // status sukses tetap hijau. Alias lama `green` tetap menyasar success.
   string: { c16: "33", c256: "38;5;173", rgb: "38;2;206;145;120" },
-  // Thinking/reasoning: abu-kebiruan yang tetap terbaca nyaman (bukan `dim` yang
-  // meredupkan seluruh teks) — jelas sekunder dari jawaban model tapi tak silau.
-  thinking: { c16: "90", c256: "38;5;246", rgb: "38;2;135;146;160" },
+  // Thinking/reasoning: abu-kebiruan sekunder tapi tetap terbaca nyaman.
+  // Lebih terang dari gray lama agar tidak tenggelam di terminal gelap,
+  // tetap lebih redup dari teks narasi utama.
+  thinking: { c16: "37", c256: "38;5;250", rgb: "38;2;165;175;186" },
   // Faint: abu gelap untuk garis footer — lebih redup dari `gray` (bright-black)
   // dan dari `muted` (dim). Dipakai elemen yang harus ada tapi hampir tak
   // terlihat, seperti separator baris dasar.
@@ -432,6 +433,9 @@ export const glyphs = {
   get caret() {
     return supportsUtf8() ? "█" : "#"
   },
+  get up() {
+    return supportsUtf8() ? "↑" : "^"
+  },
   get down() {
     return supportsUtf8() ? "↓" : "v"
   },
@@ -504,6 +508,36 @@ export const glyphs = {
   get vLine() {
     return supportsUtf8() ? "│" : "|"
   },
+}
+
+/**
+ * Glif kotak tipis bersudut lengkung untuk bingkai composer (`╭─╮│╰╯` di UTF-8,
+ * `+-+|+-+` di `MINICODE_ASCII=1`).
+ */
+export function composerBoxGlyphs(): {
+  tl: string
+  tr: string
+  bl: string
+  br: string
+  h: string
+  v: string
+} {
+  if (!supportsUtf8()) {
+    return { tl: "+", tr: "+", bl: "+", br: "+", h: "-", v: "|" }
+  }
+  return { tl: "╭", tr: "╮", bl: "╰", br: "╯", h: "─", v: "│" }
+}
+
+/**
+ * Warna garis tipis bingkai composer — lebih halus/tipis secara visual daripada
+ * `faint` (`#484848` / `238`): truecolor `#36383E` (`38;2;54;56;62`),
+ * 256-warna `236`, 16-warna `90`, dan polos di `MINICODE_COLOR=0` / `NO_COLOR`.
+ */
+export function paintComposerBorder(s: string): string {
+  const level = colorLevel()
+  if (level === 0) return s
+  const code = level >= 3 ? "38;2;54;56;62" : level === 2 ? "38;5;236" : "90"
+  return `\x1b[${code}m${s}\x1b[39m`
 }
 
 // ── Section separator ──

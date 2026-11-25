@@ -36,17 +36,18 @@ sub-milestone (`P2.x`), Quality Remediation (`Stage 1`–`10`), dan hotfix
 
 ## Status checkout
 
-HEAD checkout ini adalah `42a35a6` (garis rilis v0.43). Working tree adalah
-**kandidat rilis 0.43.2 belum di-commit** (rilis ditahan owner): `CHANGELOG.md` dan `package.json` mencatat
-0.43.2; kontrak terminal memakai entri v0.43 paling atas (bukan overlay: tail live maks 3 baris, ratchet `scrollBack` naik-saja, history committed tidak bergeser balik) di atas arsip
-v0.42–v0.34. Angka gate historis v0.33 di bawah bukan hasil checkout ini;
-hasil kandidat ada di `.audit/FINAL-STATE.md` §9/§11. Jangan menganggap angka
-historis sebagai hasil checkout ini. `PLAN.md` adalah
-ledger milestone legacy, bukan roadmap aktif. `ROADMAP.md`,
-`docs/ARCHITECTURE.html`, dan `docs/audit/` tidak ada; status roadmap belum
-tersedia. Gate repository dapat dijalankan, tetapi checkout tidak boleh
-disebut hijau atau release-ready sebelum seluruh gate lulus pada kandidat yang
-sama.
+HEAD checkout ini adalah rilis **v0.50.0** (ketahanan hang/tool/kompaksi,
+composer kotak tipis 1–2 baris dinamis + scroll & margin simetris `chatCols - 6`,
+serta audit hardening menyeluruh P0–P3). `package.json` mencatat `0.50.0`;
+kontrak terminal memakai entri v0.43 paling atas (bukan overlay: tail live maks
+3 baris, ratchet `scrollBack` naik-saja, history committed tidak bergeser balik,
+kotak tipis composer `╭─╮│╰╯`, tinggi 1–2 baris dinamis + scroll, margin
+simetris 3+3) di atas arsip v0.42–v0.34. Angka gate historis v0.33 di bawah
+bukan hasil checkout ini. `PLAN.md` adalah ledger milestone legacy, bukan
+roadmap aktif. `ROADMAP.md`, `docs/ARCHITECTURE.html`, dan `docs/audit/` tidak
+ada; status roadmap belum tersedia. Gate repository dapat dijalankan, tetapi
+checkout tidak boleh disebut hijau atau release-ready sebelum seluruh gate lulus
+pada kandidat yang sama.
 
 Peta dokumentasi aktif: [docs/README.md](docs/README.md), navigasi:
 [`docs/SUMMARY.md`](docs/SUMMARY.md), arsitektur: [docs/architecture.md](docs/architecture.md),

@@ -57,12 +57,18 @@ test("fake TTY 120×40: End → scrollBack = wrappedLength(chatCols) − viewH",
   await tty.send(KEY.pgUp)
   await tty.send(KEY.end)
 
-  const layout = (app as unknown as { lastLayout: { chatCols: number; viewH: number } }).lastLayout
+  const layout = (
+    app as unknown as {
+      lastLayout: { chatCols: number; contentCols: number; viewH: number }
+    }
+  ).lastLayout
   const scrollBack = (app as unknown as { scrollBack: number }).scrollBack
   expect(layout).not.toBeNull()
   // 120 kolom → kolom tengah aktif → chatCols = floor(120/2) < 120.
   expect(layout.chatCols).toBeLessThan(120)
-  expect(scrollBack).toBe(Math.max(0, transcript.wrappedLength(layout.chatCols) - layout.viewH))
+  // v0.43: wrap memakai contentCols = chatCols - margin frame simetris 6 (3 kiri + 3 kanan).
+  expect(layout.contentCols).toBe(layout.chatCols - 6)
+  expect(scrollBack).toBe(Math.max(0, transcript.wrappedLength(layout.contentCols) - layout.viewH))
   await tty.send(KEY.ctrlD)
   await runP
 })

@@ -316,7 +316,8 @@ describe("Esc saat busy vs idle", () => {
 
     expect(h.abortCalls()).toBe(0)
     expect(h.screenText()).not.toContain("draf")
-    expect(h.screenText()).toContain("minicode") // prompt idle tetap ada (I13)
+    // Composer v0.43+ memakai bingkai kotak tipis `╭─...╰─` (tanpa label `minicode`).
+    expect(h.screenText()).toContain("╭─") // prompt idle tetap ada (I13)
     expect(tty!.all()).not.toContain("\x1b[?1049l")
 
     await tty!.send(KEY.ctrlD) // draft sudah kosong → quit

@@ -314,7 +314,12 @@ describe("TUI slash commands (CMD-02..CMD-09)", () => {
         "new-two",
       ])
       await tty.send(KEY.esc, 90)
-      await tty.waitForScreen((f) => f.some((l) => l.includes("minicode ›")))
+      await tty.waitForScreen(
+        (f) =>
+          !f.some((l) => l.includes("Esc cancel")) &&
+          !f.slice(0, -5).some((l) => l.includes("│")) &&
+          f.some((l) => l.includes("00.00.00")),
+      )
       expect(tty.screen().join("\n")).not.toContain("completed sync-ui")
     } finally {
       release()
@@ -431,7 +436,12 @@ describe("TUI slash commands (CMD-02..CMD-09)", () => {
           f.some((l) => l.includes("prompt-in-memory-unik")),
       )
       await tty.send(KEY.esc, 90)
-      await tty.waitForScreen((f) => f.some((l) => l.includes("minicode ›")))
+      await tty.waitForScreen(
+        (f) =>
+          !f.some((l) => l.includes("Esc cancel")) &&
+          !f.slice(0, -5).some((l) => l.includes("│")) &&
+          f.some((l) => l.includes("00.00.00")),
+      )
 
       await tty.send("/exit")
       await tty.send(KEY.enter)
@@ -455,7 +465,12 @@ describe("TUI slash commands (CMD-02..CMD-09)", () => {
       await tty.waitForScreen((f) => f.some((l) => l.includes(t("cmd.initInDiscuss"))))
       expect(existsSync(join(dir, "AGENTS.md"))).toBe(false)
       await tty.send(KEY.esc, 90)
-      await tty.waitForScreen((f) => f.some((l) => l.includes("minicode ›")))
+      await tty.waitForScreen(
+        (f) =>
+          !f.some((l) => l.includes("Esc cancel")) &&
+          !f.slice(0, -5).some((l) => l.includes("│")) &&
+          f.some((l) => l.includes("00.00.00")),
+      )
 
       await tty.send("/mode BUILD")
       await tty.send(KEY.enter)
@@ -467,7 +482,12 @@ describe("TUI slash commands (CMD-02..CMD-09)", () => {
       await tty.waitForScreen((f) => f.some((l) => l.includes("AGENTS.md created")))
       expect(existsSync(join(dir, "AGENTS.md"))).toBe(true)
       await tty.send(KEY.esc, 90)
-      await tty.waitForScreen((f) => f.some((l) => l.includes("minicode ›")))
+      await tty.waitForScreen(
+        (f) =>
+          !f.some((l) => l.includes("Esc cancel")) &&
+          !f.slice(0, -5).some((l) => l.includes("│")) &&
+          f.some((l) => l.includes("00.00.00")),
+      )
 
       await tty.send("/exit")
       await tty.send(KEY.enter)

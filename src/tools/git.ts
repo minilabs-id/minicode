@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process"
+import { lstatSync } from "node:fs"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
@@ -18,6 +19,7 @@ import {
   isPathOutsideRoot,
   isRealPathOutsideRoot,
   isSensitive,
+  isSensitiveReal,
 } from "../policy/jail.ts"
 import { sanitizeSpawnEnv, scrubSecrets } from "../policy/scrub.ts"
 import { contextUnrestricted, requireToolCwd } from "./context.ts"
@@ -66,6 +68,8 @@ export function runGit(
         // handler hanya bisa memeriksa `signal` induk — timeout mengakhiri child
         // dengan code null lalu di-resolve sebagai `exit null` (palsu-sukses).
         signal: effective,
+        // Tutup stdin agar subproses git tidak pernah menggantung menunggu prompt/EOF.
+        stdio: ["ignore", "pipe", "pipe"],
       },
     )
     // F-15: cap SAAT streaming (bukan slice di akhir): `git diff`/`git log`
@@ -275,6 +279,7 @@ function assertPaths(
   cwd: string | undefined,
   sessionRoot: string,
   relaxed = false,
+  rejectDirectories = false,
 ): string[] {
   if (paths == null) return []
   if (!Array.isArray(paths)) throw new Error("paths must be an array of strings")
@@ -282,12 +287,28 @@ function assertPaths(
   const out: string[] = []
   for (const p of paths) {
     if (typeof p !== "string" || !p.trim()) continue
+    // Tolak pathspec magic git (`:(glob)`, `:(top)`, `:/`, `:!`, `:^`):
+    // bisa mencocokkan file sensitif/direktori luar secara diam-diam.
+    if (/^:(?:\(|\/|!|\^)/.test(p)) throw new Error(`pathspec magic is not allowed: ${p}`)
     if (!relaxed && (isPathOutsideRoot(p, root) || isRealPathOutsideRoot(p, root)))
       throw new Error(`path outside workspace: ${p}`)
     const abs = resolve(root, p)
-    if (isSensitive(p) || isSensitive(abs)) throw new Error(`blocked sensitive file: ${p}`)
+    if (isSensitive(p) || isSensitive(abs) || isSensitiveReal(p, root))
+      throw new Error(`blocked sensitive file: ${p}`)
     if (isOwnedState(p) || isOwnedState(abs) || isOwnedStateReal(p, root))
       throw new Error(`blocked owned state: ${p}`)
+    if (rejectDirectories) {
+      if (p === "." || p === "./" || p === ".\\") {
+        throw new Error(`directory path is not allowed; specify a single file path: ${p}`)
+      }
+      try {
+        if (lstatSync(abs).isDirectory()) {
+          throw new Error(`directory path is not allowed; specify a single file path: ${p}`)
+        }
+      } catch (e) {
+        if (e instanceof Error && e.message.startsWith("directory path is not allowed")) throw e
+      }
+    }
     out.push(p)
   }
   return out
@@ -374,13 +395,19 @@ export const gitCommitTool: Tool = {
           indexEnv,
         )
         if (files.length > 0) {
-          // `--` memisahkan path dari opsi: nama file bernama `-f` tak jadi flag.
-          await runGit(["add", "--", ...files], resolvedCwd, ctx.signal, indexEnv)
+          // `--literal-pathspecs` + `--`: path diperlakukan harfiah (bukan glob/magic/flag).
+          await runGit(
+            ["--literal-pathspecs", "add", "--", ...files],
+            resolvedCwd,
+            ctx.signal,
+            indexEnv,
+          )
         }
 
         // `-m` satu argumen; --no-verify menonaktifkan hook yang sudah
-        // dinetralkan GIT_SAFE_BASE. `-a` hanya berlaku pada index privat.
-        const args = ["commit", "--no-verify", "-m", msg]
+        // dinetralkan GIT_SAFE_BASE; --no-gpg-sign mencegah eksekusi gpg.program.
+        // `-a` hanya berlaku pada index privat.
+        const args = ["commit", "--no-verify", "--no-gpg-sign", "-m", msg]
         if (files.length === 0 && all === true) args.push("-a")
         const out = await runGit(args, resolvedCwd, ctx.signal, indexEnv)
         const firstLine = msg.split("\n")[0]?.trim()
@@ -568,7 +595,13 @@ export const gitPushTool: Tool = {
       return s
     }
     const remoteName = refArg(remote, "remote")
+    if (remoteName && (/[:/\\@]/.test(remoteName) || remoteName.includes(".."))) {
+      throw new Error("remote must be a configured remote name (not a URL, path, or ext:: helper)")
+    }
     const branchName = refArg(branch, "branch")
+    if (branchName && (branchName.startsWith("+") || branchName.startsWith(":"))) {
+      throw new Error("force-push (+) and remote branch deletion (:) refspecs are not allowed")
+    }
     if (!(await isGitRepo(resolvedCwd, ctx.signal))) return "not a git repository"
     // Netralisasi hook: pre-push repo tak boleh dieksekusi. Kredensial hanya
     // lewat saat unrestricted (relaxed).
@@ -637,8 +670,8 @@ export const gitRestoreTool: Tool = {
     const relaxed = contextUnrestricted(ctx)
     assertCwd(c, sessionRoot, relaxed)
     const resolvedCwd = c ? resolve(sessionRoot, c) : sessionRoot
-    // Fail-closed: path luar root / sensitif / owned-state ditolak sebelum git jalan.
-    const [target] = assertPaths([path], c, sessionRoot, relaxed)
+    // Fail-closed: path luar root / sensitif / owned-state / direktori ditolak sebelum git jalan.
+    const [target] = assertPaths([path], c, sessionRoot, relaxed, true)
     if (!target) throw new Error("path is required")
 
     // Nilai `--source=` tetap satu argumen argv, tapi tolak awalan '-' dan NUL
@@ -651,8 +684,8 @@ export const gitRestoreTool: Tool = {
     // Audit deep: tolak sebelum smudge filter repo sempat dieksekusi.
     await refuseRepoFilters(resolvedCwd)
 
-    // `--` memisahkan opsi dari path: nama berkas '-f' tak jadi flag git.
-    const args: string[] = ["restore"]
+    // `--literal-pathspecs` + `--`: path satu berkas harfiah, tanpa glob/magic/flag.
+    const args: string[] = ["--literal-pathspecs", "restore"]
     if (staged === true) args.push("--staged")
     if (source) args.push(`--source=${source}`)
     args.push("--", target)
@@ -682,14 +715,18 @@ export const gitCheckoutTool: Tool = {
     const relaxed = contextUnrestricted(ctx)
     assertCwd(c, sessionRoot, relaxed)
     const resolvedCwd = c ? resolve(sessionRoot, c) : sessionRoot
-    const [target] = assertPaths([path], c, sessionRoot, relaxed)
+    const [target] = assertPaths([path], c, sessionRoot, relaxed, true)
     if (!target) throw new Error("path is required")
     if (!(await isGitRepo(resolvedCwd, ctx.signal))) return "not a git repository"
     // Audit deep: tolak sebelum smudge filter repo sempat dieksekusi.
     await refuseRepoFilters(resolvedCwd)
     // Sengaja TIDAK ada bentuk `git checkout <branch>`: switch branch mengubah
     // seluruh working tree dan bisa menimpa kerja user di luar satu path.
-    const out = await runGit(["checkout", "--", target], resolvedCwd, ctx.signal)
+    const out = await runGit(
+      ["--literal-pathspecs", "checkout", "--", target],
+      resolvedCwd,
+      ctx.signal,
+    )
     return out.trim() || `restored ${target} from index`
   },
 }

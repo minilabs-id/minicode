@@ -132,6 +132,66 @@ function isAmbiguousMatch(content: string, needle: string, first?: MatchResult |
   return flexibleMatch(content.slice(m.end), needle) !== null
 }
 
+/**
+ * Buat petunjuk diagnostik ketika `oldString` gagal cocok agar model cukup
+ * membaca ulang bagian terkait lewat `read_file` alih-alih panik memakai
+ * skrip python/node lewat `bash`.
+ */
+export function buildEditNotFoundHint(content: string, needle: string, pathLabel: string): string {
+  const contentLines = normalizeLf(content).split("\n")
+  const needleLines = normalizeLf(needle)
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+  const anchor = needleLines.find((l) => l.length >= 4) ?? needleLines[0] ?? ""
+  if (!anchor) {
+    return `\nTip: the file may have changed — call read_file on ${pathLabel} to inspect the exact current text and punctuation.`
+  }
+  const anchorTokens = new Set(anchor.match(/[A-Za-z0-9_]+/g) ?? [])
+  let bestIdx = -1
+  let bestScore = 0
+  for (let i = 0; i < contentLines.length; i++) {
+    const t = contentLines[i]!.trim()
+    if (!t) continue
+    let score = 0
+    if (t === anchor) {
+      score = 1
+    } else if (t.length >= 6 && anchor.length >= 6 && (t.includes(anchor) || anchor.includes(t))) {
+      score = 0.8
+    } else if (anchorTokens.size > 0) {
+      const tokens = t.match(/[A-Za-z0-9_]+/g)
+      if (tokens && tokens.length > 0) {
+        const lineSet = new Set(tokens)
+        let shared = 0
+        for (const tok of anchorTokens) {
+          if (lineSet.has(tok)) shared++
+        }
+        score = (shared / anchorTokens.size) * 0.75
+      }
+    }
+    if (score > bestScore) {
+      bestScore = score
+      bestIdx = i
+    }
+  }
+  if (bestIdx === -1 || bestScore < 0.4) {
+    return `\nTip: the file may have changed — call read_file on ${pathLabel} to inspect the exact current text and punctuation.`
+  }
+  const start = Math.max(0, bestIdx - 1)
+  const end = Math.min(contentLines.length, bestIdx + 4)
+  const snippetLines: string[] = []
+  let totalChars = 0
+  for (let i = start; i < end; i++) {
+    const rawLine = contentLines[i]!.replace(/\r$/, "")
+    const formatted = `  ${i + 1}: ${rawLine.length > 120 ? `${rawLine.slice(0, 119)}…` : rawLine}`
+    if (totalChars + formatted.length + 1 > 550 && snippetLines.length > 0) break
+    snippetLines.push(formatted)
+    totalChars += formatted.length + 1
+  }
+  const offset = Math.max(1, bestIdx - 2)
+  return `\nClosest match around line ${bestIdx + 1}:\n${snippetLines.join("\n")}\nTip: call read_file on ${pathLabel} with offset=${offset} to verify the exact current lines.`
+}
+
 export const editTool: Tool = {
   name: "edit",
   // v7.33: satu aturan keputusan Yang SAMA di edit/apply_patch/write_file.
@@ -169,7 +229,8 @@ export const editTool: Tool = {
       const hunk = applyHashline(content, oldS, newS)
       if (hunk !== null) {
         const first = flexibleMatch(content, oldS)
-        if (!first) throw new Error(`oldString not found in ${p}`)
+        if (!first)
+          throw new Error(`oldString not found in ${p}${buildEditNotFoundHint(content, oldS, p)}`)
         if (isAmbiguousMatch(content, oldS, first)) {
           throw new Error(
             `oldString found multiple times in ${p} — provide more surrounding lines to make it unique`,
@@ -184,7 +245,8 @@ export const editTool: Tool = {
       }
     }
     const match = flexibleMatch(content, oldS)
-    if (!match) throw new Error(`oldString not found in ${p}`)
+    if (!match)
+      throw new Error(`oldString not found in ${p}${buildEditNotFoundHint(content, oldS, p)}`)
     if (isAmbiguousMatch(content, oldS, match)) {
       throw new Error(
         `oldString found multiple times in ${p} — provide more surrounding lines to make it unique`,

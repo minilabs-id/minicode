@@ -120,11 +120,11 @@ describe("audit v7.29 — clean composer", () => {
     const frame = m.screen()
     // Tinggi frame tak berubah: tak ada baris progres yang disuntik.
     expect(frame).toHaveLength(rowsBefore)
-    // v7.42: prompt kini diawali margin kiri 3 kolom (ASSISTANT_LEFT_MARGIN),
-    // mengikuti tepi teks asisten. Isi draft & invariant bersih tetap sama; hanya
-    // baris prompt yang bergeser 3 kolom — bukan penambahan status/progres.
-    const draftRow = frame.find((line) => line.includes("minicode ›")) ?? ""
-    expect(draftRow).toBe("   minicode ›draf")
+    // v0.43: composer tanpa prefix `minicode ›` di dalam kotak tipis sudut
+    // lengkung (default 1 baris isi: [len-4] atas, [len-3] isi, [len-2] bawah).
+    const draftRow = frame[frame.length - 3] ?? ""
+    expect(draftRow).toMatch(/^ {3}│ draf +│$/)
+    expect(m.text()).not.toContain("minicode ›")
     // Tak ada status/progres/tool/elapsed yang bocor ke composer.
     expect(draftRow).not.toMatch(/step \d|\.{1,3}|read_file|\(\d+s\)/)
     expect(m.text()).not.toMatch(/\b(Working|Thinking|Running)\b/)
@@ -147,9 +147,11 @@ describe("audit v7.29 — clean composer", () => {
     await m.send(KEY.enter)
     m.release()
     await new Promise((r) => setTimeout(r, 20))
-    // v7.42: margin 3 kolom mengikuti promptFirst(); composer kosong tetap satu
-    // baris tanpa status/progres — yang berubah hanya leading margin-nya.
-    expect(m.screen().find((line) => line.includes("minicode ›")) ?? "").toBe("   minicode ›")
+    // v0.43: composer kosong kembali ke default 1 baris isi (atas / 1 isi / bawah).
+    const frame = m.screen()
+    expect(frame[frame.length - 4] ?? "").toMatch(/^ {3}╭─+╮$/)
+    expect(frame[frame.length - 3] ?? "").toMatch(/^ {3}│ +│$/)
+    expect(frame[frame.length - 2] ?? "").toMatch(/^ {3}╰─+╯$/)
     await m.send(KEY.ctrlD)
     await runP
   })

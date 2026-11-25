@@ -201,6 +201,7 @@ describe("F2 — derivasi kontrak identik dengan daftar lama", () => {
       "git_diff",
       "git_log",
       "git_commit",
+      "git_push",
     ])
   })
 

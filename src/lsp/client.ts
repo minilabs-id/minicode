@@ -3,6 +3,7 @@ import { type ChildProcess, spawn, spawnSync } from "node:child_process"
 import { extname, resolve as resolvePath } from "node:path"
 import { pathToFileURL } from "node:url"
 import { LIMITS } from "../constants.ts"
+import { sanitizeIncoming } from "../daemon/sanitize.ts"
 import { resolveSpawnTarget, resolveTrustedExecutable } from "../lib/trusted-exec.ts"
 import { sanitizeSpawnEnv } from "../policy/scrub.ts"
 import type {
@@ -261,9 +262,10 @@ class LspConnection {
         }
       }
     })
-    this.proc.stderr?.on("data", (d: Buffer) =>
-      process.stderr.write(`[lsp${this.entry.ext}] ${d.toString().trim().slice(0, 500)}\n`),
-    )
+    this.proc.stderr?.on("data", (d: Buffer) => {
+      const clean = sanitizeIncoming(d.toString()).trim().slice(0, 500)
+      if (clean) process.stderr.write(`[lsp${sanitizeIncoming(this.entry.ext)}] ${clean}\n`)
+    })
     this.proc.stdout!.on("data", (chunk: Buffer) => this.handleData(chunk))
 
     // [P13.2] Serahkan kepemilikan anak ke jalur ownership proses runtime.

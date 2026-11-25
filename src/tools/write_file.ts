@@ -29,9 +29,9 @@ export const writeFileTool: Tool = {
     const root = requireToolCwd(ctx)
     const relaxed = contextUnrestricted(ctx)
     // Verifikasi path terpusat (logis + target nyata) — detail di safe-open.ts.
-    const { real: realAbs } = await resolveSafePath(p, root, relaxed)
-    // Tolak menimpa symlink final (swap antara cek dan tulis gagal tutup).
-    await assertSafeWriteTarget(resolve(root, p), root, relaxed)
+    await resolveSafePath(p, root, relaxed)
+    // Tolak menimpa symlink/sensitif/hook final dan tulis ke path terverifikasi itu.
+    const realAbs = await assertSafeWriteTarget(resolve(root, p), root, relaxed)
     // guard large write — chars vs bytes (emoji/CJK 4x)
     const c = content as string
     if (c.length > LIMITS.WRITE_FILE_MAX_CHARS)

@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from "node:child_process"
+import { realpathSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { LIMITS } from "../constants.ts"
 import { resolveTrustedExecutable } from "../lib/trusted-exec.ts"
@@ -82,25 +83,40 @@ export function buildSeatbeltProfile(
   envFiles: readonly string[] = [],
   opts: { network?: "none" | "bridge" } = {},
 ): string {
-  const escapedAbs = escapeSeatbelt(absCwd)
-  const deniedPaths = new Set<string>([
-    ...envFiles.map((rel) => join(absCwd, rel)),
-    ...([".env", ".env.local", ".env.production", ".env.development", ".env.test"] as const).map(
-      (f) => join(absCwd, f),
-    ),
-  ])
+  // Resolusi symlink pada cwd (mis. `/tmp` → `/private/tmp`, `/var` → `/private/var`
+  // di macOS) supaya aturan deny cocok dengan path kanonik yang dilihat kernel.
+  let canonCwd = absCwd
+  try {
+    canonCwd = realpathSync(absCwd)
+  } catch {}
+  const roots = canonCwd === absCwd ? [absCwd] : [absCwd, canonCwd]
+  const deniedPaths = new Set<string>()
+  for (const r of roots) {
+    for (const rel of envFiles) deniedPaths.add(join(r, rel))
+    for (const f of [".env", ".env.local", ".env.production", ".env.development", ".env.test"]) {
+      deniedPaths.add(join(r, f))
+    }
+  }
   const envDenyRules = [...deniedPaths]
     .sort()
     .map((p) => `(deny file-read* file-write* (literal "${escapeSeatbelt(p)}"))`)
     .join("\n")
-  const escapedMinicode = escapeSeatbelt(join(absCwd, ".minicode"))
+  const minicodeDenyRules = roots
+    .map((r) => `(deny file-read* file-write* (subpath "${escapeSeatbelt(join(r, ".minicode"))}"))`)
+    .join("\n")
+  const allowRoots = roots
+    .map((r) => `(allow file-read* file-write* (subpath "${escapeSeatbelt(r)}"))`)
+    .join("\n")
+  // Seatbelt mengevaluasi aturan last-match-wins: SEMUA `(allow ...)` (termasuk
+  // `/private/tmp` yang bisa menaungi workspace) WAJIB berada SEBELUM `(deny ...)`
+  // agar aturan allow tidak membatalkan deny `.minicode` dan `.env*`.
   return `(version 1)
 (deny default)
 (allow process-exec)
-(allow file-read* file-write* (subpath "${escapedAbs}"))
-(deny file-read* file-write* (subpath "${escapedMinicode}"))
-${envDenyRules}
 (allow file-read* (subpath "/usr") (subpath "/bin") (subpath "/private/tmp"))
+${allowRoots}
+${minicodeDenyRules}
+${envDenyRules}
 (allow sysctl-read)
 ${opts.network === "bridge" ? "(allow network*)" : "(deny network*)"}
 `
@@ -117,6 +133,9 @@ export function buildBwrapArgs(
     emptyMaskPath: string | null
   },
 ): string[] {
+  if (mask.envFiles.length > 0 && !mask.emptyMaskPath) {
+    throw new Error("refusing to start bwrap sandbox without .env mask file")
+  }
   const args = [
     "--ro-bind",
     "/usr",
@@ -134,6 +153,8 @@ export function buildBwrapArgs(
     "/proc",
     "--dev",
     "/dev",
+    "--size",
+    "67108864",
     "--tmpfs",
     "/tmp",
     "--bind",
@@ -141,7 +162,7 @@ export function buildBwrapArgs(
     absCwd,
   ]
   if (mask.hasMinicode) {
-    args.push("--tmpfs", join(absCwd, ".minicode"))
+    args.push("--size", "65536", "--tmpfs", join(absCwd, ".minicode"))
   }
   if (mask.emptyMaskPath) {
     for (const rel of mask.envFiles) {

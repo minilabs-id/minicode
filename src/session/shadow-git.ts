@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
-import { statSync } from "node:fs"
+import { readFileSync, statSync } from "node:fs"
 import { rm } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve } from "node:path"
 import { LIMITS } from "../constants.ts"
@@ -66,10 +66,11 @@ function gitMarkerStamp(cwd: string): string {
   }
 }
 
-/** Stamp konfigurasi filter: config lokal `.git/config` + global ~/.gitconfig. */
+/** Stamp konfigurasi filter: `.git/config`, `.git/config.worktree`, dan marker `.git`. */
 function gitConfigStamp(cwd: string): string {
   const parts: string[] = []
-  for (const p of [join(cwd, ".git", "config"), join(cwd, ".git")]) {
+  const configPath = join(cwd, ".git", "config")
+  for (const p of [configPath, join(cwd, ".git", "config.worktree"), join(cwd, ".git")]) {
     try {
       const st = statSync(p)
       parts.push(`${st.mtimeMs}:${st.size}`)
@@ -77,6 +78,14 @@ function gitConfigStamp(cwd: string): string {
       parts.push("-")
     }
   }
+  // Bila `.git/config` memuat `[include` / `[includeIf`, file target include
+  // bisa berubah tanpa mengubah mtime `.git/config` — jangan pakai cache lama.
+  try {
+    const raw = readFileSync(configPath, "utf8")
+    if (/\[include(?:If)?[\s"\]]/i.test(raw)) {
+      parts.push(`inc:${Date.now()}:${Math.random()}`)
+    }
+  } catch {}
   return parts.join("|")
 }
 

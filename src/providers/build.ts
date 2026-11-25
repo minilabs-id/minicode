@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto"
 import type { ModelProvider } from "#minicore/core/provider.ts"
 import { createOpenAICompatProvider } from "#minicore/providers/openai-compat.ts"
-import type { MinicodeConfig } from "../config.ts"
+import { isLocalConfigProvider, type MinicodeConfig } from "../config.ts"
 import { createAnthropicProvider } from "./anthropic.ts"
 import { allowedEfforts, thinkingFamily, withEffortFallback } from "./effort.ts"
 import { withStreamGuards } from "./guards.ts"
@@ -110,11 +110,18 @@ export async function buildProviderListAsync(cfg: MinicodeConfig): Promise<Model
   // tak membatalkan yang lain; hasilnya TETAP dikumpulkan dalam urutan
   // `cfg.providers` agar urutan fallback router tidak berubah.
   const jobs = cfg.providers.map(async (p) => {
+    const fromLocal = isLocalConfigProvider(p)
     if (p.auth !== "oauth") {
       // Referensi keystore (`keystore:<nama>`) di-resolve ke secret OS di
       // sini (lapisan provisioning) — config.ts tetap IO murni. Gagal =
       // skip dengan peringatan, sama seperti OAuth yang belum login.
       if (p.apiKey.startsWith("keystore:")) {
+        if (fromLocal) {
+          process.stderr.write(
+            `[auth] provider "${p.id}" from local repo config cannot access global keystore credentials — skipped.\n`,
+          )
+          return null
+        }
         const secret = await getSecret(p.apiKey.slice("keystore:".length)).catch(() => null)
         if (!secret) {
           process.stderr.write(
@@ -125,6 +132,12 @@ export async function buildProviderListAsync(cfg: MinicodeConfig): Promise<Model
         return { ...p, apiKey: secret }
       }
       return p
+    }
+    if (fromLocal) {
+      process.stderr.write(
+        `[auth] provider "${p.id}" from local repo config cannot access global OAuth tokens — skipped.\n`,
+      )
+      return null
     }
     const token = await getValidAccessToken(p.id)
     if (!token) {

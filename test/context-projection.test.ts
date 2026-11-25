@@ -192,6 +192,23 @@ test("P3.4-7b (T1): ringkasan kernel di messages[0] dipakai ulang, bukan re-fold
   expect(out!.summaryText).toBe(kernelSummary)
 })
 
+test("P3.4-7b2 (T1): mechanical digest 'Previous context:\\n' dipakai ulang, bukan re-fold", () => {
+  // Akar bug pasca ganti model: `conversationDigest` (compaction.ts:218) memakai
+  // marker "Previous context:\n" (titik dua + newline), BUKAN "Previous context ("
+  // seperti ringkasan LLM. Deteksi harus menerima dua-duanya. `\n` adalah
+  // pembeda wajib dari prosa user ("Previous context: my notes...").
+  const digest = "Previous context:\n[mechanical summary; incomplete] FAKTA-LAMA"
+  const msgs = [
+    { role: "user", content: digest },
+    { role: "assistant", content: "tail 1" },
+    { role: "user", content: "tail 2" },
+  ]
+  const out = deriveSummaryFromCanonical(msgs as never, { keepRecentTurns: 2 })
+  expect(out).not.toBeNull()
+  expect(out!.baseSeq).toBe(1)
+  expect(out!.summaryText).toBe(digest)
+})
+
 test("P3.4-7c (A): proyeksi mempertahankan isi hasil tool, bukan `<result omitted>`", () => {
   // Folder kernel (`mechanicalCompaction`) menulis `- tool(…): <result omitted>`
   // dan membuang fakta. Folder host (`mechanicalKeepResults`) harus menyimpan
@@ -401,6 +418,50 @@ test("P3.4-18: PRODUKSI — kanonik → produsen → history_projections → sel
   expect(sel.messages[0]!.content).toContain("Previous context")
   // 3) Kanonik utuh.
   expect(loadThreadHistoryWithSeq("s", DEFAULT_THREAD_ID, cwd).length).toBe(rows.length)
+})
+
+test("P3.4-18b (T1): digest kanonik → proyeksi → selector summary-plus-tail (bukan budget-tail)", async () => {
+  // Alur penuh pasca turn gagal + ganti model: ringkasan mekanikal dari
+  // `conversationDigest` tersimpan sebagai baris kanonik pertama. Tanpa deteksi
+  // marker "Previous context:\n", produsen balik null → selector jatuh ke
+  // fallback-unknown/budget-tail yang membuang prefix dan membuat model baru
+  // kehilangan FAKTA-LAMA.
+  const cwd = ws()
+  const digest = "Previous context:\n[mechanical summary; incomplete] FAKTA-LAMA"
+  await saveSession(
+    "s",
+    cwd,
+    undefined,
+    [
+      { role: "user", content: digest },
+      { role: "assistant", content: "tail 1" },
+      { role: "user", content: "tail 2" },
+    ],
+    { turns: 2 },
+  )
+  // 1) Produsen mengenali marker dan memakai ulang digest verbatim (baseSeq 1).
+  const produced = produceSummaryProjection("s", cwd, {
+    expectedEpoch: 0,
+    policy: { keepRecentTurns: 2 },
+  })
+  expect(produced.produced).toBe(true)
+  expect(produced.baseSeq).toBe(1)
+  // 2) Proyeksi consumable → selector memakai summary-plus-tail.
+  const proj = readConsumableSummaryProjection("s", cwd)
+  expect(proj).not.toBeNull()
+  expect(proj!.summaryText).toBe(digest)
+  const rows = loadThreadHistoryWithSeq("s", DEFAULT_THREAD_ID, cwd)
+  const sel = selectContext({
+    sessionId: "s",
+    threadId: DEFAULT_THREAD_ID,
+    rows,
+    revision: 0,
+    projection: proj!,
+    policy: { budgetTokens: 1_000_000 },
+  })
+  expect(sel.selectionBasis).toBe("summary-plus-tail")
+  expect(sel.coveredSeq).toBe(1)
+  expect(sel.messages[0]!.content).toContain(digest)
 })
 
 // ── N1 (hardening): rule-7 anchor-broken STALE must NOT be consumable ─────────

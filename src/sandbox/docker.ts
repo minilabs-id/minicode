@@ -112,7 +112,14 @@ export function buildDockerRunArgs(
 ): string[] {
   const image = opts.image ?? process.env.MINICODE_SANDBOX_IMAGE ?? "node:22-alpine"
   const mount = workspaceMount(cwd)
+  if (mount.includes(":")) {
+    throw new Error(`refusing docker mount with ':' in path: ${mount}`)
+  }
   const net = opts.network === "bridge" ? "bridge" : "none"
+  const mem = opts.memory ?? process.env.MINICODE_SANDBOX_MEMORY ?? "512m"
+  if (mask.envFiles.length > 0 && !mask.emptyMaskHostPath) {
+    throw new Error("refusing to start docker sandbox without .env mask file")
+  }
   const args = [
     "run",
     "--rm",
@@ -127,7 +134,7 @@ export function buildDockerRunArgs(
     "--pids-limit",
     "32",
     "--tmpfs",
-    "/tmp",
+    "/tmp:rw,noexec,nosuid,nodev,size=64m",
     "-v",
     `${mount}:${mount}`,
   ]
@@ -137,7 +144,11 @@ export function buildDockerRunArgs(
   }
   if (mask.emptyMaskHostPath) {
     const emptyMount = workspaceMount(mask.emptyMaskHostPath)
+    if (emptyMount.includes(":")) {
+      throw new Error(`refusing docker mask mount with ':' in path: ${emptyMount}`)
+    }
     for (const rel of mask.envFiles) {
+      if (rel.includes(":")) throw new Error(`refusing docker .env mask with ':' in path: ${rel}`)
       args.push("-v", `${emptyMount}:${mount}/${rel}:ro`)
     }
   }
@@ -147,7 +158,9 @@ export function buildDockerRunArgs(
     "--network",
     net,
     "--memory",
-    opts.memory ?? process.env.MINICODE_SANDBOX_MEMORY ?? "512m",
+    mem,
+    "--memory-swap",
+    mem,
     "--cpus",
     String(opts.cpus ?? 1),
     "--user",

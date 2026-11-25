@@ -43,6 +43,8 @@ export interface ControlActions {
 
 export interface ControlDeps {
   incarnation: string
+  /** Workspace root untuk membaca epoch penulis yang tepat saat daemon dijalankan di luar process.cwd(). */
+  cwd?: string
   actions: ControlActions | null
   approvals: ApprovalBroker
   telemetry: Telemetry
@@ -277,7 +279,7 @@ function runOp(op: ControlOp, req: ControlRequest, deps: ControlDeps): ControlOu
       // Epoch beda = otoritas penulis pindah; perintah penampil lama tak boleh
       // menyentuh sesi milik penulis lain.
       if (typeof args.expectedEpoch === "number") {
-        const actual = readWriterEpoch(sid)
+        const actual = readWriterEpoch(sid, deps.cwd)
         if (actual !== args.expectedEpoch) {
           return refuse("STALE_EPOCH", "epoch penulis berpindah — perintah basi ditolak", {
             expected: args.expectedEpoch,

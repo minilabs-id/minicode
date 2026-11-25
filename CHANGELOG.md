@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.50.0] - 2026-11-24
+
+### Added & Changed — ketahanan hang/kompaksi, composer 1–2 baris dinamis, audit hardening menyeluruh
+
+- **Ketahanan hang, tool, & kompaksi (Stream A):**
+  - Perbaikan `formatMachineError()` di jalur ACP agar kode mesin tidak terpengaruh locale OS, validasi hasil kompaksi (`compaction-validate.ts`), multi-chunk paste, `WRITE_TOOLS` di `cli/setup.ts`, dan kutip trailing-backslash `cmd.exe`.
+- **UI composer kotak tipis & tinggi dinamis 1–2 baris (Stream B):**
+  - Composer memakai kotak tipis sudut bulat `╭─╮│╰╯` dengan margin simetris `chatCols - 6`.
+  - Tinggi composer default 1 baris, otomatis melebar ke 2 baris saat teks > 1 baris visual, dan mendukung scroll mouse-wheel & keyboard internal saat teks > 2 baris visual (`docs/TERMINAL_CONTRACT.md`).
+- **Hardening keamanan menyeluruh (P0–P3, `.audit/2026-11-24-audit-hardening.md`):**
+  - **Policy, jail, tokenizer, & shim Windows:** tutup NTFS ADS (`::$DATA`, `::$INDEX_ALLOCATION`, `:a+b`), lindungi `.git/hooks/` & berkas kredensial/pin `.minicode/`, tutup bypass single-quote POSIX `\'`, tolak `"`/`!` di `quoteWinCmdArg` (BatBadBut), parser quote sadar-`win32` di `bash-guard.ts`, jalankan `bash-guard` & sandbox check sebelum `matchAllowlist` di mode `ask`, prefix `exact:` anti-ekspansi `*`, perluas aturan `bash-guard`/`permission`/`scrub`, dan tambah `jailTarget: "cwd"` untuk `git_push`.
+  - **Git, grep, trash, safe-open, glob, & verifier:** perluas `GIT_SAFE_BASE` (nonaktifkan GPG/SSH/ext-protocol RCE), filter discovery `--worktree` + env bersih, netralisasi filter di `approval-binding`/`checkpoint`/`verification`, tolak URL/`ext::`/`+`/`:` di `git_push`, tolak direktori & pathspec magic `:(` di `git_restore`/`git_checkout`, cek sensitif absolut + urutan `--glob` ripgrep di `grep`, guard symlink `.minicode/.trash`, tolak non-regular file (FIFO) di `read_file`/`read_image`, lipat `**/**/` di `glob`, dan gate `detectVerifyCommand` di balik `--allow-local-config`.
+  - **Auto-update, SSRF/network, providers, sandbox, & sub-agent:** hapus `shell: true` pada `npm.cmd` dan isolasi `cwd`/`env`/`npm_config_userconfig` di `update-check.ts`, perketat `isPrivateHost` (trailing dot, IPv6 non-kompresi, multicast/reserved, integer IPv4), cap 4 lapis `Content-Encoding`, `redirect: "manual"` pada fetch berkredensial & `web_search`, isolasi provider config lokal dari keystore/OAuth global, fail-closed masker `.env` + perbaikan urutan Seatbelt & `--tmpfs`/`--memory-swap` Docker/bwrap, dan propagasi `bashAllowlist` + fail-closed governance sub-agent.
+  - **Daemon, MCP, LSP, & ANSI sanitization:** `icacls` via `resolveTrustedExecutable` + `userInfo().username`, `flag: "wx"` + ACL sebelum rename, wajib loopback di `readEndpoint`/`DaemonServer.start()`, tolak lease future-skew, cek ulang TTL/revocation capability per op, teruskan `cwd` ke `readWriterEpoch`, cap `--ttl` 24 jam, fail-closed file pin MCP korup & tool tak ditemukan, sanitasi stderr MCP/LSP + `mcp_list`, dan tolak SGR `8` (conceal) + karakter invisible tambahan.
+
 ## [0.43.3] - 2026-11-24
 
 ### Changed — kebijakan agen, browser opsional, antre command, spark/caret

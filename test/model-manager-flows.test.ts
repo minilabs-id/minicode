@@ -14,6 +14,7 @@ import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import { runModelManager } from "../cli/model-manager.ts"
 import { stripAnsi, supportsUtf8 } from "../src/ui/render/theme.ts"
+import { tSystem } from "../src/ui/render/tool-label.ts"
 import { displayWidth } from "../src/ui/render/width.ts"
 import { windowWidth } from "../src/ui/screens/window.ts"
 import { type FakeTty, installFakeTty, KEY } from "./helpers/tui-harness.ts"
@@ -567,7 +568,7 @@ describe("model-manager view: Enter gagal tidak menutup manager", () => {
     })
     await tty.ready()
     await tty.send(KEY.enter, 60)
-    await tty.waitForOutput((out) => out.includes("simpan gagal"), 2000)
+    await tty.waitForOutput((out) => out.includes(tSystem("err.unknown")), 2000)
     // Manager TETAP terbuka (kode lama: listener dilepas → waitForListener
     // timeout 2 dtk → test gagal di kode lama).
     await tty.waitForListener(2000)
@@ -678,10 +679,10 @@ describe("model-manager view: Enter gagal tidak menutup manager", () => {
     })
     await tty.ready()
     await tty.send(KEY.enter, 60)
-    await tty.waitForScreen((f) => f.some((l) => l.includes("err-")))
+    await tty.waitForScreen((f) => f.some((l) => l.includes(tSystem("err.unknown"))))
     // Perkecil tinggi layar di bawah total isi+notice: body ter-clip (`more`),
     // tetapi footer hint (`Esc`) WAJIB tetap tampil utuh.
-    tty.resize(110, 7)
+    tty.resize(110, 5)
     const frame = tty.screen().join("\n")
     expect(frame).toContain("more")
     expect(frame).toContain("Esc")

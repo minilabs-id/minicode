@@ -178,8 +178,10 @@ describe("Transcript: lipatan sentinel kompaksi", () => {
     const row = t.viewport(80, 4, 0).rows.find((r) => r.text.includes("tool results"))!
     expect(row.selectable).toBe(true)
     expect(row.sourceId).toBeGreaterThanOrEqual(0)
-    const start = t.pointAt(row, 3)!
-    const end = t.pointAt(row, 3 + expected.length)!
+    // v0.43: margin 3 milik FRAME, bukan spasi pada teks — kolom 0 adalah
+    // karakter pertama baris ini, jadi seleksi mulai dari kolom 0.
+    const start = t.pointAt(row, 0)!
+    const end = t.pointAt(row, 0 + expected.length)!
     expect(t.selectionText(start, end)).toBe(expected)
   })
 })

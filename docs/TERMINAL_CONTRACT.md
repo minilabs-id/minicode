@@ -1,4 +1,4 @@
-# Kontrak Terminal MiniCode (TUI fullscreen — v0.43: baris live tool transien ikut tail, **maksimal 3 baris terakhir** agar narasi committed tetap tampil; ratchet `scrollBack` per turn naik-saja, tidak turun saat live hilang; composer **2 baris TETAP di semua state** — prompt tak bergeser saat submit; v0.42: baris live tool committed monoton + teks gagal ringkas (aspek transiensi ditimpa v0.43); v0.41: auto-update diagnostik + `/update` TUI + handoff terminal aman; v0.37: bracketed paste + select-all + resize stabilizer + echo prompt sekali-wrap + geometri prompt progresif; v0.36: composer ≤2 baris & dropdown overlay; v0.35: rekap committed statis & label aktivitas OS; v0.34: sidebar dihapus, chat kolom tengah)
+# Kontrak Terminal MiniCode (TUI fullscreen — v0.43: chat + composer di-offset **3 kolom kiri + 3 kolom kanan sebagai padding FRAME simetris** (margin bukan spasi pada teks; footer tetap kolom 0 lebar `chatCols`; popup/dropdown full-screen), **kotak garis tipis bersudut lengkung keliling composer (`╭─╮`/`│ │`/`╰─╯`, warna `#36383E`/`236`, tanpa latar warna) dengan tinggi isi dinamis 1–2 baris (default 1 baris, otomatis melebar ke 2 baris saat teks > 1 baris, dapat digulir via panah `↑`/`↓` maupun mouse wheel bila > 2 baris dengan indikator `↑`/`↓`), tanpa prefix `minicode ›`, seleksi teks composer via drag/`Ctrl+A`/`Ctrl+C`** + **word-wrap** + **placeholder paste ringkas (`{paste text N lines}`)**; baris live tool transien ikut tail, **maksimal 3 baris terakhir** agar narasi committed tetap tampil; ratchet `scrollBack` per turn naik-saja, tidak turun saat live hilang; v0.42: baris live tool committed monoton + teks gagal ringkas (aspek transiensi ditimpa v0.43); v0.41: auto-update diagnostik + `/update` TUI + handoff terminal aman; v0.37: bracketed paste + select-all + resize stabilizer + echo prompt sekali-wrap + geometri prompt progresif; v0.36: composer ≤2 baris & dropdown overlay; v0.35: rekap committed statis & label aktivitas OS; v0.34: sidebar dihapus, chat kolom tengah)
 
 > **Status & presedensi (dibaca dulu).** `v0.x` = versi produk, `v7.x` = versi
 > kontrak terminal — dua namespace, bukan peringkat numerik.
@@ -35,17 +35,35 @@
 >   write/frame) utuh.
 >   Butir v0.42 "commit-in-place / never-shrink by id" **ditimpa hanya pada aspek
 >   transiensi baris live**; klausa v0.42 lain tetap berlaku. Juga diamandemen
->   redaksi kegagalan tool: 13 pola (4 lama + sub-agent + 8 baru) dengan
->   presedensi sub-agent/guard lebih dulu; detail tetap di jurnal/`--verbose`.
->   Juga diamandemen prefix prompt composer: `minicode ›` / `›` / `·`
->   **tanpa spasi trailing**, caret DECSCUSR menempel di glif — selaras dengan
->   klausa v0.36/v7.30 (kode/test lama masih mengunci spasi trailing).
->   Juga diamandemen tinggi composer: **2 baris TETAP di semua state** (idle,
->   mengetik, busy, setelah submit) — `composerH` tak lagi bergantung `editing`,
->   prompt tidak bergeser saat submit, baris ke-2 kosong bila draft satu baris.
+>   redaksi kegagalan tool: 21 pola kanonik (6 jalur presedensi + 15 pola) dengan
+>   presedensi duplicate/sub-agent/guard/shellQuoting lebih dulu + fallback narasi
+>   aman OS-locale (`tSystem`); detail tetap di jurnal/`--verbose`, dan jalur
+>   mesin ACP memakai `formatMachineError` (redaksi+sanitasi tanpa fallback generik).
+>   Juga diamandemen **margin kiri 3 kolom + kanan 3 kolom simetris**: kini menjadi
+>   **padding FRAME** saat merakit baris (`src/ui/tui/app.ts`), BUKAN spasi pada
+>   string teks. Baris chat history + composer mulai di `padLeft + 3`;
+>   **footer/indicator dikecualikan** (mulai di `padLeft` = kolom 0 saat chat
+>   penuh, lebar tetap `chatCols`, bukan penuh `cols`); **popup/dropdown tetap
+>   full-screen kolom 0** (nol perubahan). Margin bersifat **literal 3**
+>   (`ASSISTANT_LEFT_MARGIN` kiri & `FRAME_RIGHT_MARGIN` kanan), bukan
+>   `effectiveAssistantMargin` adaptif. Lebar isi = `chatCols - 6` dipakai
+>   wrap/viewport/composer/klik; I1 & writer inventory utuh.
+>   Juga diamandemen tinggi composer: **dinamis 1–2 baris isi** — default **1
+>   baris** saat kosong/1 baris teks/idle/busy, otomatis melebar ke **2 baris**
+>   saat teks melebihi 1 baris (wrap atau `\n`), dan **dapat digulir** di dalam
+>   jendela 2 baris via panah `↑`/`↓` maupun **mouse wheel** di atas kotak
+>   composer (dengan indikator `↑`/`↓`) bila teks melebihi 2 baris.
+>   Juga diamandemen **kotak garis tipis bersudut lengkung keliling composer
+>   (`╭─╮` / `│ │` / `╰─╯`, ASCII `+-+`/`|`, warna `#36383E` / `236`, tanpa
+>   latar warna)**, **tanpa prefix `minicode ›` di dalam composer** (gema di
+>   transkrip tetap memakai `minicode › `), **seleksi teks composer** via drag
+>   mouse / `Ctrl+A` / `Ctrl+C`, **word-wrap di batas spasi/tab**, serta
+>   **placeholder paste ringkas** (`{paste text N lines}` untuk paste bracketed
+>   ≥2 baris atau ≥160 char, hapus atomik Backspace/Delete, dan ekspansi penuh
+>   saat submit/enqueue).
 >   Juga diamandemen `/copy`: menyalin **render 1 turn** dari transkrip (narasi
 >   assistant + rekap/laporan), bukan buffer output tool mentah; dan error tanpa
->   13 redaksi kanonik tak dirender mentah — deny reason P0 tetap tampil.
+>   21 redaksi kanonik tak dirender mentah — deny reason P0 tetap tampil.
 > - **v0.42** — baris live tool (root/anak) di-commit permanen sejak muncul
 >   (id per `toolCallId`/`runId`), ditimpa ringkas saat terminal → tinggi tak
 >   pernah menyusut (jitter "naik lalu turun" hilang); rekap tanpa marker `└`
@@ -151,17 +169,16 @@ saat baris live hilang**, sehingga posisi baris committed berubah di layar.
 
 7. **Amendemen caret prompt — prefix tanpa spasi trailing (v0.36/v7.30
    dikonsistensikan).** `promptFirst()`/`promptCont()` di `src/ui/tui/app.ts`
-   kini menghasilkan `minicode ›` / `›` / `  ·` / `·` — **tanpa spasi
-   trailing**. `PROMPT_LONG_PREFIX_COLS` turun dari
-   `ASSISTANT_LEFT_MARGIN + 11` menjadi `+ 10` (13 kolom untuk prefix panjang),
-   sehingga ambang prefix panjang bergeser dari `w ≥ 38` menjadi `w ≥ 37`.
-   Semua posisi caret memakai `displayWidth(pf) + 1` (offset 1-based), tanpa
-   tambah `+1` untuk spasi: saat prompt kosong caret tepat sesudah `›`, dan
-   pada baris lanjutan tepat sesudah `·`. Klausa v0.36/v7.30 yang mensyaratkan
-   caret menempel di `›` kini konsisten dengan kode dan test — teks/test lama
-   masih mengunci `"minicode › "` / `"› "` / `"  · "`. Lebar composer,
-   `chat-column.ts`, dan `composerWidth()` **tidak berubah**; gema prompt
-   transkrip (v0.37) juga tidak disentuh. I1 (satu write/frame) tetap utuh.
+   kini menghasilkan `minicode ›` / `›` / `·` — **tanpa spasi depan/belakang** —
+   (margin 3 kini padding frame). `PROMPT_LONG_PREFIX_COLS` turun dari
+   `13` menjadi `10` (prefix panjang murni label),
+   sehingga ambang prefix panjang bergeser dari `w ≥ 37` menjadi **`w ≥ 34`**
+   (`w` = `composerWidth()`; lebar isi `= cols - 3`, jadi ambang LAYAR tetap 37).
+   Semua posisi caret memakai `displayWidth(pf) + 1`, lalu CUP absolut ditambah
+   `padLeft + 3`; hit-test mouse mengurangi `padLeft + 3` sebelum memetakan kolom.
+   Klausa v0.36/v7.30 yang mensyaratkan caret menempel di `›` tetap berlaku.
+   Geometri `chat-column.ts` tidak berubah; yang berubah hanya lebar isi
+   (`chatCols - 3`) untuk wrap/composer/gema. I1 (satu write/frame) tetap utuh.
    **Amendemen bentuk caret (24 Nov 2026):** DECSCUSR berubah `6 q` (bar
    stabil) → `5 q` (bar **berkedip**). Kedipan dilakukan terminal sendiri —
    tanpa timer, repaint tambahan, atau `stdout.write` baru. Posisi caret
@@ -169,6 +186,15 @@ saat baris live hilang**, sehingga posisi baris committed berubah di layar.
    **Amendemen spark footer:** glif thinking saat busy kini berputar 4 warna
    (cyan→magenta→yellow→white) mengikuti `sparkFrame` yang sudah ada; idle
    tetap `faint`. Tidak ada writer baru, geometri footer tidak berubah.
+    **Amendemen retry sukses (24 Nov 2026):** bila tool/sub-agent gagal lalu
+    retry berhasil, baris ledger lama **ditimpa** via `replaceEntry()` dengan
+    versi sukses (`paintLedger("completed")` ⇒ hijau), bukan ditambah baris baru.
+    Agregat `✦` mengurangi hitungan `failures` untuk alasan itu dan kembali ke
+    warna normal (`c.info`). Rekap (`activityFold`/`turnToolNames`) mengganti
+    slot attempt gagal — tak ada dobel hitung. Penanda `↻ retry` tetap ada di
+    baris tunggal sebagai jejak attempt kedua. Ini bukan pelanggaran
+    "never-shrink by id": barisnya tetap ada, yang berubah cuma warna/status;
+    preseden `replaceEntry` sudah dipakai untuk rekap butir 8 & agregat `✦`.
  8. **Amendemen kerapian rekap (v0.35 butir 1 & v0.42 butir 3).** Rekap kumulatif
     akhir turn kini **menimpa** baris rekap segmen yang baru saja ditulis
     (`replaceEntry()`), bukan menambah baris baru — mencegah dua rekap bertumpuk
@@ -220,6 +246,49 @@ saat baris live hilang**, sehingga posisi baris committed berubah di layar.
     identik dengan `friendlyToolError()` (locale OS via `tSystem()`, ≤120
     kolom). **Deny reason (P0) tetap wajib tampil** walau tak ada redaksi
     kanonik; sub-agent error tetap memakai `tSystem("msg.subagentFailed")`.
+12. **Amendemen kotak garis tipis bersudut lengkung keliling composer, margin kanan simetris, tanpa prefix, seleksi teks, word-wrap, dan placeholder paste.**
+    - **Kotak tipis sudut lengkung:** composer 2 baris dibingkai `╭─…─╮`,
+      `│ … │`, `╰─…─╯` (`+-+` / `|` pada `MINICODE_ASCII=1`) selebar
+      `composerBoxWidth()` dengan warna garis lebih halus dari `faint`
+      (`38;2;54;56;62` truecolor, `38;5;236` 256-warna, `90` 16-warna, polos di
+      `MINICODE_COLOR=0` / `NO_COLOR`), tanpa latar warna. Baris tepi atas &
+      bawah menggantikan dua baris pemisah kosong, sehingga `viewH = height - 5`,
+      `composerTop`, tinggi frame, dan **I1 (satu write per frame) tidak
+      berubah**. Lebar isi composer = `composerBoxWidth() - 4`
+      (`COMPOSER_BOX_LEFT_COLS = 2` untuk `│ `, `COMPOSER_BOX_RIGHT_COLS = 2`
+      untuk sel indikator gulir `↑`/`↓` (ASCII `^`/`v`) + `│`).
+    - **Margin kanan frame simetris:** baris chat & composer kini punya margin
+      kanan `FRAME_RIGHT_MARGIN = 3` selain margin kiri 3, sehingga lebar isi
+      (`contentCols`, dipakai wrap/viewport/composer/klik) = `chatCols - 6`.
+      Footer/indicator tetap dikecualikan (mulai `padLeft`, lebar `chatCols`).
+    - **Tanpa prefix di composer:** `promptFirst()`/`promptCont()` di dalam
+      composer bernilai string kosong (`""`) sehingga caret/teks mulai di kolom
+      `padLeft + 3 + 2 + 1` tanpa label `minicode ›` / `›` / `·`; gema
+      prompt di transkrip (`Transcript.pushUser`) tetap mempertahankan penanda
+      `minicode › `.
+    - **Seleksi teks composer (`Ctrl+A` / drag mouse / `Ctrl+C`):** `Ctrl+A`
+      memilih seluruh teks composer saat draft berisi (`\x1b[7m…\x1b[27m`), dan
+      tetap memilih seluruh transkrip saat composer kosong; drag mouse di dalam
+      area composer memilih substring draft. `Ctrl+C` menyalin teks terpilih
+      (otomatis mengekspansi placeholder paste); mengetik/paste/Backspace/Delete
+      menimpa atau menghapus bagian terpilih; `Esc` membatalkan seleksi tanpa
+      menghapus draft.
+    - **Word-wrap composer:** `wrapComposerLine()` (`src/ui/render/composer-wrap.ts`)
+      membungkus di batas spasi/tab sehingga kata tidak terpotong di tengah,
+      menjaga prefix `minicode ›` serta token placeholder paste tetap atomik,
+      dan hanya memotong per grapheme bila satu kata tunggal melampaui lebar
+      composer (atau pada baris pertama sebelum ada badan kata). Konservasi
+      grapheme (`rows.join("") === prefix + body`) dijaga demi sinkronisasi
+      panah vertikal & klik mouse.
+    - **Placeholder paste ringkas:** payload bracketed paste (`ESC[200~…ESC[201~`)
+      berjumlah **≥ 2 baris atau ≥ 160 karakter** diringkas di composer dan gema
+      transkrip sebagai token `{paste text N line(s)}` (`#2`, `#3`, … bila
+      jumlah baris sama berulang dalam satu draft). Backspace/Delete di ujung atau
+      dalam token menghapus seluruh token secara atomik; `Ctrl+U`/`Esc`
+      membersihkan peta paste aktif. Saat submit/enqueue (`doSubmit`), seluruh
+      token di-ekspansi satu lintasan ke teks paste penuh untuk dikirim ke
+      `host.submit` / `host.enqueue`; recall histori `↑`/`↓` dan `Ctrl+R`
+      memulihkan token beserta payload-nya (hingga 20 entri histori terakhir).
 
 Peta proteksi rekap: `test/audit-fix-live-inline-status.test.ts` (replaceEntry
 mencegah duplikasi & satu blank setelah rekap sebelum narasi).
@@ -228,14 +297,27 @@ naik saat `total` bertambah, tidak turun saat `total` menyusut, reset pada
 `turn:started` / prompt baru / `/clear` / navigasi manual / resize; regresi
 60×14 — 20 live + narasi per siklus, narasi tetap terlihat dan 1–3 baris live
 tampil saat live aktif, narasi tetap tampil setelah live hilang, `total() > 0`,
-tinggi & composer konstan, I1 satu write; composer 2 baris tetap (butir 9):
-prompt di baris yang sama di idle/ketik/busy/selesai, frame 60×14 konstan,
-footer di baris terakhir, baris ke-2 kosong, I1 satu write per repaint; draft
-8 baris & dropdown tak menggeser baris prompt); caret tanpa spasi trailing &
-menempel di `›`/`·`: prompt kosong, CJK/emoji per kolom, wrap multiline, klik
-mouse, panah vertikal, dropdown, ambang 37 kolom, I1 satu write),
-`test/audit-fix-clean-composer.test.ts` (composer kosong/draft tanpa spasi
-trailing), `test/chat-column.test.ts` (geometri & lebar composer tak berubah),
+tinggi & composer konstan, I1 satu write; composer 2 baris tetap (butir 9) di
+dalam kotak tipis sudut lengkung (butir 12): prompt di baris yang sama di
+idle/ketik/busy/selesai, frame 60×14 konstan, footer di baris terakhir, baris
+ke-2 composer kosong, I1 satu write per repaint; draft 8 baris & dropdown
+tak menggeser baris prompt); tanpa prefix di composer (`promptFirst`/`promptCont`
+kosong, caret mulai kolom `padLeft + 3 + 2 + 1`): prompt kosong,
+CJK/emoji per kolom, wrap multiline, klik mouse, drag seleksi + `Ctrl+A` /
+`Ctrl+C` di dalam composer, panah vertikal, dropdown, I1 satu write; offset
+frame 3 kiri + 3 kanan: chat mulai `padLeft + 3`, footer `padLeft` lebar
+`chatCols`, CUP & klik dikompensasi 3+2),
+`test/composer-wrap.test.ts` (word-wrap, konservasi grapheme, inkremental &
+helper placeholder paste),
+`test/composer-box-and-paste.test.ts` (E2E word-wrap, kotak tipis sudut lengkung
+keliling composer tanpa latar warna pada truecolor/256/mono/ASCII + indikator
+`↑`/`↓`, seleksi teks composer via `Ctrl+A` & drag mouse, serta paste `{paste text N lines}`
+saat ketik, hapus atomik, histori, antre busy, serta ekspansi penuh saat submit),
+`test/audit-fix-clean-composer.test.ts` (composer kosong/draft di dalam kotak
+tipis), `test/audit-fix-footer-receipts.test.ts` (klik seleksi mulai kolom 4; toast
+kwitansi tetap di footer), `test/chat-column.test.ts` (geometri & lebar composer;
+chat 53/94/53 vs footer 50/100/50 pada cols=200),
+`test/tui-scroll-width.test.ts` (wrap memakai `contentCols = chatCols - 6`),
 `test/tui-transcript.test.ts` (viewport transkrip: history committed utuh, tail
 live dipotong maksimal 3 aktivitas terakhir walau 20 running, posisi committed
 stabil saat baris live hilang; regresi baris ledger `delegate_task` gagal + 1

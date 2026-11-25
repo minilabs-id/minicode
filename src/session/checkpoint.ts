@@ -4,7 +4,7 @@ import { mkdir, readdir, readFile, rm } from "node:fs/promises"
 import { join, relative, resolve } from "node:path"
 import { LIMITS } from "../constants.ts"
 import { atomicWriteText } from "../lib/atomic-write.ts"
-import { GIT_SAFE_BASE } from "../lib/git-hardening.ts"
+import { GIT_SAFE_BASE, gitFilterNeutralizers } from "../lib/git-hardening.ts"
 import { sanitizeSessionPart } from "../lib/session-id.ts"
 import {
   isOwnedState,
@@ -12,6 +12,7 @@ import {
   isRealPathOutsideRoot,
   isSensitive,
 } from "../policy/jail.ts"
+import { sanitizeSpawnEnv } from "../policy/scrub.ts"
 import { appendUndoMarker, loadJournal } from "./journal.ts"
 import { diffTrees, ephemeralTree, isGitRepo, restoreTree, snapshotTree } from "./shadow-git.ts"
 
@@ -308,13 +309,15 @@ export async function snapshotWorkspace(
   try {
     const { spawnSync } = await import("node:child_process")
     const { resolveTrustedExecutable } = await import("../lib/trusted-exec.ts")
+    const neutral = await gitFilterNeutralizers(cwd)
     const r = spawnSync(
       resolveTrustedExecutable("git"),
-      [...GIT_SAFE_BASE, "status", "--porcelain"],
+      [...GIT_SAFE_BASE, ...neutral, "status", "--porcelain"],
       {
         cwd,
         timeout: 2000,
         encoding: "utf8",
+        env: sanitizeSpawnEnv(process.env),
       },
     )
     if (r.status === 0 && r.stdout) {

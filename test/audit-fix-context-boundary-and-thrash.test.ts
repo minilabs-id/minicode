@@ -5,6 +5,8 @@
 //         antara ringkasan [0,B) dan ekor [b,head] → tool-result hilang.
 //   P1-6: progres thrash diukur dari cacah pesan, jadi kompaksi konten (jumlah
 //         pesan sama, token turun) terlihat 0% dan dua kejadian mematikan LLM.
+//   P1-2 (koreksi): denominator progres bukan seluruh store, melainkan prefix
+//         yang benar-benar dikirim ke summarizer — lihat test di bawah.
 
 import { expect, test } from "bun:test"
 import { estimateMessages } from "#minicore/core/tokens.ts"
@@ -115,14 +117,30 @@ test("P1-6: kompaksi konten (jumlah pesan sama, token turun) tidak memicu thrash
   }
 })
 
-test("P1-6: thrash asli (token & jumlah pesan tak turun) tetap mematikan jalur LLM", async () => {
-  // Penjaga agar perbaikan tidak melemahkan fungsi anti-thrash: satu reduksi
-  // kecil (1/20 pesan) berulang dua kali tetap mematikan LLM sesi-ini.
-  const s = createLlmCompaction({ provider: scripted("RINGKASAN") })
-  const narrow = () => storeOf(convo(10))
-  await s.compactAsync!(narrow(), { keepRecentTurns: 9 }, sig())
-  await s.compactAsync!(narrow(), { keepRecentTurns: 9 }, sig())
-  await expect(s.compactAsync!(narrow(), { keepRecentTurns: 9 }, sig())).rejects.toThrow(
+test("P1-2/P1-6: thrash asli (prefix tak menyusut) tetap mematikan jalur LLM", async () => {
+  // Penjaga agar perbaikan P1-2 tidak melemahkan anti-thrash. `convo(10)`+keep=9
+  // (prefix 2→1) dulu dianggap thrash karena 1/20 dari store <10%; dengan
+  // denominator prefix itu 50% progres. Thrash asli: prefix SATU pesan diganti
+  // ringkasan hampir sepanjang itu → cacah tetap, token tak turun.
+  const s = createLlmCompaction({ provider: scripted("S".repeat(110)) })
+  const stuck = () => storeOf([u("P".repeat(120)), ...convo(5)])
+  await s.compactAsync!(stuck(), { keepRecentTurns: 5 }, sig())
+  await s.compactAsync!(stuck(), { keepRecentTurns: 5 }, sig())
+  await expect(s.compactAsync!(stuck(), { keepRecentTurns: 5 }, sig())).rejects.toThrow(
     /disabled after thrash/,
   )
+})
+
+test("P1-2: prefix 2→1 pada store 130 progresnya ~50%, bukan ~0,8%", async () => {
+  // Store 130 pesan, keep=64 → prefix 2 pesan. Kode lama memakai before/after
+  // seluruh store: 1/130 <10% → dua siklus → llmDisabled permanen walau prefix
+  // berhasil dipadatkan penuh. Sekarang denominator prefix → 1/2 = 50%.
+  const s = createLlmCompaction({ provider: scripted("RINGKASAN-PADAT") })
+  const big = () => storeOf(convo(65))
+  for (let i = 0; i < 3; i++) {
+    const out = await s.compactAsync!(big(), { keepRecentTurns: 64 }, sig())
+    expect(isSyntheticSummary(out[0]!)).toBe(true)
+    expect(String(out[0]!.content)).toContain("RINGKASAN-PADAT")
+    expect(out).toHaveLength(129)
+  }
 })

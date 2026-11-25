@@ -37,6 +37,10 @@ export const LIMITS = {
   /** Timeout default bash di mode `unrestricted` (30 menit): kompilasi/instal/
    * push jaringan tak boleh mati oleh timeout pendek; `timeoutMs` tetap menang. */
   UNRESTRICTED_BASH_TIMEOUT_MS: 1_800_000,
+  /** Batas diam (tanpa output stdout/stderr) untuk bash bertimeout panjang
+   * (mode unrestricted 30 menit). Perintah yang terus mengalirkan output tetap
+   * boleh jalan sampai batas total; yang macet sunyi diputus lebih cepat. */
+  BASH_IDLE_TIMEOUT_MS: 120_000,
   /** bash background: proses hidup melewati batas turn, dipanggil via bash_output */
   BASH_BACKGROUND_MAX_JOBS: 8,
   BASH_BACKGROUND_MAX_LIFETIME_MS: 3_600_000,

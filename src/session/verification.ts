@@ -21,11 +21,11 @@ import { createHash, randomUUID } from "node:crypto"
 import { lstat } from "node:fs/promises"
 import { isAbsolute, relative, resolve } from "node:path"
 import type { Tool, ToolContext } from "#minicore"
-import { GIT_SAFE_BASE } from "../lib/git-hardening.ts"
+import { GIT_SAFE_BASE, gitFilterNeutralizersSync } from "../lib/git-hardening.ts"
 import { safeReadFile, safeStat } from "../lib/safe-open.ts"
 import { sanitizeSessionPart } from "../lib/session-id.ts"
 import { resolveTrustedExecutable } from "../lib/trusted-exec.ts"
-import { scrubSecrets } from "../policy/scrub.ts"
+import { sanitizeSpawnEnv, scrubSecrets } from "../policy/scrub.ts"
 import type { VerifyResult } from "../policy/verifier.ts"
 import {
   appendMutationIntent,
@@ -1716,10 +1716,12 @@ function listDirtyEvaluationPathsResult(root: string): { ok: boolean; paths: str
   if (dirtyScanOverride) return dirtyScanOverride(root)
   if (!isGitRepo(root)) return { ok: false, paths: [] }
   try {
+    const neutral = gitFilterNeutralizersSync(root)
     const r = spawnSync(
       resolveTrustedExecutable("git"),
       [
         ...GIT_SAFE_BASE,
+        ...neutral,
         "status",
         "--porcelain",
         "--untracked-files=all",
@@ -1731,6 +1733,7 @@ function listDirtyEvaluationPathsResult(root: string): { ok: boolean; paths: str
         encoding: "utf8",
         timeout: GIT_OBSERVE_TIMEOUT_MS,
         maxBuffer: INTEGRITY_MAX_BYTES,
+        env: sanitizeSpawnEnv(process.env),
       },
     )
     if (r.status !== 0 || typeof r.stdout !== "string") return { ok: false, paths: [] }

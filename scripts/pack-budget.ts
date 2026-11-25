@@ -176,7 +176,16 @@
 // tsc 0 / lint 819 file 0 / bun test 6484 pass 0 fail / coverage 89,81% funcs
 // 90,83% lines. Naikkan ke 5.000 KiB memberi margin ~290 KiB untuk fitur
 // lanjutan; tetap alarm regresi node_modules/test/, bukan target bebas membengkak.
-export const PACK_SIZE_BUDGET_KIB = 5000
+// [Re-baseline 5.000 -> 5.250 KiB, disetujui pemilik 2026-11-25, rilis v0.50.0]
+// Bukti: paket aktual 5.013 KiB (5.133.649 B / 342 file: src 3953.7 KiB,
+// cli 594.7 KiB, docs 345.3 KiB, vendor 106.3 KiB) pasca hardening v0.50.0
+// (composer-wrap, tui/app/transcript, compaction-validate, bash-guard/jail/daemon/sandbox
+// hardening, errors.ts, grep.ts). Gate lain pada kandidat ini: tsc 0 / lint
+// 881 file 0 / bun test 6944 pass 33 skip 0 fail / coverage 90.26% funcs
+// 90.89% lines / gate:bash 0/85 bypass / bench:smoke 13/13 / audit:harness
+// 73 pass 0 fail / telemetry 12/15. Naikkan ke 5.250 KiB memberi margin ~237 KiB
+// tanpa melonggarkan pengecekan file sampah/node_modules/test.
+export const PACK_SIZE_BUDGET_KIB = 5250
 
 /**
  * True bila ukuran paket (KiB) masih di dalam budget.

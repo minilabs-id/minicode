@@ -1,5 +1,6 @@
 import { type ChildProcess, spawn, spawnSync } from "node:child_process"
 import { LIMITS } from "../constants.ts"
+import { sanitizeIncoming } from "../daemon/sanitize.ts"
 import { resolveSpawnTarget, resolveTrustedExecutable } from "../lib/trusted-exec.ts"
 import { sanitizeSpawnEnv } from "../policy/scrub.ts"
 
@@ -56,9 +57,10 @@ export class McpTransport {
     this.proc.on("exit", (code) => {
       if (!this.closed) this.failAll(new Error(`MCP server exited with code ${code}`))
     })
-    this.proc.stderr?.on("data", (d: Buffer) =>
-      process.stderr.write(`[mcp:${command}] ${d.toString().trim()}\n`),
-    )
+    this.proc.stderr?.on("data", (d: Buffer) => {
+      const clean = sanitizeIncoming(d.toString()).trim().slice(0, 1000)
+      if (clean) process.stderr.write(`[mcp:${sanitizeIncoming(command)}] ${clean}\n`)
+    })
     this.stdoutFrame = Buffer.alloc(0)
     this.proc.stdout!.on("data", (chunk: Buffer) => this.consumeStdout(chunk))
   }

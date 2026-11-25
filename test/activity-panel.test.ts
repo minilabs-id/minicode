@@ -6,7 +6,7 @@ import { setSessionLocale } from "../src/ui/i18n/locale.ts"
 import { activityGroup } from "../src/ui/render/activity-group.ts"
 import { groupActivities, groupLine, renderActivityPanel } from "../src/ui/render/activity-panel.ts"
 import { stripAnsi } from "../src/ui/render/theme.ts"
-import { humanToolLabel } from "../src/ui/render/tool-label.ts"
+import { humanToolLabel, tSystem } from "../src/ui/render/tool-label.ts"
 import { UiSessionState } from "../src/ui/session-state.ts"
 import { Transcript } from "../src/ui/tui/transcript.ts"
 import { createFakeBus } from "./helpers/tui-harness.ts"
@@ -226,7 +226,10 @@ describe("panel aktivitas di Transcript (TUI)", () => {
     // sengaja disembunyikan. Yang dijaga: BARIS ledger nama + status failed
     // tetap ada; redaksi "unknown job id" tak boleh bocor, sebelum maupun
     // sesudah turn selesai.
-    const failedRow = `${humanToolLabel("bash_output")} · failed`
+    // v0.43: baris ledger gagal memakai narasi fallback OS-locale
+    // (`msg.unknownToolError`) sesudah nama tool, bukan `· failed`; isi error
+    // mentah tetap tidak boleh bocor ke layar.
+    const failedRow = `${humanToolLabel("bash_output")}: ${tSystem("msg.unknownToolError")}`
     expect(visible()).toContain(failedRow)
     expect(visible()).not.toContain("unknown job id")
     // Hitungan agregat `1 failed` dulu berasal dari ringkasan grup — kini hilang.

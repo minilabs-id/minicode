@@ -5,8 +5,11 @@ import { loadIgnoreMatchers } from "../lib/ignore.ts"
 import { resolveSearchRoot, walkWorkspaceFiles } from "./context.ts"
 
 export function globToRegExp(glob: string): RegExp {
+  // Lipat rantai `**` / `**/` berulang agar tidak memicu catastrophic backtracking
+  // pada regex hasil kompilasi (mis. `**/**/**/**/**/**/**/**/**/x`).
+  const collapsed = glob.replace(/\*{2,}/g, "**").replace(/(?:\*\*\/){2,}/g, "**/")
   // Tangani brace expansion {a,b} tanpa double-escape
-  const str = glob.replace(/\{([^{}]+)\}/g, (_m, inner: string) => {
+  const str = collapsed.replace(/\{([^{}]+)\}/g, (_m, inner: string) => {
     const alts = inner.split(",").map((s) => s.trim())
     return `\0BRACE_START\0${alts.join("\0BRACE_OR\0")}\0BRACE_END\0`
   })

@@ -408,9 +408,14 @@ async function compactionMatrix(): Promise<AuditCheck[]> {
         yield { type: "finish" as const, reason: "stop" as const }
       },
     } as unknown as ModelProvider
+    // Prefix harus melampaui panjang output mock (~40k) agar lolos validasi
+    // summary-not-shorter-than-input (lineFor memotong pesan chat ke 250 char).
+    const longConvo = convo(100).map((m) =>
+      typeof m.content === "string" ? { ...m, content: `${m.content} ${"A".repeat(250)}` } : m,
+    )
     const s = createLlmCompaction({ provider: big, getContextWindowTokens: () => 1_000_000 })
     const outMsg = await s.compactAsync!(
-      { messages: convo(6) } as never,
+      { messages: longConvo } as never,
       { keepRecentTurns: 2 },
       new AbortController().signal,
     )

@@ -88,6 +88,20 @@ describe("ACE-01 evaluateConsequence — failure class / next action matrix", ()
       nextAction: "CHANGE_STRATEGY",
     },
     {
+      label: "caller retry limit requests a human instead of blind retry",
+      input: { failureType: "network_error", isTransientError: true, retryLimitReached: true },
+      verdict: "BLOCKED",
+      failureClass: "REPEATED_NO_EVIDENCE",
+      nextAction: "REQUEST_HUMAN",
+    },
+    {
+      label: "five repeated failures without evidence requests a human",
+      input: { failureType: "network_error", isTransientError: true, repeatedFailureCount: 5 },
+      verdict: "BLOCKED",
+      failureClass: "REPEATED_NO_EVIDENCE",
+      nextAction: "REQUEST_HUMAN",
+    },
+    {
       label: "insufficient evidence gathers diagnostics",
       input: { insufficientEvidence: true },
       verdict: "INCONCLUSIVE",

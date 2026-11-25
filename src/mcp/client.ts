@@ -1,8 +1,9 @@
-import { createHash } from "node:crypto"
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import { createHash, randomBytes } from "node:crypto"
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs"
 import { dirname, resolve } from "node:path"
 import type { Tool, ToolContext } from "#minicore"
 import { LIMITS } from "../constants.ts"
+import { sanitizeIncoming } from "../daemon/sanitize.ts"
 import { fenceUntrustedToolOutput, isAlreadyFenced, scrubSecrets } from "../policy/scrub.ts"
 import { McpHttpTransport, type McpTransportLike } from "./http-transport.ts"
 import { McpTransport } from "./transport.ts"
@@ -132,12 +133,16 @@ export class McpSchemaPinRegistry {
    */
   private path: string | null = null
   private loaded = false
+  /** Fail-closed: bila file pin yang sudah ada gagal dibaca/parse, jangan diam-diam mem-pin ulang. */
+  private corrupt = false
 
   /** Arahkan registry ke file pin workspace dan muat isinya sekali. */
   configure(path: string): void {
     if (this.path === path && this.loaded) return
     this.path = path
     this.loaded = false
+    this.corrupt = false
+    this.pins.clear()
     this.load()
   }
 
@@ -146,26 +151,41 @@ export class McpSchemaPinRegistry {
     this.loaded = true
     if (!this.path || !existsSync(this.path)) return
     try {
-      const raw = JSON.parse(readFileSync(this.path, "utf8")) as Record<string, unknown>
-      for (const [key, value] of Object.entries(raw)) {
+      const parsed = JSON.parse(readFileSync(this.path, "utf8")) as unknown
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        this.corrupt = true
+        this.pins.clear()
+        return
+      }
+      for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
         if (typeof value === "string" && /^[0-9a-f]{64}$/.test(value)) this.pins.set(key, value)
       }
     } catch {
-      // File rusak = fail-closed: jangan menebak pin dari data parsial.
+      // File rusak = fail-closed: tandai corrupt sehingga verify/pinMany
+      // mengembalikan drift dan persist tidak menimpa bukti kerusakan.
+      this.corrupt = true
+      this.pins.clear()
     }
   }
 
   /** Seam uji: hitung pemanggilan persist (tanpa mengganti implementasi FS). */
   private persist(): void {
     pinPersistProbe?.()
-    if (!this.path) return
+    if (!this.path || this.corrupt) return
+    const tmp = `${this.path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`
     try {
-      mkdirSync(dirname(this.path), { recursive: true })
-      const tmp = `${this.path}.tmp`
+      mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 })
       const sorted = [...this.pins.entries()].sort(([a], [b]) => a.localeCompare(b))
-      writeFileSync(tmp, `${JSON.stringify(Object.fromEntries(sorted), null, 2)}\n`, "utf8")
+      writeFileSync(tmp, `${JSON.stringify(Object.fromEntries(sorted), null, 2)}\n`, {
+        encoding: "utf8",
+        mode: 0o600,
+        flag: "wx",
+      })
       renameSync(tmp, this.path)
     } catch {
+      try {
+        unlinkSync(tmp)
+      } catch {}
       // Gagal menulis pin tidak boleh menjatuhkan koneksi; verify tetap
       // memakai pin in-memory untuk proses ini.
     }
@@ -202,6 +222,7 @@ export class McpSchemaPinRegistry {
     entries: readonly { serverId: string; toolName: string; hash: string }[],
   ): ("ok" | "pinned" | "drift")[] {
     this.load()
+    if (this.corrupt) return entries.map(() => "drift" as const)
     const results = entries.map(({ serverId, toolName, hash }) => {
       const key = `${serverId}:${toolName}`
       const pinned = this.pins.get(key)
@@ -222,9 +243,10 @@ export class McpSchemaPinRegistry {
     this.persist()
   }
 
-  /** Verify: hash sama dengan pin → ok; belum ada pin → pin sekarang; beda → drift. */
+  /** Verify: hash sama dengan pin → ok; belum ada pin → pin sekarang; beda / corrupt → drift. */
   verify(serverId: string, toolName: string, hash: string): "ok" | "pinned" | "drift" {
     this.load()
+    if (this.corrupt) return "drift"
     const key = `${serverId}:${toolName}`
     const pinned = this.pins.get(key)
     if (pinned === undefined) {
@@ -243,6 +265,7 @@ export class McpSchemaPinRegistry {
   /** Reset seluruh pin (uji hermetik); file hanya ditulis bila path terpasang. */
   reset(): void {
     this.pins.clear()
+    this.corrupt = false
     this.loaded = true
     this.persist()
   }
@@ -647,9 +670,12 @@ class McpConnection {
           )
           return null
         }
+        const safeDesc = t.description
+          ? sanitizeIncoming(scrubSecrets(t.description)).slice(0, 600)
+          : `MCP tool from ${serverId}`
         return {
           name: `${serverId}.${t.name}`,
-          description: t.description ?? `MCP tool from ${serverId}`,
+          description: safeDesc,
           parameters: normalizeMcpInputSchema(t.inputSchema),
           async execute(input: Record<string, unknown>, _ctx: ToolContext): Promise<string> {
             // P2.3: pastikan koneksi hidup; reconnect bounded bila transport
@@ -809,11 +835,16 @@ export async function callMcpTool(
   // F8.2: verify skema ulang saat pemanggilan. Tool yang skemanya berubah
   // tanpa persetujuan ditolak fail-closed sebelum request dikirim ke server.
   const tool = conn.tools.find((t) => t.name === toolName)
-  if (tool) {
-    const hash = computeMcpToolSchemaHash(tool)
-    const v = mcpSchemaPinRegistry.verify(serverId, toolName, hash)
-    if (v === "drift") throw mcpSchemaDriftError(serverId, toolName)
+  // Fail-closed: tolak pemanggilan tool yang tidak tercantum di skema hasil
+  // discovery (tanpa ini tool tak dikenal melewati verifikasi schema pin).
+  if (!tool) {
+    throw new Error(
+      `MCP tool ${serverId}.${toolName} not found in discovered schema (refusing unverified call)`,
+    )
   }
+  const hash = computeMcpToolSchemaHash(tool)
+  const v = mcpSchemaPinRegistry.verify(serverId, toolName, hash)
+  if (v === "drift") throw mcpSchemaDriftError(serverId, toolName)
   return conn.callTool(toolName, args, signal)
 }
 

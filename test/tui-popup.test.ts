@@ -10,11 +10,21 @@ import { Transcript } from "../src/ui/tui/transcript.ts"
 import { createFakeBus, installFakeTty, KEY } from "./helpers/tui-harness.ts"
 
 let tty: ReturnType<typeof installFakeTty> | null = null
+let activeApp: TuiApp | null = null
+let activeRun: Promise<unknown> | null = null
 // v7.29 membalik default warna (nyala di TTY). Test scrim below ditulis pada
 // era v7.22 yang memaksa mono, jadi ia harus menyetel MINICODE_COLOR=0 secara
 // eksplisit dan mengembalikannya setelah test — jangan mengandalkan default.
 let savedColor: string | undefined
-afterEach(() => {
+afterEach(async () => {
+  if (activeApp && activeRun) {
+    try {
+      activeApp.requestQuit()
+      await activeRun
+    } catch {}
+  }
+  activeApp = null
+  activeRun = null
   tty?.restore()
   tty = null
   resetAltScreenDepth()
@@ -56,6 +66,8 @@ describe("popup komposit", () => {
     process.env.MINICODE_COLOR = "0"
     const { transcript, app } = setup()
     const runP = app.run()
+    activeApp = app
+    activeRun = runP
     await tty!.ready()
     await tty!.waitForOutput((o) => o.includes("00.00.00"))
     // Renderer flat menyembunyikan gema user terakhir dari viewport (digantikan
@@ -74,7 +86,7 @@ describe("popup komposit", () => {
     expect(suspendOutput).not.toContain("\x1b[2m")
     expect(suspendOutput).not.toContain("\x1b[48;5;")
     const dimmedFrame = tty!.screen()
-    expect(dimmedFrame[dimmedFrame.length - 2]).toBe("")
+    expect(dimmedFrame[dimmedFrame.length - 2]).toContain("╰")
     expect(dimmedFrame[dimmedFrame.length - 1]).toContain("Auto")
     expect(dimmedFrame[dimmedFrame.length - 1]).not.toContain("Permission Mode:")
     let picked = ""
@@ -149,6 +161,8 @@ describe("popup komposit", () => {
   test("filter menyusut: tidak ada baris hantu, latar di luar box utuh", async () => {
     const { transcript, app } = setup()
     const runP = app.run()
+    activeApp = app
+    activeRun = runP
     await tty!.ready()
     await tty!.waitForOutput((o) => o.includes("00.00.00"))
     // Transkrip panjang: baris teratas viewport tak pernah tertutup box.

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto"
-import { mkdir, readdir, rename, rm, stat } from "node:fs/promises"
-import { basename, join } from "node:path"
+import { lstat, mkdir, readdir, realpath, rename, rm, stat } from "node:fs/promises"
+import { basename, join, resolve } from "node:path"
+import { isPathOutsideRoot } from "../policy/jail.ts"
 
 // Soft-delete bersama untuk delete_file & move_file (backup overwrite).
 // Lokasi di <root>/.minicode/.trash — otomatis gitignored (.minicode/) dan
@@ -12,9 +13,36 @@ export function trashDir(root: string): string {
   return join(root, ".minicode", ".trash")
 }
 
-export async function trashFile(root: string, abs: string): Promise<string> {
+/**
+ * Pastikan `.minicode` dan `.minicode/.trash` bukan symlink/junction yang
+ * mengarah ke luar workspace sebelum membuat, memindah, atau memangkas isi trash.
+ */
+async function ensureSafeTrashDir(root: string): Promise<string> {
+  const realRoot = await realpath(root).catch(() => resolve(root))
+  const minicodeDir = join(root, ".minicode")
   const dir = trashDir(root)
-  await mkdir(dir, { recursive: true, mode: 0o700 }).catch(() => {})
+  for (const seg of [minicodeDir, dir]) {
+    const lst = await lstat(seg).catch(() => null)
+    if (lst?.isSymbolicLink()) {
+      throw new Error(`refusing to use symlinked trash path: ${seg}`)
+    }
+  }
+  await mkdir(dir, { recursive: true, mode: 0o700 })
+  for (const seg of [minicodeDir, dir]) {
+    const lst = await lstat(seg)
+    if (lst.isSymbolicLink() || !lst.isDirectory()) {
+      throw new Error(`refusing to use unsafe trash directory: ${seg}`)
+    }
+    const realSeg = await realpath(seg)
+    if (isPathOutsideRoot(realSeg, realRoot)) {
+      throw new Error(`trash directory resolves outside workspace: ${seg}`)
+    }
+  }
+  return await realpath(dir)
+}
+
+export async function trashFile(root: string, abs: string): Promise<string> {
+  const dir = await ensureSafeTrashDir(root)
   const dest = join(dir, `${randomUUID().slice(0, 8)}-${basename(abs)}`)
   await rename(abs, dest)
   await pruneTrash(dir).catch(() => {})

@@ -371,6 +371,8 @@ export function createHostBackend(): ExecutionBackend {
             shell: true,
             cwd: req.cwd ?? process.cwd(),
             env: sanitizeSpawnEnv(process.env, req.env),
+            // Tutup stdin agar perintah pembaca stdin menerima EOF dan tidak macet.
+            stdio: ["ignore", "pipe", "pipe"],
             // detached agar group-leader → killTree grup (cermin bash.ts:297-299).
             detached: process.platform !== "win32",
           })

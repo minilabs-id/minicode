@@ -11,7 +11,7 @@ import {
 } from "../../src/presentation/projection.ts"
 import { mintSessionId } from "../../src/session/identity.ts"
 import { clearSubmittedResult, getSubmittedResult } from "../../src/tools/submit_result.ts"
-import { formatError } from "../../src/ui/assistant/simple.ts"
+import { formatMachineError } from "../../src/ui/assistant/simple.ts"
 import type { UiPresentationEvent, UiPresentationSnapshot } from "../../src/ui/contract.ts"
 import { formatUsd } from "../../src/ui/render/money.ts"
 import { cleanUntrusted } from "../../src/ui/render/sanitize.ts"
@@ -527,8 +527,9 @@ export async function runAcpSession(
   } catch (e) {
     // Respons error tepat sekali per run: setup gagal (termasuk tanpa
     // provider — koneksi tetap hidup untuk request berikut), run gagal,
-    // atau dibatalkan user. formatError menutupi NoProviderError juga.
-    const msg = ac.signal.aborted ? "run cancelled" : formatError(e)
+    // atau dibatalkan user. formatMachineError menjaga pesan konkret tetap
+    // teredaksi + tersanitasi tanpa mengganti error ACP jadi narasi --verbose.
+    const msg = ac.signal.aborted ? "run cancelled" : formatMachineError(e)
     write(acpErr(id, msg, machineError(ac.signal.aborted ? new Error("run cancelled") : e)))
   } finally {
     deps.onDone()

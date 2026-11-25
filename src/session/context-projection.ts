@@ -39,6 +39,7 @@ import { renderFullHistoryFold } from "./full-history-fold.ts"
 import {
   buildProjection,
   DEFAULT_THREAD_ID,
+  getHistorySummary,
   getProjection,
   getProjectionStatus,
   loadThreadHistoryWithSeq,
@@ -79,6 +80,20 @@ export interface ProjectionProduceResult {
 }
 
 /**
+ * Dua marker ringkasan kernel yang dikenal — satu sumber kebenaran untuk
+ * deteksi di kanonik (derive) DAN validasi teks yang dikirim jalur kompaksi:
+ *  1. "Previous context (" — ringkasan LLM / header fold kernel lama
+ *     (SUMMARY_HEADER, compactActiveTurn, composeBoundedSummary).
+ *  2. "Previous context:\n" — mechanical digest dari conversationDigest
+ *     (compaction.ts:218). `\n` WAJIB disertakan: tanpa itu startsWith(
+ *     "Previous context:") menangkap prosa user ("Previous context: my
+ *     notes…") dan salah mengganti konteks asli dengan ringkasan palsu.
+ */
+function isKernelSummaryText(text: string): boolean {
+  return text.startsWith("Previous context (") || text.startsWith("Previous context:\n")
+}
+
+/**
  * Derivasi DETERMINISTIK {summaryText, baseSeq} dari baris kanonik memakai render
  * fold HOST yang SUDAH ADA (`mechanicalKeepResults`, mempertahankan hasil tool).
  * MURNI (tak menyentuh DB, tak memutasi input). Mengembalikan null bila tak ada
@@ -101,7 +116,7 @@ export function deriveSummaryFromCanonical(
   const isKernelSummary =
     first?.role === "user" &&
     typeof first.content === "string" &&
-    first.content.startsWith("Previous context (")
+    isKernelSummaryText(first.content)
   const keep =
     Number.isInteger(policy.keepRecentTurns) && policy.keepRecentTurns >= 1
       ? policy.keepRecentTurns
@@ -176,9 +191,11 @@ export function produceSummaryProjection(
     expectedEpoch: number
     policy: ProjectionProducePolicy
     threadId?: string
-    /** Teks ringkasan yang sudah diproduksi jalur kompaksi (opsional). */
+    /** Teks ringkasan yang sudah diproduksi jalur kompaksi (opsional).
+     * Hanya dipakai bila memuat marker ringkasan kernel yang dikenal. */
     summaryText?: string
-    /** base_seq eksplisit (dipakai bersama summaryText); absen = diturunkan. */
+    /** base_seq kanonik tempat ringkasan dibuat — WAJIB bila summaryText
+     * dipakai; tanpa itu derivasi lokal yang dipakai. */
     baseSeq?: number
   },
 ): ProjectionProduceResult {
@@ -189,7 +206,39 @@ export function produceSummaryProjection(
   }
   let summaryText = opts.summaryText
   let baseSeq = opts.baseSeq
-  if (typeof summaryText !== "string" || summaryText.length === 0) {
+  // Teks dari jalur kompaksi dipakai VERBATIM — itulah satu-satunya ringkasan
+  // yang benar-benar dibaca model saat kompaksi. Validasi marker dulu: prosa
+  // user biasa yang diawali "Previous context:" (tanpa `\n` / `(`) bukan
+  // ringkasan, dan memakainya akan menggantikan konteks asli.
+  if (typeof summaryText !== "string" || !isKernelSummaryText(summaryText)) {
+    summaryText = undefined
+    baseSeq = undefined
+    // Fallback kedua: provenance yang ditulis setup saat kompaksi. Tanpa ini,
+    // turn BERIKUTNYA (yang tak mengkompaksi lagi) menjalankan derive dan
+    // menimpa proyeksi LLM dengan fold mekanis — persis sebab model baru
+    // menerima ringkasan miskin setelah beberapa turn. canonicalFirstText
+    // bukan-null = setup memang mencatat baris sintetis asli, bukan teks
+    // turunan produsen. Dilewati bila policy eksplisit meminta full-history.
+    if (opts.policy.fold !== "full-history") {
+      try {
+        const recorded = getHistorySummary(sessionId, threadId, cwd)
+        if (
+          recorded &&
+          isKernelSummaryText(recorded.summaryText) &&
+          typeof recorded.canonicalFirstText === "string" &&
+          recorded.canonicalFirstText.length > 0 &&
+          isKernelSummaryText(recorded.canonicalFirstText) &&
+          Number.isInteger(recorded.coveredSeq) &&
+          recorded.coveredSeq > 0 &&
+          recorded.coveredSeq <= rows.length
+        ) {
+          summaryText = recorded.summaryText
+          baseSeq = recorded.coveredSeq
+        }
+      } catch {}
+    }
+  }
+  if (summaryText === undefined) {
     if (opts.policy.fold === "full-history") {
       // P3.7 — fold cakupan-penuh deterministik atas SELURUH baris kanonik.
       // baseSeq SELALU == rows.length ([0, N) penuh, CURRENT-capable). Gagal

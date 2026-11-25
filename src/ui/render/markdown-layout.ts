@@ -22,7 +22,13 @@ export function parseFence(line: string): FenceMatch | null {
   return { char: m[1]![0]!, len: m[1]!.length, lang: m[2] ?? "" }
 }
 
-/** Margin kiri standar area teks asisten agar lega dari tepi kiri terminal. */
+/**
+ * Margin kiri standar area teks asisten = 3 KOLOM. Sejak v0.43 ini adalah
+ * PADDING FRAME (ditambahkan saat merakit baris di `app.ts`), bukan spasi yang
+ * disuntikkan ke string teks. Pemanggil `computeAssistantLineLayout()` HARUS
+ * melewatkan `outerMargin = 0`; konstanta ini dipakai untuk offset frame dan
+ * untuk menjaga paritas renderer linear yang masih menghitung lebar.
+ */
 export const ASSISTANT_LEFT_MARGIN = 3
 
 /** Margin kiri adaptif: lega (3 kolom) di terminal normal, menyusut di layar sempit. */

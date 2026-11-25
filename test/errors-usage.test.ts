@@ -9,12 +9,19 @@ import {
   friendlyFromCategory,
   friendlyToolError,
 } from "../src/ui/render/errors.ts"
-import { __setSystemLocaleForTest } from "../src/ui/render/tool-label.ts"
+import { __setSystemLocaleForTest, tSystem } from "../src/ui/render/tool-label.ts"
 import { displayWidth } from "../src/ui/render/width.ts"
 
-// Pesan error dwibahasa — kunci en (paritas highlight.test.ts).
-beforeEach(() => setSessionLocale("en"))
-afterEach(() => resetLocaleState())
+// Pesan error mengikuti locale OS (`tSystem`) — kunci en secara eksplisit
+// agar deterministik di mesin OS mana pun.
+beforeEach(() => {
+  __setSystemLocaleForTest("en")
+  setSessionLocale("en")
+})
+afterEach(() => {
+  __setSystemLocaleForTest(null)
+  resetLocaleState()
+})
 
 test("friendlyFromCategory: auth + balance", () => {
   const f = friendlyFromCategory(
@@ -194,9 +201,18 @@ test("redactSecrets menutup format kunci provider + JWT + query (bug-hunt)", () 
     "oops eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c boom",
   )
   expect(j.message).not.toContain("eyJhbGciOi")
-  const q = friendlyFromCategory("unknown", "denied https://h.test/?api_key=SECRET42 rec")
+  expect(j.message).toBe(tSystem("err.unknown"))
+  // Query secret di body JSON provider terstruktur tetap teredaksi sebelum ditampilkan.
+  const q = friendlyFromCategory(
+    "unknown",
+    '{"error":{"message":"denied https://h.test/?api_key=SECRET42 rec"}}',
+  )
   expect(q.message).not.toContain("SECRET42")
   expect(q.message).toContain("api_key=[redacted]")
+  // String non-terstruktur tidak lagi bocor ke layar sama sekali.
+  const qRaw = friendlyFromCategory("unknown", "denied https://h.test/?api_key=SECRET42 rec")
+  expect(qRaw.message).not.toContain("SECRET42")
+  expect(qRaw.message).toBe(tSystem("err.unknown"))
 })
 
 // ── Audit TUI P1-1: pesan error provider = teks tak terpercaya ───────────────
@@ -221,9 +237,9 @@ test("friendlyFromCategory: judul HTML ber-ANSI tetap satu baris bersih", () => 
   expect(f.message).toContain("502")
 })
 
-test("friendlyError: potong CJK per kolom (bukan karakter)", () => {
+test("friendlyError: potong CJK per kolom pada detail provider JSON (bukan karakter)", () => {
   // 100 emoji = 200 kolom + prefix; kode lama slice 157 char (=321 kolom).
-  const m = friendlyError(`gagal: ${"🔥".repeat(100)}`).message
+  const m = friendlyError(`{"error":{"message":"gagal: ${"🔥".repeat(100)}"}}`).message
   expect(displayWidth(m)).toBeLessThanOrEqual(160)
   expect(m.endsWith("…")).toBe(true)
 })
@@ -296,27 +312,27 @@ const SENTINEL_BEARER = "SENTINEL-BEARER-abcdef123456"
 const SENTINEL_PROVIDER_KEY = "sk-testsentinel0123456789abcdef"
 const SENTINEL_QUERY = "SENTINELQUERY987654321"
 
-test("formatError: error biasa tetap informatif (diagnostik tak hilang)", () => {
+test("formatError: error jaringan tetap dikenali dan dinarasikan tanpa bocor detail mentah", () => {
   const msg = formatError(new Error("koneksi refused di 127.0.0.1:8080"))
-  expect(msg).toContain("koneksi refused")
-  expect(msg).toContain("127.0.0.1:8080")
+  expect(msg).toContain(tSystem("err.network"))
+  expect(msg).toContain(tSystem("err.networkFix"))
+  expect(msg).not.toContain("127.0.0.1")
 })
 
 test("formatError: bearer token tak pernah tampil (Authorization header)", () => {
   const msg = formatError(new Error(`proxy menolak: Authorization: Bearer ${SENTINEL_BEARER}`))
   expect(msg).not.toContain(SENTINEL_BEARER)
-  expect(msg).toContain("[redacted]")
-  // Bagian yang tak sensitif tetap tampil — pesan tak jadi generik.
-  expect(msg).toContain("proxy menolak")
+  expect(msg).not.toContain("Authorization")
+  expect(msg).toContain(tSystem("err.unknown"))
 })
 
-test("formatError: kunci provider + query string di body error mentah", () => {
+test("formatError: kunci provider + query string tak bocor dan dipetakan ke narasi auth", () => {
   const msg = formatError(
     new Error(`gagal auth: ${SENTINEL_PROVIDER_KEY} / https://h.test/?api_key=${SENTINEL_QUERY}`),
   )
   expect(msg).not.toContain(SENTINEL_PROVIDER_KEY)
   expect(msg).not.toContain(SENTINEL_QUERY)
-  expect(msg).toContain("gagal auth")
+  expect(msg).toContain(tSystem("err.auth"))
 })
 
 test("formatError: body JSON provider mentah tak membocorkan credential", () => {
@@ -326,6 +342,7 @@ test("formatError: body JSON provider mentah tak membocorkan credential", () => 
   const msg = formatError(new Error(raw))
   expect(msg).not.toContain(SENTINEL_PROVIDER_KEY)
   expect(msg).toContain("[redacted]")
+  expect(msg).toContain(tSystem("err.rateLimit"))
 })
 
 test("formatError: credential yang dipotong batas 150 kolom tetap teredaksi", () => {
@@ -334,30 +351,48 @@ test("formatError: credential yang dipotong batas 150 kolom tetap teredaksi", ()
   const filler = "x".repeat(140)
   const msg = formatError(new Error(`${filler} ${SENTINEL_PROVIDER_KEY}`))
   expect(msg).not.toContain(SENTINEL_PROVIDER_KEY)
+  expect(msg).toContain(tSystem("err.unknown"))
 })
 
-test("formatError: objek non-Error (string dilempar) juga lewat redaksi", () => {
+test("formatError: objek non-Error (string dilempar) juga aman dan tak bocor credential", () => {
   const msg = formatError(`boom Authorization: Bearer ${SENTINEL_BEARER}`)
   expect(msg).not.toContain(SENTINEL_BEARER)
-  expect(msg).toContain("[redacted]")
+  expect(msg).not.toContain("boom")
+  expect(msg).toContain(tSystem("err.unknown"))
 })
 
-test("formatError: objek non-Error dengan `message` tetap informatif", () => {
+test("formatError: objek non-Error dengan `message` rate limited dinarasikan", () => {
   const msg = formatError({ message: "rate limited, coba lagi" } as unknown)
-  expect(msg).toContain("rate limited")
+  expect(msg).toContain(tSystem("err.rateLimit"))
 })
 
-test("formatError: error tanpa pesan tetap punya jejak (bukan baris kosong)", () => {
+test("formatError: error tanpa pesan jatuh ke narasi fallback aman", () => {
   const msg = formatError(new Error(""))
   expect(msg.trim().length).toBeGreaterThan(0)
-  expect(msg).toContain("Error")
+  expect(msg).toContain(tSystem("err.unknown"))
 })
 
-test("formatError: escape ANSI di pesan error dibuang (satu baris)", () => {
+test("formatError: escape ANSI di pesan error dibuang dan jatuh ke narasi aman", () => {
   const msg = formatError(new Error("boom\x1b[2J\x1b[?1049h"))
   expect(msg).not.toContain("\x1b[2J")
   expect(msg).not.toContain("1049")
-  expect(msg).toContain("boom")
+  expect(msg).not.toContain("boom")
+  expect(msg).toContain(tSystem("err.unknown"))
+})
+
+test("formatError: kategori tambahan & bilingual OS-locale (id/en)", () => {
+  __setSystemLocaleForTest("id")
+  setSessionLocale("en") // /lang sesi tidak menggeser narasi error OS-locale
+  expect(formatError(new Error("EACCES: permission denied"))).toContain(tSystem("err.permission"))
+  expect(formatError(new Error("ENOSPC: no space left on device"))).toContain(
+    tSystem("err.fsError"),
+  )
+  expect(formatError(new SyntaxError("Unexpected token } in JSON"))).toContain(tSystem("err.parse"))
+  expect(formatError(new Error("fatal: not a git repository"))).toContain(tSystem("err.git"))
+  expect(formatError(new Error("ERR_TLS_CERT_ALTNAME_INVALID"))).toContain(tSystem("err.tls"))
+  expect(formatError(new Error("unhandled mystery failure xyz"))).toContain(tSystem("err.unknown"))
+  __setSystemLocaleForTest("en")
+  expect(formatError(new Error("ENOSPC: no space left on device"))).toContain("File system error")
 })
 
 test("formatError: ProviderError (category) & AgentError (kind) tetap dipetakan", () => {
@@ -397,7 +432,25 @@ describe("friendlyToolError", () => {
       "Command failed · bash · details in --verbose",
     )
     expect(friendlyToolError("read failed: EIO: something")).toBe("Terminal read failed · retry")
-    expect(friendlyToolError("boom")).toBe("boom")
+    // Unknown/unmatched errors must not leak raw message; return safe narrative.
+    const unknown = friendlyToolError("boom")
+    expect(unknown).toBe(tSystem("msg.unknownToolError"))
+    expect(unknown).not.toContain("boom")
+    // Pola tool tambahan (plan sync, shell quoting, edit mismatch, fs, network, parse, git, MCP/LSP)
+    expect(friendlyToolError("cmd.exe quoting hazard: single quotes")).toBe(
+      tSystem("msg.shellQuoting"),
+    )
+    expect(friendlyToolError("canonical task sync failed (illegal task transition)")).toBe(
+      tSystem("msg.planSyncFailed"),
+    )
+    expect(friendlyToolError("oldString == newString (no change)")).toBe(
+      tSystem("msg.editMismatch"),
+    )
+    expect(friendlyToolError("ENOSPC: no space left on device")).toBe(tSystem("msg.fsAccess"))
+    expect(friendlyToolError("ECONNREFUSED 127.0.0.1:443")).toBe(tSystem("msg.networkTool"))
+    expect(friendlyToolError("SyntaxError: Unexpected token")).toBe(tSystem("msg.parseError"))
+    expect(friendlyToolError("fatal: not a git repository")).toBe(tSystem("msg.gitError"))
+    expect(friendlyToolError("MCP server not connected")).toBe(tSystem("msg.integrationError"))
   })
 
   test("redaksi id memakai locale OS, bukan /lang", () => {
@@ -520,12 +573,12 @@ describe("friendlyToolError", () => {
     }
   })
 
-  test("negatif: anchor/batas kata mencegah over-match", () => {
+  test("negatif: anchor/batas kata mencegah over-match & fallback tak bocor", () => {
     __setSystemLocaleForTest("en")
-    // exit 0 = sukses: baris log netral tetap apa adanya.
-    expect(friendlyToolError("exit code 0 recorded in log")).toBe("exit code 0 recorded in log")
+    // exit 0 = sukses: baris log netral tak salah masuk cmdFailed → jatuh ke narasi aman.
+    expect(friendlyToolError("exit code 0 recorded in log")).toBe(tSystem("msg.unknownToolError"))
     // Tanpa angka, penyebutan "exit code" tak lagi memicu cmdFailed.
-    expect(friendlyToolError("see exit code in log")).toBe("see exit code in log")
+    expect(friendlyToolError("see exit code in log")).toBe(tSystem("msg.unknownToolError"))
     expect(friendlyToolError("grep: permission denied (in fixture)")).not.toBe(
       "Blocked by permission policy · check access",
     )
@@ -549,7 +602,8 @@ describe("friendlyToolError", () => {
     expect(long).toContain("Command failed")
     const secret = friendlyToolError(`boom Authorization: Bearer ${SENTINEL_BEARER}`)
     expect(secret).not.toContain(SENTINEL_BEARER)
-    expect(secret).toContain("[redacted]")
+    expect(secret).not.toContain("boom")
+    expect(secret).toBe(tSystem("msg.unknownToolError"))
     // Cabang pola baru juga lewat gerbang redaksi yang sama.
     const matched = friendlyToolError(
       `unknown tool: Authorization: Bearer ${SENTINEL_BEARER}`,
