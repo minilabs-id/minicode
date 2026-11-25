@@ -17,9 +17,10 @@ import {
 import { trashDir, trashFile } from "../src/lib/trash.ts"
 
 function makeRoot(): string {
-  // Pakai realpathSync agar nama pendek 8.3 Windows (RUNNER~1) atau /var -> /private/var
-  // di macOS cocok dengan realpath yang dikembalikan trashFile/resolveSafePath.
-  return realpathSync(mkdtempSync(join(tmpdir(), "minicode-safe-")))
+  // Pakai realpathSync.native (bukan realpathSync JS biasa) agar nama pendek
+  // 8.3 Windows (RUNNER~1 -> runneradmin) ikut ter-resolve persis seperti
+  // fs/promises.realpath di trashFile/resolveSafePath.
+  return realpathSync.native(mkdtempSync(join(tmpdir(), "minicode-safe-")))
 }
 
 function canSymlink(): boolean {
