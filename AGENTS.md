@@ -36,14 +36,15 @@ sub-milestone (`P2.x`), Quality Remediation (`Stage 1`–`10`), dan hotfix
 
 ## Status checkout
 
-HEAD checkout ini adalah rilis **v0.50.0** (ketahanan hang/tool/kompaksi,
-composer kotak tipis 1–2 baris dinamis + scroll & margin simetris `chatCols - 6`,
-serta audit hardening menyeluruh P0–P3). `package.json` mencatat `0.50.0`;
-kontrak terminal memakai entri v0.43 paling atas (bukan overlay: tail live maks
-3 baris, ratchet `scrollBack` naik-saja, history committed tidak bergeser balik,
-kotak tipis composer `╭─╮│╰╯`, tinggi 1–2 baris dinamis + scroll, margin
-simetris 3+3) di atas arsip v0.42–v0.34. Angka gate historis v0.33 di bawah
-bukan hasil checkout ini. `PLAN.md` adalah ledger milestone legacy, bukan
+HEAD checkout ini adalah kandidat rilis **v0.51.0** (label niat tool & auto-label
+0-token, tail live adaptif `max(3, floor(viewH * 0.5))`, penyelarasan SSoT tool,
+perbaikan error/sub-agent/manager/CLI/i18n, serta kontrak terminal v0.51 atas
+v0.43). `package.json` mencatat `0.51.0`; kontrak terminal memakai entri v0.51
+(mengamandemen v0.43 pada tail live adaptif, reveal ketikan live, waiting
+indicator, dan kegagalan berbasis label `<label> mengalami kegagalan (<tag>)`
+di atas kotak tipis composer `╭─╮│╰╯`, tinggi 1–2 baris dinamis + scroll, margin
+simetris 3+3, dan ratchet `scrollBack` naik-saja) serta arsip v0.42–v0.34. Angka
+gate historis v0.33 di bawah bukan hasil checkout ini. `PLAN.md` adalah ledger milestone legacy, bukan
 roadmap aktif. `ROADMAP.md`, `docs/ARCHITECTURE.html`, dan `docs/audit/` tidak
 ada; status roadmap belum tersedia. Gate repository dapat dijalankan, tetapi
 checkout tidak boleh disebut hijau atau release-ready sebelum seluruh gate lulus

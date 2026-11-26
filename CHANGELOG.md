@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.51.0] - 2026-11-26
+
+### Added & Changed — label niat tool, ketahanan kegagalan sesi, serta penyelarasan UI/CLI/kontrak
+
+- **Label niat & tampilan live v0.51:**
+  - Parameter opsional `label` pada tool ber-intent terbuka (`bash`, `code_run`, `web_search`, `web_fetch`, MCP) plus auto-label manusiawi 0-token (`formatActivityLabel`), animasi ketikan live per kata dengan jeda anti-kedip 60 ms, waiting indicator transien saat layar masih kosong, tail live adaptif `max(3, floor(viewH * 0.5))`, dan format kegagalan seragam `formatLabeledToolFailure`.
+  - Penyelarasan registry tool SSoT di `activity-group.ts`, `transcript.ts` (`COMPACT_*`), `tool-label.ts`, `en.ts`/`id.ts` terhadap seluruh 41 tool di `src/tools/index.ts`, serta `verification.ts` yang menurunkan mutasi dari `WRITE_TOOLS` (`sanitizeSpawnEnv` pada `gitBaselineContent`).
+- **Ketahanan kegagalan, sub-agent, CLI & i18n:**
+  - Klasifikasi error lebih presisi di `errors.ts` (jaringan `refused` sempit & pemisahan `service unavailable`), trace/log mesin lewat `formatMachineError`, diagnostik persist ACP ke `stderr`, `killProcessTree` pada `git.ts`, dukungan `AbortSignal` di broker approval daemon, serta isolasi cooldown/rate-limit/history `delegate_task` + deteksi `[sub-agent skipped]` di adapter & `no-progress`.
+  - Pembaruan state aktif di `/provider` dan `/model`, pelengkapan `@mention` via `Enter`/`Tab`, validasi flag di `minicode exec`, dukungan `--runtime=<mode>`, konsistensi `/lang` pada toast & balasan perintah TUI (`t()`), serta sinkronisasi bantuan CLI (`cli/help.ts`) dan dokumentasi ID/EN (`TERMINAL_CONTRACT.md`, `docs/`, `docs-en/`).
+
 ## [0.50.0] - 2026-11-24
 
 ### Added & Changed — ketahanan hang/kompaksi, composer 1–2 baris dinamis, audit hardening menyeluruh
