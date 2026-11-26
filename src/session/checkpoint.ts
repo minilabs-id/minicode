@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto"
 import { existsSync } from "node:fs"
-import { mkdir, readdir, readFile, rm } from "node:fs/promises"
+import { mkdir, readdir, readFile, realpath, rm, stat } from "node:fs/promises"
 import { join, relative, resolve } from "node:path"
 import { LIMITS } from "../constants.ts"
 import { atomicWriteText } from "../lib/atomic-write.ts"
@@ -286,16 +286,37 @@ export async function captureFileSnapshot(
 
 // Snapshot seluruh workspace (maks `limit` file) — menangkap perubahan apa pun
 // termasuk bash/git (bukan cuma edit/write_file). Dipakai /undo per turn.
-async function walkFiles(root: string, rel: string, out: string[], limit: number): Promise<void> {
-  if (out.length >= limit) return
+const WALK_MAX_DEPTH = 16
+const WALK_MAX_DIRS = 500
+async function walkFiles(
+  root: string,
+  rel: string,
+  out: string[],
+  limit: number,
+  depth = 0,
+  visited: Set<string> = new Set(),
+  budget: { dirs: number } = { dirs: 0 },
+): Promise<void> {
+  if (out.length >= limit || depth > WALK_MAX_DEPTH || budget.dirs >= WALK_MAX_DIRS) return
   const dir = rel ? join(root, rel) : root
+  // Cegah loop symlink direktori di workspace non-git.
+  let real: string
+  try {
+    real = await realpath(dir)
+  } catch {
+    return
+  }
+  if (visited.has(real)) return
+  visited.add(real)
+  budget.dirs++
   const entries = await readdir(dir, { withFileTypes: true }).catch(() => [])
   for (const e of entries) {
-    if (out.length >= limit) break
+    if (out.length >= limit || budget.dirs >= WALK_MAX_DIRS) break
     if (e.name.startsWith(".") || e.name === "node_modules" || e.name === ".git") continue
+    if (e.isSymbolicLink()) continue
     const r = rel ? `${rel}/${e.name}` : e.name
-    if (e.isDirectory()) await walkFiles(root, r, out, limit)
-    else out.push(r)
+    if (e.isDirectory()) await walkFiles(root, r, out, limit, depth + 1, visited, budget)
+    else if (e.isFile()) out.push(r)
   }
 }
 
@@ -402,6 +423,11 @@ export async function snapshotCompleteWorkspace(cwd: string): Promise<FileSnapsh
         continue
       }
       if (!entry.isFile()) throw new Error("workspace snapshot contains unsupported entries")
+      // Cek ukuran berkas lewat stat() SEBELUM readFile() agar satu berkas besar
+      // (mis. artefak biner ratusan MB) tidak pernah dimuat penuh ke RAM.
+      const st = await stat(absolute)
+      if (snapshots.length >= 5000 || bytes + st.size > 32 * 1024 * 1024)
+        throw new Error("workspace snapshot exceeds safety budget")
       const content = await readFile(absolute)
       bytes += content.length
       if (snapshots.length >= 5000 || bytes > 32 * 1024 * 1024)

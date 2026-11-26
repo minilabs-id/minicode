@@ -87,7 +87,14 @@ interface TokenResponse {
   error_description?: string
 }
 
-async function postForm(url: string, body: Record<string, string>, timeoutMs: number) {
+async function postForm(
+  url: string,
+  body: Record<string, string>,
+  timeoutMs: number,
+  signal?: AbortSignal,
+) {
+  const timeout = AbortSignal.timeout(timeoutMs)
+  const effective = signal ? AbortSignal.any([signal, timeout]) : timeout
   const res = await fetch(url, {
     method: "POST",
     headers: {
@@ -95,7 +102,7 @@ async function postForm(url: string, body: Record<string, string>, timeoutMs: nu
       accept: "application/json",
     },
     body: new URLSearchParams(body).toString(),
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: effective,
     redirect: "manual",
   })
   const text = await res.text()
@@ -113,7 +120,10 @@ async function postForm(url: string, body: Record<string, string>, timeoutMs: nu
 }
 
 /** Langkah 1: minta device code. Diekspor untuk test. */
-export async function startDeviceFlow(spec: OAuthProviderSpec): Promise<DeviceCodeStart> {
+export async function startDeviceFlow(
+  spec: OAuthProviderSpec,
+  signal?: AbortSignal,
+): Promise<DeviceCodeStart> {
   const { status, json } = await postForm(
     spec.deviceUrl,
     {
@@ -121,6 +131,7 @@ export async function startDeviceFlow(spec: OAuthProviderSpec): Promise<DeviceCo
       ...(spec.scope ? { scope: spec.scope } : {}),
     },
     LIMITS.OAUTH_REQUEST_TIMEOUT_MS,
+    signal,
   )
   const raw = json as TokenResponse & {
     device_code?: string
@@ -142,6 +153,15 @@ export async function startDeviceFlow(spec: OAuthProviderSpec): Promise<DeviceCo
   const uri = raw.verification_uri ?? raw.verification_url
   if (!uri) throw new Error("server did not return verification_uri")
 
+  // Lindungi dari nilai NaN/Infinity/negatif dari server agar loop poll tidak
+  // berputar 0ms tanpa henti atau kedaluwarsa tidak valid.
+  const rawInterval =
+    typeof raw.interval === "number" && Number.isFinite(raw.interval) ? raw.interval : 5
+  const rawExpiresIn =
+    typeof raw.expires_in === "number" && Number.isFinite(raw.expires_in) && raw.expires_in >= 0
+      ? raw.expires_in
+      : 600
+
   return {
     deviceCode: raw.device_code,
     userCode: raw.user_code,
@@ -150,8 +170,8 @@ export async function startDeviceFlow(spec: OAuthProviderSpec): Promise<DeviceCo
       ? { verificationUriComplete: raw.verification_uri_complete }
       : {}),
     // RFC 8628: default 5 detik bila server tak menyebut interval.
-    interval: Math.max(1, Math.min(raw.interval ?? 5, 60)),
-    expiresAt: Date.now() + (raw.expires_in ?? 600) * 1000,
+    interval: Math.max(1, Math.min(rawInterval, 60)),
+    expiresAt: Date.now() + rawExpiresIn * 1000,
   }
 }
 
@@ -169,6 +189,7 @@ export async function pollDeviceTokenOnce(
   spec: OAuthProviderSpec,
   deviceCode: string,
   currentIntervalSec: number,
+  signal?: AbortSignal,
 ): Promise<PollOutcome> {
   const { status, json } = await postForm(
     spec.tokenUrl,
@@ -178,6 +199,7 @@ export async function pollDeviceTokenOnce(
       client_id: spec.clientId,
     },
     LIMITS.OAUTH_REQUEST_TIMEOUT_MS,
+    signal,
   )
 
   if (json.access_token) {
@@ -229,9 +251,36 @@ export interface LoginCallbacks {
 export async function loginWithDeviceFlow(
   spec: OAuthProviderSpec,
   cb: LoginCallbacks,
-  sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+  sleep?: (ms: number) => Promise<void>,
 ): Promise<AuthCredentials> {
-  const start = await startDeviceFlow(spec)
+  // Sleep bawaan wajib mendengar `cb.signal` agar Esc/Ctrl+C membatalkan login
+  // seketika alih-alih menggantung hingga 60 detik menunggu interval poll.
+  const wait =
+    sleep ??
+    ((ms: number) =>
+      new Promise<void>((resolve) => {
+        if (cb.signal?.aborted) {
+          resolve()
+          return
+        }
+        const onAbort = () => {
+          clearTimeout(timer)
+          resolve()
+        }
+        const timer = setTimeout(() => {
+          cb.signal?.removeEventListener("abort", onAbort)
+          resolve()
+        }, ms)
+        cb.signal?.addEventListener("abort", onAbort, { once: true })
+      }))
+
+  let start: DeviceCodeStart
+  try {
+    start = await startDeviceFlow(spec, cb.signal)
+  } catch (err) {
+    if (cb.signal?.aborted) throw new Error("login canceled")
+    throw err
+  }
   cb.onPrompt(start)
 
   let interval = start.interval
@@ -241,10 +290,16 @@ export async function loginWithDeviceFlow(
     if (Date.now() >= start.expiresAt) {
       throw new Error("device code expired — run `minicode auth login` again")
     }
-    await sleep(interval * 1000)
+    await wait(interval * 1000)
     if (cb.signal?.aborted) throw new Error("login canceled")
 
-    const res = await pollDeviceTokenOnce(spec, start.deviceCode, interval)
+    let res: PollOutcome
+    try {
+      res = await pollDeviceTokenOnce(spec, start.deviceCode, interval, cb.signal)
+    } catch (err) {
+      if (cb.signal?.aborted) throw new Error("login canceled")
+      throw err
+    }
     if (res.state === "success") {
       await saveAuth(spec.id, res.creds)
       return res.creds

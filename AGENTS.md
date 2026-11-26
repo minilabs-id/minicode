@@ -36,10 +36,7 @@ sub-milestone (`P2.x`), Quality Remediation (`Stage 1`–`10`), dan hotfix
 
 ## Status checkout
 
-HEAD checkout ini adalah kandidat rilis **v0.51.0** (label niat tool & auto-label
-0-token, tail live adaptif `max(3, floor(viewH * 0.5))`, penyelarasan SSoT tool,
-perbaikan error/sub-agent/manager/CLI/i18n, serta kontrak terminal v0.51 atas
-v0.43). `package.json` mencatat `0.51.0`; kontrak terminal memakai entri v0.51
+HEAD checkout ini adalah kandidat rilis **v0.52.0** (audit & perbaikan stabilitas/anti-hang/ReDoS/performa hot-path 3 wave, penyempurnaan popup tanpa latar abu-abu dengan jeda footer & `Esc` redup kanan atas, modal progres yang dapat dibatalkan, clipboard lintas-platform `src/lib/clipboard.ts`, serta role `system` native `openai-compat`). `package.json` mencatat `0.52.0`; kontrak terminal memakai entri v0.51
 (mengamandemen v0.43 pada tail live adaptif, reveal ketikan live, waiting
 indicator, dan kegagalan berbasis label `<label> mengalami kegagalan (<tag>)`
 di atas kotak tipis composer `╭─╮│╰╯`, tinggi 1–2 baris dinamis + scroll, margin

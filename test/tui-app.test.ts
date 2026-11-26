@@ -1225,7 +1225,7 @@ describe("TuiApp", () => {
     await runP
   })
   test("suspend: input dibekukan tanpa scrim warna; resume: kembali normal", async () => {
-    // v7.29: di mode warna scrimMode() = "bg", jadi test "tanpa scrim" ini
+    // v7.29+: di mode warna scrimMode() = "faint", jadi test "tanpa scrim" ini
     // dijalankan dengan MINICODE_COLOR=0. Yang dijaga: pembekuan input.
     process.env.MINICODE_COLOR = "0"
     try {
@@ -2077,6 +2077,31 @@ describe("TuiApp", () => {
     await runP
     const off = tty!.all().indexOf("\x1b[?2004l")
     expect(off).toBeGreaterThan(on)
+  })
+
+  test("bracketed paste dipulihkan saat resume() setelah popup mematikan ?2004l", async () => {
+    const { app, screenText, calls } = setup({ columns: 60, rows: 14 })
+    const runP = app.run()
+    await tty!.ready()
+    await tty!.waitForOutput((o) => o.includes("00.00.00"))
+
+    app.suspend()
+    // Simulasikan modal/jendela output yang menyalakan lalu mematikan bracketed paste.
+    process.stdout.write("\x1b[?2004h")
+    process.stdout.write("\x1b[?2004l")
+    const beforeResumeLen = tty!.all().length
+    app.resume()
+
+    const afterResume = tty!.all().slice(beforeResumeLen)
+    expect(afterResume).toContain("\x1b[?2004h")
+    // Paste multiline tetap utuh sebagai chip paste di draft (tidak men-submit baris pertama).
+    await tty!.send("\x1b[200~satu\ndua\x1b[201~")
+    expect(screenText()).toContain("{paste text 2 lines}")
+    expect(calls).toEqual([])
+
+    await tty!.send(KEY.ctrlU)
+    await tty!.send(KEY.ctrlD)
+    await runP
   })
 
   test("Ctrl+A saat prompt kosong = select-all transkrip; Ctrl+C menyalin semuanya", async () => {

@@ -126,23 +126,32 @@ function windowLineInput(
 function readModalInput<T extends "line" | "choice">(
   mode: T,
   render: (state: ModalRenderState) => void,
-  opt: T extends "choice" ? { count: number; quick: Readonly<Record<string, number>> } : object,
+  opt: T extends "choice"
+    ? { count: number; quick: Readonly<Record<string, number>> }
+    : { options?: readonly string[] },
   signal?: AbortSignal,
 ): Promise<T extends "choice" ? number | null : string | null> {
   type R = T extends "choice" ? number | null : string | null
   return new Promise((resolve, reject) => {
-    const o = opt as { count?: number; quick?: Record<string, number> }
+    const o = opt as { count?: number; quick?: Record<string, number>; options?: readonly string[] }
     const count = o.count ?? 0
     const quick = o.quick ?? {}
+    const lineOptions = o.options ?? []
     let done = false
     let sel = 0
+    let optSel = -1
     let lineState: PromptState = createState()
     let warned = false
     let onData!: (chunk: Buffer) => void
     let onResize!: () => void
     const redraw = () => {
       try {
-        render({ sel, typed: lineState.line, cursor: lineState.cursor, warned })
+        render({
+          sel: mode === "choice" ? sel : optSel,
+          typed: lineState.line,
+          cursor: lineState.cursor,
+          warned,
+        })
       } catch {}
     }
     const pump = createKeyStreamPump({
@@ -164,7 +173,13 @@ function readModalInput<T extends "line" | "choice">(
           // hanya Esc/Ctrl+C/Ctrl+D di atas yang keluar aman sampai dibesarkan.
           if (!canRenderModal()) continue
           if (key.type === "enter") {
-            finish((mode === "choice" ? sel : lineState.line) as R)
+            if (mode === "choice") {
+              finish(sel as R)
+            } else if (optSel >= 0 && optSel < lineOptions.length && !lineState.line.trim()) {
+              finish(lineOptions[optSel] as R)
+            } else {
+              finish(lineState.line as R)
+            }
             return true
           }
           if (mode === "choice") {
@@ -191,15 +206,27 @@ function readModalInput<T extends "line" | "choice">(
               }
             }
           } else {
-            if (key.type === "mouse" || key.type === "wheelup" || key.type === "wheeldown") {
-              continue
+            if (key.type === "mouse") continue
+            if (lineOptions.length > 0 && lineState.line.length === 0) {
+              if (key.type === "up" || key.type === "wheelup") {
+                optSel = optSel <= 0 ? 0 : optSel - 1
+                changed = true
+                continue
+              }
+              if (key.type === "down" || key.type === "wheeldown") {
+                optSel = optSel < 0 ? 0 : Math.min(lineOptions.length - 1, optSel + 1)
+                changed = true
+                continue
+              }
             }
+            if (key.type === "wheelup" || key.type === "wheeldown") continue
             const safeKey =
               key.type === "char"
                 ? { type: "char" as const, ch: key.ch.replace(/[\r\n]/g, " ") }
                 : key
             const next = applyKey(lineState, safeKey, () => [])
             if (next.action !== "none" || next.state !== lineState) {
+              if (next.state.line !== lineState.line) optSel = -1
               lineState = next.state
               changed = true
             }
@@ -262,8 +289,11 @@ function readModalInput<T extends "line" | "choice">(
       reject(new DOMException("aborted", "AbortError"))
     }
     if (signal) {
-      if (signal.aborted) onAbort()
-      else signal.addEventListener("abort", onAbort, { once: true })
+      if (signal.aborted) {
+        onAbort()
+        return
+      }
+      signal.addEventListener("abort", onAbort, { once: true })
     }
     onData = (chunk: Buffer) => pump.push(new Uint8Array(chunk))
     onResize = () => redraw()
@@ -283,7 +313,7 @@ function readModalInput<T extends "line" | "choice">(
 /** Render kotak modal + baris ekstra (echo / daftar bersorot) + parkir kursor. */
 function paintModal(
   sink: ApprovalSink,
-  spec: { title: string; body: string[]; footer?: string },
+  spec: { title: string; body: string[]; footer?: string; escHint?: boolean },
   extra: readonly string[],
   cursor?: ModalCursor,
 ): void {
@@ -303,29 +333,29 @@ function paintModal(
   let lineCursorOffset = 0
   if (cursor?.kind === "line") {
     const win = windowLineInput(cursor.typed, cursor.cursor, innerW - 4)
-    modalExtra = [`  ${c.dim(">")} ${c.info(win.visible)}`]
+    modalExtra = ["", `  ${c.dim(">")} ${c.info(win.visible)}`]
     lineCursorOffset = win.cursorOffsetCols
   }
   const focusRow =
     cursor?.kind === "choice"
       ? spec.body.length + 1 + cursor.selected
       : cursor?.kind === "line"
-        ? spec.body.length
+        ? spec.body.length + 1
         : undefined
   const frame = windowSpec({
     title: spec.title,
     body: [...spec.body, ...modalExtra],
     cols,
     rows: safeRows,
+    role: "progress",
+    ...(spec.escHint !== undefined ? { escHint: spec.escHint } : {}),
+    ...(spec.footer !== undefined ? { footerOverride: spec.footer } : {}),
     ...(focusRow != null ? { focusRow } : {}),
   })
-  // Approval punya hint khusus (submit vs pilih) —footer ditimpa, geometri
-  // (lebar/tinggi/judul) tetap dari aturan bersama.
-  frame.footer = spec.footer
   const box = dialogBox(frame, Math.max(20, cols), safeRows)
   sink.paintRegion(box.lines, box.topRow)
   if (!cursor) return
-  const focus = cursor.kind === "choice" ? focusRow! : spec.body.length
+  const focus = cursor.kind === "choice" ? focusRow! : spec.body.length + 1
   const visible = focus - box.bodyStart
   if (visible < 0 || box.bodyTop + visible >= box.lines.length) return
   const row = box.topRow + box.bodyTop + visible
@@ -409,11 +439,14 @@ export async function promptAsk(call: ApprovalRequest): Promise<"allow" | "deny"
     const summaryRaw = diffPreview ? `${t("appr.diff")} ${diffPreview}` : actionSummary
     const previewCols = Math.max(16, windowWidth(process.stdout.columns || 80) - 6)
     const wrappedSummary = summaryRaw.split(/\r?\n/).flatMap((ln) => wrapByWidth(ln, previewCols))
+    // Sisakan ruang vertikal agar header (Tool/Risk) dan seluruh opsi selalu
+    // muat terlihat bersama pada terminal pendek (10–14 baris).
+    const maxPreviewLines = Math.max(1, Math.min(5, (process.stdout.rows || 24) - 10))
     const cappedSummary =
-      wrappedSummary.length > 5
+      wrappedSummary.length > maxPreviewLines
         ? [
-            ...wrappedSummary.slice(0, 4),
-            `${truncateToWidth(wrappedSummary[4]!, Math.max(4, previewCols - 1), "")}${glyphs.ellipsis}`,
+            ...wrappedSummary.slice(0, maxPreviewLines - 1),
+            `${truncateToWidth(wrappedSummary[maxPreviewLines - 1]!, Math.max(4, previewCols - 1), "")}${glyphs.ellipsis}`,
           ]
         : wrappedSummary
     const summaryLines = cappedSummary.map((ln) => `  ${ln}`)
@@ -449,7 +482,6 @@ export async function promptAsk(call: ApprovalRequest): Promise<"allow" | "deny"
     const choiceHint = hintLine([
       { key: glyphs.upDown, label: t("hint.move") },
       { key: `${alwaysAvailable ? "y/a/n/" : "y/n/"}Enter`, label: t("hint.select") },
-      { key: "Esc", label: t("hint.cancel") },
     ])
     const idleHint = c.error(t("form.idleWarning", { s: Math.ceil(IDLE_CANCEL_MS / 1000) }))
     let pickedIndex: number | null = null
@@ -468,6 +500,7 @@ export async function promptAsk(call: ApprovalRequest): Promise<"allow" | "deny"
                 title: t("appr.title"),
                 body: modalBody,
                 footer: warned ? idleHint : choiceHint,
+                escHint: true,
               },
               ["", ...rendered],
               { kind: "choice", selected: sel },
@@ -538,14 +571,24 @@ export async function promptAskText(
     // Potong SESUDAH sanitasi lewat truncateToWidth (bukan `slice`): `slice`
     // bisa menyisakan `\x1b[` menggantung di ekor potongan.
     const q = truncateToWidth(sanitizeAnsiLine(question), 2000, glyphs.ellipsis)
-    const optionLines = options?.length
-      ? options.map((o, i) => `  ${c.dim(`${i + 1}.`)} ${sanitizeAnsiLine(o)}`)
-      : []
-    const block = [``, `${c.warning(c.bold(t("appr.askTitle")))}`, `  ${q}`, ...optionLines]
-    const modalBody = [`  ${q}`, ...optionLines]
+    const formatOptionLines = (activeSel: number): string[] =>
+      options?.length
+        ? options.map((o, i) => {
+            const text = `${i + 1}. ${sanitizeAnsiLine(o)}`
+            return activeSel === i
+              ? `  ${c.accent(glyphs.arrow)} ${c.accent(c.bold(text))}`
+              : `  ${c.dim(`${i + 1}.`)} ${sanitizeAnsiLine(o)}`
+          })
+        : []
+    const block = [
+      ``,
+      `${c.warning(c.bold(t("appr.askTitle")))}`,
+      `  ${q}`,
+      ...formatOptionLines(-1),
+    ]
     const lineHint = hintLine([
+      ...(options?.length ? [{ key: glyphs.upDown, label: t("hint.move") }] : []),
       { key: "Enter", label: t("hint.submit") },
-      { key: "Esc", label: t("hint.cancel") },
     ])
     const idleHint = c.error(t("form.idleWarning", { s: Math.ceil(IDLE_CANCEL_MS / 1000) }))
     const sink = textSink
@@ -557,18 +600,19 @@ export async function promptAskText(
       try {
         ans = await readModalInput(
           "line",
-          ({ typed, cursor, warned }) =>
+          ({ sel, typed, cursor, warned }) =>
             paintModal(
               sink,
               {
                 title: t("appr.askTitle"),
-                body: modalBody,
+                body: [`  ${q}`, ...formatOptionLines(sel)],
                 footer: warned ? idleHint : lineHint,
+                escHint: true,
               },
               [],
               { kind: "line", typed, cursor },
             ),
-          {},
+          options?.length ? { options } : {},
           signal,
         )
       } finally {

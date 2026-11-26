@@ -5,7 +5,7 @@
 
 import { t } from "../i18n/locale.ts"
 import { sanitizeAnsiLine } from "../render/sanitize.ts"
-import { c, supportsUtf8 } from "../render/theme.ts"
+import { boxGlyphsForStyle, c, glyphs } from "../render/theme.ts"
 import { displayWidth, padToWidth, truncateToWidth } from "../render/width.ts"
 
 export interface DialogSpec {
@@ -23,6 +23,8 @@ export interface DialogSpec {
   maxHeight?: number
   /** Indeks body yang WAJIB terlihat; jendela digeser agar tak mengetik buta (HIGH-2). */
   focusRow?: number
+  /** Tampilkan `Esc` redup di pojok kanan atas baris judul (tanpa keterangan). */
+  escHint?: boolean
 }
 
 interface BoxChars {
@@ -58,11 +60,7 @@ export function popupBoxWidth(cols: number): number {
 function boxChars(): BoxChars {
   // Kapabilitas dan kill-switch dibaca tiap render agar perubahan env runtime
   // (terutama test/aksesibilitas) langsung berlaku, bukan membeku saat import.
-  const style = process.env.MINICODE_BOX?.toLowerCase()
-  if (process.env.MINICODE_ASCII === "1" || style === "ascii" || !supportsUtf8())
-    return { tl: "+", tr: "+", bl: "+", br: "+", h: "-", v: "|" }
-  if (style === "square") return { tl: "┌", tr: "┐", bl: "└", br: "┘", h: "─", v: "│" }
-  return { tl: "╭", tr: "╮", bl: "╰", br: "╯", h: "─", v: "│" }
+  return boxGlyphsForStyle()
 }
 
 /** Kotak popup tanpa backdrop: untuk paintRegion di atas konten pemilik layar. */
@@ -105,6 +103,10 @@ export function dialogBox(spec: DialogSpec, cols: number, rows: number): DialogB
   const footer = spec.footer != null && spec.footer !== "" ? sanitizeAnsiLine(spec.footer) : null
 
   const hasTitle = title !== ""
+  const showEsc = Boolean(spec.escHint)
+  const escText = "Esc"
+  const escW = displayWidth(escText)
+  const hasTopBar = hasTitle || showEsc
   const maxInner = Math.max(10, c0 - 6)
   const def = Math.max(10, popupBoxWidth(c0) - 4)
   const capInner = Math.min(
@@ -120,7 +122,7 @@ export function dialogBox(spec: DialogSpec, cols: number, rows: number): DialogB
     capInner,
   )
 
-  let contentW = displayWidth(title)
+  let contentW = hasTitle ? displayWidth(title) + (showEsc ? escW + 2 : 0) : showEsc ? escW : 0
   for (const ln of spec.body) {
     const w = displayWidth(sanitizeAnsiLine(ln))
     if (w > contentW) contentW = w
@@ -130,35 +132,57 @@ export function dialogBox(spec: DialogSpec, cols: number, rows: number): DialogB
     if (w > contentW) contentW = w
   }
   const innerW = Math.max(10, Math.min(Math.max(contentW, floorInner), capInner, maxInner))
-  const cut = (s: string) => truncateToWidth(sanitizeAnsiLine(s), innerW)
+  const cut = (s: string) => truncateToWidth(sanitizeAnsiLine(s), innerW, glyphs.ellipsis)
   const boxW = innerW + 4
   const row = (l: string, m: string, r: string) => l + m + r
 
   const bar = box.h.repeat(Math.max(0, boxW - 2))
   const boxed: string[] = []
   boxed.push(row(box.tl, bar, box.tr))
-  if (hasTitle) boxed.push(`${box.v} ${padToWidth(c.accent(c.bold(cut(title))), innerW)} ${box.v}`)
+  if (hasTopBar) {
+    if (hasTitle && showEsc) {
+      const maxTitleW = Math.max(1, innerW - escW - 2)
+      const clippedTitle = truncateToWidth(title, maxTitleW, glyphs.ellipsis)
+      const gap = Math.max(2, innerW - displayWidth(clippedTitle) - escW)
+      boxed.push(
+        `${box.v} ${c.accent(c.bold(clippedTitle))}${" ".repeat(gap)}${c.dim(escText)} ${box.v}`,
+      )
+    } else if (showEsc) {
+      boxed.push(`${box.v} ${" ".repeat(Math.max(0, innerW - escW))}${c.dim(escText)} ${box.v}`)
+    } else {
+      boxed.push(`${box.v} ${padToWidth(c.accent(c.bold(cut(title))), innerW)} ${box.v}`)
+    }
+  }
 
-  const chromeFixed = 2 + (hasTitle ? 1 : 0) + (footer != null ? 1 : 0)
+  const baseFixed = 2 + (hasTopBar ? 1 : 0) + (footer != null ? 1 : 0)
   const boxBudget =
     spec.maxHeight != null && Number.isFinite(spec.maxHeight)
       ? Math.min(r0, Math.max(5, Math.floor(spec.maxHeight)))
       : r0
+  // Beri 1 baris kosong pemisah antara isi & footer bila ruang vertikal mencukupi.
+  const useFooterGap = footer != null && spec.body.length > 0 && boxBudget - baseFixed >= 2
+  const chromeFixed = baseFixed + (useFooterGap ? 1 : 0)
   const room = Math.max(0, boxBudget - chromeFixed)
   const clipped = spec.body.length > room
-  const shown = clipped ? Math.max(0, room - 1) : spec.body.length
   const focus = spec.focusRow
-  const bodyStart =
+  let shown = clipped ? Math.max(0, room - 1) : spec.body.length
+  let bodyStart =
     clipped && focus != null && shown > 0 && Number.isFinite(focus)
       ? Math.max(0, Math.min(Math.floor(focus) - shown + 1, spec.body.length - shown))
       : 0
+  // Saat scroll sudah mencapai ekor terakhir (tidak ada baris tersembunyi di bawah),
+  // manfaatkan ruang penuh `room` alih-alih menampilkan marker `... N more` palsu.
+  if (clipped && bodyStart + shown >= spec.body.length) {
+    shown = Math.min(spec.body.length, room)
+    bodyStart = Math.max(0, spec.body.length - shown)
+  }
+  const below = Math.max(0, spec.body.length - (bodyStart + shown))
   const body = spec.body.slice(bodyStart, bodyStart + shown)
   for (const ln of body) boxed.push(`${box.v} ${padToWidth(cut(ln), innerW)} ${box.v}`)
-  if (clipped)
-    boxed.push(
-      `${box.v} ${padToWidth(cut(t("dlg.more", { n: spec.body.length - shown })), innerW)} ${box.v}`,
-    )
+  if (below > 0)
+    boxed.push(`${box.v} ${padToWidth(cut(t("dlg.more", { n: below })), innerW)} ${box.v}`)
   if (footer != null) {
+    if (useFooterGap) boxed.push(`${box.v} ${" ".repeat(innerW)} ${box.v}`)
     // Jangan bungkus footer ber-SGR (hintLine / status berwarna) dengan `c.dim`,
     // karena `\x1b[2m` meredupkan tombol pertama lalu reset `\x1b[22m` mematikan
     // dim di pertengahan baris (hint.ts).
@@ -173,5 +197,5 @@ export function dialogBox(spec: DialogSpec, cols: number, rows: number): DialogB
     const left = Math.max(0, Math.floor((c0 - displayWidth(ln)) / 2))
     return `${" ".repeat(left)}${ln}`
   })
-  return { lines, topRow, height: boxed.length, bodyTop: 1 + (hasTitle ? 1 : 0), bodyStart }
+  return { lines, topRow, height: boxed.length, bodyTop: 1 + (hasTopBar ? 1 : 0), bodyStart }
 }

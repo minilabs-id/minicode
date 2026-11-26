@@ -216,6 +216,9 @@ export function createProcessSupervision(opts: ProcessSupervisionOptions = {}): 
       // Sleeper failure is not a child failure — do not escalate on it.
       return
     }
+    // shutdown() atau unregister bisa terjadi saat menunggu backoff — jangan
+    // bangkitkan ulang child yang sudah diminta berhenti.
+    if (shuttingDown || !children.has(child.id)) return
     try {
       await child.restart()
       restarts += 1

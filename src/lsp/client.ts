@@ -209,7 +209,6 @@ class LspConnection {
   private stopping = false
   /** [P13.2] root workspace — dipakai lagi saat restart. */
   private rootPath = ""
-  private winCmdTree = false
 
   constructor(public entry: LspServerEntry) {}
 
@@ -230,15 +229,21 @@ class LspConnection {
     this.stopping = false
     this.killSignal = new AbortController()
     const target = resolveSpawnTarget(this.entry.command, this.entry.args)
-    this.winCmdTree = target.windowsVerbatimArguments === true
     this.proc = spawn(target.command, target.args, {
       stdio: ["pipe", "pipe", "pipe"],
       // env kredensial di-strip; env eksplisit config server menang setelahnya
       env: sanitizeSpawnEnv(process.env, this.entry.env),
       signal: this.killSignal.signal,
+      detached: process.platform !== "win32",
+      windowsHide: true,
       ...(target.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
     })
-    this.proc.on("error", (err) => this.failAll(err))
+    this.proc.on("error", (err) => {
+      this.started = false
+      this.starting = undefined
+      this.proc = null
+      this.failAll(err)
+    })
     // [P13.2] Tulis ke server yang sudah mati menghasilkan EPIPE. Itu kondisi
     // NORMAL saat shutdown/supervisi (kita menutup lebih dulu) — dibiarkan
     // jadi event tanpa penanganan, ia bisa menjatuhkan proses CLI. Proses mati
@@ -248,6 +253,7 @@ class LspConnection {
     this.proc.on("exit", (code) => {
       this.started = false
       this.starting = undefined
+      this.proc = null
       this.failAll(new Error(`LSP server ${this.entry.ext} exited (${code})`))
       // [P13.2] Keluar saat kita TIDAK minta = anak hilang: serahkan ke jalur
       // proses (bounded restart / eskalasi jujur). Keluar karena stop() kita
@@ -272,27 +278,64 @@ class LspConnection {
     const supervisor = processSupervision
     if (supervisor) supervisor.register(this.managedChild())
 
-    // initialize handshake
-    await this.request(
-      "initialize",
-      {
-        processId: process.pid,
-        rootUri: pathToFileURL(resolvePath(rootPath)).href,
-        capabilities: {
-          workspace: { symbol: {} },
-          textDocument: {
-            publishDiagnostics: { relatedInformation: false },
-            hover: { contentFormat: ["markdown", "plaintext"] },
-            definition: {},
-            references: {},
-            documentSymbol: { hierarchicalDocumentSymbolSupport: false },
+    // initialize handshake — bila gagal/timeout, wajib bersihkan `this.starting`
+    // dan matikan proses LSP agar sesi tak terkunci permanen pada promise ditolak.
+    try {
+      await this.request(
+        "initialize",
+        {
+          processId: process.pid,
+          rootUri: pathToFileURL(resolvePath(rootPath)).href,
+          capabilities: {
+            workspace: { symbol: {} },
+            textDocument: {
+              publishDiagnostics: { relatedInformation: false },
+              hover: { contentFormat: ["markdown", "plaintext"] },
+              definition: {},
+              references: {},
+              documentSymbol: { hierarchicalDocumentSymbolSupport: false },
+            },
           },
         },
-      },
-      LIMITS.LSP_INIT_TIMEOUT_MS,
-    )
-    this.notify("initialized", {})
-    this.started = true
+        LIMITS.LSP_INIT_TIMEOUT_MS,
+      )
+      this.notify("initialized", {})
+      this.started = true
+    } catch (err) {
+      this.started = false
+      this.starting = undefined
+      const dead = this.proc
+      this.proc = null
+      this.stopping = true
+      try {
+        this.killSignal.abort()
+      } catch {}
+      if (dead && dead.exitCode === null && dead.signalCode === null) {
+        try {
+          if (process.platform === "win32" && dead.pid !== undefined) {
+            spawnSync(
+              resolveTrustedExecutable("taskkill"),
+              ["/pid", String(dead.pid), "/T", "/F"],
+              {
+                stdio: "ignore",
+                timeout: 2_000,
+                windowsHide: true,
+                env: sanitizeSpawnEnv(process.env),
+              },
+            )
+          } else if (process.platform !== "win32" && dead.pid !== undefined) {
+            process.kill(-dead.pid, "SIGKILL")
+          } else {
+            dead.kill("SIGKILL")
+          }
+        } catch {
+          try {
+            dead.kill("SIGKILL")
+          } catch {}
+        }
+      }
+      throw err
+    }
   }
 
   /**
@@ -336,8 +379,18 @@ class LspConnection {
   ): Promise<unknown> {
     const id = ++this.seq
     const msg = Buffer.from(JSON.stringify({ jsonrpc: "2.0", id, method, params }), "utf8")
-    const stdin = this.proc?.stdin
-    if (!stdin) throw new Error(`LSP ${method}: server stdin unavailable`)
+    const proc = this.proc
+    const stdin = proc?.stdin
+    if (
+      !proc ||
+      proc.exitCode !== null ||
+      proc.signalCode !== null ||
+      !stdin ||
+      stdin.destroyed ||
+      stdin.writableEnded
+    ) {
+      throw new Error(`LSP ${method}: server stdin unavailable`)
+    }
     stdin.write(`Content-Length: ${msg.length}\r\n\r\n`)
     stdin.write(msg)
     return new Promise((resolve, reject) => {
@@ -345,12 +398,14 @@ class LspConnection {
         this.pending.delete(id)
         reject(new Error(`LSP ${method} timed out after ${timeoutMs}ms`))
       }, timeoutMs)
+      timer.unref?.()
       this.pending.set(id, { resolve, reject, timer })
     })
   }
 
   notify(method: string, params: Record<string, unknown> = {}) {
-    if (!this.proc?.stdin) throw new Error(`LSP server ${this.entry.ext} not running`)
+    if (!this.proc?.stdin || this.proc.stdin.destroyed || this.proc.stdin.writableEnded)
+      throw new Error(`LSP server ${this.entry.ext} not running`)
     const msg = Buffer.from(JSON.stringify({ jsonrpc: "2.0", method, params }), "utf8")
     this.proc.stdin.write(`Content-Length: ${msg.length}\r\n\r\n`)
     this.proc.stdin.write(msg)
@@ -361,6 +416,17 @@ class LspConnection {
     const langId = languageIdFor(absPath)
     const known = this.opened.get(uri)
     if (!known) {
+      // Batasi LRU dokumen terbuka agar RAM proses & server LSP tidak tumbuh tak terbatas.
+      if (this.opened.size >= 64) {
+        const oldest = this.opened.keys().next().value
+        if (oldest) {
+          this.opened.delete(oldest)
+          this.diagnostics.delete(oldest)
+          try {
+            this.notify("textDocument/didClose", { textDocument: { uri: oldest } })
+          } catch {}
+        }
+      }
       this.notify("textDocument/didOpen", {
         textDocument: { uri, languageId: langId, version: 1, text },
       })
@@ -371,6 +437,8 @@ class LspConnection {
         textDocument: { uri, version: v },
         contentChanges: [{ text }],
       })
+      // Refresh urutan LRU.
+      this.opened.delete(uri)
       this.opened.set(uri, { version: v, text, langId })
     }
     return uri
@@ -422,6 +490,7 @@ class LspConnection {
         cleanup()
         resolve()
       }, timeoutMs)
+      timer.unref?.()
 
       let s = this.diagnosticWaiters.get(uri)
       if (!s) {
@@ -455,15 +524,12 @@ class LspConnection {
       this.proc.stdin?.end()
     } catch {}
     const p = this.proc
-    if (
-      this.winCmdTree &&
-      process.platform === "win32" &&
-      p.pid !== undefined &&
-      p.exitCode === null
-    ) {
+    if (process.platform === "win32" && p.pid !== undefined && p.exitCode === null) {
       try {
         spawnSync(resolveTrustedExecutable("taskkill"), ["/pid", String(p.pid), "/T", "/F"], {
           stdio: "ignore",
+          timeout: 2_000,
+          windowsHide: true,
           env: sanitizeSpawnEnv(process.env),
         })
       } catch {}
@@ -473,10 +539,16 @@ class LspConnection {
       await new Promise<void>((r) => {
         const t = setTimeout(() => {
           try {
-            p.kill("SIGKILL")
-          } catch {}
+            if (process.platform !== "win32" && p.pid !== undefined) process.kill(-p.pid, "SIGKILL")
+            else p.kill("SIGKILL")
+          } catch {
+            try {
+              p.kill("SIGKILL")
+            } catch {}
+          }
           r()
         }, 2_000)
+        t.unref?.()
         p.once("exit", () => {
           clearTimeout(t)
           r()
@@ -510,6 +582,24 @@ class LspConnection {
           p.reject(new Error(String((msg.error as Record<string, unknown>).message ?? "LSP error")))
         else p.resolve(msg.result)
       }
+      return
+    }
+    // server → client requests (mis. workspace/configuration, client/registerCapability):
+    // wajib dibalas agar pyright/rust-analyzer/gopls tidak menggantung menunggu jawaban.
+    if (msg.id != null && typeof msg.method === "string") {
+      try {
+        const stdin = this.proc?.stdin
+        if (stdin && !stdin.destroyed && !stdin.writableEnded) {
+          const items = (msg.params as { items?: unknown[] } | undefined)?.items
+          const result =
+            msg.method === "workspace/configuration" && Array.isArray(items)
+              ? items.map(() => null)
+              : null
+          const reply = Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result }), "utf8")
+          stdin.write(`Content-Length: ${reply.length}\r\n\r\n`)
+          stdin.write(reply)
+        }
+      } catch {}
       return
     }
     // server → client notifications

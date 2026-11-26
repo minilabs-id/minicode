@@ -413,10 +413,19 @@ export class Scheduler {
     // the process alive on its own, and cleared on every stop path.
     this.renewTimer = setInterval(() => {
       if (this.authorityToken === null) return
-      if (
-        this.store.renewSessionAuthority(this.sessionId, this.authorityToken, SESSION_LEASE_MS) ===
-        "AUTHORITY_LOST"
-      ) {
+      try {
+        if (
+          this.store.renewSessionAuthority(
+            this.sessionId,
+            this.authorityToken,
+            SESSION_LEASE_MS,
+          ) === "AUTHORITY_LOST"
+        ) {
+          this.loseAuthority()
+        }
+      } catch {
+        // Kegagalan SQLite (SQLITE_BUSY/IOERR) di dalam interval tidak boleh
+        // melempar uncaughtException yang membunuh proses — fail-closed.
         this.loseAuthority()
       }
     }, SESSION_RENEW_INTERVAL_MS)
@@ -547,8 +556,14 @@ export class Scheduler {
       this.renewTimer = null
     }
     if (this.authorityToken !== null) {
-      this.store.releaseSessionAuthority(this.sessionId, this.authorityToken)
+      const token = this.authorityToken
       this.authorityToken = null
+      try {
+        this.store.releaseSessionAuthority(this.sessionId, token)
+      } catch {
+        // Teardown best-effort: error SQLite saat lepas lease tidak boleh
+        // menggagalkan pelepasan kepemilikan sesi in-process berikutnya.
+      }
     }
   }
 

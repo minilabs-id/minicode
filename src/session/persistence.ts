@@ -99,11 +99,26 @@ function safeContent(value: unknown): string {
 const MAX_STORED_EVENT_CHARS = 200_000
 const MAX_STORED_STRING_CHARS = 32_000
 
+function hasControlOrEsc(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i)
+    if (code === 27 || code === 127 || (code < 32 && code !== 9 && code !== 10 && code !== 13)) {
+      return true
+    }
+  }
+  return false
+}
+
 function stripAnsi(value: string): string {
+  // Fast-path: mayoritas teks bersih dari escape/kontrol — kembalikan langsung
+  // tanpa menyalin karakter satu per satu (O(1) alokasi).
+  if (!hasControlOrEsc(value)) return value
   let out = ""
+  let segStart = 0
   for (let i = 0; i < value.length; i++) {
     const code = value.charCodeAt(i)
     if (code === 27) {
+      if (i > segStart) out += value.slice(segStart, i)
       const next = value[i + 1]
       if (next === "[") {
         i += 2
@@ -112,6 +127,7 @@ function stripAnsi(value: string): string {
           if (current >= 0x40 && current <= 0x7e) break
           i++
         }
+        segStart = i + 1
         continue
       }
       if (next === "]" || next === "P" || next === "_" || next === "^" || next === "X") {
@@ -124,13 +140,18 @@ function stripAnsi(value: string): string {
           }
           i++
         }
+        segStart = i + 1
         continue
       }
+      segStart = i + 1
       continue
     }
-    if ((code < 32 && code !== 9 && code !== 10 && code !== 13) || code === 127) continue
-    out += value[i]
+    if ((code < 32 && code !== 9 && code !== 10 && code !== 13) || code === 127) {
+      if (i > segStart) out += value.slice(segStart, i)
+      segStart = i + 1
+    }
   }
+  if (segStart < value.length) out += value.slice(segStart)
   return out
 }
 

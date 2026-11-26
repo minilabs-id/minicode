@@ -1,6 +1,6 @@
 // Setup CLI: orchestrator thin - delegates to src/app/* layers
 
-import { readFileSync } from "node:fs"
+import { readFileSync, statSync } from "node:fs"
 import { resolve as resolvePath } from "node:path"
 import type { Message, Session, Tool } from "#minicore"
 import { AgentError } from "#minicore"
@@ -2430,25 +2430,34 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     }
   }
 
+  let preTurnMode: "git" | "files" | "unavailable" | null = null
+  const POST_EDIT_SNAPSHOT_MAX_BYTES = 2 * 1024 * 1024
   const captureBeforeTurn = async (): Promise<void> => {
+    preTurnMode = null
     const liveWm = workModeControl?.getWorkMode() ?? effectiveWorkMode
     const livePm = permissions?.getMode() ?? permissionMode
     if (liveWm !== "EXECUTE" || livePm === "readonly" || livePm === "plan") return
     preTurnPromise = beginTurnSnapshot(sessionId, cwd ?? process.cwd())
     pendingCheckpointWork.add(preTurnPromise)
     try {
-      await preTurnPromise
+      const pre = await preTurnPromise
+      preTurnMode = pre.mode
     } finally {
       pendingCheckpointWork.delete(preTurnPromise)
     }
   }
   session.events.on("execution:completed", (e) => {
+    // Mode shadow-git tidak menggunakan postEditSnapshots; lewati readFileSync
+    // sinkron di main thread pada setiap edit/write_file.
+    if (preTurnMode === "git") return
     const name = e.execution.call.name
     if (name !== "edit" && name !== "write_file" && name !== "apply_patch") return
     const p = (e.execution.call.args as { path?: string })?.path
     if (!p) return
     const abs = resolvePath(cwd ?? ".", p)
     try {
+      const st = statSync(abs)
+      if (st.size > POST_EDIT_SNAPSHOT_MAX_BYTES) return
       postEditSnapshots.set(p, { path: p.replace(/\\/g, "/"), content: readFileSync(abs, "utf8") })
     } catch {
       postEditSnapshots.set(p, { path: p.replace(/\\/g, "/"), content: null })
@@ -2649,6 +2658,35 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     turn: number | null
     scopeSession: string
   }> = []
+  const emitVerificationFromRecords = (
+    call: { id: string; tool: string; argsHash: string; turn: number | null },
+    scopeSession: string,
+    records: Awaited<ReturnType<typeof loadJournal>>["records"],
+  ): void => {
+    const observation = pendingVerificationObservation(
+      {
+        toolCallId: call.id,
+        tool: call.tool,
+        turn: call.turn,
+        argsHash: call.argsHash,
+        sessionId: scopeSession,
+      },
+      records,
+      verificationEmitted,
+    )
+    if (!observation) return
+    verificationEmitted.add(observation.invocationId)
+    try {
+      presentation?.noteVerificationObserved({
+        toolCallId: observation.toolCallId,
+        invocationId: observation.invocationId,
+        verdict: observation.verdict,
+        method: observation.method,
+        observedAt: observation.observedAt,
+        ...(scopeSession !== sessionId ? { sessionId: scopeSession } : {}),
+      })
+    } catch {}
+  }
   const emitVerificationForCall = (
     call: { id: string; tool: string; argsHash: string; turn: number | null },
     scopeSession: string,
@@ -2656,29 +2694,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     void (async () => {
       try {
         const { records } = await loadJournal(scopeSession, cwd)
-        const observation = pendingVerificationObservation(
-          {
-            toolCallId: call.id,
-            tool: call.tool,
-            turn: call.turn,
-            argsHash: call.argsHash,
-            sessionId: scopeSession,
-          },
-          records,
-          verificationEmitted,
-        )
-        if (!observation) return
-        verificationEmitted.add(observation.invocationId)
-        try {
-          presentation?.noteVerificationObserved({
-            toolCallId: observation.toolCallId,
-            invocationId: observation.invocationId,
-            verdict: observation.verdict,
-            method: observation.method,
-            observedAt: observation.observedAt,
-            ...(scopeSession !== sessionId ? { sessionId: scopeSession } : {}),
-          })
-        } catch {}
+        emitVerificationFromRecords(call, scopeSession, records)
       } catch {}
     })()
   }
@@ -2711,10 +2727,25 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     perfCount("presentation.flush.turnTotal", 0, turnBatchEvents)
     turnBatchEvents = 0
     // Sapu verifikasi susulan dalam turn yang sama (late verification):
-    // baca ulang jurnal untuk call yang selesai tanpa verdict waktu itu.
+    // kelompokkan per scopeSession dan baca jurnal SEKALI per sesi (bukan N×
+    // pembacaan paralel saat turn memiliki puluhan/ratusan tool call).
     try {
       const pending = completedToolCalls.splice(0)
-      for (const call of pending) emitVerificationForCall(call, call.scopeSession)
+      if (pending.length === 0) return
+      const byScope = new Map<string, typeof pending>()
+      for (const call of pending) {
+        const list = byScope.get(call.scopeSession)
+        if (list) list.push(call)
+        else byScope.set(call.scopeSession, [call])
+      }
+      for (const [scopeSession, calls] of byScope) {
+        void (async () => {
+          try {
+            const { records } = await loadJournal(scopeSession, cwd)
+            for (const call of calls) emitVerificationFromRecords(call, scopeSession, records)
+          } catch {}
+        })()
+      }
     } catch {}
   })
   // ── Auto-verify & self-heal ──
@@ -3031,6 +3062,8 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
         try {
           return await runPromptWithVerifyImpl(p, runSignal, ledger)
         } catch (error) {
+          // Jangan retry atau tidur bila pengguna membatalkan atau batas waktu sudah habis.
+          if (runSignal?.aborted) throw error
           const failure = classifyFailure(error, {
             userAborted: signal?.aborted === true && deadline.signal?.aborted !== true,
           })
@@ -3040,10 +3073,25 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
           const left = Math.max(0, Math.round(decision.remainingMs / 1000))
           process.stderr.write(
             `[recovery] gangguan penyedia — melanjutkan turn otomatis ` +
-              `(percobaan ${decision.attempt}, jeda ${secs} dtk, sisa anggaran ${left} dtk)
-`,
+              `(percobaan ${decision.attempt}, jeda ${secs} dtk, sisa anggaran ${left} dtk)\n`,
           )
-          await Bun.sleep(decision.delayMs)
+          // Tidur sadar-abort agar Esc/Ctrl+C atau deadline memutus jeda seketika
+          // alih-alih menahan giliran sampai delayMs selesai.
+          await new Promise<void>((resolve) => {
+            if (runSignal?.aborted) {
+              resolve()
+              return
+            }
+            const onAbort = () => {
+              clearTimeout(timer)
+              resolve()
+            }
+            const timer = setTimeout(() => {
+              runSignal?.removeEventListener("abort", onAbort)
+              resolve()
+            }, decision.delayMs)
+            runSignal?.addEventListener("abort", onAbort, { once: true })
+          })
           // Pengguna menekan Ctrl+C saat menunggu: berhenti, jangan lanjut.
           if (runSignal?.aborted) throw error
         }
@@ -3180,7 +3228,12 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       )
     } catch (error) {
       lastTurnOutcome = "failed"
-      markPreviousRunTerminal()
+      try {
+        markPreviousRunTerminal()
+      } catch {}
+      // Lepas listener UI yang sudah terpasang sebelum melempar, agar turn
+      // gagal di fase ledger tidak meninggalkan listener duplikat.
+      detachUI()
       throw error
     }
     try {
@@ -3254,7 +3307,13 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
         }
         // Jangan biarkan run FAILED/INTERRUPTED berstatus RUNNING sampai turn
         // berikutnya: tombstone/proses lain harus melihat terminal segera.
-        markPreviousRunTerminal()
+        // Bungkus try/catch agar kegagalan SQLite di sini tidak pernah melewati
+        // detachUI() dan clearTurnActive() di bawahnya.
+        try {
+          markPreviousRunTerminal()
+        } catch (error) {
+          warnLine(`failed-turn run finalize failed: ${(error as Error).message}`)
+        }
       }
       detachUI()
       try {

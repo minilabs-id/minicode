@@ -12,8 +12,11 @@
 
 import { t } from "../i18n/locale.ts"
 import { type HintItem, hintLine } from "../render/hint.ts"
-import { glyphs } from "../render/theme.ts"
+import { c, glyphs } from "../render/theme.ts"
+import { truncateToWidth } from "../render/width.ts"
 import type { DialogSpec } from "./dialog.ts"
+
+export type WindowRole = "list" | "form" | "viewer" | "progress"
 
 export const WINDOW_MIN_COLS = 56
 export const WINDOW_MAX_COLS = 88
@@ -37,15 +40,37 @@ export function windowMaxHeight(rows: number): number {
   return Math.max(5, Math.floor(rows))
 }
 
-/** Footer baku: navigasi → pilih → tutup, plus aksi khusus jendela (opsional). */
-export function windowFooter(extra: readonly HintItem[] = []): string {
+/** Gabungkan daftar hint menjadi satu baris footer; pemotongan lebar dilakukan `dialogBox`. */
+function fitHints(items: readonly HintItem[]): string {
+  return items.length ? hintLine(items) : ""
+}
+
+/** Footer baku: menyesuaikan peran jendela (list/form/viewer/progress) + extraHints. */
+export function windowFooter(
+  extra: readonly HintItem[] = [],
+  opts?: { role?: WindowRole; maxWidth?: number },
+): string {
+  // Peringatan idle darurat (`!`) memprioritaskan seluruh lebar footer agar
+  // tidak terpotong di belakang navigasi pada terminal 80–120 kolom.
+  const urgent = extra.find((h) => h.key === "!")
+  if (urgent) {
+    const text = `! ${urgent.label}`
+    return c.error(
+      opts?.maxWidth != null ? truncateToWidth(text, opts.maxWidth, glyphs.ellipsis) : text,
+    )
+  }
+  const role = opts?.role ?? "list"
+  // Esc pindah ke pojok kanan atas dialog (redup tanpa keterangan), sehingga
+  // footer bawah fokus ke navigasi & aksi isi saja.
+  if (role === "progress" || role === "form" || role === "viewer") {
+    return fitHints(extra)
+  }
   const extraKeys = new Set(extra.map((h) => h.key))
   const nav: HintItem[] = [
     { key: glyphs.upDown, label: t("hint.move") },
     { key: "Enter", label: t("hint.select") },
-    { key: "Esc", label: t("hint.cancel") },
   ].filter((item) => !extraKeys.has(item.key))
-  return hintLine([...nav, ...extra])
+  return fitHints([...nav, ...extra])
 }
 
 export interface WindowSpecOptions {
@@ -54,17 +79,33 @@ export interface WindowSpecOptions {
   cols: number
   rows: number
   focusRow?: number
+  /** Peran jendela agar hint footer sesuai interaksi nyata. Default `"list"`. */
+  role?: WindowRole
   /** Aksi tambahan di footer (mis. `a add`, `d delete`). */
   extraHints?: readonly HintItem[]
+  /** Override footer penuh bila pemanggil membangun hint khusus (mis. approval). */
+  footerOverride?: string
+  /** Tampilkan `Esc` redup di pojok kanan atas judul. Default aktif selain `progress`. */
+  escHint?: boolean
 }
 
 /** Satu `DialogSpec` untuk semua jendela — pemanggil tinggal kasih konten. */
 export function windowSpec(opts: WindowSpecOptions): DialogSpec {
   const w = windowWidth(opts.cols)
+  const innerW = Math.max(10, w - 4)
+  const escHint = opts.escHint ?? opts.role !== "progress"
+  const footer =
+    opts.footerOverride !== undefined
+      ? opts.footerOverride
+      : windowFooter(opts.extraHints, {
+          ...(opts.role !== undefined ? { role: opts.role } : {}),
+          maxWidth: innerW,
+        })
   return {
     title: opts.title,
     body: opts.body,
-    footer: windowFooter(opts.extraHints),
+    ...(footer ? { footer } : {}),
+    ...(escHint ? { escHint } : {}),
     minWidth: w,
     maxWidth: w,
     maxHeight: windowMaxHeight(opts.rows),

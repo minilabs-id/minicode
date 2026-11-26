@@ -2,10 +2,10 @@ import { describe, expect, test } from "bun:test"
 import { deriveProviderId } from "../src/providers/provision.ts"
 
 describe("deriveProviderId (5.1 friendly id)", () => {
-  test("preset baseUrl → ramah id (no hash)", () => {
-    expect(deriveProviderId("https://openrouter.ai/api/v1", [])).toBe("openrouter")
-    expect(deriveProviderId("https://api.deepseek.com/v1", [])).toBe("deepseek")
-    expect(deriveProviderId("http://localhost:11434/v1", [])).toBe("ollama")
+  test("baseUrl → slug ramah dari host/path (tanpa daftar preset)", () => {
+    expect(deriveProviderId("https://openrouter.ai/api/v1", [])).toBe("openrouter-ai-api")
+    expect(deriveProviderId("https://api.deepseek.com/v1", [])).toBe("api-deepseek-com")
+    expect(deriveProviderId("http://localhost:11434/v1", [])).toBe("localhost-11434")
   })
   test("unknown baseUrl → slug, no random suffix", () => {
     const id = deriveProviderId("https://my.gateway.example.com/v1", [])
@@ -16,10 +16,15 @@ describe("deriveProviderId (5.1 friendly id)", () => {
     expect(deriveProviderId("https://x", [], "my-provider")).toBe("my-provider")
   })
   test("collision → numeric suffix ramah", () => {
-    expect(deriveProviderId("https://openrouter.ai/api/v1", ["openrouter"])).toBe("openrouter-2")
-    expect(deriveProviderId("https://openrouter.ai/api/v1", ["openrouter", "openrouter-2"])).toBe(
-      "openrouter-3",
+    expect(deriveProviderId("https://openrouter.ai/api/v1", ["openrouter-ai-api"])).toBe(
+      "openrouter-ai-api-2",
     )
+    expect(
+      deriveProviderId("https://openrouter.ai/api/v1", [
+        "openrouter-ai-api",
+        "openrouter-ai-api-2",
+      ]),
+    ).toBe("openrouter-ai-api-3")
   })
   test("id sliced to 30 chars", () => {
     const long = "a".repeat(40)

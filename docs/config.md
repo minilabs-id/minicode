@@ -54,29 +54,11 @@ Di mana pengaturan dan data Minicode tinggal, bagaimana file lokal yang tak tepe
 - `verifyCommand` — dipakai `--verify` bila auto-detect tidak menemukan (urutan deteksi: `typecheck` → `test` → `tsconfig`).
 - `bashAllowlist` — pola glob perintah bash tambahan yang dianggap aman. Precedence: env `MINICODE_BASH_ALLOWLIST` > `bashAllowlist` (config) > daftar bawaan. Di daftar narrow pola config **menggantikan seluruh** bawaan; di daftar developer (fallback tanpa sandbox, `restrictBash`) pola config **menambah**. Artinya, bila override aktif, penambahan bawaan (mis. `tree`/`du`/`df`/`date`/`uname`) tidak ikut dipakai — sertakan sendiri pola yang dibutuhkan. Perintah majemuk diperiksa per segmen — lihat [Policy & Sandbox](policy-sandbox.md).
 
-## 15 preset gateway (termasuk Custom URL)
+## Pengaturan provider langsung (Base URL + API key)
 
-`Gateway >` hanya menampilkan `[0] Label` tanpa URL (minimalis, tanpa bocor endpoint).
+Tidak ada daftar provider terdaftar bawaan: baik wizard setup awal maupun `/provider` → `a` (Tambah) langsung meminta **Base URL** dan **API key** untuk gateway OpenAI-compatible atau Anthropic mana pun.
 
-| id | Label | Catatan |
-|---|---|---|
-| `openai` | OpenAI | gpt, o-series |
-| `anthropic` | Anthropic | Claude, streaming `tool_use` |
-| `openrouter` | OpenRouter | Gateway 75+ model |
-| `deepseek` | DeepSeek | chat/reasoner |
-| `opencode-zen` | OpenCode Zen | Gateway |
-| `google` | Google Gemini | Konteks 1M, `thought_signature` pass-through |
-| `ollama` | Ollama | Lokal, gratis, tanpa key |
-| `qwen` | Qwen | Alibaba Qwen3-Coder (satu-satunya dengan spec OAuth terdaftar) |
-| `groq` | Groq | Inferensi cepat |
-| `together` | Together AI | Model terbuka |
-| `fireworks` | Fireworks AI | — |
-| `mistral` | Mistral AI | — |
-| `cohere` | Cohere | — |
-| `generic` | OpenAI-compatible umum | vLLM / LM Studio |
-| `custom` | Custom URL | Pseudo-preset untuk baseUrl sendiri |
-
-Alur: wizard & `/provider` (add `[0] OpenAI` … `[14] Custom URL`) → API key ter-masking → auto-detect models via `GET /models` timeout 4 dtk → provider otomatis pindah saat pilih model beda provider (tanpa restart, via `reloadProviders()` setelah `Gateway >2`).
+Alur: wizard / `/provider` → isi `Base URL` & `API key` (ter-masking) → auto-detect models via `GET /models` timeout 4 dtk → provider otomatis pindah saat pilih model beda provider (tanpa restart, via `reloadProviders()`).
 
 ## Dua jalur autentikasi
 

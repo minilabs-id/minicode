@@ -24,6 +24,7 @@
 import { type Dirent, readdirSync, readFileSync } from "node:fs"
 import { join as joinPath, relative as relativePath, resolve as resolvePath } from "node:path"
 import { expandMentions } from "../src/app/mentions.ts"
+import { writeNativeClipboard } from "../src/lib/clipboard.ts"
 import { budgetStatus } from "../src/policy/usage.ts"
 import {
   describeActivity,
@@ -46,13 +47,16 @@ import {
 import type { UiBus } from "../src/ui/contract.ts"
 import { t } from "../src/ui/i18n/locale.ts"
 import { loadHistory } from "../src/ui/input/input.ts"
+import { createDecoderState, createKeyStreamPump } from "../src/ui/input/prompt-engine.ts"
 import { renderLogoRows } from "../src/ui/render/logo.ts"
 import { formatUsd } from "../src/ui/render/money.ts"
 import { sanitizeAnsiLine, stripSgr } from "../src/ui/render/sanitize.ts"
 import { c, glyphs } from "../src/ui/render/theme.ts"
 import { tSystem } from "../src/ui/render/tool-label.ts"
-import { canRenderModal, dialogBox, popupBoxWidth } from "../src/ui/screens/dialog.ts"
+import { truncateToWidth } from "../src/ui/render/width.ts"
+import { canRenderModal, dialogBox } from "../src/ui/screens/dialog.ts"
 import { runOutputWindow } from "../src/ui/screens/output-window.ts"
+import { windowWidth } from "../src/ui/screens/window.ts"
 // [Area A · PROMPT 06] State UI milik SESI ini. TUI + printer linier sesi yang
 // sama berbagi state (satu instance), sesi lain di proses yang sama tak
 // tersentuh. Absen = instance default (fixture tes partial).
@@ -850,9 +854,53 @@ export interface TuiUpdateDeps {
   writeStatusLine: (line: string) => void
   runUpdate: (opts: {
     onPhase?: (phase: "check" | "install" | "verify", latest?: string) => unknown
+    signal?: AbortSignal
   }) => Promise<ManualUpdateOutcome>
   respawn: (latest: string) => Promise<number | null>
   exit: (code: number) => never
+}
+
+/**
+ * Pasang listener stdin sementara selama kotak progres jaringan (`/provider sync`,
+ * `/update`) terbuka agar Esc / Ctrl+C / Ctrl+D langsung membatalkan request.
+ */
+function attachProgressCancel(ac: AbortController): () => void {
+  let detached = false
+  const pump = createKeyStreamPump({
+    state: createDecoderState(),
+    onKeys: (keys) => {
+      for (const d of keys) {
+        if (d.key.type === "esc" || d.key.type === "ctrl-c" || d.key.type === "ctrl-d") {
+          ac.abort()
+          return true
+        }
+      }
+      return false
+    },
+  })
+  const onData = (chunk: Buffer) => {
+    try {
+      pump.push(new Uint8Array(chunk))
+    } catch {}
+  }
+  try {
+    process.stdin.setRawMode(true)
+    process.stdin.resume()
+    process.stdin.on("data", onData)
+  } catch {}
+  return () => {
+    if (detached) return
+    detached = true
+    try {
+      pump.dispose()
+    } catch {}
+    try {
+      process.stdin.removeListener("data", onData)
+    } catch {}
+    try {
+      process.stdin.setRawMode(false)
+    } catch {}
+  }
 }
 
 /**
@@ -860,12 +908,15 @@ export interface TuiUpdateDeps {
  * progres tampil hidup; alt-screen hanya dilepas saat `install` benar-benar
  * dimulai, dan sesi induk ditutup (`closeSession`) sebelum child di-spawn.
  */
-export function createTuiUpdateHandler(deps: TuiUpdateDeps): () => Promise<ManualUpdateOutcome> {
-  return async () => {
+export function createTuiUpdateHandler(
+  deps: TuiUpdateDeps,
+): (signal?: AbortSignal) => Promise<ManualUpdateOutcome> {
+  return async (signal?: AbortSignal) => {
     let released = false
     let result: ManualUpdateOutcome
     try {
       result = await deps.runUpdate({
+        signal,
         onPhase: (phase, latest) => {
           if (phase === "install" && !released) {
             released = true
@@ -879,7 +930,11 @@ export function createTuiUpdateHandler(deps: TuiUpdateDeps): () => Promise<Manua
         },
       })
     } catch (error) {
-      result = { ok: false, reason: error instanceof Error ? error.message : String(error) }
+      if (signal?.aborted || (error as { name?: string })?.name === "AbortError") {
+        result = { ok: false, aborted: true, step: "check" }
+      } else {
+        result = { ok: false, reason: error instanceof Error ? error.message : String(error) }
+      }
     }
     if (result.ok && result.latest) {
       // Tutup writer lease, SQLite WAL, scheduler, dan MCP/LSP sebelum child lahir
@@ -962,6 +1017,11 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
     ui.setMinimizeActivity(true)
   let warned80 = false
   let abort: AbortController | null = null
+  // Menutup seluruh siklus runTurn (termasuk kuras queuedCommands) agar auto-resume
+  // background atau @mention async tidak membuka runTurn re-entrant maupun
+  // meninggalkan prompt nyangkut di queuedPrompts.
+  let turnLoopActive = false
+  let turnGen = 0
   // Abort membatalkan NIAT: sampai user benar-benar mengirim prompt BARU,
   // jalur antrean (steering fallback) harus menolak baris. Tanpa ini, Enter
   // yang masuk di celah antara unwind abort dan submit berikutnya mengisi
@@ -1003,12 +1063,15 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
   const workspaceFiles = (): string[] => {
     const root = resolvePath(cwd ?? process.cwd())
     const now = Date.now()
-    if (mentionCache && mentionCache.root === root && now - mentionCache.at < 5000) {
+    if (mentionCache && mentionCache.root === root && now - mentionCache.at < 15_000) {
       return mentionCache.files
     }
     const collected: string[] = []
+    let visitedDirs = 0
+    const MAX_MENTION_DIRS = 500
     const walk = (dir: string, depth: number): void => {
-      if (depth > 6 || collected.length >= 1500) return
+      if (depth > 6 || collected.length >= 1500 || visitedDirs >= MAX_MENTION_DIRS) return
+      visitedDirs++
       let entries: Dirent[]
       try {
         entries = readdirSync(dir, { withFileTypes: true })
@@ -1016,7 +1079,7 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
         return
       }
       for (const entry of entries) {
-        if (collected.length >= 1500) break
+        if (collected.length >= 1500 || visitedDirs >= MAX_MENTION_DIRS) break
         if (entry.isDirectory()) {
           if (!MENTION_SKIP_DIRS.has(entry.name) && !entry.name.startsWith(".")) {
             walk(joinPath(dir, entry.name), depth + 1)
@@ -1231,12 +1294,17 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
     },
     // /update — cek versi di TUI (modal tetap tampil), baru lepas terminal
     // saat install dimulai, dan tutup sesi sebelum spawn ulang.
-    withUpdate: async () => {
+    withUpdate: async (signal) => {
       const { runManualUpdate } = await import("../src/policy/update-check.ts")
       const { waitChildExit, writeUpdateStatusLine } = await import("./auto-update.ts")
       const { spawn } = await import("node:child_process")
       return createTuiUpdateHandler({
-        releaseTerminal: () => app.releaseTerminal(),
+        releaseTerminal: () => {
+          // Lepas listener Esc progres sebelum menyerahkan terminal ke proses npm.
+          detachUpdateCancel?.()
+          detachUpdateCancel = null
+          app.releaseTerminal()
+        },
         reacquireTerminal: () => app.reacquireTerminal(),
         requestQuit: () => app.requestQuit(),
         resumeStdin: () => {
@@ -1254,7 +1322,7 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
           return waitChildExit(child)
         },
         exit: (code) => process.exit(code),
-      })()
+      })(signal)
     },
     getContextTokens: () => session.contextTokens,
     budgetState: () => {
@@ -1365,16 +1433,20 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
     }
   }
 
+  let detachUpdateCancel: (() => void) | null = null
+
   async function runBuiltin(
     q: string,
     recordOutput = true,
+    signal?: AbortSignal,
   ): Promise<{ lines: string[]; shouldExit: boolean; handled: boolean }> {
     let shouldExit = false
     let handled = false
     let lines: string[] = []
+    const ctxForRun = signal ? { ...commandCtx, signal } : commandCtx
     try {
       lines = await captureConsole(async () => {
-        const r = await handleBuiltinCommand(q, commandCtx)
+        const r = await handleBuiltinCommand(q, ctxForRun)
         shouldExit = !!r.shouldExit
         handled = r.handled
       })
@@ -1430,6 +1502,18 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
   }
 
   /**
+   * Salin teks: utamakan clipboard OS native (tanpa batas 256 KB di sesi lokal)
+   * dan tetap pancarkan OSC-52 selama ukuran dalam batas agar terminal remote /
+   * integrator yang menangkap OSC-52 ikut menerima.
+   */
+  const copyToClipboard = (text: string): boolean => {
+    const nativeOk = writeNativeClipboard(text)
+    const oscOk =
+      clipboardByteLength(text) <= MAX_CLIPBOARD_BYTES ? writeClipboardOsc52(text) : false
+    return nativeOk || oscOk
+  }
+
+  /**
    * Output command readout tampil sebagai JENDELA di atas chat, bukan dicetak
    * ke transkrip. Bila layar tak mampu, fallback ke transkrip agar data tidak
    * hilang. App dibekukan selama jendela hidup (pola popupBuiltin).
@@ -1442,7 +1526,7 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
       opened = await runOutputWindow({
         title,
         lines,
-        onCopy: (text) => writeClipboardOsc52(text),
+        onCopy: (text) => copyToClipboard(text),
       })
     } catch {
       opened = false
@@ -1504,6 +1588,7 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
     // (steering mati selamanya) dan childRecapPromptPending=true (turn user sah
     // berikutnya salah terflag sebagai turn recap).
     const { isChildRecapTurn } = turnState.beginTurn()
+    const myGen = ++turnGen
     // v7.41 (audit F1): catatan gema steered milik turn lama tak boleh ikut
     // dihitung sebagai "dibuang" saat turn ini di-abort.
     steeredEchoes.length = 0
@@ -1521,6 +1606,12 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
     let finalPrompt = prompt
     if (prompt.includes("@")) {
       const expanded = await expandMentions(prompt, cwd ?? process.cwd())
+      // Pengguna menekan Esc selama ekspansi @mention asinkron → batalkan
+      // sebelum menyalakan turn agar tidak muncul turn hantu.
+      if (turnState.abortRequested || myGen !== turnGen) {
+        app.showToast(t("tui.stopped"))
+        return
+      }
       finalPrompt = expanded.prompt
       if (expanded.notes.length)
         transcript.pushInfo(expanded.notes.map((n) => c.muted(`  [@mention] ${n}`)))
@@ -1608,13 +1699,18 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
       }
 
       const u = usage.get(modelRef.current)
-      await persistCurrent(u)
-      // P2.2: histori yang tak durable = error transkrip eksplisit (bukan diam).
-      // Detail teknis (epoch/bootId/catatan) tetap di jurnal & log; layar hanya
-      // pesan pendek bahasa sistem — bukan prefix teknis yang tak berarti
-      // bagi user. Lihat test/tui-lang.test.ts (P03-B).
-      if (ctx.isWriterStale()) transcript.pushError(tSystem("msg.staleWriter"))
-      usage.reset()
+      try {
+        await persistCurrent(u)
+        // P2.2: histori yang tak durable = error transkrip eksplisit (bukan diam).
+        // Detail teknis (epoch/bootId/catatan) tetap di jurnal & log; layar hanya
+        // pesan pendek bahasa sistem — bukan prefix teknis yang tak berarti
+        // bagi user. Lihat test/tui-lang.test.ts (P03-B).
+        if (ctx.isWriterStale()) transcript.pushError(tSystem("msg.staleWriter"))
+      } finally {
+        // Reset usage per-turn bahkan bila persistCurrent melempar agar angka
+        // turn gagal tidak bocor ke turn berikutnya.
+        usage.reset()
+      }
       const sess = usage.getSession(modelRef.current)
       if (
         budget != null &&
@@ -1699,38 +1795,54 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
    * ditunda mengembalikan `{ quit: true }`).
    */
   async function runTurn(prompt: string): Promise<{ quit?: boolean } | undefined> {
-    let next: string | undefined = prompt
-    while (next !== undefined) {
-      await runTurnOnce(next)
-      const item = queuedPrompts.shift()
-      // v7.41 (audit F1): gema baris user TEPAT saat baris diambil untuk
-      // dijalankan. Bila dibuang saat abort, ia tak pernah sampai ke sini dan
-      // karenanya tak pernah tampil sebagai prompt hantu di transkrip.
-      if (item?.needsEcho) transcript.pushUser(item.echoText ?? item.text, app.getChatWidth())
-      next = item?.text
-    }
-    // Hanya siklus terluar yang menguras command; pemanggilan runTurn bersarang
-    // (skill / auto-resume) membiarkan antrean utuh untuk diproses di sini.
-    if (drainingDeferredCommands) return undefined
-    drainingDeferredCommands = true
+    const isOuterTurn = !turnLoopActive
+    if (isOuterTurn) turnLoopActive = true
     try {
-      let n = 0
-      while (queuedCommands.length > 0 && n < MAX_DEFERRED_COMMANDS_PER_CYCLE) {
-        const cmd = queuedCommands.shift()!
-        n++
-        const res = await submit(cmd)
-        if (res?.quit) return res
+      let next: string | undefined = prompt
+      while (next !== undefined) {
+        try {
+          await runTurnOnce(next)
+        } catch (err) {
+          // Kegagalan non-abort memutus rantai turn: jangan biarkan antrean
+          // pesan/command tertinggal diam-diam sampai turn jauh berikutnya.
+          const droppedPrompts = queuedPrompts.splice(0).filter((q) => q.needsEcho).length
+          const droppedCommands = queuedCommands.splice(0).length
+          const dropped = droppedPrompts + droppedCommands
+          if (dropped > 0) app.showToast(t("tui.queueDropped", { n: String(dropped) }))
+          throw err
+        }
+        const item = queuedPrompts.shift()
+        // v7.41 (audit F1): gema baris user TEPAT saat baris diambil untuk
+        // dijalankan. Bila dibuang saat abort, ia tak pernah sampai ke sini dan
+        // karenanya tak pernah tampil sebagai prompt hantu di transkrip.
+        if (item?.needsEcho) transcript.pushUser(item.echoText ?? item.text, app.getChatWidth())
+        next = item?.text
       }
-      // Batas tercapai tapi antrean masih ada → buang sisa dengan kwitansi;
-      // jangan biarkan command "nyangkut" tak tersampaikan diam-diam.
-      if (queuedCommands.length) {
-        const dropped = queuedCommands.splice(0).length
-        app.showToast(t("tui.queueDropped", { n: String(dropped) }))
+      // Hanya siklus terluar yang menguras command; pemanggilan runTurn bersarang
+      // (skill / auto-resume) membiarkan antrean utuh untuk diproses di sini.
+      if (drainingDeferredCommands) return undefined
+      drainingDeferredCommands = true
+      try {
+        let n = 0
+        while (queuedCommands.length > 0 && n < MAX_DEFERRED_COMMANDS_PER_CYCLE) {
+          const cmd = queuedCommands.shift()!
+          n++
+          const res = await submit(cmd)
+          if (res?.quit) return res
+        }
+        // Batas tercapai tapi antrean masih ada → buang sisa dengan kwitansi;
+        // jangan biarkan command "nyangkut" tak tersampaikan diam-diam.
+        if (queuedCommands.length) {
+          const dropped = queuedCommands.splice(0).length
+          app.showToast(t("tui.queueDropped", { n: String(dropped) }))
+        }
+      } finally {
+        drainingDeferredCommands = false
       }
+      return undefined
     } finally {
-      drainingDeferredCommands = false
+      if (isOuterTurn) turnLoopActive = false
     }
-    return undefined
   }
 
   /**
@@ -1776,14 +1888,17 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
       app.showToast(t("tui.copyNone"))
       return
     }
-    // Guard byte SEBELUM base64: 10 turn panjang bisa melewati batas OSC 52;
-    // memberi pesan spesifik lebih baik daripada gagal "butuh TTY" yang keliru.
+    // Coba clipboard OS native dulu (tidak terikat batas 256 KB OSC-52 di
+    // terminal lokal). Jika gagal/remote/test dan payload melewati batas OSC-52,
+    // laporkan pesan spesifik "terlalu besar".
     const bytes = clipboardByteLength(txt)
-    if (bytes > MAX_CLIPBOARD_BYTES) {
+    const nativeOk = writeNativeClipboard(txt)
+    if (!nativeOk && bytes > MAX_CLIPBOARD_BYTES) {
       app.showToast(t("tui.copyTooLarge", { n: bytes, max: MAX_CLIPBOARD_BYTES }))
       return
     }
-    if (writeClipboardOsc52(txt)) {
+    const oscOk = bytes <= MAX_CLIPBOARD_BYTES ? writeClipboardOsc52(txt) : false
+    if (nativeOk || oscOk) {
       const key = turns.length > 1 ? "tui.copyOkMany" : "tui.copyOk"
       app.showToast(t(key, { n: txt.length, turns: turns.length }))
     } else app.showToast(t("tui.copyNeedTty"))
@@ -2008,12 +2123,20 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
       const paintSyncProgress = () => {
         const cols = process.stdout.columns || 80
         const rows = process.stdout.rows || 24
-        if (!canRenderModal(cols, rows)) return
-        const w = popupBoxWidth(cols)
+        if (!canRenderModal(cols, rows)) {
+          app.paintRegion(
+            [c.warning(truncateToWidth(tSystem("msg.tooSmall"), Math.max(1, cols - 2)))],
+            Math.max(1, Math.floor(rows / 2)),
+          )
+          app.setCursorVisible(false)
+          return
+        }
+        const w = windowWidth(cols)
         const box = dialogBox(
           {
             title: t("out.titleSync"),
             body: [c.muted(t("cmd.syncing"))],
+            escHint: true,
             minWidth: w,
             maxWidth: w,
           },
@@ -2023,25 +2146,54 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
         app.paintRegion(box.lines, box.topRow)
         app.setCursorVisible(false)
       }
+      const ac = new AbortController()
       const onResize = () => paintSyncProgress()
       process.stdout.on("resize", onResize)
+      let detachCancel: (() => void) | null = null
       let syncLines: string[] = []
       try {
         paintSyncProgress()
-        ;({ lines: syncLines } = await runBuiltin("/provider sync"))
+        detachCancel = attachProgressCancel(ac)
+        const syncP = runBuiltin("/provider sync", true, ac.signal)
+        syncP.catch(() => {})
+        const res = await new Promise<{ lines: string[] } | null>((resolve, reject) => {
+          const onAbort = () => resolve(null)
+          if (ac.signal.aborted) {
+            onAbort()
+            return
+          }
+          ac.signal.addEventListener("abort", onAbort, { once: true })
+          syncP.then(
+            (v) => {
+              ac.signal.removeEventListener("abort", onAbort)
+              resolve(v)
+            },
+            (err) => {
+              ac.signal.removeEventListener("abort", onAbort)
+              reject(err)
+            },
+          )
+        })
+        detachCancel()
+        detachCancel = null
         process.stdout.removeListener("resize", onResize)
         app.clearRegion()
-        const nonBlank = syncLines.filter((l) => l.trim().length > 0)
-        const out =
-          nonBlank.length > 1 && nonBlank[0]?.trim() === t("cmd.syncing")
-            ? nonBlank.slice(1)
-            : syncLines
-        if (out.length) await showCommandOutput(t("out.titleSync"), out)
+        if (res && !ac.signal.aborted) {
+          syncLines = res.lines
+          const nonBlank = syncLines.filter((l) => l.trim().length > 0)
+          const out =
+            nonBlank.length > 1 && nonBlank[0]?.trim() === t("cmd.syncing")
+              ? nonBlank.slice(1)
+              : syncLines
+          if (out.length) await showCommandOutput(t("out.titleSync"), out)
+        }
       } finally {
+        detachCancel?.()
         process.stdout.removeListener("resize", onResize)
         app.clearRegion()
         app.resume()
       }
+      if (ac.signal.aborted) app.showToast(t("cmd.syncCanceled"))
       return
     }
     if (name === "update") {
@@ -2049,15 +2201,25 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
       // kotak Layer 2 selama cek versi async berjalan. Terminal baru dilepas
       // bila fase berpindah ke install npm, lalu hasil ditampilkan di jendela output.
       app.suspend()
+      let currentUpdateLabel = tSystem("cmd.updateChecking")
       const paintUpdateProgress = (label: string): void => {
+        currentUpdateLabel = label
         const cols = process.stdout.columns || 80
         const rows = process.stdout.rows || 24
-        if (!canRenderModal(cols, rows)) return
-        const w = popupBoxWidth(cols)
+        if (!canRenderModal(cols, rows)) {
+          app.paintRegion(
+            [c.warning(truncateToWidth(tSystem("msg.tooSmall"), Math.max(1, cols - 2)))],
+            Math.max(1, Math.floor(rows / 2)),
+          )
+          app.setCursorVisible(false)
+          return
+        }
+        const w = windowWidth(cols)
         const box = dialogBox(
           {
-            title: tSystem("out.titleUpdate"),
+            title: t("out.titleUpdate"),
             body: [c.muted(label)],
+            escHint: true,
             minWidth: w,
             maxWidth: w,
           },
@@ -2067,22 +2229,50 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
         app.paintRegion(box.lines, box.topRow)
         app.setCursorVisible(false)
       }
-      const onResize = () => paintUpdateProgress(tSystem("cmd.updateChecking"))
+      const ac = new AbortController()
+      const onResize = () => paintUpdateProgress(currentUpdateLabel)
       process.stdout.on("resize", onResize)
       try {
-        paintUpdateProgress(tSystem("cmd.updateChecking"))
+        paintUpdateProgress(currentUpdateLabel)
+        detachUpdateCancel = attachProgressCancel(ac)
         // runBuiltin → handleBuiltinCommand → withUpdate (release + install,
         // restart + exit di jalur sukses; reacquire di jalur gagal).
-        const { lines } = await runBuiltin("/update")
+        const updateP = runBuiltin("/update", true, ac.signal)
+        updateP.catch(() => {})
+        const res = await new Promise<{ lines: string[] } | null>((resolve, reject) => {
+          const onAbort = () => resolve(null)
+          if (ac.signal.aborted) {
+            onAbort()
+            return
+          }
+          ac.signal.addEventListener("abort", onAbort, { once: true })
+          updateP.then(
+            (v) => {
+              ac.signal.removeEventListener("abort", onAbort)
+              resolve(v)
+            },
+            (err) => {
+              ac.signal.removeEventListener("abort", onAbort)
+              reject(err)
+            },
+          )
+        })
+        detachUpdateCancel?.()
+        detachUpdateCancel = null
         process.stdout.removeListener("resize", onResize)
         app.clearRegion()
-        const out = lines.filter((l) => l.trim().length > 0)
-        if (out.length) await showCommandOutput(t("out.titleUpdate"), out)
+        if (res && !ac.signal.aborted) {
+          const out = res.lines.filter((l) => l.trim().length > 0)
+          if (out.length) await showCommandOutput(t("out.titleUpdate"), out)
+        }
       } finally {
+        detachUpdateCancel?.()
+        detachUpdateCancel = null
         process.stdout.removeListener("resize", onResize)
         app.clearRegion()
         app.resume()
       }
+      if (ac.signal.aborted) app.showToast(t("cmd.updateCanceled"))
       return
     }
     const { lines, shouldExit, handled } = await runBuiltin(line)
@@ -2226,9 +2416,11 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
       if (line.includes("@") && ctx.session.steer) {
         // Ekspansi `@mention` asinkron sebelum menyuntik steer (atau antre bila
         // turn berakhir lebih dulu), lalu gema placeholder ke transkrip.
+        const gen = turnGen
         void expandMentions(line, cwd ?? process.cwd())
           .then((expanded) => {
-            if (turnState.abortRequested) return
+            // Buang bila turn dibatalkan atau sudah berpindah ke generasi baru.
+            if (turnState.abortRequested || gen !== turnGen) return
             if (expanded.notes.length) {
               transcript.pushInfo(expanded.notes.map((n) => c.muted(`  [@mention] ${n}`)))
             }
@@ -2236,6 +2428,28 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
               transcript.pushUser(echo, chatW)
               if (steeredEchoes.length < 8) steeredEchoes.push(echo)
               app.repaint()
+              return
+            }
+            if (turnLoopActive || abort !== null) {
+              queuedPrompts.push({ text: expanded.prompt, echoText: echo, needsEcho: true })
+              app.showToast(t("tui.queued", { n: String(queuedPrompts.length) }))
+              return
+            }
+            // Turn sebelumnya sudah selesai saat @mention masih diproses dan TUI
+            // kini idle: mulai turn baru langsung agar pesan tidak nyangkut di antrean.
+            if (!app.isSuspended()) {
+              disarmAbortQuitIfAvailable(app)
+              transcript.pushUser(echo, app.getChatWidth())
+              app.repaint()
+              void runTurn(expanded.prompt)
+                .then((res) => {
+                  if (res?.quit) app.requestQuit()
+                })
+                .catch((err) => {
+                  const msg = err instanceof Error ? err.message : String(err)
+                  transcript.pushError(sanitizeAnsiLine(msg))
+                  app.repaint()
+                })
               return
             }
             queuedPrompts.push({ text: expanded.prompt, echoText: echo, needsEcho: true })
@@ -2263,7 +2477,7 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
       app.showToast(t("tui.queued", { n: String(queuedPrompts.length) }))
       return true
     },
-    copySelection: (text) => writeClipboardOsc52(text),
+    copySelection: (text) => copyToClipboard(text),
     abort: () => {
       turnState.markAbortRequested()
       contextTokens.invalidate()
@@ -2332,10 +2546,10 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
     try {
       if (resumedJobs.has(id)) return
       // Audit #1/#3 + batch 3 #2: satu guard idle untuk notifikasi DAN auto-
-      // resume. `abort` non-null sampai seluruh runTurnOnce selesai; `app.busy`
-      // menutup jendela @-mention (expandMentions di-await sebelum abort=ctrl).
+      // resume. `abort` non-null sampai seluruh runTurnOnce selesai, `turnLoopActive`
+      // menutup kuras queuedCommands, dan `app.busy` menutup jendela @-mention.
       const idle = isTurnIdleForBackground({
-        abortActive: abort !== null,
+        abortActive: abort !== null || turnLoopActive,
         suspended: app.isSuspended(),
         busy: isAppBusy(app),
       })

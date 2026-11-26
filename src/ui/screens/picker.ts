@@ -9,9 +9,10 @@ import {
   toGraphemes,
 } from "../input/prompt-engine.ts"
 import type { HintItem } from "../render/hint.ts"
-import { listRow, tailFilterWindow } from "../render/list.ts"
+import { highlightMatch, listRow, tailFilterWindow } from "../render/list.ts"
 import { cleanUntrusted, sanitizeAnsiLine } from "../render/sanitize.ts"
 import { c, glyphs, stripAnsi } from "../render/theme.ts"
+import { tSystem } from "../render/tool-label.ts"
 import { displayWidth, truncateToWidth } from "../render/width.ts"
 import { type AltScreen, openAltScreen } from "../runtime/screen.ts"
 import { boxLeftPad, canRenderModal, dialogBox } from "./dialog.ts"
@@ -50,17 +51,7 @@ const dim = (s: string): string => c.dim(s)
 // Tandai substring query di label agar user tahu KENAPA item cocok.
 // Pakai warna foreground saja (bukan bold \x1b[22m) agar atribut bold/dim dari
 // pemanggil tidak padam untuk sisa teks setelah bagian yang cocok.
-function highlightMatch(label: string, query: string, selected: boolean): string {
-  const paintBase = (s: string): string => (selected ? c.accent(c.bold(s)) : c.dim(s))
-  const paintHit = (s: string): string => (selected ? c.brightCyan(c.bold(s)) : c.dim(c.info(s)))
-  const idx = query ? label.toLowerCase().indexOf(query.toLowerCase()) : -1
-  const prefix = selected ? `  ${c.accent(glyphs.arrow)} ` : "    "
-  if (idx < 0) return `${prefix}${paintBase(label)}`
-  const before = label.slice(0, idx)
-  const hit = label.slice(idx, idx + query.length)
-  const after = label.slice(idx + query.length)
-  return `${prefix}${before ? paintBase(before) : ""}${paintHit(hit)}${after ? paintBase(after) : ""}`
-}
+/** Sorotan query di dalam baris daftar: memakai helper aman-grapheme di render/list.ts. */
 
 export async function runPicker(opts: PickerOptions): Promise<void> {
   if (!process.stdin.isTTY) {
@@ -94,7 +85,7 @@ export async function runPicker(opts: PickerOptions): Promise<void> {
     // Footer seragam dari windowFooter (nav/pilih/tutup). Aksi khusus picker
     // filterable cukup jadi extraHints — bukan hint ad-hoc di dalam body.
     const baseExtraHints: readonly HintItem[] = isFilterable
-      ? [{ key: glyphs.caret, label: t("hint.edit") }]
+      ? [{ key: t("hint.type"), label: t("hint.filter") }]
       : []
     // Lebar dinamis terhadap terminal saat render/resize (tetap stabil saat filter).
     const boxWidth = () => windowWidth(screen.cols || 80)
@@ -114,11 +105,9 @@ export async function runPicker(opts: PickerOptions): Promise<void> {
     // label 55 kolom tetap digambar, dan pada rows=3 overlay 6 baris tetap
     // dicetak — keduanya membungkus dan merusak tampilan.
     const visibleRows = () => {
-      const rows = process.stdout.rows || 24
-      // Jalur overlay inline sudah dihapus: satu-satunya tampilan adalah modal.
-      // Judul selalu ada (format seragam) → chrome = border + judul + baris
-      // pencarian (bila ada) + footer hint.
-      const chrome = (isFilterable ? 4 : 3) + 1
+      const rows = screen.rows || 24
+      // Chrome = 2 border + judul + (baris cari?) + jeda footer + footer.
+      const chrome = (isFilterable ? 5 : 4) + 1
       return Math.max(1, Math.min(rows - chrome, 12))
     }
     // Lebar konten = lebar kotak (dibekukan saat mount) dikurangi chrome dialog
@@ -127,7 +116,7 @@ export async function runPicker(opts: PickerOptions): Promise<void> {
 
     // Isi untuk dialog popup (hint dipasung di `spec.footer` agar tak pernah
     // ikut terpotong clipping dialogBox saat terminal menyusut).
-    const bodyLines = (): { lines: string[]; filterShown: string } => {
+    const bodyLines = (): { lines: string[]; filterShown: string; viewTitle: string } => {
       const items = filteredItems()
       const v = visibleRows()
       if (sel >= items.length) sel = Math.max(0, items.length - 1)
@@ -136,6 +125,10 @@ export async function runPicker(opts: PickerOptions): Promise<void> {
       if (sel >= scroll + v) scroll = sel - v + 1
       if (items.length === 0) scroll = 0
       const rows = items.slice(scroll, scroll + v)
+      const viewTitle =
+        items.length > v
+          ? `${title} (${scroll + 1}-${scroll + rows.length}/${items.length})`
+          : title
       const w = width()
       const cut = (s: string) => truncateToWidth(s, w)
       const lines: string[] = []
@@ -154,7 +147,7 @@ export async function runPicker(opts: PickerOptions): Promise<void> {
       }
       if (items.length === 0) {
         lines.push(cut(dim(`  ${t("pick.noMatch", { q: sanitizeAnsiLine(filter) })}`)))
-        return { lines, filterShown }
+        return { lines, filterShown, viewTitle }
       }
       for (let i = 0; i < rows.length; i++) {
         const it = rows[i]!
@@ -172,11 +165,21 @@ export async function runPicker(opts: PickerOptions): Promise<void> {
         const truncated = truncateToWidth(rawLabel, Math.max(4, w - 4), glyphs.ellipsis)
         lines.push(filter ? highlightMatch(truncated, filter, picked) : listRow(truncated, picked))
       }
-      return { lines, filterShown }
+      return { lines, filterShown, viewTitle }
     }
 
     const render = () => {
-      const { lines, filterShown } = bodyLines()
+      const cols = screen.cols || 80
+      const rows = screen.rows || 24
+      if (!canRenderModal(cols, rows)) {
+        screen.paintRegion(
+          [c.warning(truncateToWidth(tSystem("msg.tooSmall"), Math.max(1, cols - 2)))],
+          Math.max(1, Math.floor(rows / 2)),
+        )
+        screen.setCursorVisible(false)
+        return
+      }
+      const { lines, filterShown, viewTitle } = bodyLines()
       const extraHints: readonly HintItem[] = [
         ...(idleWarned
           ? [{ key: "!", label: t("form.idleWarning", { s: Math.ceil(IDLE_CANCEL_MS / 1000) }) }]
@@ -189,7 +192,7 @@ export async function runPicker(opts: PickerOptions): Promise<void> {
       // picker tak lagi menghitung minWidth/maxWidth/maxHeight sendiri.
       const box = dialogBox(
         windowSpec({
-          title,
+          title: viewTitle,
           body: lines,
           cols: screen.cols || 80,
           rows: screen.rows || 24,
@@ -279,6 +282,11 @@ export async function runPicker(opts: PickerOptions): Promise<void> {
       idle.dispose()
       // Hapus region popup sendiri; pemilik layar (App.resume) repaint penuh,
       // standalone membuang alt-buffer + memulihkan kursor via close().
+      if (ownScreen || isFilterable) {
+        try {
+          screen.setBracketedPaste?.(false)
+        } catch {}
+      }
       try {
         screen.clearRegion()
       } catch {}
@@ -301,7 +309,17 @@ export async function runPicker(opts: PickerOptions): Promise<void> {
     // Jalur tunggal key (sinkron + flush lone-ESC 50ms via pump): panah split
     // tak lagi jadi esc (filter terhapus + picker tertutup). True = selesai.
     const handlePickerKeys = (keys: DecodedKey[]): boolean => {
+      const usable = canRenderModal(screen.cols || 80, screen.rows || 24)
       for (const d of keys) {
+        if (!usable) {
+          if (d.key.type === "esc" || d.key.type === "ctrl-c" || d.key.type === "ctrl-d") {
+            cleanup()
+            opts.onCancel()
+            resolve()
+            return true
+          }
+          continue
+        }
         const items = filteredItems()
         switch (d.key.type) {
           case "up":
@@ -463,6 +481,7 @@ export async function runPicker(opts: PickerOptions): Promise<void> {
       process.stdin.setRawMode(true)
       process.stdin.resume()
       process.stdin.setMaxListeners(0)
+      if (ownScreen || isFilterable) screen.setBracketedPaste?.(true)
       process.stdin.on("data", onData)
       process.stdout.on("resize", onResize)
       idle.reset()

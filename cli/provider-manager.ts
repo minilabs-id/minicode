@@ -3,7 +3,6 @@
 
 import { reloadProviders } from "../src/app/provider-layer.ts"
 import { loadConfig, type MinicodeConfig } from "../src/config.ts"
-import { GATEWAY_PRESETS } from "../src/providers/presets.ts"
 import { detectAndSave, removeProvider } from "../src/providers/provision.ts"
 import { t } from "../src/ui/i18n/locale.ts"
 import { formatError } from "../src/ui/render/errors.ts"
@@ -52,7 +51,6 @@ export async function runProviderManager(opts: {
     rowsFrom(await loadConfig(opts.cwd, { allowLocal: opts.allowLocalConfig }))
   await runProviderManagerView({
     initialRows: await loadViewState(),
-    presets: GATEWAY_PRESETS.map((p) => ({ id: p.id, label: p.label, baseUrl: p.baseUrl })),
     currentModel: activeModel,
     getCurrentModel: () => activeModel,
     askScope: !!opts.cwd,
@@ -63,15 +61,15 @@ export async function runProviderManager(opts: {
       }
     },
     loadRows: loadViewState,
-    onAdd: async ({ preset, baseUrl, apiKey, scope }): Promise<ProviderActionResult> => {
-      const full = preset ? GATEWAY_PRESETS.find((p) => p.id === preset.id) : undefined
-      const fallbackModels = full?.fallbackModels ?? ["gpt-4o-mini"]
+    onAdd: async ({ baseUrl, apiKey, scope }): Promise<ProviderActionResult> => {
+      const fallbackModels = baseUrl.includes("anthropic") ? ["claude-sonnet-4"] : ["gpt-4o-mini"]
       try {
-        const entry = await detectAndSave(baseUrl, apiKey, full?.id, {
+        const entry = await detectAndSave(baseUrl, apiKey, undefined, {
           global: scope === "global",
           cwd: opts.cwd,
           fallbackModels,
           allowLocal: opts.allowLocalConfig,
+          rejectUnreachable: true,
         })
         const warn = await reloadSuffix()
         return {
@@ -85,6 +83,14 @@ export async function runProviderManager(opts: {
       await removeProvider(row.id, { global: true })
       if (opts.cwd && opts.allowLocalConfig)
         await removeProvider(row.id, { global: false, cwd: opts.cwd })
+      // Bila provider yang dihapus sedang aktif, geser override ke model
+      // pertama yang masih tersisa (atau kosongkan) agar footer tak basi.
+      if (activeModel?.startsWith(`${row.id}::`)) {
+        const remaining = await loadViewState()
+        const nextRow = remaining.find((r) => r.firstModel)
+        activeModel = nextRow?.firstModel ? `${nextRow.id}::${nextRow.firstModel}` : ""
+        opts.setModelOverride?.(activeModel)
+      }
       const warn = await reloadSuffix()
       return { ok: `${t("prov.deleted", { id: row.id })}${warn}` }
     },

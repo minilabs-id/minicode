@@ -75,7 +75,9 @@ export interface CommandContext {
    * API TIDAK merestart proses; pemanggil yang spawn + process.exit.
    * Bentuk struktural supaya modul ini tak bergantung pada implementasi A.
    */
-  withUpdate?: () => Promise<ManualUpdateOutcome>
+  withUpdate?: (signal?: AbortSignal) => Promise<ManualUpdateOutcome>
+  /** Sinyal batal opsional (mis. tombol Esc pada modal progres `/provider sync` atau `/update`). */
+  signal?: AbortSignal
   /** Kontrak control-plane (Phase 6): angka konteks SAAT INI dari sumber
    * kebenaran kernel (estimateSessionContext) — bukan usage kumulatif.
    * Dibedakan dari Input/Output/Total (provider usage) di /status. */
@@ -120,6 +122,7 @@ export interface ManualUpdateOutcome {
   reason?: string
   optedOut?: boolean
   alreadyLatest?: boolean
+  aborted?: boolean
 }
 
 /**
@@ -774,7 +777,8 @@ export async function handleBuiltinCommand(
         return { handled: true }
       }
       try {
-        const result = await ctx.withUpdate()
+        const result = await ctx.withUpdate(ctx.signal)
+        if (result.aborted) return { handled: true }
         const lines: string[] = []
         if (result.optedOut) {
           lines.push(t("cmd.updateOptedOut"))
@@ -909,10 +913,20 @@ export async function handleBuiltinCommand(
       }
       // Opt-in lokal tetap mengawal endpoint repo saat sinkronisasi.
       console.log(`\n${t("cmd.syncing")}`)
-      const { updated, failed } = await refreshProviderModels({
-        cwd: ctx.cwd,
-        allowLocal: ctx.allowLocalConfig,
-      })
+      let updated: { id: string; from: number; to: number }[] = []
+      let failed: { id: string; reason: string }[] = []
+      try {
+        ;({ updated, failed } = await refreshProviderModels({
+          cwd: ctx.cwd,
+          allowLocal: ctx.allowLocalConfig,
+          signal: ctx.signal,
+        }))
+      } catch (error) {
+        if (ctx.signal?.aborted || (error as { name?: string })?.name === "AbortError") {
+          return { handled: true }
+        }
+        throw error
+      }
       if (!updated.length && !failed.length) {
         // Bedakan "belum ada provider" dari "ada tapi deteksi kosong" —
         // yang kedua jangan diklaim sebagai yang pertama.
@@ -998,9 +1012,10 @@ export async function handleBuiltinCommand(
             // Jendela command: judul konsisten dengan /model, /provider, dll.
             showTitle: true,
             items: rows.map((r) => ({
-              name: `${humanName(r.id, r.created_at)} · ${sanitizeAnsiLine(r.id)} · ${new Date(r.created_at).toLocaleString()} · ${r.cwd ? sanitizeAnsiLine(shortDir(r.cwd)) : "(cwd)"}`,
+              name: `${humanName(r.id, r.created_at)} · ${r.cwd ? sanitizeAnsiLine(shortDir(r.cwd)) : "(cwd)"} · ${sanitizeAnsiLine(r.id)} · ${new Date(r.created_at).toLocaleString()}`,
               provider: "",
               value: r.id,
+              category: "session",
             })),
             filterable: true,
             onPick: (id) => {

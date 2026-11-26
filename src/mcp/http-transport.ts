@@ -187,6 +187,7 @@ export class McpHttpTransport implements McpTransportLike {
       if (sid) this.sessionId = sid
 
       if (res.status >= 300 && res.status < 400) {
+        await res.body?.cancel().catch(() => {})
         throw new Error(`MCP http: redirect not followed (${res.status}) — check the server URL`)
       }
       if (!res.ok) {
@@ -306,10 +307,14 @@ export async function readSseResponse(
   const decoder = new TextDecoder()
   let buffer = ""
   let total = 0
+  let reachedEof = false
   try {
     while (true) {
       const { done, value } = await reader.read()
-      if (done) break
+      if (done) {
+        reachedEof = true
+        break
+      }
       total += value.byteLength
       if (total > LIMITS.MCP_HTTP_BODY_MAX_BYTES) {
         throw new Error("MCP http: aliran SSE melewati batas ukuran")
@@ -355,6 +360,9 @@ export async function readSseResponse(
     }
     return null
   } finally {
+    // Batalkan stream yang berhenti lebih awal (sudah ketemu id / overflow / error)
+    // agar soket HTTP keep-alive tidak bocor menggantung.
+    if (!reachedEof) await reader.cancel().catch(() => {})
     reader.releaseLock()
   }
 }
@@ -384,16 +392,21 @@ async function readCapped(res: Response): Promise<string> {
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
   let out = ""
+  let reachedEof = false
   try {
     while (true) {
       const { done, value } = await reader.read()
-      if (done) break
+      if (done) {
+        reachedEof = true
+        break
+      }
       out += decoder.decode(value, { stream: true })
       if (out.length > LIMITS.MCP_HTTP_BODY_MAX_BYTES) {
         throw new Error("MCP http: balasan melewati batas ukuran")
       }
     }
   } finally {
+    if (!reachedEof) await reader.cancel().catch(() => {})
     reader.releaseLock()
   }
   return out

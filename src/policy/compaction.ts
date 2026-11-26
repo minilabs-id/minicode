@@ -6,6 +6,7 @@ import type { Message } from "#minicore/core/types.ts"
 import { createOpenAICompatProvider } from "#minicore/providers/openai-compat.ts"
 import { LIMITS } from "../constants.ts"
 import { isPrivateHostWithDns } from "../lib/net.ts"
+import { withStreamGuards } from "../providers/guards.ts"
 import { validateCompactionSummary } from "./compaction-validate.ts"
 import { minicodeEstimator } from "./context.ts"
 import { outputReserveFor } from "./context-budget.ts"
@@ -1001,12 +1002,14 @@ export async function compactWithLlm(
   const provider =
     opts.provider ??
     (opts.apiKey
-      ? createOpenAICompatProvider({
-          baseUrl,
-          apiKey: opts.apiKey!,
-          models: [opts.model ?? "deepseek-chat"],
-          defaultModel: opts.model ?? "deepseek-chat",
-        })
+      ? withStreamGuards(
+          createOpenAICompatProvider({
+            baseUrl,
+            apiKey: opts.apiKey!,
+            models: [opts.model ?? "deepseek-chat"],
+            defaultModel: opts.model ?? "deepseek-chat",
+          }),
+        )
       : undefined)
   if (!provider) {
     if (noFallback) throw new Error("no provider for LLM compaction")
@@ -1020,7 +1023,7 @@ export async function compactWithLlm(
     if (m.role === "user") return `- user: ${head(contentToText(m.content), 250)}`
     if (m.role === "assistant") {
       const calls = (m.toolCalls ?? [])
-        .map((c) => `${c.name}(${head(JSON.stringify(c.args), 60)})`)
+        .map((c) => `${c.name}(${head(safeStringify(c.args ?? {}), 60)})`)
         .join(", ")
       return `- assistant${calls ? ` [${calls}]` : ""}: ${head(contentToText(m.content), 250)}`
     }
@@ -1145,40 +1148,76 @@ ${prefixText}
         },
         watch.signal,
       )
-      for await (const ev of stream) {
-        // Event SINTETIS (`minicode:attempt`) bukan byte provider — jangan reset
-        // first-byte watchdog, atau timer dibatalkan sebelum byte masuk.
-        const synthetic =
-          ev.type === "extension" && (ev.kind === "minicode:attempt" || ev.kind === "usage")
-        if (!synthetic) {
-          // Chunk konten nyata = provider masih hidup: reset ke idle antar-chunk.
-          armWatchdog(LIMITS.COMPACTION_LLM_IDLE_TIMEOUT_MS, "llm compaction idle timeout")
+      const iter = stream[Symbol.asyncIterator]()
+      let iterDone = false
+      const nextWithAbort = (): Promise<
+        IteratorResult<import("#minicore/core/provider.ts").ProviderEvent>
+      > => {
+        if (watch.signal.aborted) {
+          return Promise.reject(watch.signal.reason ?? new DOMException("aborted", "AbortError"))
         }
-        // Tangkap usage stream kompaksi agar belanja masuk budget.
-        if (ev.type === "text") {
-          // Ringkasan tersimpan membawa SUMMARY_HEADER; cadangkan ruangnya agar
-          // composeBoundedSummary tak memotong marker truncasi eksplisit stream.
-          const remaining = summaryBudgetChars - text.length
-          if (ev.text.length > remaining) {
-            // Respons kelebihan tetap lebih berguna dari dump mekanikal; simpan
-            // marker elision eksplisit di dalam pagu keras.
-            const contentBudget = Math.max(0, summaryBudgetChars - streamElision.length)
-            text = `${safeHead(text + ev.text, contentBudget)}${streamElision}`
+        return new Promise((resolve, reject) => {
+          const onAbort = () =>
+            reject(watch.signal.reason ?? new DOMException("aborted", "AbortError"))
+          watch.signal.addEventListener("abort", onAbort, { once: true })
+          iter.next().then(
+            (res) => {
+              watch.signal.removeEventListener("abort", onAbort)
+              resolve(res)
+            },
+            (err) => {
+              watch.signal.removeEventListener("abort", onAbort)
+              reject(err)
+            },
+          )
+        })
+      }
+      try {
+        while (true) {
+          const step = await nextWithAbort()
+          if (step.done) {
+            iterDone = true
             break
           }
-          text += ev.text
-        }
-        if (ev.type === "extension" && (ev as { kind?: string }).kind === "usage") {
-          const d = (ev as { data?: Record<string, unknown> }).data ?? {}
-          const num = (v: unknown): number | undefined =>
-            typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined
-          compactionUsage = {
-            inputTokens: num(d.inputTokens),
-            outputTokens: num(d.outputTokens),
-            totalTokens: num(d.totalTokens),
+          const ev = step.value
+          // Event SINTETIS (`minicode:attempt`) bukan byte provider — jangan reset
+          // first-byte watchdog, atau timer dibatalkan sebelum byte masuk.
+          const synthetic =
+            ev.type === "extension" && (ev.kind === "minicode:attempt" || ev.kind === "usage")
+          if (!synthetic) {
+            // Chunk konten nyata = provider masih hidup: reset ke idle antar-chunk.
+            armWatchdog(LIMITS.COMPACTION_LLM_IDLE_TIMEOUT_MS, "llm compaction idle timeout")
           }
+          // Tangkap usage stream kompaksi agar belanja masuk budget.
+          if (ev.type === "text") {
+            // Ringkasan tersimpan membawa SUMMARY_HEADER; cadangkan ruangnya agar
+            // composeBoundedSummary tak memotong marker truncasi eksplisit stream.
+            const remaining = summaryBudgetChars - text.length
+            if (ev.text.length > remaining) {
+              // Respons kelebihan tetap lebih berguna dari dump mekanikal; simpan
+              // marker elision eksplisit di dalam pagu keras.
+              const contentBudget = Math.max(0, summaryBudgetChars - streamElision.length)
+              text = `${safeHead(text + ev.text, contentBudget)}${streamElision}`
+              break
+            }
+            text += ev.text
+          }
+          if (ev.type === "extension" && (ev as { kind?: string }).kind === "usage") {
+            const d = (ev as { data?: Record<string, unknown> }).data ?? {}
+            const num = (v: unknown): number | undefined =>
+              typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined
+            compactionUsage = {
+              inputTokens: num(d.inputTokens),
+              outputTokens: num(d.outputTokens),
+              totalTokens: num(d.totalTokens),
+            }
+          }
+          if (ev.type === "finish") break
         }
-        if (ev.type === "finish") break
+      } finally {
+        if (!iterDone && iter.return) {
+          void Promise.resolve(iter.return()).catch(() => {})
+        }
       }
       return text
     } catch (e) {

@@ -104,12 +104,16 @@ export function withStreamGuards(
       let finishReason: "stop" | "tool_calls" | "length" | "abort" | "error" | undefined
       let hadVisibleOutput = false
       let invalidated = false
+      let streamEnded = false
       let iterator: AsyncIterator<ProviderEvent> | undefined
       try {
         iterator = provider.stream(request, ctl.signal)[Symbol.asyncIterator]()
         while (true) {
           const next = await nextOrAbort(iterator, ctl.signal)
-          if (next.done) break
+          if (next.done) {
+            streamEnded = true
+            break
+          }
           // Ada frame masuk = koneksi masih hidup; jadwal diam dimulai ulang.
           armIdle()
           const ev = next.value
@@ -234,10 +238,13 @@ export function withStreamGuards(
       } finally {
         stopTimers()
         signal.removeEventListener("abort", onParentAbort)
-        if (!ctl.signal.aborted && finishReason !== "stop" && finishReason !== "tool_calls") {
+        if (!streamEnded && !ctl.signal.aborted) {
           ctl.abort(new DOMException("Provider stream closed", "AbortError"))
         }
-        if (ctl.signal.aborted && iterator?.return) {
+        // Selalu tutup generator dalam bila belum EOF (termasuk consumer break
+        // tepat di `finish` pada kompaksi / judul sub-agent) agar reader & soket
+        // HTTP langsung dilepas, bukan bocor menggantung.
+        if (!streamEnded && iterator?.return) {
           try {
             void Promise.resolve(iterator.return()).catch(() => {})
           } catch {}

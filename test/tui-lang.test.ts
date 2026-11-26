@@ -237,13 +237,11 @@ describe("/lang end-to-end", () => {
         (f) =>
           f.some((l) => l.includes("Status")) && f.some((l) => l.includes("Session lang-test")),
       )
-      expect(frame.some((l) => l.includes("Esc close"))).toBe(true)
+      expect(frame.some((l) => l.includes("Status") && l.includes("Esc"))).toBe(true)
       await tty.send(KEY.esc, 90)
       await tty.waitForScreen(
         (f) =>
-          !f.some((l) => l.includes("Esc close")) &&
-          !f.slice(0, -5).some((l) => l.includes("│")) &&
-          f.some((l) => l.includes("00.00.00")),
+          !f.slice(0, -5).some((l) => l.includes("│")) && f.some((l) => l.includes("00.00.00")),
       )
       // Output readout TIDAK boleh bocor ke transkrip chat.
       expect(tty.screen().join("\n")).not.toContain("Session lang-test")
@@ -275,9 +273,7 @@ describe("/lang end-to-end", () => {
       await tty.send(KEY.esc, 90)
       await tty.waitForScreen(
         (f) =>
-          !f.some((l) => l.includes("Esc cancel")) &&
-          !f.slice(0, -5).some((l) => l.includes("│")) &&
-          f.some((l) => l.includes("00.00.00")),
+          !f.slice(0, -5).some((l) => l.includes("│")) && f.some((l) => l.includes("00.00.00")),
       )
       await tty.send("/exit")
       await tty.send(KEY.enter)

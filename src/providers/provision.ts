@@ -18,7 +18,6 @@ import {
 } from "../config.ts"
 import { getSecret } from "../lib/keystore.ts"
 import { clearDetectCache, type DetectResult, detectModels } from "./detect.ts"
-import { GATEWAY_PRESETS } from "./presets.ts"
 
 /**
  * Selesaikan apiKey untuk deteksi model: referensi `keystore:<nama>` menjadi
@@ -47,25 +46,22 @@ export async function saveProvider(
   })
 }
 
-// 5.1 — id ramah: pakai id preset (openrouter/deepseek/generic/...) atau slug
-// baseUrl; dedupe dengan indeks numerik, BUKAN hash acak.
+// 5.1 — id ramah: pakai id eksplisit bila ada, atau slug baseUrl; dedupe
+// dengan indeks numerik, BUKAN hash acak.
 export function deriveProviderId(baseUrl: string, existingIds: string[], id?: string): string {
   let baseId: string
   if (id) {
     baseId = id
   } else {
     const norm = baseUrl.replace(/\/+$/, "")
-    const preset = GATEWAY_PRESETS.find((p) => p.baseUrl.replace(/\/+$/, "") === norm)
     baseId =
-      (preset?.id ??
-        norm
-          .replace(/\/v1$/i, "") // OpenAI-compatible gateways: buang akhiran /v1
-          .replace(/https?:\/\//, "")
-          .replace(/[^a-z0-9]/gi, "-")
-          .replace(/-+/g, "-")
-          .replace(/^-|-$/g, "")
-          .slice(0, 24)) ||
-      "gateway"
+      norm
+        .replace(/\/v1$/i, "") // OpenAI-compatible gateways: buang akhiran /v1
+        .replace(/https?:\/\//, "")
+        .replace(/[^a-z0-9]/gi, "-")
+        .replace(/-+/g, "-")
+        .replace(/^-|-$/g, "")
+        .slice(0, 24) || "gateway"
   }
   let uniqId = baseId.slice(0, 30)
   if (!id) {
@@ -156,7 +152,16 @@ export async function detectAndSave(
   baseUrl: string,
   apiKey: string,
   id?: string,
-  opts: { global?: boolean; cwd?: string; fallbackModels?: string[]; allowLocal?: boolean } = {},
+  opts: {
+    global?: boolean
+    cwd?: string
+    fallbackModels?: string[]
+    allowLocal?: boolean
+    signal?: AbortSignal
+    /** Tolak endpoint yang tidak terjangkau jaringan (DNS/ECONNREFUSED/timeout)
+     * alih-alih menyimpan daftar fallback diam-diam (dipakai wizard & /provider add). */
+    rejectUnreachable?: boolean
+  } = {},
 ): Promise<ProviderEntry> {
   // Fallback model dipakai bila provider tidak punya endpoint GET /models
   // (mis. Anthropic) atau deteksi gagal karena JARINGAN — agar wizard tetap
@@ -165,9 +170,11 @@ export async function detectAndSave(
   // Cache 30 menit juga dibuang dulu: retry add dengan key terkoreksi harus
   // re-fetch, bukan menyajikan daftar basi dari percobaan sebelumnya.
   clearDetectCache()
+  if (opts.signal?.aborted) throw new DOMException("aborted", "AbortError")
   let detected: DetectResult
   try {
-    detected = await detectModels(baseUrl, apiKey)
+    detected = await detectModels(baseUrl, apiKey, opts.signal)
+    if (opts.signal?.aborted) throw new DOMException("aborted", "AbortError")
     if (detected.models.length === 0 && !detected.authFailed && opts.fallbackModels?.length) {
       detected = {
         models: opts.fallbackModels,
@@ -176,6 +183,12 @@ export async function detectAndSave(
       }
     }
   } catch (e) {
+    if (opts.signal?.aborted || (e as { name?: string })?.name === "AbortError") {
+      throw new DOMException("aborted", "AbortError")
+    }
+    if (opts.rejectUnreachable && e instanceof Error && e.message.startsWith("unreachable:")) {
+      throw e
+    }
     if (!opts.fallbackModels) throw e
     const hint = baseUrl.includes("anthropic")
       ? "anthropic"
@@ -243,12 +256,13 @@ export interface SyncResult {
 }
 
 export async function refreshProviderModels(
-  opts: { global?: boolean; cwd?: string; allowLocal?: boolean } = {},
+  opts: { global?: boolean; cwd?: string; allowLocal?: boolean; signal?: AbortSignal } = {},
 ): Promise<SyncResult> {
   // /sync harus benar-benar re-fetch — tanpa ini detectModels menyajikan cache
   // 30 menit dan /sync menjadi no-op ("from == to") padahal provider punya
   // model baru.
   clearDetectCache()
+  if (opts.signal?.aborted) throw new DOMException("aborted", "AbortError")
   const merged = await loadConfig(opts.cwd, { allowLocal: opts.allowLocal })
   const providers: ProviderEntry[] = merged.providers
   if (providers.length === 0 && (opts.global ?? true)) {
@@ -263,6 +277,7 @@ export async function refreshProviderModels(
   const updated = new Map<string, ProviderEntry>()
   const failed: { id: string; reason: string }[] = []
   for (let i = 0; i < providers.length; i++) {
+    if (opts.signal?.aborted) throw new DOMException("aborted", "AbortError")
     const p = providers[i]!
     if (!p.apiKey || !p.baseUrl) continue
     // Selesaikan referensi keystore SEBELUM deteksi (sama seperti
@@ -270,6 +285,7 @@ export async function refreshProviderModels(
     // sebagai Bearer → 401 → [] → sync diam-diam no-op selamanya — tak masuk
     // updated maupun failed, dan daftar model tak pernah tersinkron.
     const apiKey = await resolveDetectApiKey(p.apiKey)
+    if (opts.signal?.aborted) throw new DOMException("aborted", "AbortError")
     if (apiKey == null) {
       failed.push({
         id: p.id,
@@ -281,7 +297,8 @@ export async function refreshProviderModels(
       continue
     }
     try {
-      const detected = await detectModels(p.baseUrl, apiKey)
+      const detected = await detectModels(p.baseUrl, apiKey, opts.signal)
+      if (opts.signal?.aborted) throw new DOMException("aborted", "AbortError")
       if (detected.models.length) {
         // Metadata kapasitas ikut disegarkan: gateway yang menambah/mengubah
         // model akan memperbarui jendela konteksnya tanpa user menyentuh apa pun.
@@ -297,6 +314,9 @@ export async function refreshProviderModels(
         failed.push({ id: p.id, reason: "unauthorized (401/403) — periksa API key" })
       }
     } catch (e) {
+      if (opts.signal?.aborted || (e as { name?: string })?.name === "AbortError") {
+        throw new DOMException("aborted", "AbortError")
+      }
       // provider offline/timeout — catat, jangan diam. Daftar lama dibiarkan.
       failed.push({ id: p.id, reason: String((e as Error)?.message ?? e).slice(0, 120) })
     }

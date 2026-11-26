@@ -10,14 +10,15 @@ import {
 } from "../input/prompt-engine.ts"
 import { formatError } from "../render/errors.ts"
 import type { HintItem } from "../render/hint.ts"
-import { listRow, tailFilterWindow } from "../render/list.ts"
+import { highlightMatch, tailFilterWindow } from "../render/list.ts"
 import { type NoticeKind, paintNoticeLines } from "../render/notice.ts"
 import { cleanUntrusted, sanitizeAnsiLine } from "../render/sanitize.ts"
 import { c, glyphs, stripAnsi } from "../render/theme.ts"
+import { tSystem } from "../render/tool-label.ts"
 import { displayWidth, truncateToWidth, wrapByWidth } from "../render/width.ts"
 import { type AltScreen, openAltScreen } from "../runtime/screen.ts"
 import { boxLeftPad, canRenderModal, dialogBox } from "./dialog.ts"
-import { runForm } from "./form.ts"
+import { IDLE_CANCEL_MS, IDLE_WARN_MS, runForm } from "./form.ts"
 import { createIdleTimer } from "./lifecycle.ts"
 import { runPicker } from "./picker.ts"
 import { withTimeout } from "./watchdog.ts"
@@ -89,22 +90,22 @@ export async function runModelManagerView(opts: ModelManagerViewOptions): Promis
   // keypress baru — terlihat sampai tombol berikut ditekan.
   let notice: string | null = null
   let noticeKind: NoticeKind = "info"
+  let idleWarned = false
 
   return new Promise<void>((resolve) => {
-    const width = () => Math.max(8, windowWidth(process.stdout.columns || 80) - 4)
+    const width = () => Math.max(8, windowWidth(screen.cols || 80) - 4)
     const renderedNoticeLines = (): string[] =>
       notice ? paintNoticeLines(noticeKind, notice).flatMap((l) => wrapByWidth(l, width())) : []
     const visibleRows = () => {
-      // windowMaxHeight = tinggi kotak maksimum (sudah termasuk margin 4 baris).
-      // Chrome tetap 5 baris: 2 border + judul + baris cari + footer. Jatah
-      // daftar mengikuti aturan jendela; notice menyusutkan agar hint tak hilang.
-      const maxBody = windowMaxHeight(process.stdout.rows || 24) - 5
-      return Math.max(1, Math.min(maxBody - renderedNoticeLines().length, 8))
+      // windowMaxHeight = tinggi kotak maksimum (termasuk border+judul+jeda+footer).
+      // Chrome = 6 baris: 2 border + judul + baris cari + jeda footer + footer.
+      const maxBody = windowMaxHeight(screen.rows || 24) - 6
+      return Math.max(1, Math.min(maxBody - renderedNoticeLines().length, 12))
     }
 
     // Isi MINIMAL dialog /model; footer dipin lewat `windowFooter` (windowSpec)
     // agar aman dari pemotongan saat notice error panjang membungkus banyak baris.
-    const bodyLinesModal = (): { lines: string[]; filterShown: string } => {
+    const bodyLinesModal = (): { lines: string[]; filterShown: string; title: string } => {
       const list = viewRows()
       const v = visibleRows()
       if (sel < scroll) scroll = sel
@@ -112,6 +113,11 @@ export async function runModelManagerView(opts: ModelManagerViewOptions): Promis
       const w = width()
       const cut = (s: string) => truncateToWidth(s, w)
       const view = list.slice(scroll, scroll + v)
+      const baseTitle = t("out.titleModels")
+      const title =
+        list.length > v
+          ? `${baseTitle} (${scroll + 1}-${scroll + view.length}/${list.length})`
+          : baseTitle
       const lines: string[] = []
       // Caret glyph blok statis dihapus — caret bar terminal (DECSCUSR `6 q`)
       // jadi satu-satunya penanda. `w - 3` = budget lama tanpa lebar glyph;
@@ -126,31 +132,44 @@ export async function runModelManagerView(opts: ModelManagerViewOptions): Promis
           const row = view[i]!
           const picked = i === sel - scroll
           const badge = row.effort && row.effort !== "default" ? ` [${row.effort}]` : ""
-          // Penanda aktif di luar budget truncasi (paritas provider-manager):
-          // nama yang dipotong, status yang selamat.
+          // Penanda effort & aktif ditaruh bersama di luar truncasi nama agar
+          // status maupun badge thinking selamat di terminal sempit.
           const active = row.active ? ` (${t("common.active")})` : ""
-          // Ikon kategori model jadi bagian baris yang terlihat (1 kolom, ASCII
-          // fallback lewat getter glyphs). Diletakkan di luar budget truncasi
-          // supaya nama yang dipotong tak pernah menelan penanda kategori —
-          // sama seperti penanda active. Sanitasi tetap pada id (tak-terpercaya).
+          const suffix = `${badge}${active}`
           const iconPart = `${glyphs.modelIcon} `
-          const nameBudget = Math.max(8, w - 4 - displayWidth(active) - displayWidth(iconPart))
-          const label = `${iconPart}${truncateToWidth(`${sanitizeAnsiLine(row.id)}${badge}`, nameBudget, glyphs.ellipsis)}${active}`
-          // Kolom marker dipakai bersama (listRow): label tak bergeser saat
-          // seleksi berpindah dan marker `›` tidak hilang tanpa warna.
-          lines.push(listRow(label, picked))
+          const avail = Math.max(0, w - 4 - displayWidth(iconPart))
+          const nameBudget = Math.max(1, avail - displayWidth(suffix))
+          const baseName = `${iconPart}${truncateToWidth(sanitizeAnsiLine(row.id), nameBudget, glyphs.ellipsis)}`
+          // Kolom marker dipakai bersama (highlightMatch / listRow): sorot filter
+          // di nama model tanpa merusak suffix effort/active.
+          lines.push(highlightMatch(baseName, filter ?? "", picked, suffix))
         }
       }
       for (const line of renderedNoticeLines()) lines.push(cut(line))
-      return { lines, filterShown }
+      return { lines, filterShown, title }
     }
 
     const render = () => {
-      const { lines, filterShown } = bodyLinesModal()
+      const cols = screen.cols || 80
+      const rows = screen.rows || 24
+      // Jaga layar ekstrem (< 20×4) agar tak menggambar kotak korup; baris ≥ 5
+      // tetap dirender dengan footer ter-pin (dikunci model-manager-flows.test).
+      if (cols < 20 || rows < 4) {
+        screen.paintRegion(
+          [c.warning(truncateToWidth(tSystem("msg.tooSmall"), Math.max(1, cols - 2)))],
+          Math.max(1, Math.floor(rows / 2)),
+        )
+        screen.setCursorVisible(false)
+        return
+      }
+      const { lines, filterShown, title } = bodyLinesModal()
       // Navigasi (↑↓ / Enter / Esc) disuplai windowFooter; hanya aksi khusus
       // /model yang dikirim sebagai extraHints. Saat filter aktif Del dipakai
       // untuk mengedit query, jadi jangan diiklankan sebagai hapus model.
       const extraHints: HintItem[] = [
+        ...(idleWarned
+          ? [{ key: "!", label: t("form.idleWarning", { s: Math.ceil(IDLE_CANCEL_MS / 1000) }) }]
+          : []),
         { key: "Tab", label: t("hint.effort") },
         ...(filter == null ? [{ key: "Del", label: t("hint.delete") }] : []),
       ]
@@ -158,7 +177,7 @@ export async function runModelManagerView(opts: ModelManagerViewOptions): Promis
       // resize lewat aturan seragam windowSpec.
       const box = dialogBox(
         windowSpec({
-          title: t("out.titleModels"),
+          title,
           body: lines,
           cols: screen.cols,
           rows: screen.rows,
@@ -215,7 +234,12 @@ export async function runModelManagerView(opts: ModelManagerViewOptions): Promis
     // dengan picker: idle 90 dtk = batal otomatis (helper bersama, audit D1).
     // `finish` dirujuk sebagai closure — dievaluasi saat timer fire.
     const idle = createIdleTimer({
-      cancelMs: 90_000,
+      warnMs: IDLE_WARN_MS,
+      cancelMs: IDLE_CANCEL_MS,
+      onWarn: () => {
+        idleWarned = true
+        render()
+      },
       onCancel: () => finish(),
     })
 
@@ -262,6 +286,11 @@ export async function runModelManagerView(opts: ModelManagerViewOptions): Promis
         process.stdout.on("resize", onResize)
         attached = true
       }
+      // Sub-dialog (runForm / runPicker) mematikan bracketed paste saat selesai;
+      // aktifkan lagi saat kendali kembali ke manager.
+      try {
+        screen.setBracketedPaste?.(true)
+      } catch {}
       render()
       idle.reset()
     }
@@ -279,6 +308,9 @@ export async function runModelManagerView(opts: ModelManagerViewOptions): Promis
         process.stdin.setMaxListeners(prevMaxListeners)
       } catch {}
       // Hapus region popup sendiri sebelum pemilik me-repaint (App.resume).
+      try {
+        screen.setBracketedPaste?.(false)
+      } catch {}
       try {
         screen.clearRegion()
       } catch {}
@@ -353,7 +385,6 @@ export async function runModelManagerView(opts: ModelManagerViewOptions): Promis
             footerHints: [
               { key: `${glyphs.leftRight}/y/n`, label: t("hint.select") },
               { key: "Enter", label: t("hint.delete") },
-              { key: "Esc", label: t("hint.cancel") },
             ],
           },
           screen,
@@ -421,11 +452,7 @@ export async function runModelManagerView(opts: ModelManagerViewOptions): Promis
           // Mode cari: semua ketikan masuk ke query, Esc keluar dari mode
           // cari — bukan tutup manager.
           if (filter != null) {
-            if (
-              item.key.type === "esc" ||
-              item.key.type === "ctrl-c" ||
-              item.key.type === "ctrl-d"
-            ) {
+            if (item.key.type === "esc") {
               filter = null
               sel = 0
               scroll = 0
@@ -523,6 +550,14 @@ export async function runModelManagerView(opts: ModelManagerViewOptions): Promis
             // kembali ke daftar — manajer tidak pernah menutup diri di sini.
             const row = viewRows()[sel]
             if (!row || busy || !opts.onSetEffort) return true
+            if (!canRenderModal(screen.cols || 80, screen.rows || 24)) {
+              // Sub-picker butuh ukuran modal minimum; tanpa garda ini error
+              // terminal sempit tertelan captureConsole dan tampak membisu.
+              notice = t("gate.tuiModel")
+              noticeKind = "error"
+              render()
+              return true
+            }
             busy = true
             suspend()
             ;(async () => {
@@ -574,6 +609,7 @@ export async function runModelManagerView(opts: ModelManagerViewOptions): Promis
     }
     const managerPump = createKeyStreamPump({ state: decoder, onKeys: handleManagerKeys })
     const onData = (chunk: Buffer) => {
+      idleWarned = false
       idle.reset()
       try {
         managerPump.push(chunk)
@@ -589,6 +625,7 @@ export async function runModelManagerView(opts: ModelManagerViewOptions): Promis
       process.stdin.setRawMode(true)
       process.stdin.resume()
       process.stdin.setMaxListeners(0)
+      screen.setBracketedPaste?.(true)
       process.stdin.on("data", onData)
       process.stdout.on("resize", onResize)
       attached = true

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test"
 import { renderTable } from "../src/ui/render/table.ts"
-import { glyphs, stripAnsi } from "../src/ui/render/theme.ts"
+import { renderGridTable } from "../src/ui/render/table-grid.ts"
+import { composerBoxGlyphs, glyphs, stripAnsi } from "../src/ui/render/theme.ts"
 import { displayWidth } from "../src/ui/render/width.ts"
 
 test("table: renders empty state", () => {
@@ -174,6 +175,33 @@ test("table: MINICODE_ASCII=1 memaksa garis '-' dan ellipsis '...'", () => {
     expect(out).not.toContain("…")
     expect(out).not.toContain("─")
   } finally {
+    if (prevAscii === undefined) delete process.env.MINICODE_ASCII
+    else process.env.MINICODE_ASCII = prevAscii
+    if (prevWt === undefined) delete process.env.WT_SESSION
+    else process.env.WT_SESSION = prevWt
+  }
+})
+
+test("MINICODE_BOX disatukan pada composerBoxGlyphs dan renderGridTable", () => {
+  const prevBox = process.env.MINICODE_BOX
+  const prevAscii = process.env.MINICODE_ASCII
+  const prevWt = process.env.WT_SESSION
+  process.env.WT_SESSION = "1"
+  delete process.env.MINICODE_ASCII
+  try {
+    process.env.MINICODE_BOX = "square"
+    expect(composerBoxGlyphs()).toEqual({ tl: "┌", tr: "┐", bl: "└", br: "┘", h: "─", v: "│" })
+
+    process.env.MINICODE_BOX = "ascii"
+    expect(composerBoxGlyphs()).toEqual({ tl: "+", tr: "+", bl: "+", br: "+", h: "-", v: "|" })
+    const grid = stripAnsi(
+      renderGridTable({ headers: ["H"], rows: [["v"]] }, { width: 20, box: true }),
+    )
+    expect(grid).toContain("+")
+    expect(grid).not.toContain("┌")
+  } finally {
+    if (prevBox === undefined) delete process.env.MINICODE_BOX
+    else process.env.MINICODE_BOX = prevBox
     if (prevAscii === undefined) delete process.env.MINICODE_ASCII
     else process.env.MINICODE_ASCII = prevAscii
     if (prevWt === undefined) delete process.env.WT_SESSION

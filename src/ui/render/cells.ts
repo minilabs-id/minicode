@@ -248,6 +248,23 @@ export function parseCells(line: string): Cell[] {
     let end = line.indexOf("\x1b", i)
     if (end < 0) end = line.length
     if (end === i) end++
+    // Fast-path ASCII printable (0x20..0x7e): selalu 1 grapheme berlebar 1 kolom
+    // tanpa combining mark — hindari alokasi substring & Intl.Segmenter.
+    let allAscii = true
+    for (let j = i; j < end; j++) {
+      const code = line.charCodeAt(j)
+      if (code < 0x20 || code > 0x7e) {
+        allAscii = false
+        break
+      }
+    }
+    if (allAscii) {
+      for (let j = i; j < end; j++) {
+        cells.push({ glyph: line[j]!, style })
+      }
+      i = end
+      continue
+    }
     const run = line.slice(i, end)
     for (const g of segmentGraphemes(run)) {
       // Baris frame tidak boleh memuat newline; kalau ada, itu artefak dan

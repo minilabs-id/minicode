@@ -33,19 +33,25 @@ function byteEncoder(): Map<number, string> {
 }
 
 const BYTE_TO_UNICODE = byteEncoder()
+// Satu instance TextEncoder di level modul — hindari alokasi per-kata.
+const TEXT_ENCODER = new TextEncoder()
+const MAX_PIECE_CACHE = 8_192
+const MAX_EXACT_PIECE_LEN = 512
 
 // Regex pre-tokenizer persis tiktoken (keluarga GPT-2 BPE).
 const PAT =
   /(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+/gu
 
 function byteEncode(text: string): string[] {
-  const bytes = new TextEncoder().encode(text)
-  return [...bytes].map((b) => BYTE_TO_UNICODE.get(b) ?? "")
+  const bytes = TEXT_ENCODER.encode(text)
+  const out = new Array<string>(bytes.length)
+  for (let i = 0; i < bytes.length; i++) out[i] = BYTE_TO_UNICODE.get(bytes[i]!) ?? ""
+  return out
 }
 
 /** Terapkan BPE merge pada satu "kata" (string unicode) memakai rank merge. */
 function bpeMerge(token: string[], mergeRanks: Map<string, number>): string[] {
-  let parts = token.slice()
+  const parts = token.slice()
   // Greedy: gabungkan pasangan ber-rank terendah (tertinggi) selama ada.
   for (;;) {
     let bestIdx = -1
@@ -58,17 +64,15 @@ function bpeMerge(token: string[], mergeRanks: Map<string, number>): string[] {
       }
     }
     if (bestIdx < 0) break
-    parts = [
-      ...parts.slice(0, bestIdx),
-      parts[bestIdx]! + parts[bestIdx + 1]!,
-      ...parts.slice(bestIdx + 2),
-    ]
+    parts[bestIdx] = parts[bestIdx]! + parts[bestIdx + 1]!
+    parts.splice(bestIdx + 1, 1)
   }
   return parts
 }
 
 export class BpeTokenizer {
   private mergeRanks: Map<string, number>
+  private pieceCache = new Map<string, number>()
 
   constructor(data: BpeData) {
     // merges = urutan rank (indeks pertama = prioritas tertinggi).
@@ -92,10 +96,29 @@ export class BpeTokenizer {
     let total = 0
     for (const piece of text.match(PAT) ?? []) {
       if (!piece) continue
+      // Potongan raksasa tanpa pemisah (base64/minified) bisa membuat merge O(L²)
+      // membeku; pakai estimasi konservatif agar admission budget tetap aman & cepat.
+      if (piece.length > MAX_EXACT_PIECE_LEN) {
+        total += Math.ceil(piece.length / 3)
+        continue
+      }
+      const cached = this.pieceCache.get(piece)
+      if (cached !== undefined) {
+        total += cached
+        continue
+      }
       const token = byteEncode(piece)
-      const parts = bpeMerge(token, this.mergeRanks)
+      const count = bpeMerge(token, this.mergeRanks).length
+      if (this.pieceCache.size >= MAX_PIECE_CACHE) {
+        let drop = MAX_PIECE_CACHE >>> 2
+        for (const key of this.pieceCache.keys()) {
+          this.pieceCache.delete(key)
+          if (--drop <= 0) break
+        }
+      }
+      this.pieceCache.set(piece, count)
       // Setiap bagian jadi satu token; vocab lookup (>0 selalu ada di BPE terlatih).
-      total += parts.length
+      total += count
     }
     return total
   }

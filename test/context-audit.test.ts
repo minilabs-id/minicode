@@ -57,7 +57,7 @@ const convo = (n: number): Message[] => {
 
 // ── P0: system prompt mencapai wire ──
 
-test("audit: router menyelipkan system ke openai-compat (kind tak dikenal)", async () => {
+test("audit: openai-compat mengirim request.system native dengan role system (via router dan langsung)", async () => {
   const bodies: string[] = []
   const srv = Bun.serve({
     port: 0,
@@ -89,9 +89,30 @@ test("audit: router menyelipkan system ke openai-compat (kind tak dikenal)", asy
     )) {
       /* drain */
     }
-    const body = JSON.parse(bodies[0]!) as { messages: { role: string; content: string }[] }
-    expect(body.messages[0]).toMatchObject({ role: "user", content: "SYSTEM-RAHASIA-INSTRUKSI" })
-    expect(body.messages[1]).toMatchObject({ role: "user", content: "hi" })
+    const viaRouter = JSON.parse(bodies[0]!) as { messages: { role: string; content: string }[] }
+    expect(viaRouter.messages).toHaveLength(2)
+    expect(viaRouter.messages[0]).toMatchObject({
+      role: "system",
+      content: "SYSTEM-RAHASIA-INSTRUKSI",
+    })
+    expect(viaRouter.messages[1]).toMatchObject({ role: "user", content: "hi" })
+
+    // Panggilan langsung ke adapter (tanpa router, mis. compaction summarizer)
+    // juga wajib membawa role system native.
+    for await (const _ of openai.stream(
+      {
+        messages: [{ role: "user", content: "ringkas" }],
+        model: "m",
+        system: "SYSTEM-LANGSUNG",
+      } as never,
+      ac.signal,
+    )) {
+      /* drain */
+    }
+    const direct = JSON.parse(bodies[1]!) as { messages: { role: string; content: string }[] }
+    expect(direct.messages).toHaveLength(2)
+    expect(direct.messages[0]).toMatchObject({ role: "system", content: "SYSTEM-LANGSUNG" })
+    expect(direct.messages[1]).toMatchObject({ role: "user", content: "ringkas" })
   } finally {
     srv.stop(true)
   }

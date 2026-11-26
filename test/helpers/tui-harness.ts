@@ -216,6 +216,7 @@ export function installFakeTty(opts: FakeTtyOptions = {}): FakeTty {
   process.on("uncaughtException", onFailure)
 
   const fakeStdin = {
+    [Symbol.for("minicode.fakeTty")]: true,
     isTTY,
     setRawMode(v: boolean) {
       rawMode = v

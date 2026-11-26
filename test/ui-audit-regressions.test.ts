@@ -104,14 +104,22 @@ describe("audit regresi UI/UX: backdrop dimming & multi-line helpers", () => {
     // Regresi AUD-003: dulu `A[1m...[22mB` membuat B jadi normal di atas
     // backdrop, membuka lubang terang. Sekarang setiap reset memulihkan scrim.
     const dimmed = TuiApp.applyBackdropDim("A\x1b[1mB\x1b[22mC")
-    // C harus berada SESUDAH pemulihan scrim (bukan sekadar `[22m` telanjang).
-    // Lint menolak kontrol karakter di regex, jadi bandingkan potongan string:
-    // 12 karakter sebelum "C" harus berupa sekuens SGR scrim yang baru dibuka.
+    // C harus berada SESUDAH pemulihan scrim (bukan sekadar `[22m` telanjang),
+    // tanpa latar abu-abu `48;5;236`, dan MINICODE_SCRIM=none mematikannya total.
     const i = dimmed.lastIndexOf("C")
     const before = dimmed.slice(0, i)
     expect(before.endsWith("m")).toBe(true)
     expect(before.includes("\x1b[22m")).toBe(true)
     expect(before.lastIndexOf("\x1b[22m")).toBeGreaterThan(before.lastIndexOf("\x1b[1m"))
+    expect(dimmed).not.toContain("48;5;236")
+    const savedScrim = process.env.MINICODE_SCRIM
+    process.env.MINICODE_SCRIM = "none"
+    try {
+      expect(TuiApp.applyBackdropDim("plain")).toBe("plain")
+    } finally {
+      if (savedScrim === undefined) delete process.env.MINICODE_SCRIM
+      else process.env.MINICODE_SCRIM = savedScrim
+    }
   })
 
   test("countLogicalLines dan cursorLineIndex mengukur baris multi-line dengan benar", () => {

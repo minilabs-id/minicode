@@ -57,9 +57,9 @@ test("isi melebihi layar dipotong defensif + marker", () => {
   const out = frame({ title: "T", body, footer: "f" }, 60, 12)
   // Tinggi kotak dibatasi `rows`, bukan dipaksa sama dengan `rows`.
   expect(out.length).toBeLessThanOrEqual(12)
-  // 100 isi vs jatah 12-4(chrome)-1(marker)=7 → 93 terpotong, marker tampil.
+  // 100 isi vs jatah 12-5(chrome incl. jeda footer)-1(marker)=6 → 94 terpotong, marker tampil.
   // Border bawah tetap ada (regresi: dulu total r0+1 hingga border terbuang).
-  expect(plain(out).join("\n")).toContain("93")
+  expect(plain(out).join("\n")).toContain("94")
   expect(plain(out).join("\n")).toContain(BOX.bl)
 })
 
@@ -164,4 +164,36 @@ test("canRenderModal menegakkan batas minimum 20x10 dan footer ber-SGR tak di-di
   // SGR pengenal footer dipertahankan tanpa dibungkus `\x1b[2m...\x1b[22m` paksa.
   expect(footerLine).toContain("\x1b[36mEnter\x1b[39m")
   expect(footerLine).not.toContain("\x1b[2m\x1b[36mEnter")
+})
+
+test("dialogBox: memberi jeda 1 baris sebelum footer saat ruang cukup & omit di tinggi mini", () => {
+  const b = dialogBox({ title: "T", body: ["baris-1", "baris-2"], footer: "Enter save" }, 60, 14)
+  // top(1) + title(1) + body(2) + jeda(1) + footer(1) + bottom(1) = 7
+  expect(b.height).toBe(7)
+  const rows = plain(b.lines)
+  expect(rows[b.bodyTop + 2]!.replace(/[│|]/g, "").trim()).toBe("")
+  expect(rows[b.bodyTop + 3]).toContain("Enter save")
+
+  // Pada tinggi minimum (maxHeight=5), jeda ditiadakan agar isi tetap tampil.
+  const tight = dialogBox(
+    { title: "T", body: ["baris-1"], footer: "Enter ok", maxHeight: 5 },
+    60,
+    5,
+  )
+  expect(tight.height).toBe(5)
+  expect(plain(tight.lines).join("\n")).toContain("baris-1")
+})
+
+test("dialogBox: escHint menampilkan Esc redup di pojok kanan atas judul secara aman", () => {
+  const b = dialogBox({ title: "Judul Sangat Panjang Sekali", body: ["x"], escHint: true }, 36, 12)
+  const headerRaw = b.lines[1] ?? ""
+  const headerPlain = stripAnsi(headerRaw)
+  expect(headerPlain).toContain("Esc")
+  expect(/Esc [│|]$/.test(headerPlain.trimEnd())).toBe(true)
+  expect(headerPlain).not.toContain("cancel")
+
+  // Tanpa judul sekalipun, escHint tetap sejajar kanan.
+  const bare = dialogBox({ title: "", body: ["x"], escHint: true }, 40, 12)
+  expect(bare.bodyTop).toBe(2)
+  expect(/Esc [│|]$/.test(stripAnsi(bare.lines[1] ?? "").trimEnd())).toBe(true)
 })

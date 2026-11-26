@@ -831,6 +831,7 @@ export class Transcript {
         this.activityFold = []
         // Akumulator rekap kumulatif + penanda jeda narasi ikut turn baru.
         this.turnToolNames = []
+        this.turnToolNameIds = []
         this.lastRecapText = ""
         this.recapRowId = null
         this.recapJustWritten = false
@@ -1782,6 +1783,12 @@ export class Transcript {
       perWidth = new Map()
       this.rowCache.set(id, perWidth)
     }
+    // Batasi cache per-baris ke 3 lebar terakhir (setara LRU committedByWidth)
+    // agar resize berulang tidak menumpuk entri lebar lama di memori.
+    if (!perWidth.has(w) && perWidth.size >= 3) {
+      const oldest = perWidth.keys().next().value
+      if (oldest !== undefined) perWidth.delete(oldest)
+    }
     perWidth.set(w, {
       width: w,
       id,
@@ -1852,6 +1859,9 @@ export class Transcript {
     const index = this.lines.length - 1
     if (index < 0) return
     for (const proj of this.committedByWidth.values()) {
+      // Proyeksi dirty akan dibangun ulang saat dibaca — jangan buang CPU
+      // memperbarui array yang pasti dibuang.
+      if (proj.dirty) continue
       this.appendToProjection(proj, index)
       proj.appendsSeen = this.totalAppended
     }
@@ -2021,6 +2031,17 @@ export class Transcript {
    */
   private pendingRowMemo = new Map<string, TranscriptRow[]>()
 
+  /** Buang seperempat entri tertua (FIFO Map) agar jawaban streaming panjang
+   * tidak memicu cache-miss storm penuh setiap kali batas memo tercapai. */
+  private evictPendingMemoIfNeeded(): void {
+    if (this.pendingRowMemo.size < PENDING_MEMO_MAX_ENTRIES) return
+    let drop = Math.max(1, PENDING_MEMO_MAX_ENTRIES >>> 2)
+    for (const key of this.pendingRowMemo.keys()) {
+      this.pendingRowMemo.delete(key)
+      if (--drop <= 0) break
+    }
+  }
+
   /** Proyeksi `pending` (jawaban streaming) + marker truncasi. Di-cache per
    * (width, pendingVersion, truncated) untuk hasil total; proyeksi per baris
    * dimemo terpisah agar delta baru tidak memaksa kerja ulang penuh. */
@@ -2055,7 +2076,22 @@ export class Transcript {
               selectable: false,
             })
           }
-          rows.push(...this.projectTable(block.table, -1, w))
+          // Memoize tabel markdown yang sudah lengkap agar tidak dirender ulang
+          // pada setiap delta streaming teks di bawahnya.
+          const tableSig = JSON.stringify(block.table)
+          const tableKey =
+            tableSig.length <= PENDING_MEMO_LINE_MAX * 4 ? `${w}\u0000T\u0000${tableSig}` : null
+          const cachedTable = tableKey === null ? undefined : this.pendingRowMemo.get(tableKey)
+          if (cachedTable) {
+            rows.push(...cachedTable)
+          } else {
+            const tableRows = this.projectTable(block.table, -1, w)
+            if (tableKey !== null) {
+              this.evictPendingMemoIfNeeded()
+              this.pendingRowMemo.set(tableKey, tableRows)
+            }
+            rows.push(...tableRows)
+          }
         } else {
           const lineList = block.text.split("\n")
           if (rows.length > 0 && lineList[0] !== "" && rows[rows.length - 1]!.text !== "") {
@@ -2081,9 +2117,7 @@ export class Transcript {
             const clean = stripSgr(sanitizeAnsi(line))
             const produced = this.projectText(line, clean, -1, w, false, "", true, fenceState)
             if (memoKey !== null) {
-              // Batas sederhana: memo adalah cache tampilan, bukan struktur
-              // data — dibuang seluruhnya saat terlalu besar.
-              if (this.pendingRowMemo.size >= PENDING_MEMO_MAX_ENTRIES) this.pendingRowMemo.clear()
+              this.evictPendingMemoIfNeeded()
               this.pendingRowMemo.set(memoKey, produced)
             }
             rows.push(...produced)
@@ -3182,6 +3216,7 @@ export class Transcript {
     if (this.turnToolNames.length === 0) return
     const summary = this.formatFoldSummary(this.turnToolNames.map((rawName) => ({ rawName })))
     this.turnToolNames = []
+    this.turnToolNameIds = []
     if (!summary) return
     // Bila segmen terakhir sudah menulis rekap yang sama persis, jangan ulangi —
     // rekap kumulatif tetap benar (sudah tertera), hanya tanpa baris ganda.

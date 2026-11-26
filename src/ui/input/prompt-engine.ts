@@ -718,9 +718,13 @@ export function decodeKeysStream(chunk: Uint8Array, state: DecoderState): Decode
         continue
       }
       if (i < term && isIncompleteUtf8Prefix(buf, i, term)) {
-        // Code point terbelah tepat sebelum terminator: jangan dibuang bersama
-        // terminator — tahan dulu, lengkapi dengan chunk berikutnya.
-        break
+        // Terminator ESC[201~ sudah tiba di `term`: byte UTF-8 tak lengkap di
+        // [i..term) tak mungkin lagi dilengkapi chunk berikutnya — pancarkan
+        // U+FFFD lalu tutup blok paste agar tidak deadlock permanen.
+        out.push({ key: { type: "char", ch: "\ufffd" }, width: 0, pasted: true, pasteEnd: true })
+        i = term + 6
+        state.pasteOverflow = false
+        continue
       }
       // end === i → tepat di terminator: tutup blok paste overflow yang sedang
       // diakumulasi di consumer, lalu keluar dari mode overflow.
@@ -762,11 +766,12 @@ export function decodeKeysStream(chunk: Uint8Array, state: DecoderState): Decode
           // Batas defensif bila terminal crash sebelum mengirim penutup ESC[201~:
           // jangan tahan buffer tanpa batas sampai membekukan seluruh input.
           if (buf.length - (i + 6) > MAX_PASTE_BYTES) {
-            // Jangan decode sampai ujung chunk: byte terakhir bisa berada di
-            // tengah code point multibyte. Mundur ke batas Utf-8 terakhir;
-            // sisanya tetap di pending dan disambung chunk berikutnya.
+            // Tahan awalan terminator ESC[201~ yang mungkin terbelah di ujung
+            // chunk serta mundur ke batas UTF-8 terakhir agar tidak mengunci
+            // mode pasteOverflow selamanya atau merusak emoji multibyte.
             const start = i + 6
-            const end = lastUtf8Boundary(buf, start, buf.length)
+            const hold = Math.max(start, trailingPasteEndPrefix(buf))
+            const end = lastUtf8Boundary(buf, start, hold)
             if (end > start) {
               out.push({
                 key: { type: "char", ch: decodeUtf8(buf.slice(start, end)) },

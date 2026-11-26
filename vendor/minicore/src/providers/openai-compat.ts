@@ -91,13 +91,25 @@ export function createOpenAICompatProvider(config: OpenAICompatConfig): ModelPro
     return v;
   }
 
-  return {
+  const provider: ModelProvider & { readonly kind: "openai-compat" } = {
     id: config.id ?? "openai-compat",
+    kind: "openai-compat",
     models: config.models,
     async *stream(request: StreamRequest, signal: AbortSignal): AsyncIterable<ProviderEvent> {
       const includeUsage = config.includeUsage ?? true;
-      const buildBody = (withUsage: boolean): string =>
-        JSON.stringify({
+      const buildBody = (withUsage: boolean): string => {
+        const wireMessages = toMessages(request.messages, takeProviderMeta);
+        // Kirim system prompt secara native dengan role "system" (OpenAI Chat Completions),
+        // bukan diselipkan sebagai pesan user di router. Hindari duplikasi bila pesan awal
+        // sudah membawa role "system".
+        const hasLeadingSystem =
+          request.messages.length > 0 &&
+          (request.messages[0] as { role?: string }).role === "system";
+        const messages =
+          request.system?.trim() && !hasLeadingSystem
+            ? [{ role: "system", content: request.system }, ...wireMessages]
+            : wireMessages;
+        return JSON.stringify({
           model: request.model ?? config.defaultModel,
           // Pagu output opsional (seam aditif `StreamRequest.maxTokens`).
           // Tanpa ini panggilan sampingan seperti summarizer kompaksi boleh
@@ -105,7 +117,7 @@ export function createOpenAICompatProvider(config: OpenAICompatConfig): ModelPro
           ...(request.maxTokens !== undefined && request.maxTokens > 0
             ? { max_tokens: request.maxTokens }
             : {}),
-          messages: toMessages(request.messages, takeProviderMeta),
+          messages,
           tools: request.tools?.length ? toTools(request.tools) : undefined,
           stream: true,
           // JSON.stringify drops undefined keys, so the field is omitted entirely.
@@ -117,16 +129,18 @@ export function createOpenAICompatProvider(config: OpenAICompatConfig): ModelPro
           ...((process.env.MINICORE_THINKING ?? process.env.MINICODE_THINKING) === "off" ? { enable_thinking: false } : {}),
           ...(config.reasoningEffort ? { reasoning_effort: config.reasoningEffort } : {}),
         });
+      };
       let body = buildBody(includeUsage);
       let response = await fetchOrThrow(endpoint, headers, body, signal);
       // P4: strict OpenAI-compat endpoints reject the unknown stream_options
       // field with 400. Retry once without it; a second 400 is a real error.
       if (!response.ok && includeUsage && response.status === 400) {
+        await response.body?.cancel().catch(() => {});
         body = buildBody(false);
         response = await fetchOrThrow(endpoint, headers, body, signal);
       }
       if (!response.ok) {
-        const text = await response.text().catch(() => "");
+        const text = await readCappedErrorBody(response, 64 * 1024);
         throw toProviderError(response.status, text, response.headers);
       }
       if (!response.body) throw new ProviderError("network", "empty response body");
@@ -281,10 +295,17 @@ export function createOpenAICompatProvider(config: OpenAICompatConfig): ModelPro
       }
     },
   };
+  return provider;
 }
 
 function toMessages(messages: readonly Message[], takeMeta: (id: string) => unknown): unknown[] {
   return messages.map((message) => {
+    if ((message as { role: string }).role === "system") {
+      return {
+        role: "system",
+        content: toContent((message as unknown as { content: Content }).content),
+      };
+    }
     switch (message.role) {
       case "user":
         return { role: "user", content: toContent(message.content) };
@@ -390,16 +411,58 @@ async function fetchOrThrow(url: string, headers: Record<string, string>, body: 
   }
 }
 
+async function readCappedErrorBody(response: Response, maxBytes: number): Promise<string> {
+  if (!response.body) return response.text().catch(() => "");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let out = "";
+  let total = 0;
+  let reachedEof = false;
+  try {
+    while (total < maxBytes) {
+      const { done, value } = await reader.read();
+      if (done) {
+        reachedEof = true;
+        break;
+      }
+      const room = maxBytes - total;
+      const slice = value.byteLength > room ? value.subarray(0, room) : value;
+      out += decoder.decode(slice, { stream: true });
+      total += slice.byteLength;
+      if (total >= maxBytes) break;
+    }
+    out += decoder.decode();
+    return out;
+  } catch {
+    return out;
+  } finally {
+    if (!reachedEof) await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+
 async function* sse(body: ReadableStream<Uint8Array>, signal: AbortSignal): AsyncGenerator<Record<string, unknown>> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let totalBytes = 0;
   let reachedEof = false;
+  // Abort pada fetch tidak selalu membatalkan reader.read() yang sedang
+  // menunggu di semua runtime; panggil reader.cancel() eksplisit saat abort.
+  const onAbort = () => {
+    void reader.cancel().catch(() => {});
+  };
+  if (signal.aborted) {
+    onAbort();
+    reader.releaseLock();
+    throw new DOMException("aborted", "AbortError");
+  }
+  signal.addEventListener("abort", onAbort, { once: true });
   try {
     while (true) {
-      if (signal.aborted) throw new Error("AbortError");
+      if (signal.aborted) throw new DOMException("aborted", "AbortError");
       const { done, value } = await reader.read();
+      if (signal.aborted) throw new DOMException("aborted", "AbortError");
       if (done) {
         reachedEof = true;
         break;
@@ -411,11 +474,15 @@ async function* sse(body: ReadableStream<Uint8Array>, signal: AbortSignal): Asyn
       if (totalBytes > MAX_TOTAL_BYTES) {
         throw new ProviderError("invalid_request", "SSE stream exceeds total byte limit");
       }
+      const prevLen = buffer.length;
       buffer += decoder.decode(value, { stream: true });
+      let scanFrom = Math.max(0, prevLen);
+      let lineStart = 0;
       let index: number;
-      while ((index = buffer.indexOf("\n")) >= 0) {
-        const line = buffer.slice(0, index).replace(/\r$/, "");
-        buffer = buffer.slice(index + 1);
+      while ((index = buffer.indexOf("\n", scanFrom)) >= 0) {
+        const line = buffer.slice(lineStart, index).replace(/\r$/, "");
+        lineStart = index + 1;
+        scanFrom = lineStart;
         if (line.length > MAX_FRAME_BYTES) {
           throw new ProviderError("invalid_request", "SSE frame exceeds byte limit");
         }
@@ -430,12 +497,14 @@ async function* sse(body: ReadableStream<Uint8Array>, signal: AbortSignal): Asyn
           }
         }
       }
+      if (lineStart > 0) buffer = buffer.slice(lineStart);
       // Satu baris tak-berakhir yang tumbuh melebihi cap frame = runaway buffer.
       if (buffer.length > MAX_FRAME_BYTES) {
         throw new ProviderError("invalid_request", "SSE frame exceeds byte limit");
       }
     }
   } finally {
+    signal.removeEventListener("abort", onAbort);
     // HOST seam (F2): cancel (bukan hanya releaseLock) agar exit prematur /
     // [DONE] melepas body & koneksi, bukan membiarkannya menggantung.
     if (!reachedEof) await reader.cancel().catch(() => {});

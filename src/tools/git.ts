@@ -69,6 +69,10 @@ export function runGit(
         // handler hanya bisa memeriksa `signal` induk — timeout mengakhiri child
         // dengan code null lalu di-resolve sebagai `exit null` (palsu-sukses).
         signal: effective,
+        // Grup proses sendiri di POSIX agar killProcessTree(-pid) ikut
+        // mematikan helper/hook turunan git; sembunyikan konsol di Windows.
+        detached: process.platform !== "win32",
+        windowsHide: true,
         // Tutup stdin agar subproses git tidak pernah menggantung menunggu prompt/EOF.
         stdio: ["ignore", "pipe", "pipe"],
       },

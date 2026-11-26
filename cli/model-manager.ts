@@ -112,8 +112,10 @@ export async function runModelManager(opts: {
       if (id === activeModel) {
         const fallback = nextRows[0]?.id ?? ""
         activeModel = fallback
-        if (fallback) opts.setModelOverride?.(fallback)
-        return rowsOf((await loadConfig(opts.cwd, { allowLocal: opts.allowLocalConfig })).providers)
+        // Selalu sinkronkan override termasuk "" saat model terakhir dihapus
+        // agar sesi/footer tidak terus menunjuk model yang sudah tiada.
+        opts.setModelOverride?.(fallback)
+        return nextRows
       }
       return nextRows
     },

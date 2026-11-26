@@ -101,7 +101,7 @@ export const EXECUTION_PATHS: Readonly<Record<string, RegisteredPath>> = {
   "src/policy/verifier.ts": {
     cls: "external-tool",
     entry: "runVerify/runWithSelfHeal",
-    proof: "execAsync",
+    proof: "spawn(",
     note: "--verify: menjalankan perintah verifikasi + self-heal. Remote ke authority eksekusi.",
   },
   "src/tools/web_fetch.ts": {

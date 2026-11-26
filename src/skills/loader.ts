@@ -1,4 +1,4 @@
-import type { Dirent } from "node:fs"
+import { type Dirent, realpathSync } from "node:fs"
 import { readdir, stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
@@ -56,7 +56,22 @@ function parseFrontmatter(txt: string): { meta: Record<string, string>; body: st
   return { meta, body }
 }
 
-async function loadDir(dir: string, out: Skill[], root: string = dir) {
+const MAX_SKILL_DIR_DEPTH = 4
+
+async function loadDir(
+  dir: string,
+  out: Skill[],
+  root: string = dir,
+  depth = 0,
+  visited: Set<string> = new Set(),
+) {
+  if (depth > MAX_SKILL_DIR_DEPTH) return
+  let realDir = dir
+  try {
+    realDir = realpathSync(dir)
+  } catch {}
+  if (visited.has(realDir)) return
+  visited.add(realDir)
   const entries = await readdir(dir, { withFileTypes: true }).catch(() => [])
   for (const e of entries) {
     const full = join(dir, e.name)
@@ -69,8 +84,8 @@ async function loadDir(dir: string, out: Skill[], root: string = dir) {
       // skill — tanpa ini references/guide.md ikut dimuat sebagai skill
       // "guide" dan mengotori katalog. Terdeteksi via <skill>.md di parent.
       if ((e.name === "scripts" || e.name === "references") && (await isAssetDir(dir))) continue
-      // recursive 1-level deep for nested skills
-      await loadDir(full, out, root)
+      // recursive berbatas kedalaman + anti-siklus symlink.
+      await loadDir(full, out, root, depth + 1, visited)
       continue
     }
     if (!e.isFile() || !e.name.endsWith(".md")) continue

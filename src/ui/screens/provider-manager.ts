@@ -10,16 +10,17 @@ import {
   type DecoderState,
 } from "../input/prompt-engine.ts"
 import { formatError } from "../render/errors.ts"
+import type { HintItem } from "../render/hint.ts"
 import { listRow } from "../render/list.ts"
 import { type NoticeKind, paintNoticeLines } from "../render/notice.ts"
 import { sanitizeAnsiLine } from "../render/sanitize.ts"
 import { c, glyphs } from "../render/theme.ts"
+import { tSystem } from "../render/tool-label.ts"
 import { displayWidth, truncateToWidth, wrapByWidth } from "../render/width.ts"
 import { type AltScreen, openAltScreen } from "../runtime/screen.ts"
 import { canRenderModal, dialogBox } from "./dialog.ts"
-import { runForm, validateRequired, validateUrl } from "./form.ts"
+import { IDLE_CANCEL_MS, IDLE_WARN_MS, runForm, validateRequired, validateUrl } from "./form.ts"
 import { createIdleTimer } from "./lifecycle.ts"
-import { runPicker } from "./picker.ts"
 import { withTimeout } from "./watchdog.ts"
 import { windowMaxHeight, windowSpec, windowWidth } from "./window.ts"
 
@@ -50,7 +51,7 @@ export interface ProviderActionResult {
 
 export interface ProviderManagerViewOptions {
   initialRows: ProviderRow[]
-  presets: readonly ProviderPresetView[]
+  presets?: readonly ProviderPresetView[]
   currentModel?: string
   /** Bacaan live model aktif agar penanda `(active)` selalu segar setelah select. */
   getCurrentModel?: () => string | undefined
@@ -88,6 +89,7 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
   // popup tersuspend — tanpa itu tunggu terasa hang).
   let notice: string | null = null
   let noticeKind: NoticeKind = "info"
+  let idleWarned = false
 
   async function reload() {
     providers = await opts.loadRows()
@@ -96,27 +98,31 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
   }
 
   return new Promise<void>((resolve) => {
-    const width = () => Math.max(8, windowWidth(process.stdout.columns || 80) - 4)
+    const width = () => Math.max(8, windowWidth(screen.cols || 80) - 4)
     const renderedNoticeLines = (): string[] =>
       notice ? paintNoticeLines(noticeKind, notice).flatMap((l) => wrapByWidth(l, width())) : []
     // Ukuran mengikuti terminal sungguhan; satu baris border atas/bawah dan
     // kemungkinan notice tetap masuk ke perhitungan tinggi.
     const visibleRows = () => {
-      // windowMaxHeight = tinggi kotak maksimum (sudah termasuk margin 4 baris).
-      // Chrome tetap 4 baris: 2 border + judul + footer. Jatah daftar mengikuti
-      // aturan jendela; notice (transient) menyusutkan agar kotak tetap ringkas.
-      const maxBody = windowMaxHeight(process.stdout.rows || 24) - 4
-      return Math.max(1, Math.min(maxBody - renderedNoticeLines().length, 14))
+      // windowMaxHeight = tinggi kotak maksimum. Chrome = 5 baris:
+      // 2 border + judul + jeda footer + footer.
+      const maxBody = windowMaxHeight(screen.rows || 24) - 5
+      return Math.max(1, Math.min(maxBody - renderedNoticeLines().length, 12))
     }
 
-    // Isi popup ringkas: nama provider + jumlah model redup dan status aktif.
-    const bodyLines = (): { lines: string[] } => {
+    // Isi popup ringkas: nama provider + host opsional + jumlah model & status aktif.
+    const bodyLines = (): { lines: string[]; title: string } => {
       const v = visibleRows()
       if (sel < scroll) scroll = sel
       if (sel >= scroll + v) scroll = sel - v + 1
       const w = width()
       const cut = (s: string) => truncateToWidth(s, w)
       const rows = providers.slice(scroll, scroll + v)
+      const baseTitle = t("out.titleProviders")
+      const title =
+        providers.length > v
+          ? `${baseTitle} (${scroll + 1}-${scroll + rows.length}/${providers.length})`
+          : baseTitle
       const lines: string[] = []
       if (providers.length === 0) {
         lines.push(cut(dim(`  ${t("prov.empty")}`)))
@@ -131,34 +137,62 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
           // Ikon kategori provider jadi bagian baris yang terlihat (1 kolom,
           // fallback ASCII lewat getter glyphs). Diletakkan di luar budget
           // truncasi seperti suffix agar identitas baris tak pernah hilang;
-          // sanitasi tetap pada id yang berasal dari config (tak-terpercaya).
+          // sanitasi tetap pada id/baseUrl yang berasal dari config (tak-terpercaya).
           const iconPart = `${glyphs.providerIcon} `
-          const nameBudget = Math.max(8, w - 4 - displayWidth(suffix) - displayWidth(iconPart))
-          const label = `${iconPart}${truncateToWidth(sanitizeAnsiLine(it.id), nameBudget, glyphs.ellipsis)}${suffix}`
+          const safeId = sanitizeAnsiLine(it.id)
+          const rawHost = sanitizeAnsiLine(it.baseUrl).replace(/^https?:\/\//i, "")
+          const nameBudget = Math.max(1, w - 4 - displayWidth(suffix) - displayWidth(iconPart))
+          const idFit = truncateToWidth(safeId, nameBudget, glyphs.ellipsis)
+          // Sisakan ruang minimum setelah id+suffix agar host URL opsional tak pernah
+          // memotong nama provider maupun tanda aktif di layar sempit.
+          const spare = w - 4 - displayWidth(iconPart) - displayWidth(idFit) - displayWidth(suffix)
+          const urlPart =
+            rawHost && w >= 48 && spare >= 14
+              ? ` · ${truncateToWidth(rawHost, spare - 3, glyphs.ellipsis)}`
+              : ""
+          const label = `${iconPart}${idFit}${urlPart}${suffix}`
           lines.push(listRow(label, picked))
         }
       }
       // Struk transient (jalur modal — notice dapat di-clip tanpa memotong footer).
       for (const line of renderedNoticeLines()) lines.push(cut(line))
-      return { lines }
+      return { lines, title }
     }
 
     const render = () => {
-      const { lines } = bodyLines()
+      const cols = screen.cols || 80
+      const rows = screen.rows || 24
+      if (!canRenderModal(cols, rows)) {
+        screen.paintRegion(
+          [c.warning(truncateToWidth(tSystem("msg.tooSmall"), Math.max(1, cols - 2)))],
+          Math.max(1, Math.floor(rows / 2)),
+        )
+        screen.setCursorVisible(false)
+        return
+      }
+      const { lines, title } = bodyLines()
       // Navigasi disuplai windowFooter; aksi a/d/e jadi extraHints. Urutan
       // tombol aksi mengikuti alur CRUD yang sudah ada (tambah, ubah, hapus).
       // Popup komposit: HANYA region kotak (tanpa clear) di atas konten.
       const box = dialogBox(
         windowSpec({
-          title: t("out.titleProviders"),
+          title,
           body: lines,
           cols: screen.cols,
           rows: screen.rows,
           extraHints: [
+            ...(idleWarned
+              ? [
+                  {
+                    key: "!",
+                    label: t("form.idleWarning", { s: Math.ceil(IDLE_CANCEL_MS / 1000) }),
+                  },
+                ]
+              : []),
             { key: "a", label: t("hint.add") },
             { key: "e", label: t("hint.edit") },
             { key: "d", label: t("hint.delete") },
-          ],
+          ] as HintItem[],
         }),
         screen.cols,
         screen.rows,
@@ -193,7 +227,12 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
     // exit — satu sumber idle via helper bersama (audit D1). `cleanup`
     // dirujuk sebagai closure (dievaluasi saat timer fire).
     const idle = createIdleTimer({
-      cancelMs: 90_000,
+      warnMs: IDLE_WARN_MS,
+      cancelMs: IDLE_CANCEL_MS,
+      onWarn: () => {
+        idleWarned = true
+        render()
+      },
       onCancel: () => {
         try {
           cleanup()
@@ -253,6 +292,10 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
         process.stdout.on("resize", onResize)
         attached = true
       }
+      // Pulihkan bracketed paste setelah sub-form / konfirmasi menutup dirinya.
+      try {
+        screen.setBracketedPaste?.(true)
+      } catch {}
       render()
       idle.reset()
     }
@@ -269,6 +312,9 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
         process.stdin.setMaxListeners(prevMaxListeners)
       } catch {}
       // Hapus region popup sendiri sebelum pemilik me-repaint (App.resume).
+      try {
+        screen.setBracketedPaste?.(false)
+      } catch {}
       try {
         screen.clearRegion()
       } catch {}
@@ -316,42 +362,14 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
       suspend()
       ;(async () => {
         try {
-          // Langkah 1: preset via picker (daftar + filter, dalam popup).
-          const CUSTOM = "custom-url"
-          const picked: string | null = await new Promise((resolvePick) => {
-            try {
-              void runPicker({
-                title: t("prov.addTitle"),
-                // Jendela command: judul tampil seragam dengan window lain.
-                showTitle: true,
-                screen,
-                items: [
-                  ...opts.presets.map((p) => ({ name: p.label, provider: "", value: p.id })),
-                  { name: t("prov.customUrl"), provider: "", value: CUSTOM },
-                ],
-                filterable: true,
-                onPick: (v) => resolvePick(v),
-                onCancel: () => resolvePick(null),
-              }).catch(() => resolvePick(null))
-            } catch {
-              resolvePick(null)
-            }
-          })
-          if (picked == null) {
-            notice = t("common.canceled")
-            noticeKind = "info"
-            return
-          }
-          const preset = picked === CUSTOM ? undefined : opts.presets.find((p) => p.id === picked)
-          // Langkah 2: form dalam popup (URL + key + scope + konfirmasi
-          // timpa bila duplikat). SEMUA ketikan di dalam kotak.
-          const duplicate = preset && providers.some((r) => r.id === preset.id)
+          // Langsung tampilkan form (Base URL + API key + scope opsional) tanpa
+          // memilih provider terdaftar terlebih dahulu.
           const fields = [
             {
               id: "url",
               label: t("prov.urlLabel"),
               kind: "text" as const,
-              initial: preset?.baseUrl ?? "",
+              initial: "",
               validate: validateUrl,
             },
             {
@@ -370,23 +388,9 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
                   },
                 ]
               : []),
-            ...(duplicate
-              ? [
-                  {
-                    id: "overwrite",
-                    label: t("prov.overwriteLabel", { id: preset.id }),
-                    kind: "confirm" as const,
-                  },
-                ]
-              : []),
           ]
           const form = await runForm({ title: t("prov.addTitle"), fields }, screen)
           if (form.cancelled || !form.values) {
-            notice = t("common.canceled")
-            noticeKind = "info"
-            return
-          }
-          if (duplicate && form.values.overwrite !== "y") {
             notice = t("common.canceled")
             noticeKind = "info"
             return
@@ -399,7 +403,7 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
           notice = t("ntc.detecting")
           noticeKind = "info"
           render()
-          const res = await withWatchdog(() => opts.onAdd({ preset, baseUrl, apiKey, scope }))
+          const res = await withWatchdog(() => opts.onAdd({ baseUrl, apiKey, scope }))
           // Hasil dari jaringan/config — formatter kanonik (redaksi + sanitasi).
           if (res.ok) {
             notice = res.ok
@@ -446,7 +450,6 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
             footerHints: [
               { key: `${glyphs.leftRight}/y/n`, label: t("hint.select") },
               { key: "Enter", label: t("hint.delete") },
-              { key: "Esc", label: t("hint.cancel") },
             ],
           },
           screen,
@@ -534,11 +537,20 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
     const handleProviderKeys = (keys: DecodedKey[]): boolean => {
       if (busy || done) return true
       if (!keys.length) return false
+      const usable = canRenderModal(screen.cols || 80, screen.rows || 24)
       // Struk lama dibersihkan tiap keypress baru (transient, bukan arsip).
       notice = null
       noticeKind = "info"
       try {
         for (const d of keys) {
+          if (!usable) {
+            if (d.key.type === "esc" || d.key.type === "ctrl-c" || d.key.type === "ctrl-d") {
+              cleanup()
+              resolve()
+              return true
+            }
+            continue
+          }
           switch (d.key.type) {
             case "up":
             case "wheelup":
@@ -641,6 +653,7 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
     }
     const providerPump = createKeyStreamPump({ state: decoder, onKeys: handleProviderKeys })
     const onData = (chunk: Buffer) => {
+      idleWarned = false
       idle.reset()
       try {
         providerPump.push(chunk)
@@ -661,6 +674,7 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
       process.stdin.setRawMode(true)
       process.stdin.resume()
       process.stdin.setMaxListeners(0)
+      screen.setBracketedPaste?.(true)
       process.stdin.on("data", onData)
       process.stdout.on("resize", onResize)
       attached = true

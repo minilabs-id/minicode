@@ -331,7 +331,8 @@ describe("ask_user modal: hint & echo", () => {
     await tty.ready()
     const frame = paints.at(-1) ?? ""
     expect(frame).toMatch(/Enter (submit|kirim)/)
-    expect(frame).toMatch(/Esc (cancel|batal)/)
+    expect(frame).toContain("Esc")
+    expect(frame).not.toMatch(/Esc (cancel|batal)/)
     await tty.send("biru")
     await tty.send(KEY.enter)
     expect(await p).toBe("biru")
@@ -477,5 +478,33 @@ describe("M1: idle guard approval di-reset tiap keypress", () => {
       globalThis.clearTimeout = realClear
       caps = []
     }
+  })
+
+  test("ask_user dengan options[]: navigasi ↑↓ memilih opsi, ketik bebas tetap bekerja", async () => {
+    tty = installFakeTty({ columns: 90, rows: 24 })
+    const paints: string[] = []
+    setApprovalSink({
+      pushBlock: () => {},
+      repaint: () => {},
+      suspend: () => {},
+      resume: () => {},
+      paintRegion: (lines) => paints.push(stripAnsi(lines.join("\n"))),
+      clearRegion: () => {},
+    })
+    const p1 = promptAskText("Pilih warna:", ["merah", "biru", "hijau"])
+    await tty.ready()
+    expect(paints.at(-1)).toContain("move")
+    await tty.send(KEY.down)
+    await tty.send(KEY.down)
+    await tty.send(KEY.enter)
+    expect(await p1).toBe("biru")
+
+    // Pilih dengan panah lalu mengetik teks baru beralih kembali ke input bebas.
+    const p2 = promptAskText("Pilih lagi:", ["merah", "biru"])
+    await tty.ready()
+    await tty.send(KEY.down)
+    await tty.send("ungu")
+    await tty.send(KEY.enter)
+    expect(await p2).toBe("ungu")
   })
 })

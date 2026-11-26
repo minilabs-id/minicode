@@ -48,6 +48,9 @@ export function killProcessTree(
         ["/pid", String(p.pid), "/T", "/F"],
         {
           stdio: "ignore",
+          // Batasi waktu sinkron agar UI/event-loop tidak membeku jika taskkill tersendat.
+          timeout: 2_000,
+          windowsHide: true,
           ...(opts.env ? { env: opts.env } : {}),
         },
       )

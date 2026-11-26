@@ -335,19 +335,20 @@ function hasNonSgrEscape(s: string): boolean {
  */
 export function truncateToWidth(s: string, width: number, ellipsis = "..."): string {
   if (width <= 0) return ""
-  // ASCII printable murni yang sudah muat: lebar = jumlah code unit, tak ada
-  // escape untuk ditutup — langsung kembali tanpa mengalokasikan token sama sekali.
-  if (s.indexOf("\x1b") === -1 && isAsciiPrintable(s) && s.length <= width) return s
+  // ASCII printable murni yang sudah muat: cek panjang lebih dulu agar string
+  // besar (ratusan KB) tidak dipindai dua kali sebelum tahu melebihi lebar.
+  if (s.length <= width && s.indexOf("\x1b") === -1 && isAsciiPrintable(s)) return s
 
-  // SATU lintasan (F-06): kumpulkan token sekali, hitung lebar visible dari
-  // token yang SAMA, lalu pakai ulang untuk pemotongan. Dulu `displayWidth(s)`
-  // memindai seluruh string, setelah itu loop `displayTokens(s)` memindainya
-  // lagi — dua kali Intl.Segmenter untuk teks non-ASCII.
+  // SATU lintasan berbatas: hentikan tokenisasi begitu lebar terakumulasi
+  // melewati `width` (O(width), bukan O(|s|) pada string ratusan KB).
   const tokens: DisplayToken[] = []
   let total = 0
   for (const token of displayTokens(s)) {
     tokens.push(token)
-    if (!token.escape) total += token.width
+    if (!token.escape) {
+      total += token.width
+      if (total > width) break
+    }
   }
 
   // Muat tanpa potong DAN tanpa escape asing: tetap tutup SGR yang terbuka
@@ -472,6 +473,18 @@ export interface WrapByWidthOptions {
  * Spasi yang tepat TIDAK muat menjadi titik putus; spasi itu (dan spasi-trailing
  * yang tak terlihat) dibuang, bukan dipindah ke baris berikutnya.
  */
+/** Perbarui tumpukan SGR aktif setelah membaca satu sekuens ANSI; dipangkas maks 8 atribut. */
+function trackSgrStack(openSgr: string[], seq: string): string[] {
+  if (!seq.endsWith("m")) return openSgr
+  const params = seq.slice(2, -1).split(/[:;]/)
+  let next = params.some((p) => SGR_OFF.has(p) || p === "") ? [] : openSgr
+  if (params.some((p) => p !== "" && !SGR_OFF.has(p))) {
+    next = [...next, seq]
+    if (next.length > 8) next = next.slice(-8)
+  }
+  return next
+}
+
 export function wrapByWidth(s: string, width: number, options?: WrapByWidthOptions): string[] {
   if (width <= 0) return [""]
   const rawHang = options?.hangingIndent ?? ""
@@ -492,13 +505,7 @@ export function wrapByWidth(s: string, width: number, options?: WrapByWidthOptio
   let wordWidth = 0
 
   const trackSgr = (seq: string): void => {
-    if (!seq.endsWith("m")) return
-    const params = seq.slice(2, -1).split(/[:;]/)
-    if (params.some((p) => SGR_OFF.has(p) || p === "")) openSgr = []
-    if (params.some((p) => p !== "" && !SGR_OFF.has(p))) {
-      openSgr.push(seq)
-      if (openSgr.length > 8) openSgr = openSgr.slice(-8)
-    }
+    openSgr = trackSgrStack(openSgr, seq)
   }
 
   const flush = (): void => {
@@ -582,4 +589,84 @@ export function wrapByWidth(s: string, width: number, options?: WrapByWidthOptio
     }
   }
   return out.length ? out : [""]
+}
+
+/**
+ * Kompositkan satu baris kotak popup yang berpusat horizontal di atas baris
+ * backdrop redup: margin kiri & kanan mengambil potongan kolom backdrop (termasuk
+ * SGR aktifnya), sehingga teks di samping kotak tetap tampak redup tanpa strip
+ * kosong horizontal. Aman terhadap glyph lebar-2 (CJK/emoji) di batas tepi box.
+ */
+export function compositeBackdropBoxLine(
+  backdropLine: string,
+  boxLine: string,
+  totalCols: number,
+): string {
+  const cols = Math.max(0, Math.floor(totalCols))
+  if (cols === 0) return ""
+  const rawBox = boxLine.split("\n")[0] ?? ""
+  let lead = 0
+  while (lead < rawBox.length && rawBox[lead] === " ") lead++
+  if (lead === rawBox.length) {
+    return backdropLine ? truncateToWidth(backdropLine, cols, "") : ""
+  }
+  const leftPad = Math.min(lead, cols)
+  const boxContent = rawBox.slice(lead)
+  const maxBoxW = Math.max(0, cols - leftPad)
+  const fittedBox =
+    displayWidth(boxContent) > maxBoxW ? truncateToWidth(boxContent, maxBoxW, "") : boxContent
+  const fittedW = displayWidth(fittedBox)
+  const middle = sgrLeftOpen(fittedBox) ? `${fittedBox}\x1b[0m` : fittedBox
+  if (!backdropLine) {
+    return `${" ".repeat(leftPad)}${middle}`
+  }
+
+  const rightStart = leftPad + fittedW
+  let col = 0
+  let leftPart = ""
+  let leftCols = 0
+  let rightPart = ""
+  let rightStarted = false
+  let openSgr: string[] = []
+
+  for (const token of displayTokens(backdropLine)) {
+    if (token.escape) {
+      if (!isSgrSeq(token.text)) continue
+      openSgr = trackSgrStack(openSgr, token.text)
+      if (col < leftPad) leftPart += token.text
+      else if (col >= rightStart && col < cols && rightStarted) rightPart += token.text
+      continue
+    }
+    const w = token.width
+    if (col < leftPad) {
+      if (col + w <= leftPad) {
+        leftPart += token.text
+        leftCols += w
+      } else {
+        // Glyph lebar-2 melintasi batas kiri kotak: isi 1 kolom dengan spasi.
+        leftPart += " "
+        leftCols += 1
+      }
+    }
+    if (col + w > rightStart && col < cols) {
+      if (!rightStarted) {
+        if (openSgr.length > 0) rightPart += openSgr.join("")
+        rightStarted = true
+      }
+      if (col < rightStart) {
+        // Glyph lebar-2 melintasi batas kanan kotak: ganti paro kanan dgn spasi.
+        rightPart += " "
+      } else if (col + w <= cols) {
+        rightPart += token.text
+      } else {
+        break
+      }
+    }
+    col += w
+  }
+
+  if (sgrLeftOpen(leftPart)) leftPart += "\x1b[0m"
+  if (leftCols < leftPad) leftPart += " ".repeat(leftPad - leftCols)
+  if (sgrLeftOpen(rightPart)) rightPart += "\x1b[0m"
+  return `${leftPart}${middle}${rightPart}`
 }

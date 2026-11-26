@@ -10,7 +10,7 @@
 // Refcount menutup modal nested (effort-picker di dalam manager): tulis
 // enter/exit fisik hanya di lapis terluar; handle dalam = no-op paint-through.
 import { type Cell, diffCellLine, parseCells } from "../render/cells.ts"
-import { truncateToWidth } from "../render/width.ts"
+import { compositeBackdropBoxLine, truncateToWidth } from "../render/width.ts"
 import {
   __resetTransientForTest,
   beginInteractiveScreen,
@@ -323,8 +323,14 @@ export function openAltScreen(): AltScreen {
         // Clamp ke lebar layar: baris lebih lebar memicu auto-wrap dan
         // menggeser seluruh region (AUD-009). Baris di luar kotak memulihkan
         // backdrop redup bila ada (bukan meninggalkan lubang hitam kosong).
+        const boxLine = i >= 0 && i < h ? ((lines[i] ?? "").split("\n")[0] ?? "") : null
+        const bgLine = backdropRows?.[r - 1]
         const raw =
-          i >= 0 && i < h ? ((lines[i] ?? "").split("\n")[0] ?? "") : (backdropRows?.[r - 1] ?? "")
+          boxLine !== null
+            ? bgLine !== undefined
+              ? compositeBackdropBoxLine(bgLine, boxLine, cols)
+              : boxLine
+            : (bgLine ?? "")
         const row = truncateToWidth(raw, cols)
         out += `\x1b[${r};1H\x1b[2K${row}`
       }

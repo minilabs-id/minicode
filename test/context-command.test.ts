@@ -19,6 +19,7 @@ import { contextWindowSavedNotice, originLabel } from "../cli/context-command.ts
 import { applyContextWindowArg } from "../cli/context-command-run.ts"
 import { loadConfig } from "../src/config.ts"
 import { __resetLiveContextWindows, resolveContextWindow } from "../src/policy/context-window.ts"
+import { t } from "../src/ui/i18n/locale.ts"
 
 let home: string
 const originalHome = process.env.MINICODE_HOME
@@ -155,8 +156,8 @@ describe("/context — label asal", () => {
   test("nilai manual dilabeli manual, tebakan mesin dilabeli sumbernya", () => {
     expect(originLabel({ tokens: 1, source: "model", origin: "user" })).toBe("manual")
     expect(originLabel({ tokens: 1, source: "model", origin: "endpoint" })).toBe("endpoint")
-    expect(originLabel({ tokens: 1, source: "catalog" })).toBe("katalog")
-    expect(originLabel({ tokens: 1, source: "safe-default" })).toBe("default aman")
+    expect(originLabel({ tokens: 1, source: "catalog" })).toBe(t("ctx.originCatalog"))
+    expect(originLabel({ tokens: 1, source: "safe-default" })).toBe(t("ctx.originSafeDefault"))
     expect(originLabel({ tokens: 1, source: "override" })).toBe("flag")
   })
 

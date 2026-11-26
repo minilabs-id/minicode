@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite"
-import { chmodSync } from "node:fs"
+import { chmodSync, statSync } from "node:fs"
 import { LIMITS } from "../../constants.ts"
 import { resolveDbPath, resolveLocalDbPath, withSqliteBusyRetrySync } from "../../lib/db-path.ts"
 
@@ -7,7 +7,23 @@ export const dbPath = (cwd?: string, local = false): string =>
   local ? resolveLocalDbPath("sessions.db", cwd) : resolveDbPath("sessions.db", cwd)
 
 const initializedSessionPaths = new Set<string>()
-const migratedSessionPaths = new Set<string>()
+// Simpan sidik file + `PRAGMA schema_version` untuk path yang sudah lulus
+// migrasi: open berikutnya cukup 1 pembacaan integer O(1) alih-alih ~9 query
+// `PRAGMA table_info`, namun tetap mendeteksi berkas yang dibuat ulang maupun
+// mutasi DDL in-place (mis. ALTER TABLE DROP COLUMN).
+const migratedSessionStamps = new Map<string, string>()
+
+function dbSchemaStamp(p: string, db: Database): string | null {
+  try {
+    const st = statSync(p, { bigint: true })
+    const sv = (db.prepare("PRAGMA schema_version").get() as { schema_version?: number } | null)
+      ?.schema_version
+    if (typeof sv !== "number") return null
+    return `${st.dev}:${st.ino}:${st.birthtimeNs}:${sv}`
+  } catch {
+    return null
+  }
+}
 
 /**
  * v0.44 (audit F-1 session): daftar kolom yang PASTI ada setelah seluruh blok
@@ -225,7 +241,12 @@ export function openSessionHandle(cwd?: string, local = false): Database {
       // chmod kini dipindah ke `finally` di bawah agar berjalan di SETIAP open
       // (juga setelah DDL pertama), tidak hanya saat path pertama kali di-init.
     }
-    const needsDdl = !migratedSessionPaths.has(p) || !daemonApprovalsMigrated(db)
+    const stamp = dbSchemaStamp(p, db)
+    const stampMatches = stamp !== null && migratedSessionStamps.get(p) === stamp
+    const needsDdl = !stampMatches && !daemonApprovalsMigrated(db)
+    if (!needsDdl && !stampMatches && stamp !== null) {
+      migratedSessionStamps.set(p, stamp)
+    }
     if (needsDdl) {
       // Kumpulkan kegagalan DDL alih-alih menelannya. Bila ada ALTER gagal,
       // jangan tandai path sebagai migrated dan lempar di akhir blok supaya
@@ -446,7 +467,8 @@ export function openSessionHandle(cwd?: string, local = false): Database {
           { cause: ddlError },
         )
       }
-      migratedSessionPaths.add(p)
+      const finalStamp = dbSchemaStamp(p, db)
+      if (finalStamp !== null) migratedSessionStamps.set(p, finalStamp)
     }
     return db
   } catch (err) {

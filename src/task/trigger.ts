@@ -126,6 +126,7 @@ export class TriggerCoordinator {
   private readonly onEvent: ((e: TriggerEvent) => void) | undefined
 
   private inFlight: Promise<unknown> | null = null
+  private active = false
   private pending = false
   private disposed = false
 
@@ -157,7 +158,7 @@ export class TriggerCoordinator {
       return this.refuse(source, "REFUSED_NOT_RUNNING")
     }
 
-    if (this.inFlight !== null) {
+    if (this.inFlight !== null || this.active) {
       // A cycle is running. Record that another is wanted and join this one.
       this.pending = true
       this.counts.coalesced++
@@ -181,26 +182,36 @@ export class TriggerCoordinator {
    */
   private async drain(source: TriggerSource): Promise<unknown> {
     let last: unknown = null
-    do {
+    let runs = 0
+    this.active = true
+    try {
+      do {
+        this.pending = false
+        this.inFlight = this.runCycle()
+        this.counts.cyclesRun++
+        runs++
+        try {
+          last = await this.inFlight
+        } catch (e) {
+          // [DESIGN DECISION] CONTINUE, do not stop. A cycle that throws is a
+          // failed EVALUATION, not evidence that the scheduler is broken. The
+          // scheduler's own contract already resolves almost every failure into a
+          // CycleResult; anything reaching here is a defect in the bridge or the
+          // store, and neither should poison the trigger.
+          this.counts.failures++
+          const detail = e instanceof Error ? e.message : String(e)
+          this.emit({ kind: "trigger:cycle_failed", source, detail })
+        } finally {
+          this.inFlight = null
+        }
+        // Hormati batas maksimal 1 follow-up (total 2 siklus) dan status isRunning
+        // agar badai trigger berkelanjutan tidak mengunci drain dalam loop tanpa akhir.
+      } while (this.pending && !this.disposed && runs < 2 && this.isRunning())
       this.pending = false
-      this.inFlight = this.runCycle()
-      this.counts.cyclesRun++
-      try {
-        last = await this.inFlight
-      } catch (e) {
-        // [DESIGN DECISION] CONTINUE, do not stop. A cycle that throws is a
-        // failed EVALUATION, not evidence that the scheduler is broken. The
-        // scheduler's own contract already resolves almost every failure into a
-        // CycleResult; anything reaching here is a defect in the bridge or the
-        // store, and neither should poison the trigger.
-        this.counts.failures++
-        const detail = e instanceof Error ? e.message : String(e)
-        this.emit({ kind: "trigger:cycle_failed", source, detail })
-      } finally {
-        this.inFlight = null
-      }
-    } while (this.pending && !this.disposed)
-    return last
+      return last
+    } finally {
+      this.active = false
+    }
   }
 
   private emit(event: TriggerEvent): void {
@@ -222,7 +233,7 @@ export class TriggerCoordinator {
 
   /** True while a cycle is running or a re-run is owed. */
   get busy(): boolean {
-    return this.inFlight !== null || this.pending
+    return this.active || this.inFlight !== null || this.pending
   }
 
   getStats(): Readonly<typeof this.counts> {

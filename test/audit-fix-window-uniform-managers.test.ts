@@ -54,7 +54,7 @@ function readFrame(frame: string[], g = boxGlyphs()): FrameMetrics {
     width,
     height,
     title: stripAnsi(frame[top + 1] ?? ""),
-    footer: stripAnsi(frame.slice(top).find((l) => stripAnsi(l).includes(t("hint.cancel"))) ?? ""),
+    footer: stripAnsi(frame[top + body] ?? ""),
   }
 }
 

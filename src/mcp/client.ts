@@ -451,74 +451,86 @@ class McpConnection {
   }
 
   async connect(): Promise<void> {
-    if (this.http) {
-      await this.http.connect()
-    } else {
-      if (!this.config.command) throw new Error("MCP config needs `command` or `url`")
-      await this.stdio!.connect(this.config.command, this.config.args ?? [], this.config.env ?? {})
-    }
-
-    let handshakeOk = false
-    // Standar MCP mewajibkan `initialize` sebagai pesan pertama; mengirim
-    // `server/discover` lebih dulu membuang 2 dtk timeout dan membuat server
-    // ketat (Playwright/Puppeteer/SDK resmi) menutup koneksi.
     try {
-      await this.transport.request(
-        "initialize",
-        {
-          protocolVersion: "2025-06-18",
-          // Deklarasikan seluruh kapabilitas yang kita KONSUMSI. Server memakai
-          // ini untuk memutuskan apa yang layak diiklankan; sebelumnya kita
-          // hanya menyebut `tools` sehingga server yang sopan tidak menawarkan
-          // resources/prompts sama sekali.
-          capabilities: { tools: {}, resources: {}, prompts: {} },
-          clientInfo: { name: "minicode", version: "0.1.0" },
-        },
-        LIMITS.MCP_HANDSHAKE_TIMEOUT_MS,
-      )
-      // wajib per spec: notification initialized setelah initialize
-      this.transport.notify("notifications/initialized", {})
-      handshakeOk = true
-    } catch (initErr) {
-      const msg = (initErr as Error)?.message ?? ""
-      if (
-        this.kind === "stdio" &&
-        !this.transport.isClosed &&
-        /method not found|-32601/i.test(msg)
-      ) {
-        try {
-          const disc = (await this.transport.request(
-            "server/discover",
-            {
-              _meta: {
-                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-                "io.modelcontextprotocol/clientInfo": { name: "minicode", version: "0.1.0" },
-                "io.modelcontextprotocol/clientCapabilities": { tools: {} },
+      if (this.http) {
+        await this.http.connect()
+      } else {
+        if (!this.config.command) throw new Error("MCP config needs `command` or `url`")
+        await this.stdio!.connect(
+          this.config.command,
+          this.config.args ?? [],
+          this.config.env ?? {},
+        )
+      }
+
+      let handshakeOk = false
+      // Standar MCP mewajibkan `initialize` sebagai pesan pertama; mengirim
+      // `server/discover` lebih dulu membuang 2 dtk timeout dan membuat server
+      // ketat (Playwright/Puppeteer/SDK resmi) menutup koneksi.
+      try {
+        await this.transport.request(
+          "initialize",
+          {
+            protocolVersion: "2025-06-18",
+            // Deklarasikan seluruh kapabilitas yang kita KONSUMSI. Server memakai
+            // ini untuk memutuskan apa yang layak diiklankan; sebelumnya kita
+            // hanya menyebut `tools` sehingga server yang sopan tidak menawarkan
+            // resources/prompts sama sekali.
+            capabilities: { tools: {}, resources: {}, prompts: {} },
+            clientInfo: { name: "minicode", version: "0.1.0" },
+          },
+          LIMITS.MCP_HANDSHAKE_TIMEOUT_MS,
+        )
+        // wajib per spec: notification initialized setelah initialize
+        this.transport.notify("notifications/initialized", {})
+        handshakeOk = true
+      } catch (initErr) {
+        const msg = (initErr as Error)?.message ?? ""
+        if (
+          this.kind === "stdio" &&
+          !this.transport.isClosed &&
+          /method not found|-32601/i.test(msg)
+        ) {
+          try {
+            const disc = (await this.transport.request(
+              "server/discover",
+              {
+                _meta: {
+                  "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                  "io.modelcontextprotocol/clientInfo": { name: "minicode", version: "0.1.0" },
+                  "io.modelcontextprotocol/clientCapabilities": { tools: {} },
+                },
               },
-            },
-            2_000,
-          )) as Record<string, unknown>
-          if (disc?.capabilities) handshakeOk = true
-        } catch {
+              2_000,
+            )) as Record<string, unknown>
+            if (disc?.capabilities) handshakeOk = true
+          } catch {
+            throw initErr
+          }
+        } else {
           throw initErr
         }
-      } else {
-        throw initErr
       }
+      if (!handshakeOk) throw new Error("handshake failed")
+
+      // P2.3: hormati `nextCursor`. Mengabaikannya membuat server >1 halaman
+      // tampil sebagai daftar parsial yang disangka lengkap.
+      this.tools = await this.listAll<McpToolDef>("tools/list", "tools")
+
+      // Resources & prompts bersifat OPSIONAL di spec: banyak server tidak
+      // mengimplementasikannya dan membalas "method not found". Kegagalan di sini
+      // tidak boleh membatalkan koneksi yang tool-nya sudah berhasil dimuat.
+      this.resources = await this.listSafely<McpResourceDef>("resources/list", "resources")
+      this.prompts = await this.listSafely<McpPromptDef>("prompts/list", "prompts")
+
+      this.ready = true
+    } catch (err) {
+      // Tutup transport saat handshake/discovery gagal agar proses anak stdio
+      // atau sesi HTTP tidak tertinggal yatim.
+      this.ready = false
+      await this.transport.close().catch(() => {})
+      throw err
     }
-    if (!handshakeOk) throw new Error("handshake failed")
-
-    // P2.3: hormati `nextCursor`. Mengabaikannya membuat server >1 halaman
-    // tampil sebagai daftar parsial yang disangka lengkap.
-    this.tools = await this.listAll<McpToolDef>("tools/list", "tools")
-
-    // Resources & prompts bersifat OPSIONAL di spec: banyak server tidak
-    // mengimplementasikannya dan membalas "method not found". Kegagalan di sini
-    // tidak boleh membatalkan koneksi yang tool-nya sudah berhasil dimuat.
-    this.resources = await this.listSafely<McpResourceDef>("resources/list", "resources")
-    this.prompts = await this.listSafely<McpPromptDef>("prompts/list", "prompts")
-
-    this.ready = true
   }
 
   /** Baca seluruh halaman `method`; batas 100 halaman mencegah loop server jahat. */
@@ -805,20 +817,33 @@ export async function connectAll(configs: McpServerConfig[], cwd?: string): Prom
     const { cfg, conn, reused } = s.value
     // P2.3: sesi kedua HARUS mendapat tool dari koneksi yang sudah aktif,
     // bukan daftar kosong. Refcount mencegah closeAll lintas-sesi.
-    const tools = conn.wrapTools(cfg.id)
+    // Bila dua pemanggil connectAll() balapan untuk server yang sama, tutup
+    // koneksi duplikat agar proses anak stdio tidak tertinggal yatim.
+    let activeConn = conn
+    let isReused = reused
+    if (!reused) {
+      const raced = activeConnections.get(cfg.id)
+      if (raced?.isAlive()) {
+        await conn.close().catch(() => {})
+        activeConn = raced
+        isReused = true
+      } else {
+        activeConnections.set(cfg.id, conn)
+      }
+    }
+    const tools = activeConn.wrapTools(cfg.id)
     allTools.push(...tools)
-    if (!reused) activeConnections.set(cfg.id, conn)
     connectionRefs.set(cfg.id, (connectionRefs.get(cfg.id) ?? 0) + 1)
     const extra = [
-      conn.resources.length ? `${conn.resources.length} resources` : "",
-      conn.prompts.length ? `${conn.prompts.length} prompts` : "",
+      activeConn.resources.length ? `${activeConn.resources.length} resources` : "",
+      activeConn.prompts.length ? `${activeConn.prompts.length} prompts` : "",
     ]
       .filter(Boolean)
       .join(", ")
     process.stderr.write(
-      reused
+      isReused
         ? `[mcp] ${cfg.id} reused existing connection (${tools.length} tools${extra ? `, ${extra}` : ""})\n`
-        : `[mcp] ${cfg.id} connected via ${conn.kind} (${tools.length} tools${extra ? `, ${extra}` : ""})\n`,
+        : `[mcp] ${cfg.id} connected via ${activeConn.kind} (${tools.length} tools${extra ? `, ${extra}` : ""})\n`,
     )
   }
 

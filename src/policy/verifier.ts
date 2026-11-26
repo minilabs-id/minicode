@@ -1,12 +1,12 @@
-import { exec } from "node:child_process"
+import { spawn } from "node:child_process"
 import { existsSync, readFileSync } from "node:fs"
 import { extname, resolve } from "node:path"
-import { promisify } from "node:util"
 import { LIMITS } from "../constants.ts"
+import { killProcessTree } from "../lib/process-tree.ts"
 import { getConfiguredExts, lspDiagnostics } from "../lsp/client.ts"
 import { sanitizeSpawnEnv, scrubSecrets } from "./scrub.ts"
 
-const execAsync = promisify(exec)
+const VERIFY_MAX_CAPTURE_BYTES = 256 * 1024
 
 export interface VerifyResult {
   ok: boolean
@@ -77,49 +77,137 @@ export async function runVerify(
   signal?: AbortSignal,
 ): Promise<VerifyResult> {
   signal?.throwIfAborted()
-  try {
-    const { stdout, stderr } = await execAsync(command, {
+  const env = sanitizeSpawnEnv(process.env)
+  return new Promise<VerifyResult>((resolveOut, rejectOut) => {
+    let settled = false
+    let timedOut = false
+    let aborted = false
+    let stdoutBuf = ""
+    let stderrBuf = ""
+    let capturedBytes = 0
+    let settleBackstop: ReturnType<typeof setTimeout> | undefined
+
+    const p = spawn(command, {
       cwd,
-      timeout: timeoutMs,
-      // v0.33 (audit MEDIUM): default Node 1 MiB bikin perintah yang LULUS tapi
-      // output >1 MB terlihat gagal (ERR_CHILD_PROCESS_STDIO_MAXBUFFER).
-      maxBuffer: 32 * 1024 * 1024,
-      encoding: "utf8",
-      env: sanitizeSpawnEnv(process.env),
-      ...(signal ? { signal } : {}),
+      shell: true,
+      detached: process.platform !== "win32",
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+      env,
     })
-    const output = scrubSecrets(`${stdout}${stderr ? `\n${stderr}` : ""}`.trim())
-    return { ok: true, output, command, exitCode: 0 }
-  } catch (e) {
-    // Exec yang mati karena abort (atau abort datang saat exec jalan) bukan
-    // kegagalan verifikasi — lempar agar self-heal/REPL berhenti, bukan
-    // memperbaiki.
-    if (signal?.aborted) signal.throwIfAborted()
-    const err = e as {
-      stdout?: string
-      stderr?: string
-      message?: string
-      code?: unknown
-      killed?: boolean
-      signal?: string | null
+
+    const cleanup = () => {
+      clearTimeout(timer)
+      if (settleBackstop) clearTimeout(settleBackstop)
+      signal?.removeEventListener("abort", onAbort)
     }
-    const rawOut = `${err.stdout ?? ""}${err.stderr ? `\n${err.stderr}` : ""}`.trim() || String(e)
-    const output = scrubSecrets(rawOut)
-    const numericCode = typeof err.code === "number" && Number.isFinite(err.code)
-    // Kode STRING (ENOENT, ERR_CHILD_PROCESS_STDIO_MAXBUFFER, dll.) adalah
-    // kegagalan infra, BUKAN assertion yang gagal dengan exit 1. Jangan
-    // mengarang angka 1 — itu bikin self-heal "memperbaiki" kode yang hijau.
-    const infraFailure = !numericCode
-    const timedOut = err.killed === true && (err.signal === "SIGTERM" || err.signal === "SIGKILL")
-    return {
-      ok: false,
-      output: output.slice(0, 8000),
-      command,
-      ...(numericCode ? { exitCode: err.code as number } : {}),
-      ...(timedOut ? { timedOut: true } : {}),
-      ...(infraFailure ? { infraFailure: true } : {}),
+
+    const terminate = () => {
+      try {
+        p.stdout?.destroy()
+      } catch {}
+      try {
+        p.stderr?.destroy()
+      } catch {}
+      killProcessTree(p, { env })
     }
-  }
+
+    const buildOutput = (fallback = ""): string => {
+      const raw = `${stdoutBuf}${stderrBuf ? `\n${stderrBuf}` : ""}`.trim() || fallback
+      return scrubSecrets(raw)
+    }
+
+    const finish = (res: VerifyResult) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      resolveOut(res)
+    }
+
+    const onAbort = () => {
+      aborted = true
+      terminate()
+      if (!settled) {
+        settled = true
+        cleanup()
+        try {
+          signal?.throwIfAborted()
+        } catch (err) {
+          rejectOut(err)
+          return
+        }
+        rejectOut(new DOMException("aborted", "AbortError"))
+      }
+    }
+    signal?.addEventListener("abort", onAbort, { once: true })
+
+    const timer = setTimeout(() => {
+      timedOut = true
+      terminate()
+      // Backstop: jika cucu menahan FD pipe di OS tertentu, pastikan Promise
+      // tetap settle walau `close` tidak kunjung datang.
+      settleBackstop = setTimeout(() => {
+        finish({
+          ok: false,
+          output: buildOutput(`verify timed out after ${timeoutMs}ms`).slice(0, 8000),
+          command,
+          timedOut: true,
+          infraFailure: true,
+        })
+      }, 1000)
+      settleBackstop.unref?.()
+    }, timeoutMs)
+    timer.unref?.()
+
+    p.stdout?.on("data", (chunk: Buffer) => {
+      if (capturedBytes >= VERIFY_MAX_CAPTURE_BYTES) return
+      const take = chunk.subarray(0, VERIFY_MAX_CAPTURE_BYTES - capturedBytes)
+      capturedBytes += take.byteLength
+      stdoutBuf += take.toString("utf8")
+    })
+    p.stderr?.on("data", (chunk: Buffer) => {
+      if (capturedBytes >= VERIFY_MAX_CAPTURE_BYTES) return
+      const take = chunk.subarray(0, VERIFY_MAX_CAPTURE_BYTES - capturedBytes)
+      capturedBytes += take.byteLength
+      stderrBuf += take.toString("utf8")
+    })
+
+    p.on("error", (err) => {
+      if (aborted) return
+      finish({
+        ok: false,
+        output: buildOutput(String(err)).slice(0, 8000),
+        command,
+        infraFailure: true,
+      })
+    })
+
+    p.on("close", (code) => {
+      if (aborted) return
+      const output = buildOutput()
+      if (timedOut) {
+        finish({
+          ok: false,
+          output: (output || `verify timed out after ${timeoutMs}ms`).slice(0, 8000),
+          command,
+          timedOut: true,
+          infraFailure: true,
+        })
+        return
+      }
+      if (code === 0) {
+        finish({ ok: true, output, command, exitCode: 0 })
+        return
+      }
+      const numericCode = typeof code === "number" && Number.isFinite(code)
+      finish({
+        ok: false,
+        output: (output || `verify exited with code ${String(code)}`).slice(0, 8000),
+        command,
+        ...(numericCode ? { exitCode: code } : { infraFailure: true }),
+      })
+    })
+  })
 }
 // Deteksi perintah verify yang masuk akal untuk proyek di `cwd`.
 export function detectVerifyCommand(cwd?: string): string | undefined {

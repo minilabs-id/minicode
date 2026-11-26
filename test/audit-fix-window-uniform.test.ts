@@ -44,9 +44,7 @@ function footerLine(frame: readonly string[]): string | undefined {
     .map(stripAnsi)
     .find(
       (l) =>
-        l.includes(t("hint.move")) &&
-        (l.includes(t("hint.select")) || l.includes(t("hint.save"))) &&
-        l.includes(t("hint.cancel")),
+        l.includes(t("hint.move")) && (l.includes(t("hint.select")) || l.includes(t("hint.save"))),
     )
 }
 
@@ -124,10 +122,12 @@ describe("format jendela seragam v0.33", () => {
     expect(ffLine).toBeTruthy()
     expect(fp).toContain(t("hint.select"))
     expect(ffLine).toContain(t("hint.save"))
-    for (const label of [t("hint.move"), t("hint.cancel")]) {
+    for (const label of [t("hint.move")]) {
       expect(fp).toContain(label)
       expect(ffLine).toContain(label)
     }
+    expect(titleLine(pf, "Sesi")).toContain("Esc")
+    expect(titleLine(ff, "Sesi")).toContain("Esc")
   })
 
   test("fallback ASCII tetap jalan di kedua jendela", async () => {
@@ -143,9 +143,10 @@ describe("format jendela seragam v0.33", () => {
       expect(frame.map(stripAnsi).some((l) => l.trimStart().startsWith("+"))).toBe(true)
       expect(frame.join("\n")).not.toContain("╭")
       expect(frame.join("\n")).not.toContain("│")
-      // Nav fallback ↑↓ → "Up/Down" (bukan glyph Unicode).
-      expect(frame.join("\n")).toContain("Up/Down")
     }
+    // Nav fallback ↑↓ → "Up/Down" (bukan glyph Unicode) pada list; form memakai Tab.
+    expect(pf.join("\n")).toContain("Up/Down")
+    expect(ff.join("\n")).toContain("Tab")
     // Ikon kategori sesi memakai fallback ">" — 1 kolom, label tetap terbaca.
     expect(pf.join("\n")).toContain("> p::s1")
     // ASCII tak mengubah isi form.

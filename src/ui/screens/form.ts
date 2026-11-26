@@ -21,11 +21,12 @@ import {
 import type { HintItem } from "../render/hint.ts"
 import { sanitizeAnsiLine } from "../render/sanitize.ts"
 import { c, glyphs, stripAnsi } from "../render/theme.ts"
+import { tSystem } from "../render/tool-label.ts"
 import { displayWidth, truncateToWidth, wrapByWidth } from "../render/width.ts"
 import type { AltScreen } from "../runtime/screen.ts"
-import { boxLeftPad, dialogBox } from "./dialog.ts"
+import { boxLeftPad, canRenderModal, dialogBox } from "./dialog.ts"
 import { createIdleTimer } from "./lifecycle.ts"
-import { windowSpec, windowWidth } from "./window.ts"
+import { windowMaxHeight, windowSpec, windowWidth } from "./window.ts"
 
 export interface FormField {
   id: string
@@ -85,19 +86,21 @@ interface FieldState {
 const dim = (s: string): string => c.dim(s)
 
 /**
- * Hint tambahan spesifik-field. Nav/pilih/tutup (↑↓/Enter/Esc) sudah jadi
- * bawaan windowFooter — jangan diduplikasi di sini. v0.33 menyatukan footer
- * semua jendela lewat satu helper.
+ * Hint spesifik-field untuk form (`role: "form"` di `windowFooter`).
+ * Tidak lagi mewarisi `↑↓ move  Enter select` ganda dari footer list.
  */
-function defaultExtraHints(st: FieldState | undefined): HintItem[] {
+function defaultExtraHints(st: FieldState | undefined, multiField: boolean): HintItem[] {
+  const moveHint: HintItem[] = multiField ? [{ key: "Tab", label: t("hint.move") }] : []
   if (st?.def.kind === "select") {
     return [
+      ...moveHint,
       { key: glyphs.leftRight, label: t("hint.select") },
       { key: "Enter", label: t("hint.save") },
     ]
   }
   if (st?.def.kind === "confirm") {
     return [
+      ...moveHint,
       { key: `${glyphs.leftRight}/y/n`, label: t("hint.select") },
       { key: "Enter", label: t("hint.save") },
     ]
@@ -179,6 +182,9 @@ export const IDLE_CANCEL_MS = 10_000
 
 export async function runForm(spec: FormSpec, screen: AltScreen): Promise<FormResult> {
   if (!spec.fields.length) return { cancelled: true }
+  if (!screen.ok || !canRenderModal(screen.cols || 80, screen.rows || 24)) {
+    return { cancelled: true }
+  }
   return new Promise<FormResult>((resolve) => {
     const fields = spec.fields.map(toState)
     let idx = 0
@@ -210,11 +216,22 @@ export async function runForm(spec: FormSpec, screen: AltScreen): Promise<FormRe
 
     // Baris nilai field aktif (indeks dalam body) untuk parkir kursor.
     const render = (): { activeRow: number; activeCol: number } => {
+      const cols = screen.cols || 80
+      const rows = screen.rows || 24
+      if (!canRenderModal(cols, rows)) {
+        screen.paintRegion(
+          [c.warning(truncateToWidth(tSystem("msg.tooSmall"), Math.max(1, cols - 2)))],
+          Math.max(1, Math.floor(rows / 2)),
+        )
+        screen.setCursorVisible(false)
+        return { activeRow: -1, activeCol: -1 }
+      }
       const w = innerW()
       const cut = (s: string) => truncateToWidth(s, w)
       const body: string[] = []
       let activeRow = -1
       let activeCol = -1
+      let focusAnchor = -1
       fields.forEach((st, fi) => {
         const active = fi === idx
         const marker = active ? c.accent(glyphs.arrow) : " "
@@ -284,6 +301,12 @@ export async function runForm(spec: FormSpec, screen: AltScreen): Promise<FormRe
             body.push(cut(c.error(`  ${el}`)))
           }
         }
+        if (active) {
+          const rowsAvail = Math.max(1, windowMaxHeight(screen.rows || 24) - 4)
+          const errEnd = body.length - 1
+          focusAnchor =
+            st.error && activeRow >= 0 && errEnd - activeRow < rowsAvail ? errEnd : activeRow
+        }
       })
       // Footer selalu dari windowFooter (nav/pilih/tutup). Aksi khusus form
       // (Tab/Enter/select/confirm) dan peringatan idle (TUI-004: draft tak
@@ -292,7 +315,7 @@ export async function runForm(spec: FormSpec, screen: AltScreen): Promise<FormRe
         ...(idleWarned
           ? [{ key: "!", label: t("form.idleWarning", { s: Math.ceil(IDLE_CANCEL_MS / 1000) }) }]
           : []),
-        ...(spec.footerHints ?? defaultExtraHints(fields[idx])),
+        ...(spec.footerHints ?? defaultExtraHints(fields[idx], fields.length > 1)),
       ]
       const box = dialogBox(
         windowSpec({
@@ -300,9 +323,9 @@ export async function runForm(spec: FormSpec, screen: AltScreen): Promise<FormRe
           body,
           cols: screen.cols || 80,
           rows: screen.rows || 24,
-          // Field aktif WAJIB terlihat: dialog menggeser jendela body bila
-          // muat-tidaknya terpaksa memotong (audit 2026-11-12, HIGH-2).
-          focusRow: activeRow >= 0 ? activeRow : undefined,
+          role: "form",
+          // Field aktif (+ error validasinya bila muat) WAJIB terlihat.
+          focusRow: focusAnchor >= 0 ? focusAnchor : undefined,
           extraHints,
         }),
         screen.cols,
@@ -310,11 +333,9 @@ export async function runForm(spec: FormSpec, screen: AltScreen): Promise<FormRe
       )
       screen.paintRegion(box.lines, box.topRow)
       // Parkir kursor terminal di posisi ketik field aktif (select/confirm:
-      // sembunyikan di ujung baris). Kolom absolut = padding kiri + border +
-      // spasi + offset konten + 1; clamp ke layar. Menghitung ulang center
-      // dari lebar baris (yang sudah termasuk padding) terbukti off-by-N.
+      // sembunyikan kursor agar bar ketik tak berkedip di tepi border).
       try {
-        if (activeRow >= 0) {
+        if (activeRow >= 0 && activeCol >= 0) {
           // bodyStart = offset jendela body yang benar-benar dirender; tanpa
           // dikurangi, kursor mendarat di baris marker/border saat body dipotong.
           const li = Math.max(
@@ -324,13 +345,13 @@ export async function runForm(spec: FormSpec, screen: AltScreen): Promise<FormRe
           const row = box.topRow + li
           const stripped = stripAnsi(box.lines[li] ?? "")
           const leftPad = boxLeftPad(stripped)
-          const contentW = displayWidth(stripped) - leftPad
           const maxCol = leftPad + 2 + w + 1
-          const raw =
-            activeCol >= 0 ? Math.min(maxCol, leftPad + activeCol + 2) : leftPad + contentW + 1
+          const raw = Math.min(maxCol, leftPad + activeCol + 2)
           const col = Math.max(1, Math.min(screen.cols || 80, raw))
           // Lewat screen.moveCursor agar RESET_ATTRS + `\x1b[6 q` + blok sync konsisten.
           screen.moveCursor(row, col)
+        } else {
+          screen.setCursorVisible(false)
         }
       } catch {}
       return { activeRow, activeCol }
@@ -342,6 +363,9 @@ export async function runForm(spec: FormSpec, screen: AltScreen): Promise<FormRe
       idle.dispose()
       try {
         formPump.dispose()
+      } catch {}
+      try {
+        screen.setCursorVisible(false)
       } catch {}
       try {
         screen.setBracketedPaste?.(false)
@@ -452,8 +476,16 @@ export async function runForm(spec: FormSpec, screen: AltScreen): Promise<FormRe
     const handleKeys = (keys: DecodedKey[]): boolean => {
       if (done) return true
       resetIdle()
+      const usable = canRenderModal(screen.cols || 80, screen.rows || 24)
       for (const d of keys) {
         const k = d.key
+        if (!usable) {
+          if (k.type === "esc" || k.type === "ctrl-c" || k.type === "ctrl-d") {
+            finish(true)
+            return true
+          }
+          continue
+        }
         // Field STATE dibaca ulang tiap iterasi: Tab/↑/↓ di dalam chunk yang
         // sama memindahkan `idx`, dan pointer yang dicapture sebelum loop
         // membuat ketikan masuk ke field SEBELUMNYA (audit 2026-11-12, HIGH-1).

@@ -1,5 +1,5 @@
-// View wizard setup pertama — murni presentasi: picker gateway + form
-// URL/key dalam popup. Penyimpanan provider lewat callback `onSubmit` yang
+// View wizard setup pertama — murni presentasi: form Base URL + API key
+// dalam popup. Penyimpanan provider lewat callback `onSubmit` yang
 // di-inject controller (cli/wizard.ts). SEMUA langkah dalam kotak: tak ada
 // ketikan di luar popup.
 import { formatError } from "../assistant/simple.ts"
@@ -7,16 +7,15 @@ import { t } from "../i18n/locale.ts"
 import { createDecoderState, createKeyStreamPump } from "../input/prompt-engine.ts"
 import type { HintItem } from "../render/hint.ts"
 import { sanitizeAnsiLine } from "../render/sanitize.ts"
-import { c } from "../render/theme.ts"
+import { c, glyphs } from "../render/theme.ts"
 import { tSystem } from "../render/tool-label.ts"
-import { wrapByWidth } from "../render/width.ts"
+import { truncateToWidth, wrapByWidth } from "../render/width.ts"
 import { openAltScreen } from "../runtime/screen.ts"
 import { canRenderModal, type DialogSpec, dialogBox } from "./dialog.ts"
 import { IDLE_CANCEL_MS, IDLE_WARN_MS, runForm, validateUrl } from "./form.ts"
 import { createIdleTimer } from "./lifecycle.ts"
-import { runPicker } from "./picker.ts"
 import { withTimeout } from "./watchdog.ts"
-import { windowSpec, windowWidth } from "./window.ts"
+import { windowMaxHeight, windowSpec, windowWidth } from "./window.ts"
 
 /**
  * Batas tunggu simpan-provider (audit 2026-11-12, MEDIUM-7).
@@ -34,17 +33,21 @@ export interface WizardPreset {
 }
 
 export interface SetupWizardViewOptions {
-  presets: readonly WizardPreset[]
+  presets?: readonly WizardPreset[]
   /** Simpan provider; kembalikan pesan sukses, atau lempar untuk gagal. */
-  onSubmit(baseUrl: string, apiKey: string): Promise<string>
+  onSubmit(baseUrl: string, apiKey: string, signal?: AbortSignal): Promise<string>
 }
 
 export interface WizardWindowOptions {
   body: string[]
   cols: number
   rows: number
-  /** Aksi khusus langkah (mis. Enter = tutup pada dialog gagal). */
+  /** Judul opsional (default `wiz.title`); dipakai untuk counter gulir saat error panjang. */
+  title?: string
+  /** Aksi khusus langkah (mis. Enter retry pada dialog gagal). */
   extraHints?: readonly HintItem[]
+  /** Tampilkan `Esc` redup di pojok kanan atas judul. */
+  escHint?: boolean
 }
 
 /**
@@ -56,22 +59,35 @@ export interface WizardWindowOptions {
  */
 export function wizardWindowSpec(opts: WizardWindowOptions): DialogSpec {
   return windowSpec({
-    title: t("wiz.title"),
+    title: opts.title ?? t("wiz.title"),
     body: opts.body,
     cols: opts.cols,
     rows: opts.rows,
+    role: "progress",
+    ...(opts.escHint !== undefined ? { escHint: opts.escHint } : {}),
     ...(opts.extraHints ? { extraHints: opts.extraHints } : {}),
   })
 }
 
 /** Tunggu keputusan user pada dialog error wizard (`retry` / `back` / `cancel`). */
-async function waitForWizardDismiss(renderErr: () => void): Promise<"retry" | "back" | "cancel"> {
+async function waitForWizardDismiss(
+  renderErr: (idleWarned: boolean) => void,
+  onScroll?: (delta: number, page: number) => void,
+): Promise<"retry" | "back" | "cancel"> {
   return new Promise<"retry" | "back" | "cancel">((resolve) => {
     let done = false
+    let idleWarned = false
     let onData!: (chunk: Buffer) => void
     let onResize!: () => void
     const idle = createIdleTimer({
-      cancelMs: IDLE_WARN_MS + IDLE_CANCEL_MS,
+      warnMs: IDLE_WARN_MS,
+      cancelMs: IDLE_CANCEL_MS,
+      onWarn: () => {
+        idleWarned = true
+        try {
+          renderErr(idleWarned)
+        } catch {}
+      },
       onCancel: () => finish("cancel"),
     })
     const finish = (choice: "retry" | "back" | "cancel") => {
@@ -95,14 +111,36 @@ async function waitForWizardDismiss(renderErr: () => void): Promise<"retry" | "b
     const pump = createKeyStreamPump({
       state: createDecoderState(),
       onKeys: (keys) => {
+        const usable = canRenderModal(process.stdout.columns || 80, process.stdout.rows || 24)
         for (const d of keys) {
           const k = d.key
+          if (k.type === "esc" || k.type === "ctrl-c" || k.type === "ctrl-d") {
+            finish("cancel")
+            return true
+          }
+          if (!usable) continue
           if (k.type === "enter") {
             finish("retry")
             return true
           }
+          if (k.type === "up" || k.type === "wheelup") {
+            onScroll?.(-1, 1)
+            continue
+          }
+          if (k.type === "down" || k.type === "wheeldown") {
+            onScroll?.(1, 1)
+            continue
+          }
+          if (k.type === "pageup" || k.type === "pagedown") {
+            onScroll?.(k.type === "pageup" ? -1 : 1, 5)
+            continue
+          }
           if (k.type === "char") {
             const ch = k.ch.toLowerCase()
+            if (ch === "j" || ch === "k") {
+              onScroll?.(ch === "k" ? -1 : 1, 1)
+              continue
+            }
             if (ch === "r") {
               finish("retry")
               return true
@@ -112,16 +150,13 @@ async function waitForWizardDismiss(renderErr: () => void): Promise<"retry" | "b
               return true
             }
           }
-          if (k.type === "esc" || k.type === "ctrl-c" || k.type === "ctrl-d") {
-            finish("cancel")
-            return true
-          }
         }
         idle.reset()
         return false
       },
     })
     onData = (chunk: Buffer) => {
+      idleWarned = false
       idle.reset()
       try {
         pump.push(new Uint8Array(chunk))
@@ -131,7 +166,7 @@ async function waitForWizardDismiss(renderErr: () => void): Promise<"retry" | "b
     }
     onResize = () => {
       try {
-        renderErr()
+        renderErr(idleWarned)
       } catch {}
     }
     try {
@@ -140,7 +175,7 @@ async function waitForWizardDismiss(renderErr: () => void): Promise<"retry" | "b
       process.stdin.on("data", onData)
       process.stdout.on("resize", onResize)
       idle.reset()
-      renderErr()
+      renderErr(idleWarned)
     } catch {
       finish("cancel")
     }
@@ -157,10 +192,62 @@ function sleepUnref(ms: number): Promise<void> {
 }
 
 /**
+ * Pasang listener stdin sementara selama kotak progres jaringan berjalan agar
+ * Esc/Ctrl+C/Ctrl+D dapat langsung membatalkan deteksi, dan resize me-repaint.
+ */
+function attachProgressCancel(ac: AbortController, onResize: () => void): () => void {
+  let detached = false
+  const pump = createKeyStreamPump({
+    state: createDecoderState(),
+    onKeys: (keys) => {
+      for (const d of keys) {
+        if (d.key.type === "esc" || d.key.type === "ctrl-c" || d.key.type === "ctrl-d") {
+          ac.abort()
+          return true
+        }
+      }
+      return false
+    },
+  })
+  const onData = (chunk: Buffer) => {
+    try {
+      pump.push(new Uint8Array(chunk))
+    } catch {}
+  }
+  const handleResize = () => {
+    try {
+      onResize()
+    } catch {}
+  }
+  try {
+    process.stdin.setRawMode(true)
+    process.stdin.resume()
+    process.stdin.on("data", onData)
+    process.stdout.on("resize", handleResize)
+  } catch {}
+  return () => {
+    if (detached) return
+    detached = true
+    try {
+      pump.dispose()
+    } catch {}
+    try {
+      process.stdin.removeListener("data", onData)
+    } catch {}
+    try {
+      process.stdout.removeListener("resize", handleResize)
+    } catch {}
+    try {
+      process.stdin.setRawMode(false)
+    } catch {}
+  }
+}
+
+/**
  * Wizard setup pertama — hal PERTAMA yang dilihat pengguna baru.
  *
- * Memakai `runPicker` (panah + filter) untuk gateway, lalu form dalam popup
- * untuk URL + API key. Esc di langkah mana pun = batal total.
+ * Langsung membuka form dalam popup untuk Base URL + API key (tanpa memilih
+ * preset provider). Esc di langkah mana pun = batal total.
  */
 export async function runSetupWizardView(opts: SetupWizardViewOptions): Promise<boolean> {
   if (!process.stdin.isTTY) return false
@@ -171,36 +258,11 @@ export async function runSetupWizardView(opts: SetupWizardViewOptions): Promise<
       exitMsg = `${tSystem("msg.tooSmall")}\n`
       return false
     }
-    const CUSTOM = "\u0000custom"
-    const items = [
-      ...opts.presets.map((p) => ({ name: p.label, provider: "", value: p.baseUrl })),
-      { name: t("prov.customUrl"), provider: "", value: CUSTOM },
-    ]
 
-    let picked: string | null = null
-    await runPicker({
-      title: t("wiz.gateway"),
-      items,
-      filterable: true,
-      // Step [1/3] butuh judul; picker biasa tetap tanpa judul (kontrak v7.8).
-      showTitle: true,
-      screen,
-      onPick: (v) => {
-        picked = v
-      },
-      onCancel: () => {
-        picked = null
-      },
-    })
-    if (picked === null) {
-      exitMsg = `${t("wiz.canceled")}\n`
-      return false
-    }
-
-    let draftUrl = picked === CUSTOM ? "" : (picked as string)
+    let draftUrl = ""
     let draftKey = ""
-    // Loop langkah 2–3 agar kegagalan deteksi model mengizinkan Retry atau
-    // kembali memperbaiki URL/API key tanpa mengulang wizard dari awal.
+    // Loop langkah Base URL + API key agar kegagalan deteksi model mengizinkan
+    // Retry atau kembali memperbaiki isian tanpa mengulang wizard dari awal.
     for (;;) {
       const urlForm = await runForm(
         {
@@ -208,14 +270,10 @@ export async function runSetupWizardView(opts: SetupWizardViewOptions): Promise<
           fields: [
             {
               id: "url",
-              label: picked === CUSTOM ? t("wiz.urlLabel") : `${t("wiz.urlLabel")} [${picked}]`,
+              label: t("wiz.urlLabel"),
               kind: "text",
               initial: draftUrl,
-              validate: (v) => {
-                const val = v.trim() || (picked === CUSTOM ? "" : (picked as string))
-                if (!val) return t("form.required")
-                return validateUrl(val)
-              },
+              validate: validateUrl,
             },
           ],
         },
@@ -225,8 +283,7 @@ export async function runSetupWizardView(opts: SetupWizardViewOptions): Promise<
         exitMsg = `${t("wiz.canceled")}\n`
         return false
       }
-      const rawUrl = (urlForm.values.url ?? "").trim()
-      const targetUrl = rawUrl || (picked === CUSTOM ? "" : (picked as string))
+      const targetUrl = (urlForm.values.url ?? "").trim()
       if (!targetUrl) {
         exitMsg = `${t("wiz.canceled")}\n`
         return false
@@ -268,19 +325,56 @@ export async function runSetupWizardView(opts: SetupWizardViewOptions): Promise<
       // Inner loop untuk Retry deteksi langsung dengan URL + key yang sama.
       let goBack = false
       for (;;) {
-        const box = dialogBox(
-          wizardWindowSpec({
-            body: [c.muted(t("wiz.detecting"))],
-            cols: screen.cols || 80,
-            rows: screen.rows || 24,
-          }),
-          screen.cols,
-          screen.rows,
-        )
-        screen.paintRegion(box.lines, box.topRow)
-        screen.setCursorVisible(false)
+        const paintDetecting = () => {
+          const cols = screen.cols || 80
+          const rows = screen.rows || 24
+          if (!canRenderModal(cols, rows)) {
+            screen.paintRegion(
+              [c.warning(truncateToWidth(tSystem("msg.tooSmall"), Math.max(1, cols - 2)))],
+              Math.max(1, Math.floor(rows / 2)),
+            )
+            screen.setCursorVisible(false)
+            return
+          }
+          const box = dialogBox(
+            wizardWindowSpec({
+              body: [c.muted(t("wiz.detecting"))],
+              cols,
+              rows,
+              escHint: true,
+            }),
+            cols,
+            rows,
+          )
+          screen.paintRegion(box.lines, box.topRow)
+          screen.setCursorVisible(false)
+        }
+        const ac = new AbortController()
+        paintDetecting()
+        const detachCancel = attachProgressCancel(ac, paintDetecting)
         try {
-          const message = await withTimeout(() => opts.onSubmit(targetUrl, apiKey), 60_000)
+          const submitP = withTimeout(() => opts.onSubmit(targetUrl, apiKey, ac.signal), 60_000)
+          // Redam unhandled rejection bila user menekan Esc sebelum promise selesai.
+          submitP.catch(() => {})
+          const message = await new Promise<string>((resolve, reject) => {
+            const onAbort = () => reject(new DOMException("aborted", "AbortError"))
+            if (ac.signal.aborted) {
+              onAbort()
+              return
+            }
+            ac.signal.addEventListener("abort", onAbort, { once: true })
+            submitP.then(
+              (v) => {
+                ac.signal.removeEventListener("abort", onAbort)
+                resolve(v)
+              },
+              (err) => {
+                ac.signal.removeEventListener("abort", onAbort)
+                reject(err)
+              },
+            )
+          })
+          detachCancel()
           screen.clearRegion()
           const doneBox = dialogBox(
             wizardWindowSpec({
@@ -296,19 +390,63 @@ export async function runSetupWizardView(opts: SetupWizardViewOptions): Promise<
           await sleepUnref(1200)
           return true
         } catch (e) {
+          detachCancel()
           screen.clearRegion()
+          // Pembatalan eksplisit via Esc/Ctrl+C selama deteksi: kembali ke
+          // form Base URL/API key dengan draft utuh (tanpa menumpuk dialog error).
+          if (ac.signal.aborted) {
+            goBack = true
+            break
+          }
           const errRaw = t("wiz.detectFail", { msg: formatError(e) })
-          const renderErr = () => {
-            const innerW = Math.max(10, windowWidth(screen.cols || 80) - 4)
+          let errScroll = 0
+          let lastIdleWarned = false
+          const buildWrapped = () => {
+            const cols = screen.cols || 80
+            const rows = screen.rows || 24
+            const innerW = Math.max(10, windowWidth(cols) - 4)
             const wrapped = errRaw
               .split("\n")
               .flatMap((line) => (line.trim() ? wrapByWidth(c.error(line), innerW) : [""]))
+            const viewH = Math.max(1, windowMaxHeight(rows) - 5)
+            return { cols, rows, wrapped, viewH }
+          }
+          const renderErr = (idleWarned: boolean) => {
+            lastIdleWarned = idleWarned
+            const { cols, rows, wrapped, viewH } = buildWrapped()
+            if (!canRenderModal(cols, rows)) {
+              screen.paintRegion(
+                [c.warning(truncateToWidth(tSystem("msg.tooSmall"), Math.max(1, cols - 2)))],
+                Math.max(1, Math.floor(rows / 2)),
+              )
+              screen.setCursorVisible(false)
+              return
+            }
+            const maxScroll = Math.max(0, wrapped.length - viewH)
+            if (errScroll > maxScroll) errScroll = maxScroll
+            if (errScroll < 0) errScroll = 0
+            const visible = wrapped.slice(errScroll, errScroll + viewH)
+            const title =
+              maxScroll > 0
+                ? `${t("wiz.title")} (${errScroll + 1}-${errScroll + visible.length}/${wrapped.length})`
+                : t("wiz.title")
             const errBox = dialogBox(
               wizardWindowSpec({
-                body: wrapped,
-                cols: screen.cols || 80,
-                rows: screen.rows || 24,
+                title,
+                body: visible,
+                cols,
+                rows,
+                escHint: true,
                 extraHints: [
+                  ...(idleWarned
+                    ? [
+                        {
+                          key: "!",
+                          label: t("form.idleWarning", { s: Math.ceil(IDLE_CANCEL_MS / 1000) }),
+                        },
+                      ]
+                    : []),
+                  ...(maxScroll > 0 ? [{ key: glyphs.upDown, label: t("hint.scroll") }] : []),
                   { key: "r/Enter", label: t("hint.retry") },
                   { key: "b", label: t("hint.back") },
                 ],
@@ -319,7 +457,12 @@ export async function runSetupWizardView(opts: SetupWizardViewOptions): Promise<
             screen.paintRegion(errBox.lines, errBox.topRow)
             screen.setCursorVisible(false)
           }
-          const action = await waitForWizardDismiss(renderErr)
+          const action = await waitForWizardDismiss(renderErr, (dir, mult) => {
+            const { viewH } = buildWrapped()
+            const step = mult > 1 ? Math.max(1, viewH - 1) : 1
+            errScroll += dir * step
+            renderErr(lastIdleWarned)
+          })
           if (action === "retry") continue
           if (action === "back") {
             goBack = true
@@ -334,6 +477,9 @@ export async function runSetupWizardView(opts: SetupWizardViewOptions): Promise<
   } finally {
     try {
       screen.clearRegion()
+    } catch {}
+    try {
+      screen.setBracketedPaste?.(false)
     } catch {}
     try {
       screen.close()

@@ -1316,17 +1316,20 @@ export async function createMinicodeSession(
           ? `${d.provider}::${d.model}`
           : d.model
         : currentContextModel()
-    const __fbT = perfEnabled() ? performance.now() : 0
-    let fallbackLocal = 0
-    try {
-      fallbackLocal =
-        estimateSystem(computeLiveSystem(), minicodeEstimator) +
-        estimateTools(liveToolSchemas(), minicodeEstimator) +
-        estimateMessages(core.state.history, minicodeEstimator)
-    } finally {
-      perfCount("session.estimateFallback", perfEnabled() ? performance.now() - __fbT : 0)
+    let localEstimatedTokens = lastRequestLocalEstimate?.tokens
+    // Hitung estimasi fallback secara lazy: hanya saat estimasi pra-request
+    // absen agar tidak meng-clone core.state.history pada setiap event usage SSE.
+    if (localEstimatedTokens === undefined) {
+      const __fbT = perfEnabled() ? performance.now() : 0
+      try {
+        localEstimatedTokens =
+          estimateSystem(computeLiveSystem(), minicodeEstimator) +
+          estimateTools(liveToolSchemas(), minicodeEstimator) +
+          estimateMessages(core.state.history, minicodeEstimator)
+      } finally {
+        perfCount("session.estimateFallback", perfEnabled() ? performance.now() - __fbT : 0)
+      }
     }
-    const localEstimatedTokens = lastRequestLocalEstimate?.tokens ?? fallbackLocal
     // Anchor input nyata (max per turn) = lantai admission request berikutnya.
     if (typeof d.inputTokens === "number" && d.inputTokens > 0) {
       lastProviderInputTokens =

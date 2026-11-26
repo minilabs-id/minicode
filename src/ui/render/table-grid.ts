@@ -1,7 +1,7 @@
 import { effectiveAssistantMargin } from "./markdown-layout.ts"
 import type { MarkdownTable, PipeTableAlignment } from "./markdown-table.ts"
 import { cleanUntrusted, sanitizeAnsiLine, stripSgr } from "./sanitize.ts"
-import { c, getTerminalWidth, glyphs, supportsUtf8 } from "./theme.ts"
+import { c, getTerminalWidth, glyphs, resolveBoxStyle } from "./theme.ts"
 import {
   displayWidth,
   graphemeWidth,
@@ -217,33 +217,34 @@ function renderBorderedGrid(
   options: GridRenderOptions,
   margin: number,
 ): string {
-  const g = supportsUtf8()
-    ? {
-        tl: "┌",
-        tm: "┬",
-        tr: "┐",
-        ml: "├",
-        mm: "┼",
-        mr: "┤",
-        bl: "└",
-        bm: "┴",
-        br: "┘",
-        h: "─",
-        v: "│",
-      }
-    : {
-        tl: "+",
-        tm: "+",
-        tr: "+",
-        ml: "+",
-        mm: "+",
-        mr: "+",
-        bl: "+",
-        bm: "+",
-        br: "+",
-        h: "-",
-        v: "|",
-      }
+  const g =
+    resolveBoxStyle() !== "ascii"
+      ? {
+          tl: "┌",
+          tm: "┬",
+          tr: "┐",
+          ml: "├",
+          mm: "┼",
+          mr: "┤",
+          bl: "└",
+          bm: "┴",
+          br: "┘",
+          h: "─",
+          v: "│",
+        }
+      : {
+          tl: "+",
+          tm: "+",
+          tr: "+",
+          ml: "+",
+          mm: "+",
+          mr: "+",
+          bl: "+",
+          bm: "+",
+          br: "+",
+          h: "-",
+          v: "|",
+        }
   const cellEllipsis = options.ellipsis ?? glyphs.ellipsis
   // Guard terakhir: baris sel TIDAK BOLEH lebih lebar dari kolomnya. Pakai
   // ellipsis runtime (bukan kosong) supaya pemotongan token tetap terbaca.

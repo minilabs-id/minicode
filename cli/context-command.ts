@@ -41,11 +41,11 @@ export function originLabel(res: ContextWindowResolution): string {
       // (ditemukan dari /models, boleh ditimpa sync berikutnya).
       return res.origin === "user" ? "manual" : (res.origin ?? "config")
     case "catalog":
-      return "katalog"
+      return t("ctx.originCatalog")
     case "models-dev":
       return "models.dev"
     case "safe-default":
-      return "default aman"
+      return t("ctx.originSafeDefault")
   }
 }
 

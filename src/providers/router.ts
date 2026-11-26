@@ -41,19 +41,14 @@ function needsBinaryFix(p: ModelProvider): boolean {
   return (p as unknown as { kind?: string }).kind !== "anthropic"
 }
 
-// P0 konteks: adapter openai-compat (vendor, frozen) TIDAK mengirim
-// request.system ke wire (buildBody-nya tak membaca field itu), dan bertipe
-// kernel tanpa role "system" (toMessages me-null-kan role tak dikenal).
-// Akibatnya seluruh system prompt (MEMORY, repomap, AGENTS.md, recovery)
-// hilang diam-diam pada semua provider non-Anthropic/non-Responses.
-// Perbaikan di router (satu-satunya seam app-layer sebelum wire): selipkan
-// system sebagai pesan user PERTAMA. Bukan developer/system role (vendor
-// me-null-kan), bukan merge ke user pertama (provenance lebih buruk).
-// Anthropic mengirim system native; Responses diurus via `instructions`
-// di adapter-nya sendiri — keduanya dilewati di sini.
+// Adapter resmi (`anthropic`, `responses`, dan kini `openai-compat` di
+// vendor/minicore yang host-editable) mengirim `request.system` secara native
+// ke wire (`system` / `instructions` / `{ role: "system" }`).
+// Router hanya menyelipkan fallback untuk adapter kustom tanpa `kind` yang
+// mungkin belum membaca `request.system`.
 function needsSystemMessage(p: ModelProvider): boolean {
   const kind = (p as unknown as { kind?: string }).kind
-  return kind !== "anthropic" && kind !== "responses"
+  return kind !== "anthropic" && kind !== "responses" && kind !== "openai-compat"
 }
 
 function withSystemMessage(req: StreamRequest): StreamRequest {

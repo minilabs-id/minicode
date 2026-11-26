@@ -108,8 +108,11 @@ function installCrashGuard(): void {
       stdin.setRawMode?.(false)
     } catch {}
     try {
-      // 1049 = keluar alt-screen; 25h = tampilkan kursor; 0m = reset atribut.
-      process.stdout.write("\u001b[?1049l\u001b[?25h\u001b[0m")
+      // Matikan mouse tracking (1000/1002/1006) & bracketed paste (2004),
+      // keluar alt-screen (1049), tampilkan kursor (25h), reset atribut (0m).
+      process.stdout.write(
+        "\u001b[?1000l\u001b[?1002l\u001b[?1006l\u001b[?2004l\u001b[?1049l\u001b[?25h\u001b[0m",
+      )
     } catch {}
     try {
       const debug = process.env.MINICODE_DEBUG === "1"

@@ -120,7 +120,7 @@ available" without spawning npm.
 |---|---|
 | `MINICODE_ASCII` | `1` -> force ASCII glyphs (`[OK]`, `>`, `.`) for consoles without UTF-8 |
 | `MINICODE_BOX` | popup box corner style: default **rounded** (`+`-style curves); `square` -> sharp; `ascii` -> `+-|` (same as `MINICODE_ASCII=1`). For terminals that render rounded glyphs badly |
-| `MINICODE_SCRIM` | `none` -> force the backdrop scrim to `faint` only (no dark `48;5;236` background) — diagnostics/terminals that map 256-colour oddly |
+| `MINICODE_SCRIM` | `none` -> disable `faint` text dimming on the popup backdrop (no gray background fill is used) |
 | `MINICODE_COMPACT` | `1` -> compact tool calls, `0` -> expanded. Default: compact in the TUI, expanded in one-shot/exec |
 | `MINICODE_JUSTIFY` | `1` -> enable justified model text output. Default: off (opt-in) — justification injects spaces that change the original text when copied/piped |
 | `MINICODE_DROPDOWN` | `0` -> disable the dropdown, use inline hints (legacy consoles). When active, the dropdown is drawn as an **overlay inside the same `paint()` frame**, not a separate `paintRegion()`, and does not reduce `viewH` — chat and composer content width uses symmetrical frame margins (`chatCols - 6`) with the progressive `composerWidth()` cap |

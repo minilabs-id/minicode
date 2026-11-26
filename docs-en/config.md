@@ -44,8 +44,8 @@ Where MiniCode settings and data live, how untrusted local files are treated, an
   The `/context` table uses the same resolution chain as the router, so the
   number shown cannot differ from the one actually used. The **Origin** column
   says who decided: `manual` (your choice, locked against `sync`), `endpoint`
-  (metadata from `/models`, may be overwritten), `katalog`, `models.dev`, `flag`
-  (`--context-window`), or `default aman`. A `/context` change applies to the
+  (metadata from `/models`, may be overwritten), `catalog`, `models.dev`, `flag`
+  (`--context-window`), or `safe default`. A `/context` change applies to the
   running session immediately — no restart needed.
 
   Accepted choices follow sizes actually used by production models: `16K`, `32K`, `64K`, `128K`, `200K`, `256K`, `400K`, `500K`, `1M`, `1M (1024^2)`, `1.05M`, `2M`, `4M`, `10M`, plus exact numbers. The **three 1M variants** are deliberate because they really differ: `1000000` (Anthropic/DeepSeek/Qwen), `1048576` (Google/Gemini, Kimi, GLM), `1050000` (OpenAI) — a gap of up to ~50K tokens.
@@ -53,29 +53,11 @@ Where MiniCode settings and data live, how untrusted local files are treated, an
 - `verifyCommand` — used by `--verify` when auto-detection finds nothing (detection order: `typecheck` -> `test` -> `tsconfig`).
 - `bashAllowlist` — comma/glob patterns of bash commands considered safe (`allowlist` mode). Precedence: env `MINICODE_BASH_ALLOWLIST` > `bashAllowlist` (config) > built-in defaults. It **replaces the entire** narrow list (it adds to the developer list), so when an override is active the built-in additions (e.g. `tree`/`du`/`df`/`date`/`uname`) are not used — include the patterns you need yourself.
 
-## 15 gateway presets (including Custom URL)
+## Direct provider setup (Base URL + API key)
 
-`Gateway >` shows only `[0] Label` without the URL (minimal, no endpoint leak).
+There is no pre-registered provider list: both the first-time setup wizard and `/provider` -> `a` (Add) go directly to entering **Base URL** and **API key** for any OpenAI-compatible or Anthropic gateway.
 
-| id | Label | Notes |
-|---|---|---|
-| `openai` | OpenAI | gpt, o-series |
-| `anthropic` | Anthropic | Claude, streaming `tool_use` |
-| `openrouter` | OpenRouter | Gateway with 75+ models |
-| `deepseek` | DeepSeek | chat/reasoner |
-| `opencode-zen` | OpenCode Zen | Gateway |
-| `google` | Google Gemini | 1M context, `thought_signature` pass-through |
-| `ollama` | Ollama | Local, free, no key |
-| `qwen` | Qwen | Alibaba Qwen3-Coder (the only one with a registered OAuth spec) |
-| `groq` | Groq | Fast inference |
-| `together` | Together AI | Open models |
-| `fireworks` | Fireworks AI | — |
-| `mistral` | Mistral AI | — |
-| `cohere` | Cohere | — |
-| `generic` | Generic OpenAI-compatible | vLLM / LM Studio |
-| `custom` | Custom URL | Pseudo-preset for your own baseUrl |
-
-Flow: wizard & `/provider` (add `[0] OpenAI` ... `[14] Custom URL`) -> masked API key -> auto-detect models via `GET /models` with a 4 s timeout -> the provider switches automatically when you pick a model from a different provider (no restart, via `reloadProviders()` after `Gateway > 2`).
+Flow: wizard / `/provider` -> enter `Base URL` & masked `API key` -> auto-detect models via `GET /models` with a 4 s timeout -> the provider switches automatically when you pick a model from a different provider (no restart, via `reloadProviders()`).
 
 ## Two authentication paths
 

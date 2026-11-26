@@ -10,7 +10,7 @@ import type { HintItem } from "../render/hint.ts"
 import { sanitizeAnsiLine } from "../render/sanitize.ts"
 import { c, glyphs, stripAnsi } from "../render/theme.ts"
 import { tSystem } from "../render/tool-label.ts"
-import { wrapByWidth } from "../render/width.ts"
+import { displayWidth, truncateToWidth, wrapByWidth } from "../render/width.ts"
 import { type AltScreen, openAltScreen } from "../runtime/screen.ts"
 import { canRenderModal, type DialogSpec, dialogBox } from "./dialog.ts"
 import { IDLE_CANCEL_MS, IDLE_WARN_MS } from "./form.ts"
@@ -42,17 +42,22 @@ function wrapCommandLines(source: readonly string[], width: number): string[] {
       out.push(...direct)
       continue
     }
-    const lead = /^(\s+)/.exec(stripAnsi(safe))?.[1]?.length ?? 0
-    const hang = Math.min(lead, Math.max(0, Math.floor(width / 3)))
+    const plain = stripAnsi(safe)
+    // Deteksi kolom tabel 2-kolom (/help, /help keys): teks berindentasi + ≥2 spasi pemisah.
+    const twoCol = /^(\s*\S+(?:\s\S+)*\s{2,})/.exec(plain)?.[1]
+    const twoColW = twoCol ? displayWidth(twoCol) : 0
+    const leadW = displayWidth(/^(\s+)/.exec(plain)?.[1] ?? "")
+    const hang =
+      twoColW > leadW && twoColW <= Math.floor(width * 0.45)
+        ? twoColW
+        : Math.min(leadW, Math.max(0, Math.floor(width / 3)))
     if (hang <= 0) {
       out.push(...direct)
       continue
     }
-    // Bungkus ulang dengan anggaran menyisakan `hang` kolom agar sambungan sejajar.
-    const pad = " ".repeat(hang)
-    const indented = wrapByWidth(safe, Math.max(8, width - hang))
-    out.push(indented[0]!)
-    for (let k = 1; k < indented.length; k++) out.push(`${pad}${indented[k]!}`)
+    // Bungkus langsung dengan hangingIndent agar baris pertama tetap memakai lebar
+    // penuh dan baris sambungan sejajar tepat di awal kolom deskripsi.
+    out.push(...wrapByWidth(safe, width, { hangingIndent: " ".repeat(hang) }))
   }
   return out
 }
@@ -86,17 +91,14 @@ export interface OutputWindowSpecOptions {
  * terbaca adalah bagian dari kontrak jendela ini.
  */
 export function outputWindowSpec(opts: OutputWindowSpecOptions): DialogSpec {
-  const frame = windowSpec({
+  return windowSpec({
     title: opts.title,
     body: opts.body,
     cols: opts.cols,
     rows: opts.rows,
+    role: "viewer",
     ...(opts.extraHints ? { extraHints: opts.extraHints } : {}),
   })
-  return {
-    ...frame,
-    maxHeight: (frame.maxHeight ?? 0) + WINDOW_CHROME_ROWS,
-  }
 }
 
 /**
@@ -153,13 +155,31 @@ export async function runOutputWindow(opts: OutputWindowOptions): Promise<boolea
     }
   }
 
-  // Anggaran baris isi = aturan tinggi jendela seragam (windowMaxHeight).
-  const bodyBudget = (): number => Math.max(1, windowMaxHeight(process.stdout.rows || 24))
+  // Anggaran baris isi menyesuaikan ada-tidaknya footer: tanpa footer = 3 chrome
+  // (border+judul); dengan footer = 5 chrome (border+judul+jeda+footer).
+  const hasFooterAtBudget = (): boolean => {
+    if (opts.onCopy || idleWarned) return true
+    const maxH = windowMaxHeight(screen.rows || 24)
+    const noFooterBudget = Math.max(1, maxH - 3)
+    return wrapped.length > noFooterBudget
+  }
+  const bodyBudget = (): number => {
+    const chrome = hasFooterAtBudget() ? WINDOW_CHROME_ROWS + 1 : WINDOW_CHROME_ROWS - 1
+    return Math.max(1, windowMaxHeight(screen.rows || 24) - chrome)
+  }
   const maxScroll = (): number => Math.max(0, wrapped.length - bodyBudget())
 
   const render = (): void => {
-    const cols = process.stdout.columns || 80
-    const rows = process.stdout.rows || 24
+    const cols = screen.cols || 80
+    const rows = screen.rows || 24
+    if (!canRenderModal(cols, rows)) {
+      screen.paintRegion(
+        [c.warning(truncateToWidth(tSystem("msg.tooSmall"), Math.max(1, cols - 2)))],
+        Math.max(1, Math.floor(rows / 2)),
+      )
+      screen.setCursorVisible(false)
+      return
+    }
     ensureWrapped(cols)
     const budget = bodyBudget()
     scroll = Math.max(0, Math.min(scroll, Math.max(0, wrapped.length - budget)))
@@ -173,14 +193,13 @@ export async function runOutputWindow(opts: OutputWindowOptions): Promise<boolea
     // tak-terpercaya (tabel /help, status, potongan kode) — menghiasinya akan
     // menggeser kolom & mengubah makna. Fallback ASCII ditanggung `glyphs`.
     const titleText = `${glyphs.sessionIcon} ${rawTitle}`
-    // windowFooter otomatis mendeduplikasi key yang ditimpa lewat extraHints.
+    // Esc berada di pojok kanan atas judul; footer hanya memuat scroll/salin/peringatan.
     const extraHints: HintItem[] = [
       ...(idleWarned
         ? [{ key: "!", label: t("form.idleWarning", { s: Math.ceil(IDLE_CANCEL_MS / 1000) }) }]
         : []),
       ...(scrollable ? [{ key: glyphs.upDown, label: t("hint.scroll") }] : []),
       ...(opts.onCopy ? [{ key: "c", label: t("hint.copy") }] : []),
-      { key: "Esc", label: t("hint.close") },
     ]
     const body = wrapped.slice(scroll, scroll + budget)
     // Konfirmasi salin jadi baris isi, BUKAN footer: footer wajib tetap
@@ -251,12 +270,23 @@ export async function runOutputWindow(opts: OutputWindowOptions): Promise<boolea
   const result = new Promise<boolean>((r) => (resolve = r))
 
   const handleKeys = (keys: DecodedKey[]): boolean => {
-    ensureWrapped(process.stdout.columns || 80)
+    const usable = canRenderModal(screen.cols || 80, screen.rows || 24)
+    if (usable) ensureWrapped(process.stdout.columns || 80)
     let dirty = false
     for (const d of keys) {
       dirty = true
       const k = d.key
-      if (k.type === "esc" || k.type === "enter" || k.type === "ctrl-c" || k.type === "ctrl-d") {
+      if (
+        k.type === "esc" ||
+        k.type === "ctrl-c" ||
+        k.type === "ctrl-d" ||
+        (k.type === "char" && (k.ch === "q" || k.ch === "Q"))
+      ) {
+        finish(true)
+        return true
+      }
+      if (!usable) continue
+      if (k.type === "enter") {
         finish(true)
         return true
       }

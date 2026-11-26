@@ -364,7 +364,9 @@ export async function checkForUpdateFresh(
   currentVersion: string,
   signal?: AbortSignal,
 ): Promise<string | null> {
+  if (signal?.aborted) return null
   const latest = await fetchLatest(signal)
+  if (signal?.aborted) return null
   if (latest) await writeCache(latest)
   const eff = latest ?? (await readCache())?.latest ?? null
   if (!eff) return null
@@ -688,6 +690,7 @@ export interface ManualUpdateResult {
   reason?: string
   optedOut?: boolean
   alreadyLatest?: boolean
+  aborted?: boolean
 }
 
 async function notifyPhase(
@@ -705,13 +708,15 @@ async function notifyPhase(
 export async function runManualUpdate(
   opts: {
     onPhase?: (phase: "check" | "install" | "verify", latest?: string) => unknown
-    check?: () => Promise<string | null>
+    check?: (signal?: AbortSignal) => Promise<string | null>
     install?: (version: string) => boolean
     getInstalled?: () => string
     installSource?: InstallSource
+    signal?: AbortSignal
   } = {},
 ): Promise<ManualUpdateResult> {
   if (isUpdateOptedOut()) return { ok: false, optedOut: true }
+  if (opts.signal?.aborted) return { ok: false, aborted: true, step: "check" }
   clearLastUpdateFailure()
   // Saat test menyuntikkan `install`, izinkan alur tanpa salinan global kecuali
   // `installSource` diisi eksplisit untuk menguji penolakan preflight.
@@ -724,16 +729,23 @@ export async function runManualUpdate(
     }
   }
   await notifyPhase(opts, "check")
+  if (opts.signal?.aborted) return { ok: false, aborted: true, step: "check" }
   let latest: string | null
   try {
-    latest = opts.check ? await opts.check() : await checkForUpdateFresh(readCurrentVersion())
+    latest = opts.check
+      ? await opts.check(opts.signal)
+      : await checkForUpdateFresh(readCurrentVersion(), opts.signal)
   } catch (err) {
+    if (opts.signal?.aborted || (err as { name?: string })?.name === "AbortError") {
+      return { ok: false, aborted: true, step: "check" }
+    }
     return {
       ok: false,
       step: "check",
       reason: formatUpdateError("check", { status: null, error: errorMessage(err) }),
     }
   }
+  if (opts.signal?.aborted) return { ok: false, aborted: true, step: "check" }
   if (!latest) return { ok: true, alreadyLatest: true }
   if (source === "bun-global") {
     return {

@@ -19,6 +19,7 @@ import { budgetForScope, nextSubAgentStepLimit } from "../policy/subagent-budget
 import { resolveSubAgentTimeout } from "../policy/subagent-timeout.ts"
 import type { WorkMode } from "../policy/work-mode.ts"
 import { buildProviderListAsync } from "../providers/build.ts"
+import { withStreamGuards } from "../providers/guards.ts"
 import { createRouterProvider } from "../providers/router.ts"
 import type { ProductionExecutionRunner } from "../runtime/production-execution.ts"
 import { acquireSessionWriter, releaseSessionWriter } from "../session/authority.ts"
@@ -612,12 +613,14 @@ async function getProvider(
     const apiKey = process.env.OPENAI_API_KEY ?? process.env.AGENT_API_KEY ?? ""
     if (apiKey)
       providers.push(
-        createOpenAICompatProvider({
-          baseUrl,
-          apiKey,
-          models: ["gpt-4o-mini"],
-          defaultModel: "gpt-4o-mini",
-        }),
+        withStreamGuards(
+          createOpenAICompatProvider({
+            baseUrl,
+            apiKey,
+            models: ["gpt-4o-mini"],
+            defaultModel: "gpt-4o-mini",
+          }),
+        ),
       )
   }
   if (providers.length === 0) throw new Error("no provider for sub-agent")
@@ -1024,23 +1027,41 @@ export const delegateTaskTool: Tool = {
         childOf: parentId,
       })
     })
-    const intent: EffectIntentResult = await persistEffectIntent({
-      sessionId: parentId,
-      threadId: DEFAULT_THREAD_ID,
-      tool: "delegate_task",
-      cwd: parentCwd,
-      childSessionId: childId,
-      args: { prompt: String(prompt), mode: m },
-      specialPath: "delegate-task",
-    })
-    // Canonical intent is also the fail-closed evidence gate: without a
-    // durable delegation identity the child must not start.
-    if (!intent.durable) {
-      // v7.32: tanpa identitas delegasi durabel anak TIDAK boleh jalan; ini
-      // kegagalan verifikasi (isError), bukan hasil sukses berbentuk string.
-      throw new Error(
-        `[sub-agent error] REFUSED_VERIFICATION_EVIDENCE: durable EffectIntent unavailable for ${childId}`,
-      )
+    let intent: EffectIntentResult
+    try {
+      intent = await persistEffectIntent({
+        sessionId: parentId,
+        threadId: DEFAULT_THREAD_ID,
+        tool: "delegate_task",
+        cwd: parentCwd,
+        childSessionId: childId,
+        args: { prompt: String(prompt), mode: m },
+        specialPath: "delegate-task",
+      })
+      // Canonical intent is also the fail-closed evidence gate: without a
+      // durable delegation identity the child must not start.
+      if (!intent.durable) {
+        // v7.32: tanpa identitas delegasi durabel anak TIDAK boleh jalan; ini
+        // kegagalan verifikasi (isError), bukan hasil sukses berbentuk string.
+        throw new Error(
+          `[sub-agent error] REFUSED_VERIFICATION_EVIDENCE: durable EffectIntent unavailable for ${childId}`,
+        )
+      }
+    } catch (e) {
+      // Pastikan Run anak RUNNING & writer lease dilepas bila persistEffectIntent
+      // gagal atau tidak durable — mencegah lease terkunci hingga 2,5 jam.
+      if (childRunId !== null) {
+        try {
+          interruptRun(childRunId, parentCwd, { recoveryStatus: "UNKNOWN" })
+        } catch {}
+      }
+      if (childEpoch !== undefined && childEpochHeld) {
+        try {
+          releaseSessionWriter(childId, childEpoch, parentCwd)
+        } catch {}
+        childEpochHeld = false
+      }
+      throw e
     }
     let terminal: "committed" | "failed" = "committed"
     // committed = delegasi benar-benar jalan di sesi anak (efeknya di jurnal
@@ -1523,10 +1544,20 @@ export const delegateTaskTool: Tool = {
             }
             return observedSummary
           } finally {
-            // Batalkan panggilan judul LEBIH DULU, lalu tunggu promise-nya keluar:
-            // watchdog tak boleh menahan turn anak dan timer/listener tak boleh bocor.
+            // Batalkan panggilan judul LEBIH DULU, lalu tunggu promise-nya keluar
+            // dengan batas 500ms: provider yang mengabaikan abort tidak boleh
+            // menahan finally (memblokir Pool, lease anak, & parallelExecutor).
             titleAbort?.abort()
-            await titlePromise?.catch(() => {})
+            if (titlePromise) {
+              const settled = titlePromise.catch(() => {})
+              await Promise.race([
+                settled,
+                new Promise<void>((resolve) => {
+                  const t = setTimeout(resolve, 500)
+                  t.unref?.()
+                }),
+              ])
+            }
             if (titleWatchdog) clearTimeout(titleWatchdog)
             if (forwardTitleAbort) ctx.signal.removeEventListener("abort", forwardTitleAbort)
             // Watchdog & listener liveness tak boleh hidup melewati turn anak:

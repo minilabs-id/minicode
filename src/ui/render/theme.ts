@@ -77,21 +77,24 @@ function stderrColorLevel(): number {
   return streamColorLevel(process.stderr)
 }
 
-export type ScrimMode = "bg" | "faint" | "none"
+export type ScrimMode = "faint" | "none"
 
-/** Mode scrim (lazy); tak menambah byte di pipe. */
+/** Mode scrim (lazy); meredupkan teks latar (`faint`) tanpa blok latar abu-abu. */
 export function scrimMode(): ScrimMode {
-  if (noColorEnv() || !process.stdout.isTTY || process.env.TERM?.toLowerCase() === "dumb")
+  if (
+    noColorEnv() ||
+    !process.stdout.isTTY ||
+    process.env.TERM?.toLowerCase() === "dumb" ||
+    process.env.MINICODE_SCRIM === "none"
+  ) {
     return "none"
-  if (process.env.MINICODE_SCRIM === "none") return "faint"
-  return colorLevel() >= 2 ? "bg" : colorLevel() === 1 ? "faint" : "none"
+  }
+  return colorLevel() >= 1 ? "faint" : "none"
 }
 
-/** SGR pembuka scrim; pemanggil menjaga efek tetap hidup melewati reset konten. */
+/** SGR pembuka scrim; memakai `faint` teks saja tanpa warna latar abu-abu. */
 export function scrimSgr(mode: ScrimMode): string {
-  if (mode === "bg") return "\x1b[2;48;5;236m"
-  if (mode === "faint") return "\x1b[2m"
-  return ""
+  return mode === "faint" ? "\x1b[2m" : ""
 }
 
 /**
@@ -603,9 +606,36 @@ export const glyphs = {
   },
 }
 
+export type BoxStyle = "round" | "square" | "ascii"
+
 /**
- * Glif kotak tipis bersudut lengkung untuk bingkai composer (`╭─╮│╰╯` di UTF-8,
- * `+-+|+-+` di `MINICODE_ASCII=1`).
+ * Tentukan gaya garis kotak aktif (`round` default, `square` atau `ascii` bila
+ * dipaksa via env/kapabilitas). Dievaluasi saat render agar perubahan env
+ * runtime langsung berlaku pada dialog, composer, maupun tabel grid.
+ */
+export function resolveBoxStyle(): BoxStyle {
+  const style = process.env.MINICODE_BOX?.toLowerCase()
+  if (process.env.MINICODE_ASCII === "1" || style === "ascii" || !supportsUtf8()) return "ascii"
+  return style === "square" ? "square" : "round"
+}
+
+/** Set karakter sudut & garis kotak untuk gaya tertentu. */
+export function boxGlyphsForStyle(style: BoxStyle = resolveBoxStyle()): {
+  tl: string
+  tr: string
+  bl: string
+  br: string
+  h: string
+  v: string
+} {
+  if (style === "ascii") return { tl: "+", tr: "+", bl: "+", br: "+", h: "-", v: "|" }
+  if (style === "square") return { tl: "┌", tr: "┐", bl: "└", br: "┘", h: "─", v: "│" }
+  return { tl: "╭", tr: "╮", bl: "╰", br: "╯", h: "─", v: "│" }
+}
+
+/**
+ * Glif kotak tipis bingkai composer (`╭─╮│╰╯` default, `┌─┐│└┘` di
+ * `MINICODE_BOX=square`, `+-+|+-+` di `MINICODE_ASCII=1` / `MINICODE_BOX=ascii`).
  */
 export function composerBoxGlyphs(): {
   tl: string
@@ -615,10 +645,7 @@ export function composerBoxGlyphs(): {
   h: string
   v: string
 } {
-  if (!supportsUtf8()) {
-    return { tl: "+", tr: "+", bl: "+", br: "+", h: "-", v: "|" }
-  }
-  return { tl: "╭", tr: "╮", bl: "╰", br: "╯", h: "─", v: "│" }
+  return boxGlyphsForStyle()
 }
 
 /**

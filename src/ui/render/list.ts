@@ -11,6 +11,43 @@ export function listRow(label: string, selected: boolean): string {
 }
 
 /**
+ * Sorot kecocokan sub-string case-insensitive pada `label` secara aman-grapheme
+ * (emoji/surrogate/UTF-8 tak terbelah), plus akhiran `suffix` tak tersorot.
+ */
+export function highlightMatch(
+  label: string,
+  query: string,
+  selected: boolean,
+  suffix = "",
+): string {
+  if (!query) return listRow(`${label}${suffix}`, selected)
+  const paintBase = (s: string): string => (selected ? c.accent(c.bold(s)) : c.dim(s))
+  const paintHit = (s: string): string => (selected ? c.brightCyan(c.bold(s)) : c.dim(c.info(s)))
+  const prefix = selected ? `  ${c.accent(glyphs.arrow)} ` : "    "
+  const qLower = query.toLowerCase()
+  const graphemes = segmentGraphemes(label)
+  const lowerParts = graphemes.map((g) => g.toLowerCase())
+  const matchStart = lowerParts.join("").indexOf(qLower)
+  if (matchStart < 0) return `${prefix}${paintBase(`${label}${suffix}`)}`
+  const matchEnd = matchStart + qLower.length
+  let pos = 0
+  let before = ""
+  let hit = ""
+  let after = ""
+  for (let i = 0; i < graphemes.length; i++) {
+    const g = graphemes[i]!
+    const len = lowerParts[i]!.length
+    const gEnd = pos + len
+    if (gEnd <= matchStart) before += g
+    else if (pos >= matchEnd) after += g
+    else hit += g
+    pos = gEnd
+  }
+  const tail = `${after}${suffix}`
+  return `${prefix}${before ? paintBase(before) : ""}${hit ? paintHit(hit) : ""}${tail ? paintBase(tail) : ""}`
+}
+
+/**
  * Ambil akhiran query agar muat dalam `maxCols` saat diketik panjang di kotak
  * filter (picker & model-manager), sehingga kursor tetap berada di dalam kotak.
  */

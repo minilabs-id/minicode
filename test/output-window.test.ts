@@ -3,7 +3,7 @@
 // pemanggil fallback ke transkrip.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { MAX_CLIPBOARD_BYTES } from "../src/ui/assistant/simple.ts"
-import { resetLocaleState, setSessionLocale } from "../src/ui/i18n/locale.ts"
+import { resetLocaleState, setSessionLocale, t } from "../src/ui/i18n/locale.ts"
 import { tSystem } from "../src/ui/render/tool-label.ts"
 import { resetAltScreenDepth } from "../src/ui/runtime/screen.ts"
 import { outputWindowWidth, runOutputWindow } from "../src/ui/screens/output-window.ts"
@@ -27,7 +27,8 @@ describe("runOutputWindow", () => {
     const text = frame.join("\n")
     expect(text).toContain("Commands:")
     expect(text).toContain("/model")
-    expect(text).toContain("Esc close")
+    expect(text).toContain("Esc")
+    expect(text).not.toContain("Esc close")
     expect(text).not.toContain("scroll")
     await tty.send(KEY.esc, 90)
     expect(await p).toBe(true)
@@ -57,6 +58,18 @@ describe("runOutputWindow", () => {
     await tty.waitForScreen((f) =>
       f.some((l) => l.includes("History (")) ? counter(f) !== setelahWheel : false,
     )
+    const setelahK = counter(tty.screen())
+    // Halaman berikut lewat PgDn bergerak >1 baris dan halaman yang tak terpotong
+    // tidak memunculkan penanda "+N baris lagi" palsu.
+    await tty.send(KEY.pgDown)
+    await tty.waitForScreen((f) =>
+      f.some((l) => l.includes("History (")) ? counter(f) !== setelahK : false,
+    )
+    const setelahPgDn = counter(tty.screen())
+    const startOf = (s: string) => Number(/\((\d+)-/.exec(s)?.[1] ?? "0")
+    expect(startOf(setelahPgDn) - startOf(setelahK)).toBeGreaterThan(1)
+    const moreWord = t("dlg.more", { n: 0 }).split("0")[1]!.trim()
+    expect(tty.screen().join("\n")).not.toContain(moreWord)
     await tty.send(KEY.esc, 90)
     expect(await p).toBe(true)
   })
@@ -111,5 +124,23 @@ describe("runOutputWindow", () => {
     expect(outputWindowWidth(80)).toBe(72)
     expect(outputWindowWidth(60)).toBe(56)
     expect(outputWindowWidth(200)).toBe(96)
+  })
+
+  test("wrap baris 2-kolom (/help) menyejajarkan sambungan di bawah kolom deskripsi", async () => {
+    tty = installFakeTty({ columns: 52, rows: 14 })
+    const p = runOutputWindow({
+      title: "Help",
+      lines: ["    /status      Alpha beta gamma delta epsilon zeta eta"],
+    })
+    await tty.ready()
+    const frame = await tty.waitForScreen((f) => f.some((l) => l.includes("Help")))
+    const line1 = frame.find((l) => l.includes("/status")) ?? ""
+    const line2 = frame.find((l) => !l.includes("/status") && l.includes("epsilon")) ?? ""
+    const descCol = line1.indexOf("Alpha")
+    expect(descCol).toBeGreaterThan(10)
+    const contTextCol = line2.search(/[a-z]{3,}/)
+    expect(contTextCol).toBe(descCol)
+    await tty.send(KEY.esc, 90)
+    expect(await p).toBe(true)
   })
 })

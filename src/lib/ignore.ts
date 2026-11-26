@@ -8,15 +8,28 @@ import { resolve } from "node:path"
  * walker sudah skip hard-coded.
  * Pure kecuali load di helper; matcher bisa diuji tanpa FS.
  */
+const MAX_IGNORE_PATTERNS = 2000
+const MAX_IGNORE_FILE_BYTES = 256 * 1024
+const MAX_WILDCARDS_PER_PATTERN = 4
+
 export function compileIgnoreMatchers(patterns: string[]): ((rel: string) => boolean)[] {
   const matchers: ((rel: string) => boolean)[] = []
   for (const raw of patterns) {
+    if (matchers.length >= MAX_IGNORE_PATTERNS) break
     const pat = raw.trim()
-    if (!pat || pat.startsWith("#") || pat.startsWith("!")) continue
+    if (!pat || pat.startsWith("#") || pat.startsWith("!") || pat.length > 512) continue
     const isDir = pat.endsWith("/")
     const core = isDir ? pat.slice(0, -1) : pat
     const hasSlash = core.includes("/")
-    const normalized = core.replace(/^\//, "")
+    // Kolaps pengulangan wildcard (`***`, `**/**`, `**/**/`) sebelum dikompilasi
+    // agar .gitignore dari repo asing tidak memicu backtracking eksponensial (ReDoS).
+    const normalized = core
+      .replace(/^\//, "")
+      .replace(/\*{3,}/g, "**")
+      .replace(/(?:\*\*\/){2,}/g, "**/")
+      .replace(/(?:\*\*)+/g, "**")
+    const starRuns = normalized.match(/\*+/g)?.length ?? 0
+    if (starRuns > MAX_WILDCARDS_PER_PATTERN) continue
     // Build regex via glob simple: * -> [^/]*, ** -> .* (pakai placeholder agar ** tidak rusak oleh * berikutnya)
     const escapeGlob = (s: string) =>
       s
@@ -50,7 +63,8 @@ export function isIgnored(rel: string, matchers: ((rel: string) => boolean)[]): 
 export async function loadIgnoreMatchers(root: string): Promise<((rel: string) => boolean)[]> {
   try {
     const txt = await readFile(resolve(root, ".gitignore"), "utf8")
-    const lines = txt.split("\n")
+    const bounded = txt.length > MAX_IGNORE_FILE_BYTES ? txt.slice(0, MAX_IGNORE_FILE_BYTES) : txt
+    const lines = bounded.split("\n")
     return compileIgnoreMatchers(lines)
   } catch {
     return []

@@ -18,7 +18,11 @@ function cleanCell(value: unknown): string {
     .replace(/\r/g, " ")
 }
 
-export function renderTable(columns: ColumnDef[], data: Record<string, unknown>[]): string {
+export function renderTable(
+  columns: ColumnDef[],
+  data: Record<string, unknown>[],
+  opts?: { width?: number },
+): string {
   // Status kosong juga user-visible → lewat t() (I26).
   if (columns.length === 0) return c.muted(t("tbl.noColumns"))
   if (data.length === 0) return c.muted(t("tbl.noEntries"))
@@ -30,6 +34,6 @@ export function renderTable(columns: ColumnDef[], data: Record<string, unknown>[
       aligns: columns.map((column) => column.align ?? "left"),
       widths: columns.map((column) => column.width),
     },
-    { width: getTerminalWidth(), maxCellWidth: 50, styleHeader: true },
+    { width: opts?.width ?? getTerminalWidth(), maxCellWidth: 50, styleHeader: true },
   )
 }

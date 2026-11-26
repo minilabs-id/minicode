@@ -177,7 +177,7 @@ describe("runForm", () => {
     await p
     s.close()
   })
-  test("select parkir di ujung baris (kolom pas, clamp layar)", async () => {
+  test("select menyembunyikan kursor agar bar ketik tak berkedip di luar border", async () => {
     const s = screen()
     const p = runForm(
       {
@@ -187,10 +187,12 @@ describe("runForm", () => {
       s,
     )
     await tty!.ready()
-    // Kursor parkir di ujung kanan border: centering-pad + lebar kotak + 1.
-    // Dihitung dari windowWidth agar test tak patah saat lebar berubah (I20).
-    const pad = Math.floor((70 - windowWidth(70)) / 2)
-    expect(tty!.all()).toContain(`;${pad + windowWidth(70) + 1}H`)
+    // Field select/confirm tidak menerima ketikan: kursor harus disembunyikan,
+    // bukan diparkir di luar garis kanan kotak.
+    const lastHide = tty!.all().lastIndexOf("\x1b[?25l")
+    const lastShow = tty!.all().lastIndexOf("\x1b[?25h")
+    expect(lastHide).toBeGreaterThan(-1)
+    expect(lastHide).toBeGreaterThan(lastShow)
     await tty!.send(KEY.esc, 90)
     await p
     s.close()
@@ -211,7 +213,8 @@ describe("runForm", () => {
     expect(frame).not.toContain("{cancel}")
     expect(frame).toContain("Tab move")
     expect(frame).toContain("Enter save")
-    expect(frame).toContain("Esc cancel")
+    expect(frame).toContain("Esc")
+    expect(frame).not.toContain("Esc cancel")
     await tty!.send(KEY.esc, 90)
     await tty!.send(KEY.esc, 90)
     await p
@@ -357,6 +360,34 @@ describe("runForm: temuan audit 2026-11-12", () => {
     await tty!.send(KEY.esc, 90)
     await tty!.send(KEY.esc, 90)
     await p
+    s.close()
+  })
+
+  test("layar terlalu kecil saat buka mengembalikan cancelled, dan resize sempit memblokir Enter buta", async () => {
+    tty = installFakeTty({ columns: 18, rows: 8 })
+    const sSmall = openAltScreen()
+    const early = await runForm(
+      { title: "TooSmall", fields: [{ id: "k", label: "K", kind: "text" }] },
+      sSmall,
+    )
+    expect(early.cancelled).toBe(true)
+    sSmall.close()
+    tty.restore()
+
+    tty = installFakeTty({ columns: 70, rows: 20 })
+    const s = openAltScreen()
+    const p = runForm({ title: "ResizeGuard", fields: [{ id: "k", label: "K", kind: "text" }] }, s)
+    await tty.ready()
+    await tty.send("val")
+    tty.resize(18, 8)
+    // Enter saat terlalu kecil tidak boleh men-submit buta.
+    await tty.send(KEY.enter, 40)
+    tty.resize(70, 20)
+    await tty.waitForScreen((f) => f.some((l) => l.includes("ResizeGuard")))
+    await tty.send(KEY.enter, 40)
+    const res = await p
+    expect(res.cancelled).toBe(false)
+    expect(res.values?.k).toBe("val")
     s.close()
   })
 })

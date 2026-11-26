@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto"
-import { createInterface } from "node:readline"
 import type { ExecutorDeps, Tool, ToolContext } from "#minicore"
 import { scrubSecrets } from "../policy/scrub.ts"
 import { finalizeJournal, hashArgs, isMutationTool } from "../session/journal.ts"
@@ -42,7 +41,10 @@ interface JsonRpcMsg {
 }
 
 function send(msg: JsonRpcMsg) {
-  process.stdout.write(`${JSON.stringify(msg)}\n`)
+  if (process.stdout.destroyed || process.stdout.writableEnded) return
+  try {
+    process.stdout.write(`${JSON.stringify(msg)}\n`)
+  } catch {}
 }
 
 function reply(id: string | number, result: unknown) {
@@ -407,8 +409,12 @@ export async function serveMcp(opts: McpServeOptions = {}): Promise<void> {
     `[mcp-server] ready — ${tools.length} tools (${opts.allTools ? "all" : "curated"}${opts.allowAll ? ", allow-all" : ""})\n`,
   )
 
-  const rl = createInterface({ input: process.stdin })
-  rl.on("line", (line) => {
+  // Pengganti readline: batasi panjang baris stdin (8 MiB) agar klien nakal /
+  // baris tanpa `\n` tidak memicu OOM.
+  const MAX_STDIN_LINE_BYTES = 8 * 1024 * 1024
+  let stdinBuf = ""
+  let droppingOversizedLine = false
+  const handleLine = (line: string) => {
     if (!line.trim()) return
     let msg: JsonRpcMsg
     try {
@@ -423,7 +429,38 @@ export async function serveMcp(opts: McpServeOptions = {}): Promise<void> {
       if (msg.id !== undefined && msg.id !== null)
         replyError(msg.id, CODE_INTERNAL, String((e as Error).message ?? e))
     })
-  })
+  }
+  const onStdinData = (chunk: Buffer | string) => {
+    const text = typeof chunk === "string" ? chunk : chunk.toString("utf8")
+    if (droppingOversizedLine) {
+      const nl = text.indexOf("\n")
+      if (nl < 0) return
+      droppingOversizedLine = false
+      stdinBuf = text.slice(nl + 1)
+    } else {
+      stdinBuf += text
+    }
+    let start = 0
+    let idx = stdinBuf.indexOf("\n", start)
+    while (idx >= 0) {
+      const line = stdinBuf.slice(start, idx).replace(/\r$/, "")
+      start = idx + 1
+      if (Buffer.byteLength(line, "utf8") > MAX_STDIN_LINE_BYTES) {
+        send({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "message too large" } })
+      } else {
+        handleLine(line)
+      }
+      idx = stdinBuf.indexOf("\n", start)
+    }
+    if (start > 0) stdinBuf = stdinBuf.slice(start)
+    if (Buffer.byteLength(stdinBuf, "utf8") > MAX_STDIN_LINE_BYTES) {
+      stdinBuf = ""
+      droppingOversizedLine = true
+      send({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "message too large" } })
+    }
+  }
+  process.stdin.on("data", onStdinData)
+  process.stdin.resume()
 
   async function handle(msg: JsonRpcMsg): Promise<void> {
     const method = msg.method ?? ""
@@ -648,27 +685,42 @@ export async function serveMcp(opts: McpServeOptions = {}): Promise<void> {
     }
   }
 
-  // stdin close → shutdown bersih (bersihkan listener sinyal agar tidak bocor)
+  // stdin close / stdout EPIPE → shutdown bersih: abort semua tool in-flight
+  // dan bunuh job background agar klien putus tak meninggalkan proses yatim.
   await new Promise<void>((resolve) => {
-    const onSig = () => {
+    let finished = false
+    const done = () => {
+      if (finished) return
+      finished = true
       shutdown.abort()
       cleanup()
       resolve()
     }
-    const onClose = () => {
-      cleanup()
-      resolve()
+    const onEnd = () => {
+      if (!droppingOversizedLine && stdinBuf.trim()) {
+        handleLine(stdinBuf.replace(/\r$/, ""))
+        stdinBuf = ""
+      }
+      done()
     }
     const cleanup = () => {
-      rl.off("close", onClose)
-      process.off("SIGINT", onSig)
-      process.off("SIGTERM", onSig)
+      process.stdin.off("data", onStdinData)
+      process.stdin.off("end", onEnd)
+      process.stdin.off("close", done)
+      process.stdout.off("error", done)
+      process.off("SIGINT", done)
+      process.off("SIGTERM", done)
     }
-    rl.on("close", onClose)
-    process.once("SIGINT", onSig)
-    process.once("SIGTERM", onSig)
+    process.stdin.once("end", onEnd)
+    process.stdin.once("close", done)
+    process.stdout.on("error", done)
+    process.once("SIGINT", done)
+    process.once("SIGTERM", done)
   })
-  rl.close()
+  try {
+    const { killAllBackgroundJobs } = await import("../tools/bash.ts")
+    killAllBackgroundJobs()
+  } catch {}
   todoSession.id = prevTodo
   todoSession.cwd = prevTodoCwd
 }

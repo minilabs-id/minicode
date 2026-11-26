@@ -378,7 +378,11 @@ function createTimeout(ms: number): Timeout {
 }
 
 function withAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(abortError(signal));
+  if (signal.aborted) {
+    // Redam unhandled rejection dari promise yang sudah dimulai (mis. executeTurn).
+    promise.catch(noop);
+    return Promise.reject(abortError(signal));
+  }
   return new Promise((resolve, reject) => {
     const onAbort = () => {
       cleanup();

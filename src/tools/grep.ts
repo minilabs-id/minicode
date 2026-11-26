@@ -162,8 +162,21 @@ export function isReDosPronePattern(pattern: string): boolean {
   // >= 4 quantifier tak-terbatas (`*`/`+`) di luar character class.
   const topStructural = structuralChars(pattern)
   if (/(?:\.\*|\.\+){2,}/.test(topStructural)) return true
+  // Rantai kelas karakter ter-quantifier yang berdekatan (mis. `\w+\w+\w+!`,
+  // `[a-z]+[a-z]+$`) memicu backtracking eksponensial/polinomial di JSC YARR
+  // walau tanpa `.*`/`.+`.
+  if (
+    /(\[[^\]\r\n]{1,64}\]|\\[wWdDsS]|\.)(?:[*+]|\{\d{1,4},\})\1(?:[*+]|\{\d{1,4},\})/.test(
+      pattern,
+    ) ||
+    /(?:\\(?:w|W|d|D|s|S)|\.)(?:[*+]|\{\d{1,4},\})(?:\\(?:w|W|d|D|s|S)|\.)(?:[*+]|\{\d{1,4},\})(?:\\(?:w|W|d|D|s|S)|\.)(?:[*+]|\{\d{1,4},\})/.test(
+      pattern,
+    )
+  ) {
+    return true
+  }
   const unboundedCount = (topStructural.match(/(?:\.\*|\.\+|[*+])/g) ?? []).length
-  if (unboundedCount >= 4 && /\.\*|\.\+/.test(topStructural)) return true
+  if (unboundedCount >= 4 && /(?:\\(?:w|W|d|D|s|S)|\.\*|\.\+)/.test(pattern)) return true
   return false
 }
 
@@ -476,6 +489,12 @@ function runRipgrep(
   args.push("--regexp", pattern, "--", ".")
 
   return new Promise((resolveOut, reject) => {
+    // Cek abort SEBELUM spawn agar tidak memunculkan proses yatim atau
+    // unhandled 'error' event saat spawn gagal sebelum listener terpasang.
+    if (signal.aborted) {
+      reject(new Error("aborted"))
+      return
+    }
     const env = sanitizeSpawnEnv(process.env)
     // Config pengguna tidak ikut diterapkan pada operasi pencarian agent.
     // --no-config tetap dipasang sebagai pagar kedua pada argv ripgrep.
@@ -483,6 +502,7 @@ function runRipgrep(
     const p = spawn(resolveTrustedExecutable("rg"), args, {
       cwd: root,
       stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
       env,
     })
     const out: string[] = []
@@ -491,6 +511,8 @@ function runRipgrep(
     let done = false
     let matchCount = 0
     let hasMore = false
+    let killEscalation: ReturnType<typeof setTimeout> | undefined
+    let timer: ReturnType<typeof setTimeout> | undefined
     const displayLimit = ctxLines > 0 ? Math.max(0, limit - 1) : limit
     // Untuk mode `--json` + `-C`: tahan konteks-sebelum agar tidak bocor bila
     // match berikutnya ternyata melampaui `displayLimit`.
@@ -506,22 +528,41 @@ function runRipgrep(
       lastEmitted = { rel, lineNo }
     }
 
+    const terminateRg = () => {
+      try {
+        p.stdout.destroy()
+      } catch {}
+      try {
+        p.kill("SIGTERM")
+      } catch {}
+      if (!killEscalation) {
+        killEscalation = setTimeout(() => {
+          try {
+            p.kill("SIGKILL")
+          } catch {}
+        }, 500)
+        killEscalation.unref?.()
+      }
+    }
+
     const finish = (fn: () => void) => {
       if (done) return
       done = true
+      if (timer) clearTimeout(timer)
+      if (killEscalation) clearTimeout(killEscalation)
+      signal.removeEventListener("abort", onAbort)
       fn()
     }
     const onAbort = () => {
-      p.kill("SIGTERM")
+      terminateRg()
       finish(() => reject(new Error("aborted")))
     }
-    if (signal.aborted) {
-      p.kill("SIGTERM")
-      return reject(new Error("aborted"))
-    }
+    p.on("error", (e) => {
+      finish(() => reject(e))
+    })
     signal.addEventListener("abort", onAbort, { once: true })
-    const timer = setTimeout(() => {
-      p.kill("SIGTERM")
+    timer = setTimeout(() => {
+      terminateRg()
       finish(() => {
         // v7.32 (L6): marker timeout HARUS selalu ada, termasuk saat nol hit.
         // Dulu marker hanya ditambah bila ada sebagian hasil, sehingga timeout
@@ -532,6 +573,7 @@ function runRipgrep(
         resolveOut({ lines: out, hasMore, matchCount, timedOut: true })
       })
     }, LIMITS.GREP_RIPGREP_TIMEOUT_MS)
+    timer.unref?.()
 
     const consumeLine = (line: string): boolean => {
       if (ctxLines === 0) {
@@ -594,7 +636,7 @@ function runRipgrep(
       matchCount++
       if (matchCount > displayLimit) {
         hasMore = true
-        p.kill("SIGTERM")
+        terminateRg()
         return false
       }
       for (const b of pendingBefore) {
@@ -607,27 +649,29 @@ function runRipgrep(
     }
 
     p.stdout.on("data", (d: Buffer) => {
+      if (done) return
+      const prevLen = buf.length
       buf += d.toString()
-      let idx = buf.indexOf("\n")
+      let scanFrom = prevLen
+      let lineStart = 0
+      let idx = buf.indexOf("\n", scanFrom)
       while (idx >= 0) {
-        const line = buf.slice(0, idx).replace(/\r$/, "")
-        buf = buf.slice(idx + 1)
-        if (!consumeLine(line)) break
-        idx = buf.indexOf("\n")
+        const line = buf.slice(lineStart, idx).replace(/\r$/, "")
+        lineStart = idx + 1
+        scanFrom = lineStart
+        if (!consumeLine(line)) {
+          buf = ""
+          return
+        }
+        idx = buf.indexOf("\n", scanFrom)
       }
+      if (lineStart > 0) buf = buf.slice(lineStart)
     })
     p.stderr.on("data", (d: Buffer) => {
       if (stderr.length < 2000) stderr += d.toString()
     })
-    p.on("error", (e) => {
-      clearTimeout(timer)
-      signal.removeEventListener("abort", onAbort)
-      finish(() => reject(e))
-    })
     p.on("close", (code) => {
-      clearTimeout(timer)
-      signal.removeEventListener("abort", onAbort)
-      if (buf.trim()) consumeLine(buf.replace(/\r$/, ""))
+      if (!done && buf.trim()) consumeLine(buf.replace(/\r$/, ""))
       // rg: 0 = ada match, 1 = tak ada match, 2 = error (mis. regex invalid)
       if (code === 2 && out.length === 0) {
         finish(() => reject(new Error(stderr.trim() || "ripgrep failed")))

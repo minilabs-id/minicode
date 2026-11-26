@@ -80,3 +80,33 @@ test("detectAndSave provider baru tanpa effort tetap tanpa kunci effort", async 
   const saved = await globalProviders()
   expect(saved.find((p) => p.id === "baru")).not.toHaveProperty("reasoningEffort")
 })
+
+test("detectAndSave dengan rejectUnreachable menolak host tak terjangkau alih-alih simpan fallback", async () => {
+  clearDetectCache()
+  await writeFile(globalPath, JSON.stringify({ providers: [] }), "utf8")
+  await expect(
+    detectAndSave("https://tidak-terjangkau.example/v1", "k", "bad", {
+      global: true,
+      fallbackModels: ["gpt-4o-mini"],
+      rejectUnreachable: true,
+    }),
+  ).rejects.toThrow(/unreachable/i)
+  const saved = await globalProviders()
+  expect(saved.find((p) => p.id === "bad")).toBeUndefined()
+})
+
+test("detectAndSave menghormati AbortSignal tanpa jatuh ke fallback", async () => {
+  clearDetectCache()
+  await writeFile(globalPath, JSON.stringify({ providers: [] }), "utf8")
+  const ac = new AbortController()
+  ac.abort()
+  await expect(
+    detectAndSave("https://aborted.example/v1", "k", "ab", {
+      global: true,
+      fallbackModels: ["gpt-4o-mini"],
+      signal: ac.signal,
+    }),
+  ).rejects.toThrow(/aborted/i)
+  const saved = await globalProviders()
+  expect(saved.find((p) => p.id === "ab")).toBeUndefined()
+})

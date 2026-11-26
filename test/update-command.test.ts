@@ -266,3 +266,33 @@ test("createTuiUpdateHandler: install gagal pasca-release memulihkan terminal ta
     "requestQuit",
   ])
 })
+
+test("createTuiUpdateHandler: abort saat fase check batal bersih tanpa melepas terminal", async () => {
+  const events: string[] = []
+  const ac = new AbortController()
+  const handler = createTuiUpdateHandler({
+    releaseTerminal: () => events.push("releaseTerminal"),
+    reacquireTerminal: () => {
+      events.push("reacquireTerminal")
+      return true
+    },
+    requestQuit: () => events.push("requestQuit"),
+    resumeStdin: () => events.push("resumeStdin"),
+    closeSession: async () => {
+      events.push("closeSession")
+    },
+    writeStatusLine: (line) => events.push(`status:${line}`),
+    runUpdate: async ({ signal }) => {
+      ac.abort()
+      expect(signal?.aborted).toBe(true)
+      return { ok: false, aborted: true, step: "check" }
+    },
+    respawn: async () => 0,
+    exit: (() => {
+      throw new Error("exit")
+    }) as never,
+  })
+  const res = await handler(ac.signal)
+  expect(res).toEqual({ ok: false, aborted: true, step: "check" })
+  expect(events).toEqual([])
+})

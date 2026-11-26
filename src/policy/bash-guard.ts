@@ -186,6 +186,8 @@ export function expandBraceAlternatives(cmd: string): string {
  */
 export function inlineSimpleVars(cmd: string): string {
   const ASSIGN = /(?:^|[;&|]\s*|\s)([A-Za-z_][A-Za-z0-9_]*)=([^\s;&|"'`$()]+)/g
+  // Batasi ekspansi berantai (`a=xx; b=$a$a; c=$b$b`) agar tidak memicu OOM.
+  const maxExpandedLen = Math.max(cmd.length * 4, 16_384)
   let out = cmd
   for (let pass = 0; pass < 3; pass++) {
     // scan ulang: substitusi lintasan sebelumnya bisa memunculkan
@@ -202,6 +204,7 @@ export function inlineSimpleVars(cmd: string): string {
     for (const [name, value] of vars) {
       const ref = new RegExp(`\\$\\{${name}\\}|\\$${name}\\b`, "g")
       const next = out.replace(ref, () => value)
+      if (next.length > maxExpandedLen) return out
       if (next !== out) {
         out = next
         changed = true
@@ -230,7 +233,9 @@ export function inlineSimpleVars(cmd: string): string {
  * melihat `\x2eenv` dan SENSITIVE_TARGET meleset.
  */
 export function decodeAnsiCQuotes(cmd: string): string {
-  return cmd.replace(/\$'((?:\\.|[^'])*)'/g, (_full, body: string) => {
+  // Cabang `\\[\s\S]` dan `[^'\\]` dibuat saling lepas agar input `$'\\\\...`
+  // tanpa penutup tidak memicu backtracking eksponensial (ReDoS).
+  return cmd.replace(/\$'((?:\\[\s\S]|[^'\\])*)'/g, (_full, body: string) => {
     return body.replace(/\\(?:x([0-9a-fA-F]{1,2})|([0-7]{1,3})|(.))/g, (_m, hex, oct, std) => {
       if (hex !== undefined) return String.fromCharCode(parseInt(hex, 16))
       if (oct !== undefined) return String.fromCharCode(parseInt(oct, 8))
@@ -467,7 +472,7 @@ const GIT_EXEC_ENV =
  * memperluas allowlist ke bahasa baru membuka jalur kode-inline pada bahasa itu.
  */
 const INLINE_INTERPRETER =
-  /(?:^|[;&|\n(\s/\\])(?:pyw?|python[\d.]*|pypy[\d.]*|sh|bash|dash|zsh|ksh|node|deno|bun|perl|ruby|php|Rscript|lua|luajit|julia|elixir|escript|erl|groovy|scala|tclsh|dotnet|swift|swiftc|dart|java|raku)(?:\.exe)?\b\s+(?:--[A-Za-z0-9_-]+(?:=[^\s;&|]+)?\s+|-(?:W|X|I|M)\s+[^\s;&|]+\s+|-[A-Za-z0-9]+\s+)*(?:-c|-e|-E|--eval|-eval|--print|-p|--command|-r|--execute|--require|--import|--loader|-(?:pe|ep|ne|en|uc|cu|ue|eu|ie|ei|ic|ci|lc|cl|rc|cr|xc|cx|ec|ce|sc|cs))\b/i
+  /(?:^|[;&|\n(\s/\\])(?:pyw?|python[\d.]*|pypy[\d.]*|sh|bash|dash|zsh|ksh|node|deno|bun|perl|ruby|php|Rscript|lua|luajit|julia|elixir|escript|erl|groovy|scala|tclsh|dotnet|swift|swiftc|dart|java|raku)(?:\.exe)?\b\s+(?:--[A-Za-z0-9_-]+(?:=[^\s;&|]+)?\s+|-(?:W|X|I|M)\s+[^\s;&|]+\s+|-(?![WXIM]\s)[A-Za-z0-9]+\s+)*(?:-c|-e|-E|--eval|-eval|--print|-p|--command|-r|--execute|--require|--import|--loader|-(?:pe|ep|ne|en|uc|cu|ue|eu|ie|ei|ic|ci|lc|cl|rc|cr|xc|cx|ec|ce|sc|cs))\b/i
 // Residual jujur (audit 2026-09-16 B3): eksekusi via stdin/redirect TANPA
 // flag inline (`bash -s < skrip`, `python3 < prog`, `... | python3 -`) tidak
 // ditahan — menahan `| python3 -` mematahkan pipeline sah, dan `bash berkas`

@@ -2,13 +2,14 @@
 // 0% tercakup (nol test, hanya bisa diuji manual).
 
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { runSetupWizard } from "../cli/wizard.ts"
 import { GATEWAY_PRESETS } from "../src/providers/presets.ts"
 import { stripAnsi } from "../src/ui/render/theme.ts"
 import { displayWidth } from "../src/ui/render/width.ts"
+import { runSetupWizardView } from "../src/ui/screens/wizard.ts"
 import { type FakeTty, installFakeTty, KEY } from "./helpers/tui-harness.ts"
 
 let tty: FakeTty | undefined
@@ -48,24 +49,23 @@ describe("wizard: non-TTY", () => {
   })
 })
 
-describe("wizard: pemilihan gateway", () => {
-  test("memakai picker ringkas (panah), bukan prompt nomor", async () => {
+describe("wizard: input langsung Base URL + API key", () => {
+  test("langsung menampilkan form Base URL [1/2] tanpa picker gateway", async () => {
     tty = installFakeTty({ columns: 80, rows: 24 })
     isolateHome()
     const p = runSetupWizard()
     await tty.ready(3000)
     const out = visible(tty)
-    // Picker gateway menampilkan step [1/3] + opsi; prompt nomor tidak ada.
-    expect(out).toContain("OpenAI")
-    expect(out).toContain("Minicode setup [1/3]")
-    expect(out).not.toMatch(/Choice \[1-\d+\]/)
-    // Penanda seleksi picker ada.
-    expect(out).toMatch(/\u203a/)
+    // Langsung form Base URL [1/2]; picker preset OpenAI/gateway tidak ada.
+    expect(out).toContain("Minicode setup [1/2]")
+    expect(out).toContain("Base URL")
+    expect(out).not.toContain("Select gateway")
+    expect(out).not.toContain("OpenAI (gpt")
     await tty.send(KEY.esc, 60)
     expect(await p).toBe(false)
   })
 
-  test("Esc pada picker membatalkan setup dengan pesan", async () => {
+  test("Esc pada form Base URL membatalkan setup dengan pesan", async () => {
     tty = installFakeTty()
     isolateHome()
     const p = runSetupWizard()
@@ -75,43 +75,25 @@ describe("wizard: pemilihan gateway", () => {
     expect(visible(tty)).toContain("Setup cancelled")
   })
 
-  test("daftar gateway berjudul step; hint aksi minimalis di dasar kotak", async () => {
+  test("hint aksi minimalis tampil di dasar kotak form", async () => {
     tty = installFakeTty()
     isolateHome()
     const p = runSetupWizard()
     await tty.ready(3000)
     const out = visible(tty)
-    expect(out).toContain("OpenAI")
-    // v7.16: wizard opt-in showTitle agar step [1/3] tidak hilang.
-    expect(out).toContain("Minicode setup [1/3]")
-    // Hint satu baris "kunci label" tanpa separator dekoratif.
-    expect(out).toContain("Esc cancel")
+    expect(out).toContain("Minicode setup [1/2]")
+    expect(out).toContain("Esc")
+    expect(out).toContain("Enter save")
+    expect(out).not.toContain("Esc cancel")
     await tty.send(KEY.esc, 60)
     await p
   })
 
-  test("semua preset bisa dicari (filterable)", async () => {
-    tty = installFakeTty({ columns: 80, rows: 24 })
-    isolateHome()
-    const p = runSetupWizard()
-    await tty.ready(3000)
-    tty.clear()
-    await tty.send("ollama", 60)
-    const out = visible(tty)
-    expect(out.toLowerCase()).toContain("ollama")
-    // Preset lain tersaring keluar.
-    expect(out).not.toContain("Mistral")
-    await tty.send(KEY.esc, 40)
-    await tty.send(KEY.esc, 60)
-    await p
-  })
-
-  test("daftar preset tidak melebihi lebar terminal", async () => {
+  test("form Base URL tidak melebihi lebar terminal", async () => {
     tty = installFakeTty({ columns: 40, rows: 20 })
     isolateHome()
     const p = runSetupWizard()
     await tty.ready(3000)
-    // Popup region cursor-addressed: ukur via parser screen.
     for (const l of tty.screen()) {
       expect(displayWidth(l)).toBeLessThanOrEqual(40)
     }
@@ -119,53 +101,112 @@ describe("wizard: pemilihan gateway", () => {
     await p
   })
 
-  test("menyertakan opsi URL kustom di ujung daftar", async () => {
-    tty = installFakeTty({ columns: 80, rows: 30 })
+  test("URL lalu API key [2/2] — Esc di API key membatalkan setup", async () => {
+    tty = installFakeTty({ columns: 80, rows: 24 })
     isolateHome()
     const p = runSetupWizard()
     await tty.ready(3000)
-    tty.clear()
-    await tty.send("kustom", 60)
-    expect(visible(tty).toLowerCase()).toContain("kustom")
-    await tty.send(KEY.esc, 40)
+    await tty.send("https://api.example.com/v1")
+    await tty.send(KEY.enter)
+    await tty.waitForOutput((o) => stripAnsi(o).includes("Minicode setup [2/2]"), 3000)
+    expect(visible(tty)).toContain("API key for https://api.example.com/v1")
     await tty.send(KEY.esc, 60)
-    await p
+    expect(await p).toBe(false)
   })
-})
 
-describe("wizard: tampilan", () => {
-  test("daftar awal menampilkan judul step [1/3]", async () => {
-    tty = installFakeTty()
+  test("submit Base URL + API key langsung menyimpan provider tanpa preset", async () => {
+    tty = installFakeTty({ columns: 80, rows: 24 })
     isolateHome()
-    const p = runSetupWizard()
+    const origFetch = globalThis.fetch
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ data: [{ id: "m-1" }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as unknown as typeof fetch
+    try {
+      const p = runSetupWizard()
+      await tty.ready(3000)
+      await tty.send("https://api.contoh.test/v1")
+      await tty.send(KEY.enter)
+      await tty.waitForOutput((o) => stripAnsi(o).includes("Minicode setup [2/2]"), 3000)
+      await tty.send("sk-test-123")
+      await tty.send(KEY.enter)
+      expect(await p).toBe(true)
+      const cfgPath = join(home!, ".minicode", "config.json")
+      expect(existsSync(cfgPath)).toBe(true)
+      const cfg = JSON.parse(readFileSync(cfgPath, "utf8")) as {
+        providers: { id: string; baseUrl: string; models: string[] }[]
+      }
+      expect(cfg.providers).toHaveLength(1)
+      expect(cfg.providers[0]?.baseUrl).toBe("https://api.contoh.test/v1")
+      expect(cfg.providers[0]?.models).toEqual(["m-1"])
+    } finally {
+      globalThis.fetch = origFetch
+    }
+  })
+
+  test("dialog error panjang dapat digulir dengan j/panah di layar pendek", async () => {
+    tty = installFakeTty({ columns: 50, rows: 12 })
+    const p = runSetupWizardView({
+      onSubmit: async () => {
+        tty!.resize(28, 10)
+        throw new Error("boom")
+      },
+    })
     await tty.ready(3000)
-    const out = visible(tty)
-    expect(out).toContain("OpenAI")
-    expect(out).toContain("Minicode setup [1/3]")
+    await tty.send("https://api.gagal.test/v1")
+    await tty.send(KEY.enter)
+    await tty.waitForOutput((o) => stripAnsi(o).includes("Minicode setup [2/2]"), 3000)
+    await tty.send("sk-test-123")
+    await tty.send(KEY.enter)
+    await tty.waitForScreen((f) => f.some((l) => l.includes("Model detection")), 4000)
+    expect(tty.screen().join("\n")).not.toContain("--verbose")
+    await tty.send("j")
+    await tty.waitForScreen((f) => f.some((l) => l.includes("--verbose")))
     await tty.send(KEY.esc, 60)
-    await p
+    expect(await p).toBe(false)
+  })
+
+  test("Esc selama Detecting models… membatalkan request dan kembali ke form dengan draft utuh", async () => {
+    tty = installFakeTty({ columns: 80, rows: 24 })
+    let sawAbort = false
+    const p = runSetupWizardView({
+      onSubmit: (_url, _key, signal) =>
+        new Promise((_resolve, reject) => {
+          signal?.addEventListener(
+            "abort",
+            () => {
+              sawAbort = true
+              reject(new DOMException("aborted", "AbortError"))
+            },
+            { once: true },
+          )
+        }),
+    })
+    await tty.ready(3000)
+    await tty.send("https://api.lambat.test/v1")
+    await tty.send(KEY.enter)
+    await tty.waitForOutput((o) => stripAnsi(o).includes("Minicode setup [2/2]"), 3000)
+    await tty.send("sk-lambat-123")
+    await tty.send(KEY.enter)
+    await tty.waitForScreen((f) => f.some((l) => l.includes("Detecting models")), 3000)
+    expect(tty.screen().join("\n")).toContain("Esc")
+    await tty.send(KEY.esc, 90)
+    // Kembali ke langkah [1/2] dengan URL draft masih terisi (tidak terbuang).
+    await tty.waitForScreen(
+      (f) =>
+        f.some((l) => l.includes("Minicode setup [1/2]")) &&
+        f.some((l) => l.includes("api.lambat.test")),
+      3000,
+    )
+    expect(sawAbort).toBe(true)
+    await tty.send(KEY.ctrlD, 60)
+    expect(await p).toBe(false)
   })
 })
 
-describe("wizard: preset", () => {
-  test("setiap preset punya label, baseUrl, dan fallbackModels", () => {
-    expect(GATEWAY_PRESETS.length).toBeGreaterThan(5)
-    for (const p of GATEWAY_PRESETS) {
-      expect(p.id, JSON.stringify(p)).toBeTruthy()
-      expect(p.label, p.id).toBeTruthy()
-      expect(p.baseUrl, p.id).toMatch(/^https?:\/\//)
-      expect(p.fallbackModels.length, p.id).toBeGreaterThan(0)
-    }
-  })
-
-  test("id preset unik", () => {
-    const ids = GATEWAY_PRESETS.map((p) => p.id)
-    expect(new Set(ids).size).toBe(ids.length)
-  })
-
-  test("label preset cukup pendek untuk terminal 40 kolom", () => {
-    for (const p of GATEWAY_PRESETS) {
-      expect(displayWidth(p.label), p.id).toBeLessThanOrEqual(52)
-    }
+describe("wizard: preset kosong", () => {
+  test("tidak ada preset gateway terdaftar", () => {
+    expect(GATEWAY_PRESETS).toEqual([])
   })
 })

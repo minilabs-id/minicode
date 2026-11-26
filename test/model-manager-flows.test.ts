@@ -640,10 +640,10 @@ describe("model-manager view: Enter gagal tidak menutup manager", () => {
 
   test("PgDn/PgUp/Home/End navigasi daftar panjang", async () => {
     // Gagal-di-kode-lama: kondisi paging memakai panjang list sebagai jatah
-    // visible → selalu false → PgDn mati. 12 baris, jatah 8.
+    // visible → selalu false → PgDn mati. 16 baris, jatah 12.
     const { runModelManagerView } = await import("../src/ui/screens/model-manager.ts")
     tty = installFakeTty({ rows: 24 })
-    const rows = Array.from({ length: 12 }, (_, i) => ({
+    const rows = Array.from({ length: 16 }, (_, i) => ({
       id: `m${String(i).padStart(2, "0")}`,
       active: i === 0,
     }))

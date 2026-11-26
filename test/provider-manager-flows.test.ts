@@ -123,19 +123,16 @@ async function openManager(
 }
 
 describe.serial("provider-manager: add (a)", () => {
-  // Alur baru (form dalam popup): "a" → picker preset → Enter → form
-  // (URL prefill + key + scope) → Tab navigasi → Enter simpan. SEMUA ketikan
-  // di dalam kotak; tak ada prompt bernomor di luar.
+  // Alur langsung (tanpa picker preset): "a" → form (Base URL + API key + scope)
+  // → Tab navigasi → Enter simpan. SEMUA ketikan di dalam kotak.
   async function addFlow(
-    opts: { presetFilter?: string; key?: string; local?: boolean } = {},
+    opts: { url?: string; key?: string; local?: boolean } = {},
   ): Promise<void> {
     const t = tty
     if (!t) throw new Error("installFakeTty must be called first")
     await t.send("a")
-    await t.waitForOutput((o) => o.includes("OpenAI"))
-    if (opts.presetFilter) await t.send(opts.presetFilter)
-    await t.send(KEY.enter)
     await t.waitForOutput((o) => o.includes("Base URL"))
+    await t.send(opts.url ?? "https://api.openai.com/v1")
     if (opts.key !== undefined) {
       await t.send(KEY.tab) // URL → key
       await t.send(opts.key)
@@ -144,7 +141,7 @@ describe.serial("provider-manager: add (a)", () => {
     if (opts.local) await t.send(KEY.right) // global → local
   }
 
-  test("preset + scope local menyimpan provider ke config lokal", async () => {
+  test("Base URL + scope local menyimpan provider ke config lokal", async () => {
     tty = installFakeTty({ rows: 24 })
     const t = tty // lokal typed untuk dipakai di dalam callback (narrowing
     // variabel modul tidak bertahan lintas closure).
@@ -163,7 +160,7 @@ describe.serial("provider-manager: add (a)", () => {
     expect(out).toContain("saved")
     const cfg = await readConfig(localConfigPath())
     expect(cfg.providers).toHaveLength(1)
-    expect(cfg.providers[0]?.id).toBe("openai")
+    expect(cfg.providers[0]?.id).toBe("api-openai-com")
     expect(cfg.providers[0]?.models).toEqual(["model-a", "model-b"])
     // Global remains empty — scope is respected.
     expect((await readConfig(globalPath)).providers).toHaveLength(0)
@@ -179,23 +176,20 @@ describe.serial("provider-manager: add (a)", () => {
     await mgr.close()
   })
 
-  test("URL kustom dipakai apa adanya", async () => {
+  test("URL kustom dipakai apa adanya tanpa picker preset", async () => {
     tty = installFakeTty({ rows: 24 })
     const mgr = await openManager()
     await tty.send("a")
-    await tty.waitForOutput((o) => o.includes("OpenAI"))
-    await tty.send("Custom")
-    await tty.send(KEY.enter)
     await tty.waitForOutput((o) => o.includes("Base URL"))
-    // Fokus mulai di URL (kosong untuk custom): isi dulu, baru Tab.
+    expect(visible(tty)).not.toContain("Custom URL")
+    // Fokus langsung di Base URL: isi URL, Tab ke API key, Tab ke scope.
     await tty.send("https://gw.contoh/v1")
     await tty.send(KEY.tab)
     await tty.send("sk-2")
     await tty.send(KEY.tab)
     await tty.send(KEY.right) // global → local
     await tty.send(KEY.enter)
-    // Custom URL juga menjalani detect async sebelum save — tunggu config
-    // ter-tulis sebelum dibaca (kelas race yang sama).
+    // URL kustom juga menjalani detect async sebelum save.
     await waitFor(() => existsSync(localConfigPath()))
     const cfg = JSON.parse(await readFile(localConfigPath(), "utf8")) as {
       providers: { baseUrl: string }[]
@@ -204,13 +198,10 @@ describe.serial("provider-manager: add (a)", () => {
     await mgr.close()
   })
 
-  test("empty custom URL -> required message, nothing is saved", async () => {
+  test("empty URL -> required message, nothing is saved", async () => {
     tty = installFakeTty({ rows: 24 })
     const mgr = await openManager()
     await tty.send("a")
-    await tty.waitForOutput((o) => o.includes("OpenAI"))
-    await tty.send("Custom")
-    await tty.send(KEY.enter)
     await tty.waitForOutput((o) => o.includes("Base URL"))
     // URL kosong langsung Enter → error inline, form tetap terbuka.
     await tty.send(KEY.enter)
@@ -229,9 +220,8 @@ describe.serial("provider-manager: add (a)", () => {
     tty = installFakeTty({ rows: 24 })
     const mgr = await openManager()
     await tty.send("a")
-    await tty.waitForOutput((o) => o.includes("OpenAI"))
-    await tty.send(KEY.enter)
     await tty.waitForOutput((o) => o.includes("Base URL"))
+    await tty.send("https://api.openai.com/v1")
     await tty.send(KEY.tab) // URL → key (kosong)
     await tty.send(KEY.tab) // → scope
     await tty.send(KEY.enter)
@@ -247,13 +237,10 @@ describe.serial("provider-manager: add (a)", () => {
   })
 
   test("Ctrl+C in form cancels WITHOUT killing the session", async () => {
-    // Prefill utuh (tak ada draft kotor) → tekan-1 langsung batal; manager
-    // tetap hidup (dulu tekan-1 membersihkan prefill, tekan-2 baru batal).
+    // Field masih kosong/utuh → tekan-1 langsung batal; manager tetap hidup.
     tty = installFakeTty({ rows: 24 })
     const mgr = await openManager()
     await tty.send("a")
-    await tty.waitForOutput((o) => o.includes("OpenAI"))
-    await tty.send(KEY.enter)
     await tty.waitForOutput((o) => o.includes("Base URL"))
     await tty.send(KEY.ctrlC, 90)
     await waitFor(() => {
@@ -261,21 +248,17 @@ describe.serial("provider-manager: add (a)", () => {
       if (!t) throw new Error("tty gone")
       return visible(t).includes("Cancelled")
     })
-    // Manager is still alive: Esc can still close it (if process died, this
-    // would never complete).
     await mgr.close()
   })
 
-  test("Ctrl+C dua-tahap saat prefill diubah: tekan-1 kembalikan, tekan-2 batal", async () => {
+  test("Ctrl+C dua-tahap saat input diubah: tekan-1 kembalikan, tekan-2 batal", async () => {
     tty = installFakeTty({ rows: 24 })
     const mgr = await openManager()
     await tty.send("a")
-    await tty.waitForOutput((o) => o.includes("OpenAI"))
-    await tty.send(KEY.enter)
     await tty.waitForOutput((o) => o.includes("Base URL"))
-    await tty.send("X") // kotori prefill
+    await tty.send("https://draft.example") // ubah isi awal (dirty)
     await tty.send(KEY.ctrlC, 150)
-    // Tekan-1: prefill dikembalikan, form TETAP terbuka (tanpa "Cancelled").
+    // Tekan-1: isian dikembalikan ke awal, form TETAP terbuka (tanpa "Cancelled").
     expect(visible(tty)).not.toContain("Cancelled")
     await tty.send(KEY.ctrlC, 90)
     // Tekan-2: batal total, manager tetap hidup.
@@ -291,9 +274,8 @@ describe.serial("provider-manager: add (a)", () => {
     tty = installFakeTty({ rows: 24 })
     const mgr = await openManager()
     await tty.send("a")
-    await tty.waitForOutput((o) => o.includes("OpenAI"))
-    await tty.send(KEY.enter)
     await tty.waitForOutput((o) => o.includes("Base URL"))
+    await tty.send("https://api.openai.com/v1")
     await tty.send(KEY.tab)
     await tty.send("sk-1")
     await tty.send(KEY.ctrlU, 30) // hapus semua
@@ -306,11 +288,11 @@ describe.serial("provider-manager: add (a)", () => {
     await mgr.close()
   })
 
-  test("Esc at preset picker cancels", async () => {
+  test("Esc at add form cancels", async () => {
     tty = installFakeTty({ rows: 24 })
     const mgr = await openManager()
     await tty.send("a")
-    await tty.waitForOutput((o) => o.includes("OpenAI"))
+    await tty.waitForOutput((o) => o.includes("Base URL"))
     await tty.send(KEY.esc, 90)
     await waitFor(() => {
       const t = tty
@@ -321,105 +303,41 @@ describe.serial("provider-manager: add (a)", () => {
     await mgr.close()
   })
 
-  test("adding a preset whose id already exists asks for overwrite confirmation", async () => {
-    // Regresi: detectAndSave(id preset) menimpa key+models tanpa konfirmasi.
+  test("menambah URL yang slug-nya sudah ada otomatis membuat suffix numerik", async () => {
     await writeFile(
       globalPath,
       JSON.stringify({
         providers: [
-          { id: "openai", baseUrl: "https://lama.example/v1", apiKey: "lama", models: ["lama-1"] },
+          {
+            id: "api-openai-com",
+            baseUrl: "https://api.openai.com/v1",
+            apiKey: "lama",
+            models: ["lama-1"],
+          },
         ],
       }),
       "utf8",
     )
     tty = installFakeTty({ rows: 24 })
     const mgr = await openManager()
-    const t = tty
-    if (!t) throw new Error("fake tty is missing")
-    await t.send("a")
-    await t.waitForOutput((o) => o.includes("OpenAI"))
-    await t.send(KEY.enter) // preset pertama = openai (duplikat)
-    await t.waitForOutput((o) => o.includes("Overwrite"))
-    // Isi key dulu (wajib), ke scope, ke overwrite (default Tidak) + Enter.
-    await t.send(KEY.tab)
-    await t.send("k-baru")
-    await t.send(KEY.tab)
-    await t.send(KEY.tab)
-    await t.send(KEY.enter)
-    await waitFor(() => visible(t).includes("Cancelled"))
+    await addFlow({ key: "k-baru" })
+    await tty.send(KEY.enter)
+    await waitFor(async () => (await readConfig(globalPath)).providers.length === 2)
     const cfg = JSON.parse(await readFile(globalPath, "utf8")) as {
       providers: { id: string; apiKey: string }[]
     }
-    expect(cfg.providers.find((p) => p.id === "openai")?.apiKey).toBe("lama")
+    expect(cfg.providers.find((p) => p.id === "api-openai-com")?.apiKey).toBe("lama")
+    expect(cfg.providers.find((p) => p.id === "api-openai-com-2")?.apiKey).toBe("k-baru")
     await mgr.close()
   })
 
-  test("overwrite confirmed with Yes saves new key", async () => {
-    await writeFile(
-      globalPath,
-      JSON.stringify({
-        providers: [
-          { id: "openai", baseUrl: "https://lama.example/v1", apiKey: "lama", models: ["lama-1"] },
-        ],
-      }),
-      "utf8",
-    )
-    tty = installFakeTty({ rows: 24 })
-    const mgr = await openManager()
-    await tty.send("a")
-    await tty.waitForOutput((o) => o.includes("OpenAI"))
-    await tty.send(KEY.enter)
-    await tty.waitForOutput((o) => o.includes("Overwrite"))
-    await tty.send(KEY.tab)
-    await tty.send("k-baru")
-    await tty.send(KEY.tab)
-    await tty.send(KEY.tab)
-    await tty.send(KEY.right) // Tidak → Ya
-    await tty.send(KEY.enter)
-    // Save terjadi SETELAH "Detecting models…" async. Config global SUDAH
-    // berisi 1 provider ("lama") sejak awal — menunggu jumlah = no-op yang
-    // lolos seketika; di bawah coverage save melambat dan assert membaca
-    // key lama (flake nyata). Tunggu ISI-nya: apiKey berubah jadi k-baru.
-    await waitFor(async () => {
-      const c = await readConfig(globalPath)
-      return c.providers.find((p) => p.id === "openai")?.apiKey === "k-baru"
-    })
-    const cfg = JSON.parse(await readFile(globalPath, "utf8")) as {
-      providers: { id: string; apiKey: string }[]
-    }
-    expect(cfg.providers.find((p) => p.id === "openai")?.apiKey).toBe("k-baru")
-    await mgr.close()
-  })
-
-  test("filter without match + Enter cancels", async () => {
-    tty = installFakeTty({ rows: 24 })
-    const mgr = await openManager()
-    await tty.send("a")
-    await tty.waitForOutput((o) => o.includes("OpenAI"))
-    await tty.send("zzz-tidak-ada")
-    await tty.send(KEY.enter)
-    await waitFor(() => {
-      const t = tty
-      if (!t) throw new Error("tty gone")
-      return visible(t).includes("Cancelled")
-    })
-    await mgr.close()
-  })
-
-  test("model detection failure falls back to preset models, not thrown", async () => {
+  test("model detection failure falls back to default models, not thrown", async () => {
     globalThis.fetch = failFetch
     tty = installFakeTty({ rows: 24 })
     const mgr = await openManager()
-    await tty.send("a")
-    await tty.waitForOutput((o) => o.includes("OpenAI"))
+    await addFlow({ key: "sk-3" })
     await tty.send(KEY.enter)
-    await tty.waitForOutput((o) => o.includes("Base URL"))
-    await tty.send(KEY.tab)
-    await tty.send("sk-3")
-    await tty.send(KEY.tab)
-    await tty.send(KEY.enter)
-    // Endpoint 500 semua → fallbackModels preset dipakai, provider TETAP
-    // tersimpan (bukan exception, bukan dialog gantung).
+    // Endpoint 500 semua → fallbackModels dipakai, provider TETAP tersimpan.
     await waitFor(async () => (await readConfig(globalPath)).providers.length === 1, 30000)
     await waitFor(() => {
       const t = tty
@@ -721,6 +639,7 @@ describe.serial("provider-manager: navigasi", () => {
     const mgr = await openManager()
     const screen = tty.screen().join("\n")
     expect(screen).toContain("gw0")
+    expect(screen).toContain("(1-7/12)")
     expect(screen).not.toContain("gw11")
     expect(screen).not.toContain("more")
     await mgr.close()

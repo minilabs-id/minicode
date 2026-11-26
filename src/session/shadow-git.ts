@@ -5,6 +5,7 @@ import { rm } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve } from "node:path"
 import { LIMITS } from "../constants.ts"
 import { GIT_NO_DIFF_DRIVERS, GIT_SAFE_BASE, gitFilterNeutralizers } from "../lib/git-hardening.ts"
+import { killProcessTree } from "../lib/process-tree.ts"
 import { sanitizeSessionPart } from "../lib/session-id.ts"
 import { resolveTrustedExecutable } from "../lib/trusted-exec.ts"
 import { isOwnedState, isRealPathOutsideRoot, isSensitive } from "../policy/jail.ts"
@@ -133,6 +134,10 @@ function git(
     ]
     const p = spawn(resolveTrustedExecutable("git"), hardened, {
       cwd,
+      // Grup proses sendiri di POSIX agar timeout dapat mematikan subtree git
+      // sekaligus; sembunyikan konsol di Windows.
+      detached: process.platform !== "win32",
+      windowsHide: true,
       // Env git dikendalikan penuh: GIT_INDEX_FILE mengarahkan operasi index ke
       // berkas sementara kita, dan GIT_OPTIONAL_LOCKS=0 mencegah git menulis
       // lock pada repo user hanya untuk membaca. Kredensial di-strip (audit
@@ -146,23 +151,35 @@ function git(
     })
     let stdout = ""
     let stderr = ""
+    let settled = false
+    const finish = (out: { code: number; stdout: string; stderr: string }) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolveOut(out)
+    }
     p.stdout.on("data", (d: Buffer) => {
       if (stdout.length < 4_000_000) stdout += d.toString()
     })
     p.stderr.on("data", (d: Buffer) => {
       if (stderr.length < 100_000) stderr += d.toString()
     })
-    const timer = setTimeout(
-      () => p.kill("SIGKILL"),
-      opts.timeoutMs ?? LIMITS.SHADOW_GIT_TIMEOUT_MS,
-    )
+    const timer = setTimeout(() => {
+      killProcessTree(p, { env: sanitizeSpawnEnv(process.env) })
+      try {
+        p.stdout?.destroy()
+        p.stderr?.destroy()
+      } catch {}
+      // Pastikan promise selalu selesai saat timeout meski cucu mewarisi pipe
+      // sehingga event `close` tidak kunjung datang.
+      finish({ code: -1, stdout, stderr: stderr || "git timed out" })
+    }, opts.timeoutMs ?? LIMITS.SHADOW_GIT_TIMEOUT_MS)
+    timer.unref?.()
     p.on("error", () => {
-      clearTimeout(timer)
-      resolveOut({ code: -1, stdout: "", stderr: "git not available" })
+      finish({ code: -1, stdout: "", stderr: "git not available" })
     })
     p.on("close", (code) => {
-      clearTimeout(timer)
-      resolveOut({ code: code ?? -1, stdout, stderr })
+      finish({ code: code ?? -1, stdout, stderr })
     })
   })
 }

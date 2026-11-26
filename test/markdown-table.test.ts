@@ -8,7 +8,7 @@ import {
 } from "../src/ui/render/markdown-table.ts"
 import { renderTable } from "../src/ui/render/table.ts"
 import { renderGridTable } from "../src/ui/render/table-grid.ts"
-import { stripAnsi } from "../src/ui/render/theme.ts"
+import { glyphs, stripAnsi } from "../src/ui/render/theme.ts"
 import { displayWidth } from "../src/ui/render/width.ts"
 import { Transcript } from "../src/ui/tui/transcript.ts"
 import { createFakeBus, type FakeTty, installFakeTty } from "./helpers/tui-harness.ts"
@@ -181,7 +181,7 @@ describe("grid renderer", () => {
         { width: 22, box: true, wrap: true },
       ),
     )
-    expect(output).toContain("…")
+    expect(output).toContain(glyphs.ellipsis)
     expect(output).not.toContain("md:16")
   })
 
@@ -193,7 +193,7 @@ describe("grid renderer", () => {
       ),
     )
     // Tak ada ellipsis (bukan truncate); seluruh konten dipertahankan walau dibungkus.
-    expect(output).not.toContain("…")
+    expect(output).not.toContain(glyphs.ellipsis)
     expect(output.replace(/[\s─]/g, "")).toContain("value-long-long-long")
   })
 })

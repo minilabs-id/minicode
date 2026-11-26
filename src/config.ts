@@ -254,8 +254,12 @@ export function normalizeConfig(raw: unknown): MinicodeConfig {
           }
           const contextWindows =
             Object.keys(validContextWindows).length > 0 ? validContextWindows : undefined
+          const models = Array.isArray(p.models)
+            ? p.models.filter((m): m is string => typeof m === "string" && m.length > 0)
+            : []
           return {
             ...p,
+            models,
             contextWindows:
               contextWindows && Object.keys(contextWindows).length > 0 ? contextWindows : undefined,
             ...normalizeCapacityExtras(p, contextWindows),

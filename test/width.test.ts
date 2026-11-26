@@ -8,6 +8,7 @@ import { describe, expect, test } from "bun:test"
 import {
   charWidth,
   chunkByWidth,
+  compositeBackdropBoxLine,
   displayWidth,
   escapeLength,
   padToWidth,
@@ -375,5 +376,21 @@ describe("fast-path ASCII (F-06)", () => {
     // hanya menangkap regresi kasar, bukan benchmark. Divalidasi: ~8 ms vs
     // ~760 ms di mesin audit.
     expect(performance.now() - t0).toBeLessThan(500)
+  })
+})
+
+describe("compositeBackdropBoxLine", () => {
+  test("mempertahankan margin kiri & kanan backdrop dengan SGR aktif dan aman terhadap CJK lebar-2", () => {
+    const out = compositeBackdropBoxLine("\x1b[2mhello world!\x1b[0m", "    ╭──╮", 12)
+    // Kiri 4 kolom ("hell" tetap dim lalu reset), kotak di col 4..7, kanan col 8..11 ("rld!" dim lalu reset).
+    expect(out).toBe("\x1b[2mhell\x1b[0m╭──╮\x1b[2mrld!\x1b[0m")
+
+    // CJK straddling di batas kiri (col 3..4) & kanan (col 7..8): kotak tetap tepat mulai kolom 4.
+    const cjkOut = compositeBackdropBoxLine("abc字de字fg", "    ╭──╮", 12)
+    expect(cjkOut).toBe("abc ╭──╮ fg")
+    expect(displayWidth(cjkOut)).toBe(11)
+
+    // Backdrop polos (NO_COLOR): nol sekuens SGR tambahan disuntikkan.
+    expect(compositeBackdropBoxLine("hello world!", "    ╭──╮", 12)).not.toContain("\x1b[")
   })
 })

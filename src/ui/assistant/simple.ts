@@ -503,7 +503,7 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
   }
 
   const writePresentationTerminal = (event: UiPresentationEvent): void => {
-    if (!presentationEnabled) return
+    if (opts.quiet || !presentationEnabled) return
     // JANGAN flush di sini. `flushTableStream()` mengeluarkan `lineBuffer`
     // parsial sebagai baris UTUH; dipanggil pada setiap presentation event
     // (status task, clock, verifikasi, consequence) yang datang di tengah
@@ -732,6 +732,9 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
       } else if (attemptCopyText.length < ANSWER_BUF_MAX) {
         attemptCopyText += clean.slice(0, ANSWER_BUF_MAX - attemptCopyText.length)
       }
+      // Mode quiet (TUI / machine): wOut/wErr no-op — lewati pipeline markdown/
+      // highlight/tabel duplikat pada setiap token streaming.
+      if (opts.quiet) return
       consumeTableEvents(tableStream.push(clean))
     }),
   )
@@ -943,6 +946,10 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
       // satu read_file raksasa tak langsung memenuhi buffer sendirian).
       if (!isError && typeof r.content === "string")
         rememberTurn(ui, truncateToWidth(sanitizeAnsi(r.content), 20000, ""))
+      if (opts.quiet) {
+        if (isError || ui.sectionMinimized("tool")) ui.setActiveSection(null)
+        return
+      }
       if (isError) {
         // v0.42+: redaksi ringkas kanonik — exit N / idempotency / EIO /
         // bash-guard tak lagi bocor mentah ke scrollback. Bila intent/summary

@@ -56,13 +56,7 @@ import {
   scrimSgr,
 } from "../render/theme.ts"
 import { tSystem } from "../render/tool-label.ts"
-import {
-  chunkByWidth,
-  displayWidth,
-  escapeLength,
-  padToWidth,
-  truncateToWidth,
-} from "../render/width.ts"
+import { displayWidth, escapeLength, padToWidth, truncateToWidth } from "../render/width.ts"
 import { motionReduced } from "../runtime/motion.ts"
 import {
   type AltScreen,
@@ -1026,8 +1020,14 @@ export class TuiApp {
     for (const item of keys) {
       if (item.pasted && item.key.type === "char") {
         // Akumulasi payload paste lintas-chunk saat `pasteEnd === false`
-        // (mode overflow) supaya tidak terpecah menjadi dua placeholder.
-        this.pendingPasteBuf = (this.pendingPasteBuf ?? "") + item.key.ch
+        // (mode overflow) supaya tidak terpecah menjadi dua placeholder,
+        // dengan batas keras 2 MiB agar terminal rusak tak memicu OOM.
+        const cur = this.pendingPasteBuf ?? ""
+        const room = Math.max(0, 2 * 1024 * 1024 - cur.length)
+        this.pendingPasteBuf =
+          room > 0
+            ? cur + (item.key.ch.length > room ? item.key.ch.slice(0, room) : item.key.ch)
+            : cur
         if (item.pasteEnd === false) continue
         const full = this.pendingPasteBuf
         this.pendingPasteBuf = null
@@ -1092,15 +1092,14 @@ export class TuiApp {
       return
     }
     if (key.type === "wheelup" || key.type === "wheeldown") {
-      // Wheel SELALU menggulir chat — kecuali saat dropdown `/` terbuka atau
-      // kursor berada di atas kotak composer yang berisi >2 baris visual.
+      // Wheel SELALU menggulir chat — kecuali saat dropdown `/` atau `@` terbuka
+      // atau kursor berada di atas kotak composer yang berisi >2 baris visual.
       if (
         !this.tooSmall() &&
         !this.isBusy() &&
         this.editing &&
         this.state.menuOpen &&
-        this.state.line.startsWith("/") &&
-        this.host.listCommands(this.state.line).length > 0
+        this.activeSuggestions().items.length > 0
       ) {
         this.applyEngine({ type: key.type === "wheelup" ? "up" : "down" })
         return
@@ -1738,6 +1737,11 @@ export class TuiApp {
     if (this.composerSelection) this.composerSelection.dragging = false
     this.pendingPasteBuf = null
     this.decoder.pending = []
+    this.decoder.pasteOverflow = false
+    this.decoder.discard = undefined
+    // Matikan bracketed paste saat fokus diserahkan ke modal/popup — tiap modal
+    // mengelola ?2004h/?2004l sendiri, lalu resume() wajib mengaktifkan ulang.
+    this.setBracketedPaste(false)
     this.setMouseMode("wheel")
     try {
       if (this.onData) this.stdin?.removeListener("data", this.onData)
@@ -1765,6 +1769,9 @@ export class TuiApp {
     try {
       if (this.onData) this.stdin?.on("data", this.onData)
     } catch {}
+    // Force emit ?2004h: modal/jendela output bisa mematikan bracketed paste di
+    // terminal fisik saat tutup walaupun flag internal sempat selaras.
+    this.setBracketedPaste(true, true)
     this.setMouseMode(mouseSelectionEnabled() ? "drag" : "off")
     if (this.isBusy()) this.startActivityClock()
     this.paintCurrent()
@@ -1809,13 +1816,23 @@ export class TuiApp {
     if (!screen.ok) return false
     this.currentScreen = screen
     this.released = false
-    this.setBracketedPaste(true)
+    this.setBracketedPaste(true, true)
     this.setMouseMode(!mouseSelectionEnabled() ? "off" : this.suspended > 0 ? "wheel" : "drag")
     try {
       this.stdin?.setRawMode(true)
     } catch {}
+    // Bila tidak berada di dalam suspend() (mis. /shell via withShell yang
+    // melepas terminal langsung tanpa suspend/resume), pasang ulang listener
+    // stdin secara idempoten agar TUI tidak beku permanen pasca-reacquire.
+    if (this.suspended === 0 && this.onData) {
+      try {
+        this.stdin?.removeListener("data", this.onData)
+        this.stdin?.on("data", this.onData)
+      } catch {}
+    }
     if (this.isBusy()) this.startActivityClock()
-    this.paintCurrent()
+    if (this.suspended > 0) this.paintDimmed()
+    else this.paintCurrent()
     return true
   }
 
@@ -1864,7 +1881,13 @@ export class TuiApp {
     this.frameStatus = snap
     const layout = this.buildLayout(rows, cols, snap)
     this.lastLayout = layout
-    const frozen = layout.frame.map((ln) => TuiApp.applyBackdropDim(ln))
+    const origPadLeft = chatColumnGeometry(rows, cols).padLeft
+    const origPadStr = origPadLeft > 0 ? " ".repeat(origPadLeft) : ""
+    const unpaddedDimmed = layout.frame.map((ln) => {
+      const body = origPadLeft > 0 && ln.startsWith(origPadStr) ? ln.slice(origPadLeft) : ln
+      return TuiApp.applyBackdropDim(body)
+    })
+    const frozen = unpaddedDimmed.map((ln) => (ln ? `${origPadStr}${ln}` : ""))
     screen.paint([...frozen])
     this.frames++
     // Snapshot HANYA untuk frame ini; di luar paint isBusy() kembali membaca
@@ -1872,12 +1895,17 @@ export class TuiApp {
     this.frameStatus = null
     this.clearBackdrop()
     this.releaseBackdrop = registerScreenBackdrop(
-      (_c, r) => {
-        // screen.paintRegion sudah memotong tiap baris ke lebar baru; di sini
-        // cukup menyajikan `r` baris dari snapshot (lebih panjang = di-crop,
-        // lebih pendek = baris kosong redup). Tak ada efek samping layout.
+      (c, r) => {
+        // Sesuaikan geseran horizontal kolom tengah saat terminal dilebarkan /
+        // disempitkan tanpa memanggil buildLayout (yang memutasi scrollBack /
+        // selection / clock). screen.paintRegion tetap memotong ke lebar `c`.
+        const nextPadLeft = chatColumnGeometry(r, c).padLeft
+        const prefix = nextPadLeft > 0 ? " ".repeat(nextPadLeft) : ""
         const out: string[] = []
-        for (let i = 0; i < r; i++) out.push(frozen[i] ?? "")
+        for (let i = 0; i < r; i++) {
+          const body = unpaddedDimmed[i] ?? ""
+          out.push(body ? `${prefix}${body}` : "")
+        }
         return out
       },
       cols,
@@ -2302,8 +2330,8 @@ export class TuiApp {
     } catch {}
   }
 
-  private setBracketedPaste(on: boolean): void {
-    if (this.bracketedPasteOn === on) return
+  private setBracketedPaste(on: boolean, force = false): void {
+    if (this.bracketedPasteOn === on && !force) return
     this.writeRaw(on ? BRACKETED_PASTE_ON : BRACKETED_PASTE_OFF)
     this.bracketedPasteOn = on
   }
@@ -2777,7 +2805,7 @@ export class TuiApp {
       // label tak bergeser saat panah berpindah.
       out.push(listRow(text, picked))
     })
-    return { lines: out.map((l) => chunkByWidth(l, w)[0] ?? ""), start }
+    return { lines: out.map((l) => truncateToWidth(l, w, glyphs.ellipsis)), start }
   }
 
   private selectedRange(row: TranscriptRow): { start: number; end: number } | null {
@@ -3545,9 +3573,22 @@ export class TuiApp {
     if (this.tooSmall()) {
       this.lastLayout = null
       const w = Math.max(1, cols)
-      const frame = [c.warning(truncateToWidth(tSystem("msg.tooSmall"), w))]
-      while (frame.length < Math.max(1, rows)) frame.push("")
-      screen.paint(frame.slice(0, Math.max(1, rows)))
+      const h = Math.max(1, rows)
+      const headline = truncateToWidth(tSystem("msg.tooSmall"), w, glyphs.ellipsis)
+      const sizeHint = truncateToWidth(
+        `(${cols}×${rows} · min ${MIN_COLS}×${MIN_ROWS})`,
+        w,
+        glyphs.ellipsis,
+      )
+      const center = (s: string) => {
+        const pad = Math.max(0, Math.floor((w - displayWidth(s)) / 2))
+        return `${" ".repeat(pad)}${s}`
+      }
+      const frame = Array.from({ length: h }, () => "")
+      const mid = Math.floor(h / 2)
+      frame[Math.max(0, mid - (h >= 3 ? 1 : 0))] = c.warning(center(headline))
+      if (h >= 3) frame[Math.min(h - 1, mid)] = c.dim(center(sizeHint))
+      screen.paint(frame)
       this.frames++
       return
     }

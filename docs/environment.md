@@ -119,7 +119,7 @@ di TUI interaktif; non-TTY/one-shot/ACP menjawab "not available" tanpa spawn npm
 |---|---|
 | `MINICODE_ASCII` | `1` → paksa glyph ASCII (`[OK]`, `>`, `.`) untuk konsol tanpa UTF-8 |
 | `MINICODE_BOX` | gaya sudut kotak popup: default **melengkung** (`╭╮╰╯`); `square` → lancip (`┌┐└┘`); `ascii` → `+-|` (sama dengan `MINICODE_ASCII=1`). Untuk terminal yang merender glyph melengkung jelek |
-| `MINICODE_SCRIM` | `none` → paksa scrim backdrop jadi `faint` saja (tanpa latar gelap `48;5;236`) — diagnostik/tema terminal yang memetakan 256-warna aneh |
+| `MINICODE_SCRIM` | `none` → matikan peredupan teks backdrop (`faint`) di sekitar pop-up (tidak memakai latar abu-abu) |
 | `MINICODE_COMPACT` | `1` → tool call ringkas, `0` → expanded. Default: compact di TUI, expanded di one-shot/exec. Toggle `/view compact` sudah dihapus; `Ctrl+O` juga dihapus sejak v0.34 (v0.33 pernah membuka modal detail Live di sidebar) |
 | `MINICODE_JUSTIFY` | `1` → aktifkan rata kanan-kiri (justify) keluaran teks model. Default: mati (opt-in) — justify menyuntik spasi yang mengubah teks asli saat di-copy/–pipe |
 | `MINICODE_DROPDOWN` | `0` → matikan dropdown, pakai hint inline (konsol legacy). Bila aktif, dropdown digambar sebagai **overlay di dalam frame `paint()` yang sama**, bukan `paintRegion()` terpisah, dan tidak mengurangi `viewH` — lebar isi chat & composer memakai margin simetris frame (`chatCols - 6`) dengan cap progresif `composerWidth()` |

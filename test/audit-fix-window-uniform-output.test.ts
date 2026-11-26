@@ -28,9 +28,9 @@ describe("audit v0.33: frame wizard & output window seragam", () => {
     expect(wiz.maxWidth).toBe(out.maxWidth)
   })
 
-  test("footer selalu windowFooter — extraHints jadi tambahan, bukan pengganti", () => {
+  test("footer mengikuti peran jendela — extraHints ditambahkan tanpa hint palsu", () => {
     const outHints = [{ key: "c", label: t("hint.copy") }]
-    const wizHints = [{ key: "Enter", label: t("hint.close") }]
+    const wizHints = [{ key: "r/Enter", label: t("hint.retry") }]
     const out = outputWindowSpec({
       title: "Status",
       body: [],
@@ -45,16 +45,21 @@ describe("audit v0.33: frame wizard & output window seragam", () => {
       extraHints: wizHints,
     })
 
-    expect(out.footer).toBe(windowFooter(outHints))
-    expect(wiz.footer).toBe(windowFooter(wizHints))
-    // Footer baku tetap memuat navigasi + Esc batal pada kedua jendela.
-    for (const frame of [out, wiz]) {
-      const plain = stripAnsi(frame.footer ?? "")
-      expect(plain).toContain(t("hint.move"))
-      expect(plain).toContain(t("hint.cancel"))
-    }
+    expect(out.footer).toBe(
+      windowFooter(outHints, { role: "viewer", maxWidth: windowWidth(COLS) - 4 }),
+    )
+    expect(wiz.footer).toBe(
+      windowFooter(wizHints, { role: "progress", maxWidth: windowWidth(COLS) - 4 }),
+    )
+    expect(out.escHint).toBe(true)
+    expect(wiz.escHint).toBeUndefined()
     expect(stripAnsi(out.footer ?? "")).toContain(t("hint.copy"))
-    expect(stripAnsi(wiz.footer ?? "")).toContain(t("hint.close"))
+    expect(stripAnsi(out.footer ?? "")).not.toContain(t("hint.close"))
+    expect(stripAnsi(out.footer ?? "")).not.toContain(t("hint.select"))
+    expect(stripAnsi(wiz.footer ?? "")).toContain(t("hint.retry"))
+    // Kotak progres pasif tanpa extraHints tidak memajang hint navigasi.
+    const passive = wizardWindowSpec({ body: ["loading"], cols: COLS, rows: ROWS })
+    expect(passive.footer).toBeUndefined()
   })
 
   test("judul selalu ada: wizard memakai wiz.title, output memakai judul caller", () => {
@@ -78,8 +83,12 @@ describe("audit v0.33: frame wizard & output window seragam", () => {
       const wiz = wizardWindowSpec({ body: [], cols, rows })
       const out = outputWindowSpec({ title: "X", body: [], cols, rows })
       expect(wiz.maxWidth).toBe(out.maxWidth)
-      expect(wiz.footer).toBe(out.footer)
-      expect(out.maxHeight).toBe(windowMaxHeight(rows) + 4)
+      expect(wiz.maxHeight).toBe(out.maxHeight)
+      expect(wiz.footer).toBeUndefined()
+      expect(out.footer).toBeUndefined()
+      expect(wiz.escHint).toBeUndefined()
+      expect(out.escHint).toBe(true)
+      expect(out.maxHeight).toBe(windowMaxHeight(rows))
     }
   })
 

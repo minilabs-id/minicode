@@ -258,27 +258,34 @@ async function readSourceContents(
   return out
 }
 
+// Ekstraksi specifier import/from/require sekali per file (O(N) bukan O(N²)).
+const IMPORT_SPEC_RE = /(?:import|from|require)\s*["'`]([^"'`]*)["'`]/gi
+
 // Ranking sederhana ala PageRank: file yang banyak di-import file lain
 // mendapat skor lebih tinggi → tampil lebih awal di repo-map (hemat token).
 function rankByImport(files: { path: string; content: string }[]): string[] {
-  const basenameToFiles = new Map<string, string[]>()
+  const basenameToFiles = new Map<string, { lower: string; targets: string[] }>()
   for (const { path: f } of files) {
     const base = f.slice(f.lastIndexOf("/") + 1).replace(/\.[^.]+$/, "")
     if (!base) continue
-    const list = basenameToFiles.get(base) ?? []
-    list.push(f)
-    basenameToFiles.set(base, list)
+    const entry = basenameToFiles.get(base)
+    if (entry) entry.targets.push(f)
+    else basenameToFiles.set(base, { lower: base.toLowerCase(), targets: [f] })
   }
   const scores = new Map<string, number>()
   for (const { path: f } of files) scores.set(f, 0)
   for (const { path: f, content } of files) {
-    for (const [base, targets] of basenameToFiles) {
+    // Ekstrak seluruh string specifier SEKALI per berkas agar tidak menyusun
+    // ulang RegExp dan memindai ulang isi berkas pada setiap pasangan (O(N²)).
+    const specs: string[] = []
+    for (const match of content.matchAll(IMPORT_SPEC_RE)) {
+      if (match[1]) specs.push(match[1].toLowerCase())
+    }
+    if (specs.length === 0) continue
+    const joined = specs.join("\u0000")
+    for (const { lower, targets } of basenameToFiles.values()) {
       if (f === targets[0] && targets.length === 1) continue // jangan hit diri sendiri bila unik
-      const importRe = new RegExp(
-        `(?:import|from|require)\\s*["'\`][^"'\`]*${base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[^"'\`]*["'\`]`,
-        "i",
-      )
-      if (importRe.test(content)) {
+      if (joined.includes(lower)) {
         for (const t of targets) scores.set(t, (scores.get(t) ?? 0) + 1)
       }
     }
@@ -375,13 +382,28 @@ async function gitListFiles(cwd: string, limit: number): Promise<string[] | null
           return
         }
         const chunks: string[] = []
+        let totalBytes = 0
+        const MAX_GIT_LIST_BYTES = 4 * 1024 * 1024
         const timer = setTimeout(() => {
           try {
             child.kill("SIGKILL")
           } catch {}
           done(null)
         }, REPOMAP_GIT_TIMEOUT_MS)
-        out.on("data", (d: Buffer) => chunks.push(d.toString("utf8")))
+        timer.unref?.()
+        out.on("data", (d: Buffer) => {
+          if (settled) return
+          totalBytes += d.byteLength
+          if (totalBytes > MAX_GIT_LIST_BYTES) {
+            clearTimeout(timer)
+            try {
+              child.kill("SIGKILL")
+            } catch {}
+            done(chunks.join(""))
+            return
+          }
+          chunks.push(d.toString("utf8"))
+        })
         const finish = () => {
           clearTimeout(timer)
           done(null)
@@ -428,15 +450,7 @@ function cachePath(cwd: string): string {
   }
 }
 
-// Bangun repo-map compact dari daftar file.
-export async function buildRepoMap(
-  cwd: string = process.cwd(),
-  opts: { limit?: number } = {},
-): Promise<string> {
-  const limit = opts.limit ?? MAX_FILES
-  const files = await listSourceFiles(cwd, limit)
-  // baca sekali → dipakai untuk ranking DAN simbol (tanpa double-read)
-  const contents = await readSourceContents(files, cwd)
+function buildRepoMapFromContents(contents: { path: string; content: string }[]): string {
   const ranked = rankByImport(contents)
   const byPath = new Map(contents.map((c) => [c.path, c.content]))
   const parts: string[] = []
@@ -449,24 +463,31 @@ export async function buildRepoMap(
   return parts.join("\n").slice(0, MAX_REPOMAP_CHARS)
 }
 
+// Bangun repo-map compact dari daftar file.
+export async function buildRepoMap(
+  cwd: string = process.cwd(),
+  opts: { limit?: number } = {},
+): Promise<string> {
+  const limit = opts.limit ?? MAX_FILES
+  const files = await listSourceFiles(cwd, limit)
+  // baca sekali → dipakai untuk ranking DAN simbol (tanpa double-read)
+  const contents = await readSourceContents(files, cwd)
+  return buildRepoMapFromContents(contents)
+}
+
 // Signature ISI (audit #10 P1): hash path+konten file terpilih — BUKAN
 // mtime+size. Cache repomap.json tinggal di repo (dapat ditulis penyerang);
 // sig mtime+size dapat dipalsukan via touch+padding sehingga peta BOHONG
 // disajikan tanpa baca ulang. Dengan sig isi, cache palsu hanya cocok bila
 // isinya benar-benar sama — dan bila sama, petanya pun benar. Cache lama
 // (format mtime) otomatis miss → dibangun ulang sekali, tanpa migrasi.
-async function signature(files: string[], cwd: string): Promise<string> {
+function signatureFromContents(contents: { path: string; content: string }[]): string {
   const __t = perfEnabled() ? performance.now() : 0
   try {
     const h = createHash("sha256")
-    for (const f of files.slice(0, 80)) {
-      try {
-        const abs = resolve(cwd, f)
-        const loaded = await safeReadFileCapped(abs, cwd, MAX_FILE_BYTES)
-        if (loaded.truncated) continue
-        h.update(f)
-        h.update(loaded.text)
-      } catch {}
+    for (const item of contents) {
+      h.update(item.path)
+      h.update(item.content)
     }
     return `v2:${h.digest("hex")}`
   } finally {
@@ -572,7 +593,10 @@ export async function loadRepoMap(cwd: string = process.cwd()): Promise<string> 
     const files = await listSourceFiles(cwd, MAX_FILES)
     if (files.length === 0) return ""
     const freshStamp = quickStamp(cwd, files)
-    const sig = await signature(files, cwd)
+    // Baca 80 berkas pertama SEKALI: dipakai untuk signature DAN (bila cache miss)
+    // dipakai ulang membangun repo-map tanpa `git ls-files` atau read ulang.
+    const headContents = await readSourceContents(files.slice(0, 80), cwd)
+    const sig = signatureFromContents(headContents)
     const cp = cachePath(cwd)
     // Cache hit → langsung pakai (tanpa LSP, cepat)
     try {
@@ -603,7 +627,8 @@ export async function loadRepoMap(cwd: string = process.cwd()): Promise<string> 
         return lspMap
       }
     }
-    const map = await buildRepoMap(cwd, { limit: MAX_FILES })
+    const tailContents = files.length > 80 ? await readSourceContents(files.slice(80), cwd) : []
+    const map = buildRepoMapFromContents([...headContents, ...tailContents])
     try {
       mkdirSync(join(homeDir(), ".minicode"), { recursive: true })
       writeFileSync(cp, JSON.stringify({ sig, map, lsp: false }))

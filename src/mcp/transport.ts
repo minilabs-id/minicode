@@ -1,8 +1,11 @@
-import { type ChildProcess, spawn, spawnSync } from "node:child_process"
+import { type ChildProcess, spawn } from "node:child_process"
 import { LIMITS } from "../constants.ts"
 import { sanitizeIncoming } from "../daemon/sanitize.ts"
-import { resolveSpawnTarget, resolveTrustedExecutable } from "../lib/trusted-exec.ts"
+import { killProcessTree } from "../lib/process-tree.ts"
+import { resolveSpawnTarget } from "../lib/trusted-exec.ts"
 import { sanitizeSpawnEnv } from "../policy/scrub.ts"
+
+const MAX_WRITE_QUEUE = 256
 
 export class McpTransport {
   private readonly maxFrameBytes: number
@@ -29,7 +32,12 @@ export class McpTransport {
 
   /** P2.3: liveness untuk reconnect policy (bukan sekadar proke ada). */
   get isClosed(): boolean {
-    return this.closed || this.proc === null || this.proc.exitCode !== null
+    return (
+      this.closed ||
+      this.proc === null ||
+      this.proc.exitCode !== null ||
+      this.proc.signalCode !== null
+    )
   }
 
   async connect(command: string, args: string[], env: Record<string, string> = {}): Promise<void> {
@@ -39,13 +47,22 @@ export class McpTransport {
     this.winCmdTree = target.windowsVerbatimArguments === true
     this.proc = spawn(target.command, target.args, {
       stdio: ["pipe", "pipe", "pipe"],
+      // Grup proses sendiri di POSIX agar close()/rejectOversizedFrame()
+      // dapat memutus cucu server MCP (bukan cuma proses induk).
+      detached: process.platform !== "win32",
+      windowsHide: true,
       // env kredensial di-strip; env eksplisit config server menang setelahnya
       env: sanitizeSpawnEnv(process.env, env),
       signal: this.killSignal.signal,
       ...(target.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
     })
 
-    this.proc.on("error", (err) => this.failAll(err))
+    this.proc.on("error", (err) => {
+      this.closed = true
+      this.writeQueue = []
+      this.draining = false
+      this.failAll(err)
+    })
     this.proc.stdin?.on("error", (err) => {
       // Server dapat keluar tepat sebelum request ditulis. EPIPE pada stdin
       // tetap harus menjadi penolakan request, bukan uncaught exception proses.
@@ -54,8 +71,13 @@ export class McpTransport {
       this.draining = false
       this.failAll(err)
     })
+    this.proc.stdout?.on("error", () => {})
     this.proc.on("exit", (code) => {
-      if (!this.closed) this.failAll(new Error(`MCP server exited with code ${code}`))
+      const wasClosed = this.closed
+      this.closed = true
+      this.writeQueue = []
+      this.draining = false
+      if (!wasClosed) this.failAll(new Error(`MCP server exited with code ${code}`))
     })
     this.proc.stderr?.on("data", (d: Buffer) => {
       const clean = sanitizeIncoming(d.toString()).trim().slice(0, 1000)
@@ -117,16 +139,11 @@ export class McpTransport {
     if (
       this.winCmdTree &&
       process.platform === "win32" &&
-      this.proc?.pid !== undefined &&
-      this.proc.exitCode === null
+      this.proc &&
+      this.proc.exitCode === null &&
+      this.proc.signalCode === null
     ) {
-      try {
-        spawnSync(
-          resolveTrustedExecutable("taskkill"),
-          ["/pid", String(this.proc.pid), "/T", "/F"],
-          { stdio: "ignore", env: sanitizeSpawnEnv(process.env) },
-        )
-      } catch {}
+      killProcessTree(this.proc, { env: sanitizeSpawnEnv(process.env) })
     }
     this.killSignal.abort()
     if (this.proc) {
@@ -134,20 +151,7 @@ export class McpTransport {
       if (p.exitCode === null && p.signalCode === null) {
         await new Promise<void>((r) => {
           const t = setTimeout(() => {
-            try {
-              if (process.platform === "win32" && p.pid !== undefined) {
-                spawnSync(
-                  resolveTrustedExecutable("taskkill"),
-                  ["/pid", String(p.pid), "/T", "/F"],
-                  {
-                    stdio: "ignore",
-                    env: sanitizeSpawnEnv(process.env),
-                  },
-                )
-              } else {
-                p.kill("SIGKILL")
-              }
-            } catch {}
+            killProcessTree(p, { env: sanitizeSpawnEnv(process.env) })
             r()
           }, 2_000)
           p.once("exit", () => {
@@ -163,7 +167,7 @@ export class McpTransport {
   private write(msg: unknown) {
     const proc = this.proc
     if (!proc?.stdin) throw new Error("transport not connected")
-    if (this.closed || proc.exitCode !== null || proc.stdin.destroyed) {
+    if (this.closed || proc.exitCode !== null || proc.signalCode !== null || proc.stdin.destroyed) {
       throw new Error(
         `MCP transport is closed${proc.exitCode === null ? "" : ` (exit ${proc.exitCode})`}`,
       )
@@ -175,6 +179,9 @@ export class McpTransport {
       throw new Error("circular JSON in MCP message")
     }
     if (this.draining) {
+      if (this.writeQueue.length >= MAX_WRITE_QUEUE) {
+        throw new Error("MCP transport write queue overflow")
+      }
       this.writeQueue.push(line)
       return
     }
@@ -260,14 +267,13 @@ export class McpTransport {
     this.draining = false
     this.failAll(error)
     this.killSignal.abort(error)
-    try {
-      this.proc?.kill("SIGKILL")
-    } catch {}
+    if (this.proc) killProcessTree(this.proc, { env: sanitizeSpawnEnv(process.env) })
   }
 
   private failAll(err: Error) {
     for (const p of this.pending.values()) {
       clearTimeout(p.timer)
+      p.unsubscribe?.()
       p.reject(err)
     }
     this.pending.clear()

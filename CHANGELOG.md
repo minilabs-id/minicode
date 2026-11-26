@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.52.0] - 2026-11-26
+
+### Added & Fixed — audit stabilitas/anti-hang/performa hot-path, penyempurnaan popup, & hardening UI/provider
+
+- **Stabilitas P0, anti-hang, deadlock, & anti-ReDoS (`.audit/2026-11-26-audit-stabilitas-performa-hang.md`):**
+  - TUI & input: pulihkan listener `stdin` saat `reacquireTerminal()` pasca `/shell` (`src/ui/tui/app.ts`), batasi `pendingPasteBuf` 2 MiB & tutup `pasteOverflow` pada `ESC[201~` terbelah maupun UTF-8 terpotong (`src/ui/input/prompt-engine.ts`), tutup kebocoran listener approval pre-aborted (`src/ui/approval/prompt.ts`), dan sinkronkan reset `turnToolNameIds` (`src/ui/tui/transcript.ts`).
+  - Kernel & streaming: redam `UnhandledPromiseRejection` di `withAbort` (`vendor/minicore/src/core/session.ts`), abort/cap error body 64 KiB & pemindaian SSE linear O(N) (`vendor/minicore/src/providers/openai-compat.ts`), serta cleanup iterator/socket saat stream berhenti lebih awal (`src/providers/guards.ts`, `src/policy/compaction.ts`, `src/tools/task.ts`).
+  - Proses, LSP, MCP, scheduler, & ReDoS: cegah deadlock `doStart` + LRU 64 dokumen + balas server-request di `src/lsp/client.ts`; ganti `execAsync` verifier ke `spawn` + `killProcessTree` + cap 256 KiB (`src/policy/verifier.ts`); bounded stdin 8 MiB & cleanup job MCP server (`src/mcp/server.ts`); proteksi error timer SQLite di `src/task/scheduler.ts`; batas kedalaman/symlink skill (`src/skills/loader.ts`), normalisasi `models` config (`src/config.ts`), dan guard anti-ReDoS (`src/tools/grep.ts`, `src/lib/ignore.ts`, `src/policy/bash-guard.ts`).
+- **Perbaikan race, leak, & pemulihan state (Wave 2):**
+  - Perbaiki race `@mention` & re-entransi auto-resume di `cli/tui.ts`, abortable sleep pada retry turn & jamin cleanup `detachUI`/`markPreviousRunTerminal` (`cli/setup.ts`), pulihkan mouse/bracketed-paste saat crash (`cli/index.ts`), abortable OAuth poll + guard `Number.isFinite` (`src/providers/oauth.ts`), batas timeout `taskkill`/process-tree & cleanup transport (`src/lib/process-tree.ts`, `src/tools/git.ts`, `src/session/shadow-git.ts`, `src/mcp/transport.ts`, `src/mcp/http-transport.ts`, `src/mcp/client.ts`), guard shutdown supervisi (`src/runtime/process-supervision.ts`), serta batas 2 siklus + anti-re-entransi sinkron di `TriggerCoordinator` (`src/task/trigger.ts`).
+- **Optimasi performa hot-path tanpa perubahan visual (Wave 3):**
+  - Cache sidik file migrasi SQLite (`src/session/db/schema.ts`), fast-path `stripAnsi` (`src/session/persistence.ts`), lazy `fallbackLocal` tanpa clone histori tiap event usage (`src/app/session.ts`), hoist `TextEncoder` + memo & guard token besar (`src/policy/bpe.ts`), skip render markdown duplikat pada mode quiet TUI (`src/ui/assistant/simple.ts`), batch baca jurnal sekali per sesi saat `turn:completed` & lewati `readFileSync` mode shadow-git (`cli/setup.ts`), optimasi single-pass `rankByImport` & hapus double-read (`src/repo/repomap.ts`), cek `stat` sebelum `readFile` & guard symlink walk (`src/session/checkpoint.ts`), fast-path ASCII `parseCells` & short-circuit O(width) `truncateToWidth` (`src/ui/render/cells.ts`, `src/ui/render/width.ts`), serta eviksi memo 25%, memo tabel pending, cap `rowCache` 3 lebar, dan skip proyeksi dirty (`src/ui/tui/transcript.ts`).
+- **Penyempurnaan popup, clipboard, & keandalan provider:**
+  - Hapus warna latar abu-abu luar popup, beri jeda 1 baris sebelum footer popup, pindahkan `Esc` redup ke pojok kanan atas selaras OS, tambah guard layar sempit `canRenderModal` & resize backdrop, modal progres yang dapat dibatalkan, pemulihan bracketed paste konsisten, utilitas clipboard lintas-platform (`src/lib/clipboard.ts`), dukungan role `system` native `openai-compat`, dan `rejectUnreachable`.
+
 ## [0.51.0] - 2026-11-26
 
 ### Added & Changed — label niat tool, ketahanan kegagalan sesi, serta penyelarasan UI/CLI/kontrak
