@@ -4,22 +4,27 @@
 import { expect, test } from "bun:test"
 import { createDecoderState, decodeKeysStream } from "../src/ui/input/prompt-engine.ts"
 
-test("H3: ESC+'b' (Alt+b) bukan esc — turn busy tak diabort", () => {
+test("H3: ESC+'b' (Alt+b) = word-left & ESC+'q' = ignore+char (bukan esc)", () => {
   const st = createDecoderState()
-  const keys = decodeKeysStream(new Uint8Array([0x1b, 0x62]), st)
-  expect(keys.some((d) => d.key.type === "esc")).toBe(false)
-  expect(keys.map((d) => d.key)).toEqual([{ type: "ignore" }, { type: "char", ch: "b" }])
+  const altB = decodeKeysStream(new Uint8Array([0x1b, 0x62]), st)
+  expect(altB.some((d) => d.key.type === "esc")).toBe(false)
+  expect(altB.map((d) => d.key)).toEqual([{ type: "word-left" }])
+  expect(st.pending).toEqual([])
+
+  const altQ = decodeKeysStream(new Uint8Array([0x1b, 0x71]), st)
+  expect(altQ.some((d) => d.key.type === "esc")).toBe(false)
+  expect(altQ.map((d) => d.key)).toEqual([{ type: "ignore" }, { type: "char", ch: "q" }])
   expect(st.pending).toEqual([])
 })
 
 test("H3: ESC + byte awal Utf-8 juga tak memancarkan esc", () => {
   const st = createDecoderState()
-  const bytes = new TextEncoder().encode("b😀")
+  const bytes = new TextEncoder().encode("q😀")
   const keys = decodeKeysStream(new Uint8Array([0x1b, ...bytes]), st)
   expect(keys.some((d) => d.key.type === "esc")).toBe(false)
   expect(keys.map((d) => d.key)).toEqual([
     { type: "ignore" },
-    { type: "char", ch: "b" },
+    { type: "char", ch: "q" },
     { type: "char", ch: "😀" },
   ])
 })

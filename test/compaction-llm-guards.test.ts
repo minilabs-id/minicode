@@ -184,6 +184,15 @@ describe("validateCompactionSummary (murni)", () => {
       process.cwd(),
     )
     expect(onDisk.ok).toBe(true)
+
+    // Path nyata yang tertempel tanpa spasi (mis. docs/cli.md/docs/config.md)
+    // dipecah dan lolos sebagai path terverifikasi, bukan ditolak total.
+    const concatenated = validateCompactionSummary(
+      "RINGKASAN baca docs/cli.md/docs/config.md dan src/policy/scrub.ts",
+      `${longPrefix}\ndocs/cli.md\ndocs/config.md\nsrc/policy/scrub.ts`,
+    )
+    expect(concatenated.ok).toBe(true)
+    expect(concatenated.normalized).toContain("docs/cli.md, docs/config.md")
   })
 
   test("angka dari prefix lolos; angka asing hanya ditandai needs-verification", () => {

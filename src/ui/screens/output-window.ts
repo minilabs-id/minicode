@@ -13,6 +13,7 @@ import { tSystem } from "../render/tool-label.ts"
 import { wrapByWidth } from "../render/width.ts"
 import { type AltScreen, openAltScreen } from "../runtime/screen.ts"
 import { canRenderModal, type DialogSpec, dialogBox } from "./dialog.ts"
+import { IDLE_CANCEL_MS, IDLE_WARN_MS } from "./form.ts"
 import { createIdleTimer } from "./lifecycle.ts"
 import { windowMaxHeight, windowSpec, windowWidth } from "./window.ts"
 
@@ -124,6 +125,7 @@ export async function runOutputWindow(opts: OutputWindowOptions): Promise<boolea
   let wrapped: string[] = []
   let scroll = 0
   let done = false
+  let idleWarned = false
   let bracketedPasteOn = false
   let copyNotice: string | null = null
   let copyTimer: ReturnType<typeof setTimeout> | null = null
@@ -171,11 +173,14 @@ export async function runOutputWindow(opts: OutputWindowOptions): Promise<boolea
     // tak-terpercaya (tabel /help, status, potongan kode) — menghiasinya akan
     // menggeser kolom & mengubah makna. Fallback ASCII ditanggung `glyphs`.
     const titleText = `${glyphs.sessionIcon} ${rawTitle}`
-    // windowFooter sudah memuat navigasi + Esc batal; yang khas jendela ini
-    // cukup dikirim sebagai extraHints (paritas hint lama tanpa duplikasi).
+    // windowFooter otomatis mendeduplikasi key yang ditimpa lewat extraHints.
     const extraHints: HintItem[] = [
+      ...(idleWarned
+        ? [{ key: "!", label: t("form.idleWarning", { s: Math.ceil(IDLE_CANCEL_MS / 1000) }) }]
+        : []),
       ...(scrollable ? [{ key: glyphs.upDown, label: t("hint.scroll") }] : []),
       ...(opts.onCopy ? [{ key: "c", label: t("hint.copy") }] : []),
+      { key: "Esc", label: t("hint.close") },
     ]
     const body = wrapped.slice(scroll, scroll + budget)
     // Konfirmasi salin jadi baris isi, BUKAN footer: footer wajib tetap
@@ -206,7 +211,12 @@ export async function runOutputWindow(opts: OutputWindowOptions): Promise<boolea
   }
 
   const idle = createIdleTimer({
-    cancelMs: 90_000,
+    warnMs: IDLE_WARN_MS,
+    cancelMs: IDLE_CANCEL_MS,
+    onWarn: () => {
+      idleWarned = true
+      render()
+    },
     onCancel: () => finish(true),
   })
 
@@ -291,6 +301,7 @@ export async function runOutputWindow(opts: OutputWindowOptions): Promise<boolea
       }
     }
     if (dirty) {
+      idleWarned = false
       idle.reset()
       render()
     }
@@ -299,6 +310,7 @@ export async function runOutputWindow(opts: OutputWindowOptions): Promise<boolea
   const pump = createKeyStreamPump({ state: createDecoderState(), onKeys: handleKeys })
 
   onData = (chunk: Buffer) => {
+    idleWarned = false
     idle.reset()
     try {
       pump.push(chunk)

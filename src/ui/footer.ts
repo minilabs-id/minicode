@@ -46,6 +46,14 @@ export interface FooterStatus {
   backgroundJobs?: number
   /** Frame animasi badge job (dinaikkan clock idle di app.ts, bukan turn). */
   backgroundFrame?: number
+  /** Jumlah pesan/perintah menunggu di antrean saat busy. */
+  queuedCount?: number
+  /** Jumlah tool aktif berlebih di luar batas kap tail adaptif. */
+  runningExtra?: number
+  /** Badge ringkas retry penyedia saat turn terhambat (tak menimpa footer). */
+  retryBadge?: string
+  /** Badge ringkas saat user scroll ke atas & ada baris baru di bawah. */
+  scrollBadge?: string
   activity?: string
   timer?: string
   timerActive?: boolean
@@ -188,6 +196,10 @@ function footerCacheKey(s: FooterStatus, cols: number): string {
     s.streamIntervalMs ?? 0,
     s.backgroundJobs ?? 0,
     s.backgroundFrame ?? 0,
+    s.runningExtra ?? 0,
+    s.queuedCount ?? 0,
+    s.retryBadge ?? "",
+    s.scrollBadge ?? "",
     s.activity ?? "",
     s.timer ?? "",
     s.timerActive === true,
@@ -233,7 +245,15 @@ function buildFooterLine(s: FooterStatus, cols: number): string {
   const target = Math.max(4, cols - 1)
   const ctx = s.context ? sanitizeAnsiLine(s.context) : ""
   const metrics = s.metrics ? sanitizeAnsiLine(s.metrics) : ""
-  const contextParts = [ctx, metrics].filter(Boolean).map((part) => c.gray(part))
+  const extraParts: string[] = []
+  if (s.retryBadge) extraParts.push(c.warning(sanitizeAnsiLine(s.retryBadge)))
+  if ((s.runningExtra ?? 0) > 0) extraParts.push(c.warning(`+${s.runningExtra} running`))
+  if ((s.queuedCount ?? 0) > 0) extraParts.push(c.accent(`${s.queuedCount} queued`))
+  if (s.scrollBadge) extraParts.push(c.accent(sanitizeAnsiLine(s.scrollBadge)))
+  const contextParts = [
+    ...extraParts,
+    ...[ctx, metrics].filter(Boolean).map((part) => c.gray(part)),
+  ]
   const leftWithCwdFor = (style: ModeLabelStyle): string[] => {
     const work = paintWorkMode(s.workMode, style)
     return [

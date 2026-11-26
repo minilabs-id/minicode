@@ -135,6 +135,8 @@ export interface AltScreen {
    * saat tutup sebelum pemilik me-repaint. Idempoten, tak pernah melempar.
    */
   clearRegion(): void
+  /** Aktifkan/nonaktifkan bracketed paste (`?2004h`/`?2004l`) di terminal mampu. */
+  setBracketedPaste?(enabled: boolean): void
   /** Idempoten; exit fisik hanya di lapis terluar. Tak pernah melempar. */
   close(): void
 }
@@ -359,6 +361,12 @@ export function openAltScreen(): AltScreen {
       lastFrame = null
       lastCells = null
       lastCols = 0
+    },
+    setBracketedPaste(enabled: boolean): void {
+      if (closed) return
+      try {
+        process.stdout.write(enabled ? "\x1b[?2004h" : "\x1b[?2004l")
+      } catch {}
     },
     close(): void {
       if (closed) return

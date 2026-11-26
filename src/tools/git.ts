@@ -11,6 +11,7 @@ import {
   GIT_SAFE_BASE,
   gitFilterNeutralizers,
 } from "../lib/git-hardening.ts"
+import { killProcessTree } from "../lib/process-tree.ts"
 import { resolveTrustedExecutable } from "../lib/trusted-exec.ts"
 import {
   isCwdOutsideRoot,
@@ -95,7 +96,7 @@ export function runGit(
       if (target === "out") out += piece
       else err += piece
     }
-    const onAbort = () => p.kill("SIGTERM")
+    const onAbort = () => killProcessTree(p, { env: sanitizeSpawnEnv(process.env) })
     p.stdout.on("data", (d) => push("out", d))
     p.stderr.on("data", (d) => push("err", d))
     p.on("error", (e) => {

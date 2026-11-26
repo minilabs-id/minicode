@@ -147,6 +147,8 @@ export interface UiPresentationActivity {
   runId?: string
   /** Label manusiawi sub-agent; lebih prioritas daripada marker run_<8>/sub_<8>. */
   label?: string
+  /** Deskripsi aktivitas manusiawi dari model (`args.label` / `delegate_task.name`). */
+  intent?: string
   supersedes?: string
   expandRef?: { toolCallId: string; idx: number }
   verification?: UiVerificationDisplay
@@ -245,6 +247,7 @@ export interface ActivityPolicyDescription {
   toolCallId: string
   name: string
   target?: string
+  intent?: string
   status: UiToolStatus
   summary?: string
   message?: string
@@ -355,6 +358,7 @@ export interface UiPresentationEvent {
   name?: string
   qualified?: string
   target?: string
+  intent?: string
   status?: UiToolStatus
   tsStart?: number
   durationMs?: number

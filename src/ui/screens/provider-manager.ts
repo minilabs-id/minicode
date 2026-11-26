@@ -52,6 +52,8 @@ export interface ProviderManagerViewOptions {
   initialRows: ProviderRow[]
   presets: readonly ProviderPresetView[]
   currentModel?: string
+  /** Bacaan live model aktif agar penanda `(active)` selalu segar setelah select. */
+  getCurrentModel?: () => string | undefined
   /** true bila ada cwd — dialog tambah menawarkan scope global/lokal. */
   askScope: boolean
   onSelect(row: ProviderRow): void
@@ -119,12 +121,11 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
       if (providers.length === 0) {
         lines.push(cut(dim(`  ${t("prov.empty")}`)))
       } else {
+        const curModel = opts.getCurrentModel ? opts.getCurrentModel() : opts.currentModel
         for (let i = 0; i < rows.length; i++) {
           const it = rows[i]!
           const picked = i === sel - scroll
-          const aktif = opts.currentModel?.startsWith(`${it.id}::`)
-            ? ` (${t("common.active")})`
-            : ""
+          const aktif = curModel?.startsWith(`${it.id}::`) ? ` (${t("common.active")})` : ""
           const countTag = it.models > 0 && w >= 28 ? ` (${it.models})` : ""
           const suffix = `${countTag}${aktif}`
           // Ikon kategori provider jadi bagian baris yang terlihat (1 kolom,
@@ -598,9 +599,16 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
               break
             }
             case "enter": {
-              // Footer bilang "select"; daftar kosong tak boleh menutup layar.
+              // Footer bilang "select"; daftar kosong atau provider tanpa model
+              // tak boleh menutup layar diam-diam tanpa pilihan nyata.
               const p = providers[sel]
               if (!p) return true
+              if (!p.firstModel) {
+                notice = t("model.empty")
+                noticeKind = "info"
+                render()
+                return true
+              }
               try {
                 opts.onSelect(p)
               } catch {}

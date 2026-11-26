@@ -26,6 +26,7 @@ import { safeReadFile, safeStat } from "../lib/safe-open.ts"
 import { sanitizeSessionPart } from "../lib/session-id.ts"
 import { resolveTrustedExecutable } from "../lib/trusted-exec.ts"
 import { sanitizeSpawnEnv, scrubSecrets } from "../policy/scrub.ts"
+import { WRITE_TOOLS } from "../policy/tool-contract.ts"
 import type { VerifyResult } from "../policy/verifier.ts"
 import {
   appendMutationIntent,
@@ -1801,15 +1802,9 @@ export async function captureSessionEvaluationBaseline(
  * boleh divonis `EVALUATOR_TAMPER_ATTEMPT` gara-gara proses/sesi LAIN mengubah
  * file yang memang sudah kotor sejak awal sesi.
  */
-const WORKSPACE_MUTATING_TOOLS = new Set([
-  "write_file",
-  "edit",
-  "apply_patch",
-  "move_file",
-  "delete_file",
-  "bash",
-  "code_run",
-])
+// Derivasikan mutasi file dari sumber kebenaran WRITE_TOOLS plus shell/code_run
+// agar tool tulis baru (lsp_rename, git_restore, git_checkout) otomatis tercakup.
+const WORKSPACE_MUTATING_TOOLS = new Set<string>([...WRITE_TOOLS, "bash", "code_run"])
 
 /**
  * Kumpulkan SEMUA file dimutasi milik sesi ini — menggabungkan jurnal induk,
@@ -1910,6 +1905,7 @@ function gitBaselineContent(root: string, rel: string): string | null {
         encoding: "utf8",
         timeout: GIT_OBSERVE_TIMEOUT_MS,
         maxBuffer: INTEGRITY_MAX_BYTES,
+        env: sanitizeSpawnEnv(process.env),
       },
     )
     return result.status === 0 && typeof result.stdout === "string" ? result.stdout : null

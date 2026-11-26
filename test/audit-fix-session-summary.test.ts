@@ -4,7 +4,7 @@
 // bisa beda dari apa yang benar-benar dirender.
 
 import { expect, test } from "bun:test"
-import { renderLogoRows } from "../src/ui/render/logo.ts"
+import { renderLogoRows, supportsHalfBlocks } from "../src/ui/render/logo.ts"
 import {
   buildClosingBlock,
   buildProgressLine,
@@ -51,7 +51,7 @@ test("progressPercent: fase 5 dari 9 = 55%, deret bersih, clamp", () => {
 
 test("buildClosingBlock: baris persis, logo asli, rata kiri", () => {
   const logo = renderLogoRows()
-  expect(logo.length).toBe(5)
+  expect(logo.length).toBe(supportsHalfBlocks() ? 5 : 9)
   const lines = buildClosingBlock(logo, base)
   expect(lines).toEqual([
     ...logo,

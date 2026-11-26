@@ -38,11 +38,12 @@ export async function runModelManager(opts: {
     return
   }
 
+  let activeModel = opts.currentModel
   const rowsOf = (providers: ProviderEntry[]): ModelRow[] =>
     providers.flatMap((p) =>
       p.models.map((model) => ({
         id: `${p.id}::${model}`,
-        active: `${p.id}::${model}` === opts.currentModel,
+        active: `${p.id}::${model}` === activeModel,
         ...(p.reasoningEffort ? { effort: p.reasoningEffort } : {}),
       })),
     )
@@ -96,6 +97,7 @@ export async function runModelManager(opts: {
         console.error(`[warn] ${t("prov.reloadFail")}`),
       )
       opts.setModelOverride?.(id)
+      activeModel = id
     },
     loadRows: async () =>
       rowsOf((await loadConfig(opts.cwd, { allowLocal: opts.allowLocalConfig })).providers),
@@ -104,7 +106,16 @@ export async function runModelManager(opts: {
       await updateProviderInScopes(id.slice(0, sep), (p) => {
         p.models = p.models.filter((m) => m !== id.slice(sep + 2))
       })
-      return rowsOf((await loadConfig(opts.cwd, { allowLocal: opts.allowLocalConfig })).providers)
+      const nextRows = rowsOf(
+        (await loadConfig(opts.cwd, { allowLocal: opts.allowLocalConfig })).providers,
+      )
+      if (id === activeModel) {
+        const fallback = nextRows[0]?.id ?? ""
+        activeModel = fallback
+        if (fallback) opts.setModelOverride?.(fallback)
+        return rowsOf((await loadConfig(opts.cwd, { allowLocal: opts.allowLocalConfig })).providers)
+      }
+      return nextRows
     },
     onSetEffort: async (id, effort) => {
       const sep = id.indexOf("::")

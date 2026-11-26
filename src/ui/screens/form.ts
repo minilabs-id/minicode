@@ -78,6 +78,8 @@ interface FieldState {
   error: string | null
   /** Offset scroll horizontal nilai (kursor selalu terlihat). */
   viewStart: number
+  /** Ctrl+A menandai seluruh isi field untuk ditimpa/hapus pada ketikan berikutnya. */
+  selectedAll?: boolean
 }
 
 const dim = (s: string): string => c.dim(s)
@@ -131,13 +133,13 @@ function toState(def: FormField): FieldState {
       viewStart: 0,
     }
   }
+  // Prefill berasal dari config/berkas (teks tak-terpercaya). Disanitasi di
+  // STATE, bukan saat render: kursor di ujung nilai awal agar mudah mengedit.
+  const initialText = typeof def.initial === "string" ? sanitizeAnsiLine(def.initial) : ""
   return {
     def,
-    // Prefill berasal dari config/berkas (teks tak-terpercaya). Disanitasi di
-    // STATE, bukan saat render: kursor & viewStart dihitung dari `text`, jadi
-    // escape di dalamnya akan menggeser kolom kursor dari yang terlihat.
-    text: typeof def.initial === "string" ? sanitizeAnsiLine(def.initial) : "",
-    cursor: 0,
+    text: initialText,
+    cursor: toGraphemes(initialText).length,
     selectIdx: 0,
     confirmed: false,
     error: null,
@@ -232,7 +234,8 @@ export async function runForm(spec: FormSpec, screen: AltScreen): Promise<FormRe
           while (start < st.cursor && displayWidth(pts.slice(start, st.cursor).join("")) > maxV - 1)
             start++
           st.viewStart = start
-          const vis = sliceByWidth(pts, start, maxV).join("")
+          const visRaw = sliceByWidth(pts, start, maxV).join("")
+          const vis = active && st.selectedAll && visRaw ? `\x1b[7m${visRaw}\x1b[27m` : visRaw
           if (stacked) {
             for (const hl of wrapByWidth(`${marker} ${cleanLabel}`, w)) body.push(cut(hl))
             if (active) {
@@ -276,7 +279,11 @@ export async function runForm(spec: FormSpec, screen: AltScreen): Promise<FormRe
           }
           activeRow = active ? body.length - 1 : activeRow
         }
-        if (st.error) body.push(cut(c.error(`  ${sanitizeAnsiLine(st.error)}`)))
+        if (st.error) {
+          for (const el of wrapByWidth(sanitizeAnsiLine(st.error), Math.max(8, w - 2))) {
+            body.push(cut(c.error(`  ${el}`)))
+          }
+        }
       })
       // Footer selalu dari windowFooter (nav/pilih/tutup). Aksi khusus form
       // (Tab/Enter/select/confirm) dan peringatan idle (TUI-004: draft tak
@@ -335,6 +342,9 @@ export async function runForm(spec: FormSpec, screen: AltScreen): Promise<FormRe
       idle.dispose()
       try {
         formPump.dispose()
+      } catch {}
+      try {
+        screen.setBracketedPaste?.(false)
       } catch {}
       try {
         screen.clearRegion()
@@ -448,6 +458,12 @@ export async function runForm(spec: FormSpec, screen: AltScreen): Promise<FormRe
         // sama memindahkan `idx`, dan pointer yang dicapture sebelum loop
         // membuat ketikan masuk ke field SEBELUMNYA (audit 2026-11-12, HIGH-1).
         const st = fields[idx]!
+        if (k.type !== "selectAll" && st.selectedAll) {
+          // Biarkan char/backspace/delete membaca flag di bawah sebelum dibersihkan.
+          if (k.type !== "char" && k.type !== "backspace" && k.type !== "delete") {
+            st.selectedAll = false
+          }
+        }
         // Esc/Ctrl+C dua-tahap (anti-hilang draft): field kotor → kembalikan
         // ke nilai bawaan (prefill edit tak hilang sekali tekan — dulu
         // langsung dikosongkan tanpa undo); sudah bawaan/kosong → batal
@@ -506,21 +522,49 @@ export async function runForm(spec: FormSpec, screen: AltScreen): Promise<FormRe
           continue
         }
         // Text/secret editing.
-        if (k.type === "char") insertText(st, k.ch)
-        else if (k.type === "backspace") deletePrev(st)
-        else if (k.type === "delete") {
-          const pts = toGraphemes(st.text)
-          const at = Math.max(0, Math.min(st.cursor, pts.length))
-          if (at < pts.length) {
-            pts.splice(at, 1)
-            st.text = pts.join("")
+        if (k.type === "selectAll") {
+          st.selectedAll = st.text.length > 0
+          st.cursor = toGraphemes(st.text).length
+          continue
+        }
+        const wasSelectedAll = Boolean(st.selectedAll)
+        st.selectedAll = false
+        if (k.type === "char") {
+          if (wasSelectedAll) {
+            st.text = ""
+            st.cursor = 0
+            st.viewStart = 0
+          }
+          insertText(st, k.ch)
+        } else if (k.type === "backspace" || k.type === "delete") {
+          if (wasSelectedAll) {
+            st.text = ""
+            st.cursor = 0
+            st.viewStart = 0
             st.error = null
+          } else if (k.type === "backspace") {
+            deletePrev(st)
+          } else {
+            const pts = toGraphemes(st.text)
+            const at = Math.max(0, Math.min(st.cursor, pts.length))
+            if (at < pts.length) {
+              pts.splice(at, 1)
+              st.text = pts.join("")
+              st.error = null
+            }
           }
         } else if (k.type === "left") moveCursor(st, -1)
         else if (k.type === "right") moveCursor(st, 1)
         else if (k.type === "home") st.cursor = 0
         else if (k.type === "end") st.cursor = toGraphemes(st.text).length
-        else if (k.type === "ctrl-u") {
+        else if (k.type === "ctrl-k") {
+          const pts = toGraphemes(st.text)
+          const at = Math.max(0, Math.min(st.cursor, pts.length))
+          if (at < pts.length) {
+            st.text = pts.slice(0, at).join("")
+            st.error = null
+          }
+        } else if (k.type === "ctrl-u") {
           st.text = ""
           st.cursor = 0
           st.viewStart = 0
@@ -561,6 +605,7 @@ export async function runForm(spec: FormSpec, screen: AltScreen): Promise<FormRe
       process.stdin.resume()
       process.stdin.on("data", onData)
       process.stdout.on("resize", onResize)
+      screen.setBracketedPaste?.(true)
       resetIdle()
       render()
     } catch {

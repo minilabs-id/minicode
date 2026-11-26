@@ -289,3 +289,60 @@ test("presentation event log menyaring secret dan control sequence", async () =>
     await rmDir(cwd)
   }
 })
+
+test("sessions.cwd terjaga lintas createChildSession + saveSession, dan recordTurnUsage menyimpan baris turns", async () => {
+  const { Database } = await import("bun:sqlite")
+  const { createChildSession, loadSessionMeta, loadSessionUsageSummary, recordTurnUsage } =
+    await import("../src/session/persistence.ts")
+  const cwd = localCwd()
+  try {
+    const child = createChildSession({ parentSessionId: "parent-cwd", cwd })
+    expect(loadSessionMeta("parent-cwd", cwd)?.cwd).toBe(cwd)
+    expect(loadSessionMeta(child.sessionId, cwd)?.cwd).toBe(cwd)
+
+    // saveSession dengan cwd kosong tidak menghapus cwd non-kosong yang sudah ada.
+    await saveSession("parent-cwd", cwd, "sys", [{ role: "user", content: "hi" }], {
+      totalTokens: 10,
+    })
+    recordTurnUsage("parent-cwd", { totalTokens: 25 }, cwd)
+    expect(loadSessionUsageSummary("parent-cwd", cwd).totalTokens).toBe(35)
+    const db = new Database(join(cwd, ".minicode", "sessions.db"), { readonly: true })
+    try {
+      const rows = db
+        .prepare("SELECT turn_idx FROM turns WHERE session_id = ? ORDER BY turn_idx ASC")
+        .all("parent-cwd") as { turn_idx: number }[]
+      expect(rows.map((r) => r.turn_idx)).toEqual([0, 1])
+    } finally {
+      db.close()
+    }
+  } finally {
+    await rmDir(cwd)
+  }
+})
+
+test("PresentationAdapter menjaga turnId monotonik meski turn sebelumnya gagal", async () => {
+  const { createPresentationAdapter } = await import("../src/presentation/adapter.ts")
+  const handlers = new Map<string, ((e: unknown) => void)[]>()
+  const bus = {
+    on(ev: string, fn: (e: unknown) => void) {
+      const list = handlers.get(ev) ?? []
+      list.push(fn)
+      handlers.set(ev, list)
+      return () => {}
+    },
+  }
+  const seenTurns: number[] = []
+  const adapter = createPresentationAdapter(bus, { sessionId: "mono-turn" })
+  adapter.onEvent((ev) => {
+    if (ev.type === "turn.started") seenTurns.push(ev.turnId ?? -1)
+  })
+  const emit = (ev: string, payload: unknown) => {
+    for (const fn of handlers.get(ev) ?? []) fn(payload)
+  }
+  emit("turn:started", { turn: 0 })
+  emit("turn:started", { turn: 0 })
+  emit("turn:started", { turn: 1 })
+  emit("turn:started", { turn: 1 })
+  expect(seenTurns).toEqual([0, 1, 2, 3])
+  adapter.dispose()
+})

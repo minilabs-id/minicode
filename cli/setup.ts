@@ -24,6 +24,7 @@ import { perfCount, perfEnabled } from "../src/lib/perf-debug.ts"
 import { closeAllLsp as lspCloseAll, setLspProcessSupervisor } from "../src/lsp/client.ts"
 import { closeAll as mcpCloseAll } from "../src/mcp/client.ts"
 import { addMemory, promoteOrRejectLessonsBySession } from "../src/memory/vector.ts"
+import { findRedirectTargets } from "../src/policy/bash-guard.ts"
 import {
   createLlmCompaction,
   isSyntheticSummary,
@@ -46,6 +47,7 @@ import {
   planRecovery,
   type RecoveryDecision,
 } from "../src/policy/recovery-budget.ts"
+import { isDangerousShellVerb, splitShellSegments } from "../src/policy/shell-tokenize.ts"
 import { WRITE_TOOLS } from "../src/policy/tool-contract.ts"
 import {
   budgetExceededError,
@@ -186,6 +188,7 @@ import {
   presentationHead,
   RefusedHistoryRewriteError,
   readWriterEpoch,
+  recordTurnUsage,
   type SessionTurnRecord,
   saveHistorySummary,
   saveSession,
@@ -659,14 +662,68 @@ export function resolveWorkModeForIdentity(
  * berbagi kunci → yang kedua ditolak (fail-closed). Ini lebih aman daripada
  * membiarkan efek non-idempoten ter-apply dua kali saat recovery.
  */
+const READ_ONLY_BASH_HEAD =
+  /^(?:ls|dir|pwd|cat|type|head|tail|wc|rg|grep|egrep|fgrep|findstr|where|which|echo|more|sort|uniq)$/i
+
+/**
+ * Klasifikasi sempit perintah `bash` observasi murni tanpa efek samping agar
+ * pemanggilan ulang pasca-kompaksi / step baru (`git status --short`, `dir /b`)
+ * tidak ditolak idempotency berbasis seluruh prompt.
+ */
+export function isReadOnlyObservationBash(args: unknown): boolean {
+  if (!args || typeof args !== "object") return false
+  const rec = args as Record<string, unknown>
+  const raw =
+    typeof rec.cmd === "string" ? rec.cmd : typeof rec.command === "string" ? rec.command : ""
+  const cmd = raw.trim()
+  if (!cmd) return false
+  if (/\$\(|`/.test(cmd)) return false
+  if (findRedirectTargets(cmd).length > 0) return false
+  const segments = splitShellSegments(cmd)
+  if (segments.length === 0) return false
+  for (const seg of segments) {
+    if (isDangerousShellVerb(seg)) return false
+    const tokens = seg.trim().split(/\s+/).filter(Boolean)
+    const head = (tokens[0] ?? "").toLowerCase()
+    if (!head) return false
+    if (READ_ONLY_BASH_HEAD.test(head)) continue
+    if (head === "git") {
+      const sub = (tokens[1] ?? "").toLowerCase()
+      if (/^(?:status|log|diff|show|rev-parse|ls-files|describe)$/.test(sub)) continue
+      if (
+        sub === "branch" &&
+        !tokens.some((tok) => /^-(?:[dDmMcC]|-delete|-move|-copy)$/.test(tok))
+      )
+        continue
+      return false
+    }
+    if (head === "sed") {
+      if (tokens.some((tok) => /^-(?:i|-in-place)(?:=|$)/.test(tok))) return false
+      if (tokens.some((tok) => /^-(?:n|-quiet|-silent)$/.test(tok))) continue
+      return false
+    }
+    if (head === "find") {
+      if (tokens.some((tok) => /^-(?:delete|exec|execdir|ok|okdir|fprint|fls)$/.test(tok))) {
+        return false
+      }
+      continue
+    }
+    return false
+  }
+  return true
+}
+
 export function productionIdempotencyKey(
   tool: string,
   args: unknown,
   generation: number,
   mutationEpoch?: number,
+  observationEpoch?: number,
 ): string {
   const suffix = typeof mutationEpoch === "number" && mutationEpoch > 0 ? `:m${mutationEpoch}` : ""
-  return `${tool}:${hashArgs(args ?? {})}:gen${generation}${suffix}`
+  const obsSuffix =
+    typeof observationEpoch === "number" && observationEpoch > 0 ? `:o${observationEpoch}` : ""
+  return `${tool}:${hashArgs(args ?? {})}:gen${generation}${suffix}${obsSuffix}`
 }
 
 /**
@@ -1174,6 +1231,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   // Menyimpan baseline saat eskalasi terjadi supaya jika user mengubah pin
   // lewat `/context set`, perubahan manual menang atas eskalasi sebelumnya.
   const escalatedWindows = new Map<string, { baseTokens: number; escalatedTokens: number }>()
+  const cappedWindows = new Map<string, { baseTokens: number; cappedTokens: number }>()
   const routedContextModel = (model?: string) =>
     router.contextModelIdentity(model ?? effectiveDefaultModel()) ?? model ?? "default"
   const contextModelId = (requested?: string): string => {
@@ -1182,6 +1240,14 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   const resolveEffectiveContextWindow = (model?: string) => {
     const key = routedContextModel(model)
     const resolved = resolveContextWindow(cfg, key, contextWindowTokens)
+    const cap = cappedWindows.get(key)
+    if (cap) {
+      if (cap.baseTokens !== resolved.tokens) {
+        cappedWindows.delete(key)
+      } else if (cap.cappedTokens < resolved.tokens) {
+        return { ...resolved, key, tokens: cap.cappedTokens, escalated: true }
+      }
+    }
     const esc = escalatedWindows.get(key)
     if (esc) {
       if (esc.baseTokens !== resolved.tokens) {
@@ -1484,7 +1550,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
         if (div && div.diverged > 0) {
           startupConsoleError(
             c.yellow(
-              `[resume] workspace berubah sejak checkpoint terakhir (${div.diverged} file) — /undo tersedia bila perlu kembali\n`,
+              `[resume] workspace changed since last checkpoint (${div.diverged} file(s)) — /undo available to revert\n`,
             ),
           )
         }
@@ -1911,6 +1977,9 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   // write_file, apply_patch, delete_file, move_file, git_restore/checkout,
   // lsp_rename) supaya tidak ada daftar manual kedua yang bisa drift.
   let workspaceMutationEpoch = 0
+  // Naik tiap step selesai / kompaksi agar observasi read-only (`git status`, `dir`)
+  // pasca-kompaksi tak terkunci kunci `:gen` lama sementara retry dalam satu step tetap ter-dedup.
+  let bashObservationEpoch = 0
   const {
     sessionTools,
     evidenceMode,
@@ -1936,6 +2005,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
             args,
             recoveryGeneration,
             tool === "bash" ? workspaceMutationEpoch : undefined,
+            tool === "bash" && isReadOnlyObservationBash(args) ? bashObservationEpoch : undefined,
           ),
       },
       // F-03 (P5 §C2): background bash job diikat ke sid kanonik sesi ini —
@@ -2125,6 +2195,49 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
           })
         } else {
           startupWrite(`${c.yellow(`${msg}\n`)}`)
+        }
+      },
+      onContextWindowClamped: (info) => {
+        const currentKey = routedContextModel()
+        const baseForInfo = resolveContextWindow(cfg, info.model, contextWindowTokens).tokens
+        const baseForCurrent = resolveContextWindow(cfg, currentKey, contextWindowTokens).tokens
+        cappedWindows.set(info.model, {
+          baseTokens: baseForInfo,
+          cappedTokens: info.toTokens,
+        })
+        if (currentKey !== info.model && info.model.endsWith(`::${currentKey}`)) {
+          cappedWindows.set(currentKey, {
+            baseTokens: baseForCurrent,
+            cappedTokens: info.toTokens,
+          })
+        }
+        presentation?.noteContextWindow({
+          usedTokens: info.observedTokens,
+          windowTokens: info.toTokens,
+          turnId: session.state.turnCount,
+        })
+        const msg = `[context] window capped ${info.fromTokens} → ${info.toTokens} tokens for ${sanitizeAnsi(info.model)} after upstream overflow at ${info.observedTokens}.`
+        if (enterRepl) {
+          presentation?.noteContextCutoff({
+            reason: msg,
+            usedTokens: info.observedTokens,
+            windowTokens: info.toTokens,
+            turnId: session.state.turnCount,
+          })
+        } else {
+          startupWrite(`${c.yellow(`${msg}\n`)}`)
+        }
+      },
+      onMaxStepsEscalated: (info) => {
+        sessionEvents?.emit({
+          type: "provider:extension",
+          kind: "max-steps-escalated",
+          data: info,
+        })
+        if (!enterRepl) {
+          warnLine(
+            `[steps] limit raised ${info.fromSteps} → ${info.toSteps} after ${info.observedSteps} steps; completed steps saved`,
+          )
         }
       },
       ...(maxSteps ? { maxSteps } : {}),
@@ -2472,6 +2585,9 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   })
   session.events.on("step:completed", (e) => {
     try {
+      if ((e as { forwardedChild?: unknown }).forwardedChild == null) {
+        bashObservationEpoch++
+      }
       const s = e.step
       void writeStepTrace(cwd, {
         sessionId,
@@ -2495,6 +2611,11 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   // keras di "Batas langkah tool tercapai". Operator-facing (stderr); menembus
   // ke MODEL butuh seam system-prompt terpisah (di luar scope fase ini).
   let softStepWarned = false
+  session.events.on("context:compacted", (e) => {
+    if ((e as { forwardedChild?: unknown }).forwardedChild == null) {
+      bashObservationEpoch++
+    }
+  })
   session.events.on("turn:started", () => {
     softStepWarned = false
   })
@@ -2845,11 +2966,33 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
         hooksSkippedNotice = true
         const reasonLabel =
           liveWorkMode !== "EXECUTE" ? `work-mode ${liveWorkMode}` : `${livePm} mode`
-        process.stderr.write(c.dim(`[hooks] skipped in ${reasonLabel} (read-only contract)\n`))
+        const msg = `[hooks] skipped in ${reasonLabel} (read-only contract)`
+        if (enterRepl) {
+          session.events.emit({
+            type: "provider:extension",
+            kind: "session-notice",
+            data: { line: msg },
+          })
+        } else {
+          process.stderr.write(c.dim(`${msg}\n`))
+        }
       }
       return
     }
-    await runRunHooks(phase, ctx, signal, { allowLocal: allowLocalConfig === true })
+    await runRunHooks(phase, ctx, signal, {
+      allowLocal: allowLocalConfig === true,
+      ...(enterRepl
+        ? {
+            onNotice: (line) => {
+              session.events.emit({
+                type: "provider:extension",
+                kind: "session-notice",
+                data: { line },
+              })
+            },
+          }
+        : {}),
+    })
   }
 
   /**
@@ -2886,7 +3029,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       const ledger = createRecoveryLedger()
       for (;;) {
         try {
-          return await runPromptWithVerifyImpl(p, runSignal)
+          return await runPromptWithVerifyImpl(p, runSignal, ledger)
         } catch (error) {
           const failure = classifyFailure(error, {
             userAborted: signal?.aborted === true && deadline.signal?.aborted !== true,
@@ -2977,7 +3120,11 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     )
   }
 
-  async function runPromptWithVerifyImpl(p: string, signal?: AbortSignal): Promise<void> {
+  async function runPromptWithVerifyImpl(
+    p: string,
+    signal?: AbortSignal,
+    recoveryLedger?: RecoveryLedger,
+  ): Promise<void> {
     if (signal?.aborted) {
       const reason = signal.reason
       if ((reason as { kind?: unknown } | undefined)?.kind === "timeout") {
@@ -3037,7 +3184,10 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       throw error
     }
     try {
-      presentation?.noteUserMessage({ text: p, turnId: session.state.turnCount })
+      presentation?.noteUserMessage({
+        text: p,
+        turnId: logicalTurn ? Math.max(0, logicalTurn.ordinal - 1) : session.state.turnCount,
+      })
     } catch {}
     // Tandai turn aktif: bila proses mati di tengah (segfault/kill), sesi
     // berikutnya menemukan marker yatim dan memberi tahu (bukan hilang bisu).
@@ -3049,7 +3199,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       ;(markTurnActive as ((cwd?: string, id?: string) => void) | undefined)?.(cwd, sessionId)
     } catch {}
     try {
-      await runPromptWithVerifyInner(p, composedSignal)
+      await runPromptWithVerifyInner(p, composedSignal, recoveryLedger)
       lastTurnOutcome = "completed"
     } catch (e) {
       lastTurnOutcome = classifyTurnError(e, composedSignal?.aborted === true)
@@ -3113,7 +3263,11 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     }
   }
 
-  async function runPromptWithVerifyInner(p: string, signal?: AbortSignal): Promise<void> {
+  async function runPromptWithVerifyInner(
+    p: string,
+    signal?: AbortSignal,
+    recoveryLedger?: RecoveryLedger,
+  ): Promise<void> {
     // Semua session.run settle lewat sini: finally memastikan garis status
     // berhenti pada sukses MAUPUN gagal/abort (kernel hanya emit
     // turn:completed di jalur sukses — tanpa ini painter basi menimpa prompt).
@@ -3228,7 +3382,21 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
               ownerId: sessionId,
               provenance: { requestedBy: "user", reason: "prompt" },
             },
-            () => session.run(prompt, { model: modelRef.current, signal: ctl.signal }),
+            () =>
+              (
+                session.run as (
+                  input: string,
+                  opts?: {
+                    signal?: AbortSignal
+                    model?: string
+                    recoveryLedger?: RecoveryLedger
+                  },
+                ) => Promise<unknown>
+              )(prompt, {
+                model: modelRef.current,
+                signal: ctl.signal,
+                ...(recoveryLedger ? { recoveryLedger } : {}),
+              }),
             { signal: ctl.signal },
           )
         } catch (e) {
@@ -3539,6 +3707,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
           shrinkThreadHistory(sessionId, thread.thread_id, durableHistory, cwd, {
             expectedEpoch,
           })
+          recordTurnUsage(sessionId, usageData, cwd, { expectedEpoch })
         } else {
           throw e
         }

@@ -630,7 +630,9 @@ test("P4-M10-B: maxSteps production turn → RESOURCE_EXCEEDED terminal", async 
 // ── Gate CLI: deterministik, fail-closed ──────────────────────────────────
 test("gate: --runtime off|constructed|owned deterministik; nilai aneh = off + warning", () => {
   expect(resolveRuntimeMode(["minicode", "--runtime", "owned"])).toEqual({ mode: "owned" })
-  expect(resolveRuntimeMode(["minicode", "--runtime=owned"]).mode).toBe("off")
+  expect(resolveRuntimeMode(["minicode", "--runtime=owned"])).toEqual({ mode: "owned" })
+  expect(resolveRuntimeMode(["minicode", "--runtime=yolo"]).mode).toBe("off")
+  expect(resolveRuntimeMode(["minicode", "--runtime=yolo"]).warning).toBeTruthy()
   expect(resolveRuntimeMode([]).mode).toBe("off")
   expect(resolveRuntimeMode(["--", "--runtime", "owned"]).mode).toBe("off")
   const bad = resolveRuntimeMode(["--runtime", "yolo"])

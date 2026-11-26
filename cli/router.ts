@@ -123,10 +123,10 @@ export async function dispatch(
   if (cmd === "openwork") {
     // [P14.4] Portofolio open-work lintas sesi (read-only) + merge dedup
     // eksplisit (P14.3). Handler process.exit sendiri (kontrak I28).
-    // openwork memakai `args.indexOf("openwork")` (actionAfter), jadi ia tetap
-    // menerima argv penuh agar token "openwork" tetap ditemukan.
+    // Teruskan `scoped` agar flag global sebelum token ("--cwd ... openwork list")
+    // tidak hilang sementara `actionAfter` tetap menemukan "openwork" di indeks 0.
     const { handleOpenwork } = await import("./commands/openwork.ts")
-    await handleOpenwork(args, subGetArg)
+    await handleOpenwork(scoped, subGetArg)
     return true
   }
   if (cmd === "mcp") {

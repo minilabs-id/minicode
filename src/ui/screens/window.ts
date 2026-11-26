@@ -39,11 +39,12 @@ export function windowMaxHeight(rows: number): number {
 
 /** Footer baku: navigasi → pilih → tutup, plus aksi khusus jendela (opsional). */
 export function windowFooter(extra: readonly HintItem[] = []): string {
+  const extraKeys = new Set(extra.map((h) => h.key))
   const nav: HintItem[] = [
     { key: glyphs.upDown, label: t("hint.move") },
     { key: "Enter", label: t("hint.select") },
     { key: "Esc", label: t("hint.cancel") },
-  ]
+  ].filter((item) => !extraKeys.has(item.key))
   return hintLine([...nav, ...extra])
 }
 

@@ -23,7 +23,7 @@ import { listRow } from "../render/list.ts"
 import { sanitizeAnsiLine } from "../render/sanitize.ts"
 import { c, glyphs, stripAnsi } from "../render/theme.ts"
 import { tSystem } from "../render/tool-label.ts"
-import { displayWidth, truncateToWidth } from "../render/width.ts"
+import { displayWidth, truncateToWidth, wrapByWidth } from "../render/width.ts"
 import { boxLeftPad, canRenderModal, dialogBox } from "../screens/dialog.ts"
 import { IDLE_CANCEL_MS, IDLE_WARN_MS } from "../screens/form.ts"
 import { createIdleTimer } from "../screens/lifecycle.ts"
@@ -44,6 +44,8 @@ export interface ApprovalRequest {
    * UI wajib menyembunyikan opsi yang no-op.
    */
   canAlways?: boolean
+  /** Sinyal abort turn agar modal persetujuan ikut tutup seketika. */
+  signal?: AbortSignal
 }
 
 // F-APPROVAL-1: label tier risiko yang terlokalisasi — view TIDAK import policy,
@@ -339,138 +341,183 @@ function paintModal(
   } catch {}
 }
 
+let modalLockTail: Promise<void> = Promise.resolve()
+
+/** Antrekan modal persetujuan / ask_user satu per satu agar raw-mode tidak balapan. */
+function withModalLock<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = modalLockTail
+  let release!: () => void
+  modalLockTail = new Promise<void>((r) => {
+    release = r
+  })
+  return prev
+    .catch(() => {})
+    .then(fn)
+    .finally(() => release())
+}
+
 export async function promptAsk(call: ApprovalRequest): Promise<"allow" | "deny" | "always"> {
   if (!process.stdin.isTTY) return "deny"
-  const sink = getApprovalSink()
-  // Tanpa sink (one-shot/exec) + stdout pipe: prompt tak terlihat dan blok
-  // mencemari stdout program → fail-closed (kontrak I23).
-  if (!sink && !process.stdout.isTTY) return "deny"
-  // Bell hanya bila stdout TTY: `\x07` di stdout pipe mengotori output program.
-  if (process.env.MINICODE_BELL !== "0" && process.stdout.isTTY) process.stdout.write("\x07")
-  // Live-region screen reader: teks polos, bukan escape mentah.
-  if (process.env.MINICODE_A11Y === "1")
-    process.stderr.write(`${t("appr.a11y", { name: sanitizeAnsiLine(call.name) })}\n`)
+  return withModalLock(async () => {
+    if (call.signal?.aborted) return "deny"
+    const sink = getApprovalSink()
+    // Tanpa sink (one-shot/exec) + stdout pipe: prompt tak terlihat dan blok
+    // mencemari stdout program → fail-closed (kontrak I23).
+    if (!sink && !process.stdout.isTTY) return "deny"
+    // Bell hanya bila stdout TTY: `\x07` di stdout pipe mengotori output program.
+    if (process.env.MINICODE_BELL !== "0" && process.stdout.isTTY) process.stdout.write("\x07")
+    // Live-region screen reader: teks polos, bukan escape mentah.
+    if (process.env.MINICODE_A11Y === "1")
+      process.stderr.write(`${t("appr.a11y", { name: sanitizeAnsiLine(call.name) })}\n`)
 
-  // toolName/actionSummary dari model/MCP (tak terpercaya): `\x1b[2J` di args
-  // bisa membersihkan layar saat prompt tampil → sanitasi wajib.
-  const toolName = sanitizeAnsiLine(call.name)
-  const args = (call.args ?? {}) as Record<string, unknown>
+    // toolName/actionSummary dari model/MCP (tak terpercaya): `\x1b[2J` di args
+    // bisa membersihkan layar saat prompt tampil → sanitasi wajib.
+    const toolName = sanitizeAnsiLine(call.name)
+    const args = (call.args ?? {}) as Record<string, unknown>
 
-  // Sanitasi DULU, potong SESUDAH: `slice` mentah bisa membelah surrogate pair
-  // dan memotong sekuens ANSI di tengah (audit 2026-11-12, MEDIUM-1).
-  const summarize = (value: unknown, max: number): string =>
-    truncateToWidth(sanitizeAnsiLine(String(value)), max, glyphs.ellipsis)
-  let actionSummary = ""
-  if (args.command) actionSummary = `${t("appr.cmdLabel")} ${summarize(args.command, 100)}`
-  else if (args.path) actionSummary = `${t("appr.fileLabel")} ${summarize(args.path, 100)}`
-  else if (args.query) actionSummary = `${t("appr.queryLabel")} ${summarize(args.query, 100)}`
-  else {
-    let json = ""
-    try {
-      json = JSON.stringify(args)
-    } catch {
-      json = String(args)
-    }
-    actionSummary = `${t("appr.argsLabel")} ${summarize(json, 100)}`
-  }
-  actionSummary = sanitizeAnsiLine(actionSummary)
-
-  // F-APPROVAL-1: pratinjau diff dari policy (sudah dibasuh secret) lebih jujur
-  // dari ringkasan args; jalur tanpa diff tetap memakai ringkasan args.
-  const diffPreview = call.diffPreview ? sanitizeAnsiLine(call.diffPreview) : ""
-  const riskText = tierLabel(call.riskTier)
-
-  const alwaysAvailable = call.canAlways !== false
-  const summary = diffPreview ? `${t("appr.diff")} ${diffPreview}` : actionSummary
-
-  const info = [
-    `${c.bold(t("appr.tool"))} ${c.info(toolName)}`,
-    ...(riskText ? [`${c.dim(t("appr.risk"))} ${c.info(riskText)}`] : []),
-  ]
-  const summaryLine = `  ${summary}`
-  const modalBody = [...info, summaryLine]
-  // Transkrip menyertakan batang judul; modal memakai bar title kotak.
-  const block = [``, c.warning(c.bold(t("appr.title"))), ...info.map((l) => `  ${l}`), summaryLine]
-
-  // Daftar opsi = sumber tunggal untuk footer, sorotan, dan ketik-cepat.
-  // `keys`: huruf pembeda unik agar sinonim dwibahasa panjang cukup 1 ketukan.
-  const choices: { label: string; keys: string[]; value: Decision }[] = [
-    { label: t("appr.allowOnce"), keys: ["y", "e"], value: "allow" },
-    ...(alwaysAvailable
-      ? [{ label: t("appr.always"), keys: ["a", "l"], value: "always" as const }]
-      : []),
-    { label: t("appr.deny"), keys: ["n", "i"], value: "deny" },
-  ]
-  const quickMap: Record<string, number> = {}
-  for (const [i, ch] of choices.entries()) for (const k of ch.keys) quickMap[k] = i
-  // `selalu`→s, `tidak`→t: tak berbagi huruf pertama dengan label.
-  quickMap.s = choices.findIndex((ch) => ch.value === "always")
-  quickMap.t = choices.findIndex((ch) => ch.value === "deny")
-
-  const choiceHint = hintLine([
-    { key: glyphs.upDown, label: t("hint.move") },
-    { key: "Enter", label: t("hint.select") },
-    { key: "Esc", label: t("hint.cancel") },
-  ])
-  const idleHint = c.error(t("form.idleWarning", { s: Math.ceil(IDLE_CANCEL_MS / 1000) }))
-  let pickedIndex: number | null = null
-  if (sink) {
-    sink.pushBlock(block)
-    sink.repaint()
-    sink.suspend()
-    try {
-      pickedIndex = await readModalInput(
-        "choice",
-        ({ sel, warned }) => {
-          const rendered = choices.map((ch, i) => listRow(ch.label, i === sel))
-          paintModal(
-            sink,
-            {
-              title: t("appr.title"),
-              body: modalBody,
-              footer: warned ? idleHint : choiceHint,
-            },
-            ["", ...rendered],
-            { kind: "choice", selected: sel },
-          )
-        },
-        { count: choices.length, quick: quickMap },
-      )
-    } finally {
+    // Sanitasi DULU, potong SESUDAH: `slice` mentah bisa membelah surrogate pair
+    // dan memotong sekuens ANSI di tengah (audit 2026-11-12, MEDIUM-1).
+    const summarize = (value: unknown, max: number): string =>
+      truncateToWidth(sanitizeAnsiLine(String(value)), max, glyphs.ellipsis)
+    let actionSummary = ""
+    if (args.command) actionSummary = `${t("appr.cmdLabel")} ${summarize(args.command, 300)}`
+    else if (args.path) actionSummary = `${t("appr.fileLabel")} ${summarize(args.path, 200)}`
+    else if (args.query) actionSummary = `${t("appr.queryLabel")} ${summarize(args.query, 200)}`
+    else {
+      let json = ""
       try {
-        sink.clearRegion?.()
-      } catch {}
-      sink.resume()
+        json = JSON.stringify(args)
+      } catch {
+        json = String(args)
+      }
+      actionSummary = `${t("appr.argsLabel")} ${summarize(json, 300)}`
     }
-  } else {
-    for (const l of block) process.stdout.write(`${l}\n`)
-    const labels = choices.map((ch) => c.bold(ch.label)).join("  ")
-    const raw = (await askLine({ prompt: `${labels}: ` })) ?? ""
-    // Non-TUI tetap ketik (tak ada panah).
-    const hit = quickMap[raw.trim().toLowerCase().slice(0, 1)]
-    pickedIndex = hit != null && hit >= 0 ? hit : null
-  }
+    actionSummary = sanitizeAnsiLine(actionSummary)
 
-  // Batal/indeks di luar rentang = deny (fail-closed).
-  const chosen = pickedIndex != null ? choices[pickedIndex] : undefined
-  const decisionKey =
-    chosen?.value === "allow"
-      ? ("appr.decAllow" as const)
-      : chosen?.value === "always"
-        ? ("appr.decAlways" as const)
-        : ("appr.decDeny" as const)
-  const decision = t(decisionKey)
-  // Keputusan dicatat di transkrip (jejak audit); warisan mengandalkan
-  // scrollback askLine yang terhapus repaint.
-  if (sink) {
-    sink.pushBlock([c.muted(`  ${glyphs.arrow} ${decision}`)])
-    sink.repaint()
-  }
-  return decisionKey === "appr.decAlways"
-    ? "always"
-    : decisionKey === "appr.decAllow"
-      ? "allow"
-      : "deny"
+    // Pertahankan baris baru diffPreview yang sudah disanitasi per-baris agar
+    // diff edit multi-baris maupun perintah panjang dibungkus terbaca rapi.
+    const diffPreview = call.diffPreview
+      ? call.diffPreview
+          .split(/\r?\n/)
+          .map((ln) => sanitizeAnsiLine(ln))
+          .filter(Boolean)
+          .join("\n")
+      : ""
+    const riskText = tierLabel(call.riskTier)
+
+    const alwaysAvailable = call.canAlways !== false
+    const summaryRaw = diffPreview ? `${t("appr.diff")} ${diffPreview}` : actionSummary
+    const previewCols = Math.max(16, windowWidth(process.stdout.columns || 80) - 6)
+    const wrappedSummary = summaryRaw.split(/\r?\n/).flatMap((ln) => wrapByWidth(ln, previewCols))
+    const cappedSummary =
+      wrappedSummary.length > 5
+        ? [
+            ...wrappedSummary.slice(0, 4),
+            `${truncateToWidth(wrappedSummary[4]!, Math.max(4, previewCols - 1), "")}${glyphs.ellipsis}`,
+          ]
+        : wrappedSummary
+    const summaryLines = cappedSummary.map((ln) => `  ${ln}`)
+
+    const info = [
+      `${c.bold(t("appr.tool"))} ${c.info(toolName)}`,
+      ...(riskText ? [`${c.dim(t("appr.risk"))} ${c.info(riskText)}`] : []),
+    ]
+    const modalBody = [...info, ...summaryLines]
+    // Transkrip menyertakan batang judul; modal memakai bar title kotak.
+    const block = [
+      ``,
+      c.warning(c.bold(t("appr.title"))),
+      ...info.map((l) => `  ${l}`),
+      ...summaryLines,
+    ]
+
+    // Daftar opsi = sumber tunggal untuk footer, sorotan, dan ketik-cepat.
+    // `keys`: huruf pembeda unik agar sinonim dwibahasa panjang cukup 1 ketukan.
+    const choices: { label: string; keys: string[]; value: Decision }[] = [
+      { label: t("appr.allowOnce"), keys: ["y", "e"], value: "allow" },
+      ...(alwaysAvailable
+        ? [{ label: t("appr.always"), keys: ["a", "l"], value: "always" as const }]
+        : []),
+      { label: t("appr.deny"), keys: ["n", "i"], value: "deny" },
+    ]
+    const quickMap: Record<string, number> = {}
+    for (const [i, ch] of choices.entries()) for (const k of ch.keys) quickMap[k] = i
+    // `selalu`→s, `tidak`→t: tak berbagi huruf pertama dengan label.
+    quickMap.s = choices.findIndex((ch) => ch.value === "always")
+    quickMap.t = choices.findIndex((ch) => ch.value === "deny")
+
+    const choiceHint = hintLine([
+      { key: glyphs.upDown, label: t("hint.move") },
+      { key: `${alwaysAvailable ? "y/a/n/" : "y/n/"}Enter`, label: t("hint.select") },
+      { key: "Esc", label: t("hint.cancel") },
+    ])
+    const idleHint = c.error(t("form.idleWarning", { s: Math.ceil(IDLE_CANCEL_MS / 1000) }))
+    let pickedIndex: number | null = null
+    if (sink) {
+      sink.pushBlock(block)
+      sink.repaint()
+      sink.suspend()
+      try {
+        pickedIndex = await readModalInput(
+          "choice",
+          ({ sel, warned }) => {
+            const rendered = choices.map((ch, i) => listRow(ch.label, i === sel))
+            paintModal(
+              sink,
+              {
+                title: t("appr.title"),
+                body: modalBody,
+                footer: warned ? idleHint : choiceHint,
+              },
+              ["", ...rendered],
+              { kind: "choice", selected: sel },
+            )
+          },
+          { count: choices.length, quick: quickMap },
+          call.signal,
+        )
+      } catch (e) {
+        if (call.signal?.aborted || (e as { name?: string })?.name === "AbortError") {
+          pickedIndex = null
+        } else {
+          throw e
+        }
+      } finally {
+        try {
+          sink.clearRegion?.()
+        } catch {}
+        sink.resume()
+      }
+    } else {
+      for (const l of block) process.stdout.write(`${l}\n`)
+      const labels = choices.map((ch) => c.bold(ch.label)).join("  ")
+      const raw = (await askLine({ prompt: `${labels}: ` })) ?? ""
+      // Non-TUI tetap ketik (tak ada panah).
+      const hit = quickMap[raw.trim().toLowerCase().slice(0, 1)]
+      pickedIndex = hit != null && hit >= 0 ? hit : null
+    }
+
+    // Batal/indeks di luar rentang = deny (fail-closed).
+    const chosen = pickedIndex != null ? choices[pickedIndex] : undefined
+    const decisionKey =
+      chosen?.value === "allow"
+        ? ("appr.decAllow" as const)
+        : chosen?.value === "always"
+          ? ("appr.decAlways" as const)
+          : ("appr.decDeny" as const)
+    const decision = t(decisionKey)
+    // Keputusan dicatat di transkrip (jejak audit); warisan mengandalkan
+    // scrollback askLine yang terhapus repaint.
+    if (sink) {
+      sink.pushBlock([c.muted(`  ${glyphs.arrow} ${decision}`)])
+      sink.repaint()
+    }
+    return decisionKey === "appr.decAlways"
+      ? "always"
+      : decisionKey === "appr.decAllow"
+        ? "allow"
+        : "deny"
+  })
 }
 
 /** View pertanyaan ask_user — di-inject ke src/tools/ask_user.ts dari cli/setup.ts.
@@ -482,71 +529,74 @@ export async function promptAskText(
   signal?: AbortSignal,
 ): Promise<string | null> {
   if (!process.stdin.isTTY) return null
-  const textSink = getApprovalSink()
-  // Paritas promptAsk: tanpa sink + stdout pipe = jawab tak terlihat & pipe
-  // tercemar → batal fail-closed.
-  if (!textSink && !process.stdout.isTTY) return null
-  // Potong SESUDAH sanitasi lewat truncateToWidth (bukan `slice`): `slice`
-  // bisa menyisakan `\x1b[` menggantung di ekor potongan.
-  const q = truncateToWidth(sanitizeAnsiLine(question), 2000, glyphs.ellipsis)
-  const optionLines = options?.length
-    ? options.map((o, i) => `  ${c.dim(`${i + 1}.`)} ${sanitizeAnsiLine(o)}`)
-    : []
-  const block = [``, `${c.warning(c.bold(t("appr.askTitle")))}`, `  ${q}`, ...optionLines]
-  const modalBody = [`  ${q}`, ...optionLines]
-  const lineHint = hintLine([
-    { key: "Enter", label: t("hint.submit") },
-    { key: "Esc", label: t("hint.cancel") },
-  ])
-  const idleHint = c.error(t("form.idleWarning", { s: Math.ceil(IDLE_CANCEL_MS / 1000) }))
-  const sink = textSink
-  let ans: string | null = null
-  if (sink) {
-    sink.pushBlock(block)
-    sink.repaint()
-    sink.suspend()
-    try {
-      ans = await readModalInput(
-        "line",
-        ({ typed, cursor, warned }) =>
-          paintModal(
-            sink,
-            {
-              title: t("appr.askTitle"),
-              body: modalBody,
-              footer: warned ? idleHint : lineHint,
-            },
-            [],
-            { kind: "line", typed, cursor },
-          ),
-        {},
-        signal,
-      )
-    } finally {
-      try {
-        sink.clearRegion?.()
-      } catch {}
-      sink.resume()
-    }
-  } else {
-    for (const l of block) process.stdout.write(`${l}\n`)
-    ans = await askLine({ prompt: `${c.bold(t("appr.answerPrompt"))}` })
-  }
-  if (ans == null || !ans.trim()) return null
-  const out = ans.trim()
-  // Opsi bernomor: petakan "1".."n" ke teks (AUD-008); teks bebas diteruskan.
-  const pick = options?.length ? /^\s*(\d+)\s*$/.exec(out) : null
-  const mapped = pick ? options?.[Number(pick[1]) - 1] : undefined
-  const finalAnswer = mapped ?? out
-  if (sink) {
-    // Gema jawaban juga dipotong lewat truncateToWidth: `slice` bisa membelah
-    // surrogate pair (emoji → U+FFFD) atau menyisakan escape menggantung.
-    sink.pushBlock([
-      c.muted(
-        `  ${glyphs.arrow} ${truncateToWidth(sanitizeAnsiLine(finalAnswer), 200, glyphs.ellipsis)}`,
-      ),
+  return withModalLock(async () => {
+    if (signal?.aborted) return null
+    const textSink = getApprovalSink()
+    // Paritas promptAsk: tanpa sink + stdout pipe = jawab tak terlihat & pipe
+    // tercemar → batal fail-closed.
+    if (!textSink && !process.stdout.isTTY) return null
+    // Potong SESUDAH sanitasi lewat truncateToWidth (bukan `slice`): `slice`
+    // bisa menyisakan `\x1b[` menggantung di ekor potongan.
+    const q = truncateToWidth(sanitizeAnsiLine(question), 2000, glyphs.ellipsis)
+    const optionLines = options?.length
+      ? options.map((o, i) => `  ${c.dim(`${i + 1}.`)} ${sanitizeAnsiLine(o)}`)
+      : []
+    const block = [``, `${c.warning(c.bold(t("appr.askTitle")))}`, `  ${q}`, ...optionLines]
+    const modalBody = [`  ${q}`, ...optionLines]
+    const lineHint = hintLine([
+      { key: "Enter", label: t("hint.submit") },
+      { key: "Esc", label: t("hint.cancel") },
     ])
-    sink.repaint()
-  }
-  return finalAnswer
+    const idleHint = c.error(t("form.idleWarning", { s: Math.ceil(IDLE_CANCEL_MS / 1000) }))
+    const sink = textSink
+    let ans: string | null = null
+    if (sink) {
+      sink.pushBlock(block)
+      sink.repaint()
+      sink.suspend()
+      try {
+        ans = await readModalInput(
+          "line",
+          ({ typed, cursor, warned }) =>
+            paintModal(
+              sink,
+              {
+                title: t("appr.askTitle"),
+                body: modalBody,
+                footer: warned ? idleHint : lineHint,
+              },
+              [],
+              { kind: "line", typed, cursor },
+            ),
+          {},
+          signal,
+        )
+      } finally {
+        try {
+          sink.clearRegion?.()
+        } catch {}
+        sink.resume()
+      }
+    } else {
+      for (const l of block) process.stdout.write(`${l}\n`)
+      ans = await askLine({ prompt: `${c.bold(t("appr.answerPrompt"))}` })
+    }
+    if (ans == null || !ans.trim()) return null
+    const out = ans.trim()
+    // Opsi bernomor: petakan "1".."n" ke teks (AUD-008); teks bebas diteruskan.
+    const pick = options?.length ? /^\s*(\d+)\s*$/.exec(out) : null
+    const mapped = pick ? options?.[Number(pick[1]) - 1] : undefined
+    const finalAnswer = mapped ?? out
+    if (sink) {
+      // Gema jawaban juga dipotong lewat truncateToWidth: `slice` bisa membelah
+      // surrogate pair (emoji → U+FFFD) atau menyisakan escape menggantung.
+      sink.pushBlock([
+        c.muted(
+          `  ${glyphs.arrow} ${truncateToWidth(sanitizeAnsiLine(finalAnswer), 200, glyphs.ellipsis)}`,
+        ),
+      ])
+      sink.repaint()
+    }
+    return finalAnswer
+  })
 }

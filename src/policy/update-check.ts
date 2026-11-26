@@ -4,7 +4,7 @@
 // formatUpdateError (satu baris, diredaksi) agar E401/EACCES/timeout tidak generik.
 
 import { type SpawnSyncReturns, spawnSync } from "node:child_process"
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, isAbsolute, join } from "node:path"
 import { homeDir } from "../lib/db-path.ts"
@@ -73,8 +73,7 @@ function errorMessage(err: unknown): string {
 }
 
 function shouldSkip(): boolean {
-  if (process.env.NO_UPDATE_CHECK === "1") return true
-  if (process.env.CI === "1") return true
+  if (isUpdateOptedOut()) return true
   // Jangan ganggu JSONL pipeline
   if (process.argv.includes("--json") || process.argv.includes("--output-format")) return true
   return false
@@ -88,14 +87,50 @@ export function isUpdateOptedOut(env: NodeJS.ProcessEnv = process.env): boolean 
   return off === "0" || off === "false" || off === "off"
 }
 
-function semverLt(a: string, b: string): boolean {
-  const pa = a.split(".").map((x) => Number(x) || 0)
-  const pb = b.split(".").map((x) => Number(x) || 0)
-  for (let i = 0; i < 3; i++) {
-    if ((pa[i] ?? 0) < (pb[i] ?? 0)) return true
-    if ((pa[i] ?? 0) > (pb[i] ?? 0)) return false
+interface ParsedSemver {
+  major: number
+  minor: number
+  patch: number
+  pre: string[]
+}
+
+function parseSemver(v: string): ParsedSemver {
+  const withoutBuild = v.split("+", 1)[0] ?? ""
+  const dash = withoutBuild.indexOf("-")
+  const coreStr = dash === -1 ? withoutBuild : withoutBuild.slice(0, dash)
+  const preStr = dash === -1 ? "" : withoutBuild.slice(dash + 1)
+  const parts = coreStr.split(".").map((x) => Number(x) || 0)
+  return {
+    major: parts[0] ?? 0,
+    minor: parts[1] ?? 0,
+    patch: parts[2] ?? 0,
+    pre: preStr ? preStr.split(".") : [],
   }
-  return false
+}
+
+function semverLt(a: string, b: string): boolean {
+  const pa = parseSemver(a)
+  const pb = parseSemver(b)
+  if (pa.major !== pb.major) return pa.major < pb.major
+  if (pa.minor !== pb.minor) return pa.minor < pb.minor
+  if (pa.patch !== pb.patch) return pa.patch < pb.patch
+  // SemVer 2.0.0 §11.3: rilis stabil tanpa pre-release selalu lebih tinggi dari pre-release
+  if (pa.pre.length === 0 && pb.pre.length === 0) return false
+  if (pa.pre.length === 0) return false
+  if (pb.pre.length === 0) return true
+  const len = Math.min(pa.pre.length, pb.pre.length)
+  for (let i = 0; i < len; i++) {
+    const sa = pa.pre[i] ?? ""
+    const sb = pb.pre[i] ?? ""
+    if (sa === sb) continue
+    const numA = /^\d+$/.test(sa)
+    const numB = /^\d+$/.test(sb)
+    if (numA && numB) return Number(sa) < Number(sb)
+    // Identifier numerik selalu lebih rendah daripada non-numerik
+    if (numA !== numB) return numA
+    return sa < sb
+  }
+  return pa.pre.length < pb.pre.length
 }
 
 async function readCache(): Promise<Cache | null> {
@@ -111,14 +146,22 @@ async function readCache(): Promise<Cache | null> {
 }
 
 async function writeCache(latest: string): Promise<void> {
+  let tmp: string | undefined
   try {
-    const { mkdir, writeFile, chmod } = await import("node:fs/promises")
+    const { mkdir, writeFile, chmod, rename, unlink } = await import("node:fs/promises")
     const target = cacheFilePath()
     await mkdir(dirname(target), { recursive: true })
-    await writeFile(target, JSON.stringify({ checkedAt: Date.now(), latest }), "utf8")
+    tmp = `${target}.tmp-${process.pid}`
+    await writeFile(tmp, JSON.stringify({ checkedAt: Date.now(), latest }), "utf8")
     // 0600 seperti trace/journal (bug-hunt 2026-09-19 H6): default umask bisa
     // world-readable. Isi kini non-rahasia, tapi konsistensi murah.
-    await chmod(target, 0o600).catch(() => {})
+    await chmod(tmp, 0o600).catch(() => {})
+    try {
+      await rename(tmp, target)
+    } catch (err) {
+      await unlink(tmp).catch(() => {})
+      throw err
+    }
   } catch {}
 }
 
@@ -163,9 +206,18 @@ export async function checkForUpdate(currentVersion: string): Promise<string | n
   return null
 }
 
-export function formatUpdateMessage(current: string, latest: string): string {
+export type InstallSource = "npm-global" | "bun-global" | "source-checkout"
+
+export function formatUpdateMessage(
+  current: string,
+  latest: string,
+  source: InstallSource = classifyInstallSource(),
+): string {
   // `npm update` bisa melewati langkah verifikasi signature; selalu pasang
   // versi eksak yang sudah terverifikasi dari registry yang sama.
+  if (source === "bun-global") {
+    return `Update tersedia ${current} → ${latest} — jalankan: bun add -g ${PKG_NAME}@${latest}`
+  }
   return `Update tersedia ${current} → ${latest} — jalankan: npm install -g ${PKG_NAME}@${latest}`
 }
 
@@ -176,9 +228,82 @@ export function formatUpdateMessage(current: string, latest: string): string {
 /** Guard env anti-loop restart: di-set saat respawn pasca-update. */
 export const UPDATE_GUARD_ENV = "MINICODE_AUTO_UPDATE_DONE"
 
+function findNodeModulesPkgRoot(entry: string): string | null {
+  if (!entry) return null
+  const norm = entry.replace(/\\/g, "/")
+  const marker = "/node_modules/"
+  const idx = norm.lastIndexOf(marker)
+  let afterStart = -1
+  if (idx >= 0) {
+    afterStart = idx + marker.length
+  } else if (norm.startsWith("node_modules/")) {
+    afterStart = "node_modules/".length
+  }
+  if (afterStart < 0) return null
+  let pos = afterStart
+  while (norm[pos] === "/") pos++
+  if (pos >= norm.length) return null
+  const firstEnd = norm.indexOf("/", pos)
+  if (firstEnd < 0) return entry
+  if (norm[pos] === "@") {
+    let secondStart = firstEnd
+    while (norm[secondStart] === "/") secondStart++
+    const secondEnd = norm.indexOf("/", secondStart)
+    return secondEnd < 0 ? entry : entry.slice(0, secondEnd)
+  }
+  return entry.slice(0, firstEnd)
+}
+
+/**
+ * Klasifikasikan asal instalasi biner/skrip agar auto-update & `/update` tidak
+ * menyentuh checkout dev (`bun link` / git repo) dan tidak menjalankan `npm -g`
+ * ke prefix yang salah saat terpasang via `bun add -g`.
+ */
+export function classifyInstallSource(
+  entry = process.argv[1] ?? "",
+  opts: {
+    env?: NodeJS.ProcessEnv
+    realpath?: (p: string) => string
+    exists?: (p: string) => boolean
+  } = {},
+): InstallSource {
+  const pkgRoot = findNodeModulesPkgRoot(entry)
+  if (!pkgRoot) return "source-checkout"
+  const realpath = opts.realpath ?? realpathSync
+  const exists = opts.exists ?? existsSync
+  let resolvedRoot = pkgRoot
+  try {
+    resolvedRoot = realpath(pkgRoot)
+  } catch {
+    // Path virtual (unit test) atau symlink rusak: evaluasi berdasarkan string path mentah.
+  }
+  const normPkg = pkgRoot.replace(/\\/g, "/").toLowerCase()
+  const normReal = resolvedRoot.replace(/\\/g, "/").toLowerCase()
+  // Symlink/junction (`bun link` / `npm link`) ke luar `node_modules` atau ke repo `.git`:
+  // perlakukan sebagai checkout sumber agar updater tidak menimpa/mematikan dev workspace.
+  if (!normReal.includes("/node_modules/") && !normReal.startsWith("node_modules/")) {
+    return "source-checkout"
+  }
+  try {
+    if (exists(join(resolvedRoot, ".git"))) return "source-checkout"
+  } catch {}
+  const env = opts.env ?? process.env
+  const bunGlobalMarkers = ["/.bun/install/global/"]
+  const bunInstall = env.BUN_INSTALL?.trim()
+  if (bunInstall) {
+    bunGlobalMarkers.push(
+      `${bunInstall.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase()}/install/global/`,
+    )
+  }
+  if (bunGlobalMarkers.some((m) => normPkg.includes(m) || normReal.includes(m))) {
+    return "bun-global"
+  }
+  return "npm-global"
+}
+
 /** True bila kode berjalan dari salinan ter-install (bukan checkout source). */
 export function isInstalledCopy(entry = process.argv[1] ?? ""): boolean {
-  return entry.includes("node_modules")
+  return classifyInstallSource(entry) !== "source-checkout"
 }
 
 export function isNewer(current: string, latest: string): boolean {
@@ -194,7 +319,7 @@ export interface AutoUpdateDecision {
 /**
  * Layak auto-update? Syarat SEMUA:
  * - stdin TTY (user membuka REPL, bukan pipe/CI)
- * - salinan ter-install (checkout source jangan disentuh npm)
+ * - salinan ter-install via npm global (checkout source & bun global dilewati fail-closed)
  * - bukan mode machine (`exec`, `--json`) dan bukan `--help`/`--version`
  * - belum habis di-restart (guard env) dan tidak di-opt-out
  *   (`NO_UPDATE_CHECK=1`, `CI=1`, `MINICODE_AUTO_UPDATE=0`).
@@ -205,6 +330,7 @@ export function shouldAutoUpdate(
     stdinTTY?: boolean
     env?: NodeJS.ProcessEnv
     installed?: boolean
+    installSource?: InstallSource
   } = {},
 ): AutoUpdateDecision {
   const env = opts.env ?? process.env
@@ -214,7 +340,13 @@ export function shouldAutoUpdate(
   if (off === "0" || off === "false" || off === "off") return { run: false, reason: "opt-out" }
   if (env[UPDATE_GUARD_ENV] != null) return { run: false, reason: "already-restarted" }
   if (!(opts.stdinTTY ?? process.stdin.isTTY)) return { run: false, reason: "non-tty" }
-  if (!(opts.installed ?? isInstalledCopy())) return { run: false, reason: "source-checkout" }
+  if (opts.installed !== undefined) {
+    if (!opts.installed) return { run: false, reason: "source-checkout" }
+  } else {
+    const source = opts.installSource ?? classifyInstallSource(undefined, { env })
+    if (source === "source-checkout") return { run: false, reason: "source-checkout" }
+    if (source === "bun-global") return { run: false, reason: "unsupported-package-manager" }
+  }
   if (argv.includes("--json") || argv.includes("--output-format"))
     return { run: false, reason: "machine-output" }
   if (argv.includes("-h") || argv.includes("--help") || argv.includes("-v"))
@@ -558,26 +690,40 @@ export interface ManualUpdateResult {
   alreadyLatest?: boolean
 }
 
-function notifyPhase(
-  opts: { onPhase?: (phase: "check" | "install" | "verify") => void },
+async function notifyPhase(
+  opts: {
+    onPhase?: (phase: "check" | "install" | "verify", latest?: string) => unknown
+  },
   phase: "check" | "install" | "verify",
-): void {
+  latest?: string,
+): Promise<void> {
   try {
-    opts.onPhase?.(phase)
+    await opts.onPhase?.(phase, latest)
   } catch {}
 }
 
 export async function runManualUpdate(
   opts: {
-    onPhase?: (phase: "check" | "install" | "verify") => void
+    onPhase?: (phase: "check" | "install" | "verify", latest?: string) => unknown
     check?: () => Promise<string | null>
     install?: (version: string) => boolean
     getInstalled?: () => string
+    installSource?: InstallSource
   } = {},
 ): Promise<ManualUpdateResult> {
   if (isUpdateOptedOut()) return { ok: false, optedOut: true }
   clearLastUpdateFailure()
-  notifyPhase(opts, "check")
+  // Saat test menyuntikkan `install`, izinkan alur tanpa salinan global kecuali
+  // `installSource` diisi eksplisit untuk menguji penolakan preflight.
+  const source = opts.installSource ?? (opts.install ? "npm-global" : classifyInstallSource())
+  if (source === "source-checkout") {
+    return {
+      ok: false,
+      step: "preflight",
+      reason: "dijalankan dari source checkout / dev link; update langsung lewat git pull",
+    }
+  }
+  await notifyPhase(opts, "check")
   let latest: string | null
   try {
     latest = opts.check ? await opts.check() : await checkForUpdateFresh(readCurrentVersion())
@@ -589,8 +735,15 @@ export async function runManualUpdate(
     }
   }
   if (!latest) return { ok: true, alreadyLatest: true }
+  if (source === "bun-global") {
+    return {
+      ok: false,
+      step: "preflight",
+      reason: `terpasang via Bun global — jalankan: bun add -g ${PKG_NAME}@${latest}`,
+    }
+  }
 
-  notifyPhase(opts, "install")
+  await notifyPhase(opts, "install", latest)
   let installed = false
   let thrown: unknown
   try {
@@ -614,7 +767,7 @@ export async function runManualUpdate(
     }
   }
 
-  notifyPhase(opts, "verify")
+  await notifyPhase(opts, "verify", latest)
   try {
     const current = opts.getInstalled ? opts.getInstalled() : readGlobalInstalledVersion()
     if (current !== latest) {

@@ -20,6 +20,8 @@ const PRICING_HELP = `minicode pricing — price table for cost estimation
   minicode pricing show <model>  show one model price
   minicode pricing clear         clear cache and use built-in data`
 
+const errLine = (msg: string): void => console.error(msg)
+
 export async function handlePricing(args: string[]): Promise<never> {
   if (hasHelpFlag(args)) {
     console.log(PRICING_HELP)
@@ -65,7 +67,7 @@ export async function handlePricing(args: string[]): Promise<never> {
   if (sub === "show") {
     const model = positionalSubArg(args, 2)
     if (!model) {
-      console.error("usage: minicode pricing show <model>")
+      errLine("usage: minicode pricing show <model>")
       process.exit(2)
     }
     const overlay = await loadPricingOverlay()
@@ -91,15 +93,21 @@ export async function handlePricing(args: string[]): Promise<never> {
       const { rm } = await import("node:fs/promises")
       await rm(pricingCachePath(), { force: true })
       console.log(`${c.green("ok")} pricing cache cleared`)
-    } catch {
-      console.log("(no pricing cache)")
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException | null)?.code
+      if (code === "ENOENT") {
+        console.log("(no pricing cache)")
+        process.exit(0)
+      }
+      errLine(`failed to clear pricing cache: ${(e as Error)?.message ?? e}`)
+      process.exit(1)
     }
     process.exit(0)
   }
 
   // Subcommand asing = salah pakai: exit 2 supaya skrip bisa mendeteksinya
   // dan membedakannya dari gagal runtime (exit 1).
-  console.error(`unknown pricing subcommand: ${sanitizeAnsiLine(sub)}\n`)
+  errLine(`unknown pricing subcommand: ${sanitizeAnsiLine(sub)}\n`)
   console.log(PRICING_HELP)
   process.exit(2)
 }

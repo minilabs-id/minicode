@@ -66,7 +66,7 @@ Did-you-mean: the typo `/sessoons` yields `Did you mean /sessions?` (distance <=
 | `ctrl+a` / `ctrl+e` | Start / end of line. **Since v0.37:** `ctrl+a` maps to the `selectAll` key — with an empty composer and a closed dropdown it selects **every logical transcript row**; with a draft or an open menu it stays `Home` (compatible). `ctrl+e` remains end of line |
 | `delete` / `backspace` | Delete a character (in a filter: trim the query; in `/model` browse: Del = delete a model with confirmation) |
 | `ctrl+r` | Search prompt history (prefix) |
-| `ctrl+j` | New line (multiline; Enter still submits) |
+| `ctrl+j` / `ctrl+enter` | New line (multiline; Enter still submits) |
 | `ctrl+w` | Delete one word before the cursor |
 | `ctrl+u` | Clear the line (in a filter: clear the query) |
 | `ctrl+o` | Removed in v0.34 (used to open the sidebar Live detail modal); unbound |
@@ -104,33 +104,34 @@ tool activity. Wheel scrolls the chat; `PgUp`/`PgDn` and `Home`/`End` act on the
 chat only. The pane shortcuts (`Alt+PgUp/PgDn`, `Ctrl+PgUp/PgDn`, per-pane wheel,
 `Ctrl+O`) are unbound.
 
-## Composer & dropdown (v0.36–v0.37)
+## Composer & dropdown (v0.43+)
 
-- **Composer height is at most 2 rows** (previously up to 5; v0.36 is not
-  revoked). A longer draft uses a **sliding window** that follows the cursor —
-  it adds no rows to the frame and **does not shift the transcript**. The single
-  blank separator row between the composer and the footer remains (I13/I17).
-- **One prompt geometry (v0.37):** `composerWidth()` and `chatWidth()` come from
-  a single source in `src/ui/render/chat-column.ts`. All composer, wrap, cursor
-  `Up`/`Down`, `Home`/`End`, and click-to-move calculations use `composerWidth()`
-  (I14). Its cap is now **progressive**:
-  `min(chatCols, 100 + floor(max(0, chatCols-100)/4))` — `100→100`, `200→125`,
-  `300→150`, `500→200` (replacing the old `min(100, chatWidth())` cap).
-- **Adaptive prefix (v0.37):** `minicode › ` when the content room
-  `w−14 ≥ 24` (i.e. `w ≥ 38`), else `› `; continuation rows use `· `. The old
-  "≥60 columns" threshold is superseded.
-- **Dropdown `/` = overlay inside the same frame** (I19/I1): it does not reduce
-  `viewH`, covers the lower transcript rows, and uses no separate `paintRegion()`.
-  A click in the dropdown area selects a menu item, not a transcript selection.
-  Since v0.37 the dropdown **closes on a busy/abort transition**.
-- **Prompt echo (v0.37):** the echoed user prompt is stored as **one logical row**
-  and wrapped **once** by the projector to the **chat column width**, not the
-  full terminal width — avoiding the double-wrap caused by centred padding.
-
-The older clauses about a composer up to 5 rows, a dropdown that reduced the
-transcript height, the `min(100, chatWidth())` cap, the "≥60 columns" prefix
-threshold, and a cursor following the full `chatWidth()` are archive material
-overridden by v0.36/v0.37 — see the precedence rule in `TERMINAL_CONTRACT.md`.
+- **Thin rounded box & 1–2 dynamic rows:** since v0.43 the composer is framed
+  by a thin rounded box (`╭─╮`/`│ │`/`╰─╯`, or ASCII `+-+`/`|` under
+  `MINICODE_ASCII=1`) with **1–2 dynamic content rows** (default 1 row,
+  expanding automatically to 2 rows when text exceeds 1 line). Longer drafts use
+  a **sliding window** (`Up`/`Down` or mouse wheel, with `↑`/`↓` scroll
+  indicators) — adding no frame rows and **never shifting the transcript**.
+- **One prompt geometry (`contentCols = chatCols - 6`):** `composerWidth()` and
+  `chatWidth()` come from a single source in `src/ui/render/chat-column.ts`.
+  Chat and composer rows receive symmetrical **3-column left + 3-column right**
+  frame padding (`chatCols - 6`), while the composer box text area uses
+  `composerBoxWidth() - 4`. Its cap is progressive:
+  `min(contentCols, 100 + floor(max(0, contentCols-100)/4))`, shared consistently
+  by word-wrap, vertical cursor navigation, mouse clicks, and composer text
+  selection (drag / `Ctrl+A` / `Ctrl+C`; `Ctrl+A` with an empty composer selects
+  the entire transcript).
+- **No inner prefix inside the composer:** the input box renders cleanly
+  without `minicode ›`; echoed prompts in the transcript keep `minicode › `.
+  Multi-line/long pastes collapse into `{paste text N lines}` placeholders and
+  expand on submit/enqueue.
+- **Dropdown `/` and `@mention` = overlay inside the same frame** (I19/I1):
+  does not reduce `viewH`, covers lower transcript rows without a separate
+  `paintRegion()`. Clicking a dropdown item selects it; `Tab` or `Enter`
+  completes `@mention` candidates. The dropdown closes on busy/abort transitions.
+- **Prompt echo:** echoed user prompts are stored as **one logical row** and
+  wrapped **once** by the projector to `contentCols` (`chatCols - 6`), rather
+  than full terminal width — avoiding double-wrap from centred padding.
 
 ## Footer recap & tool activity labels (v0.35)
 
@@ -158,15 +159,16 @@ the user's language (`/lang`, with `MINICODE_LANG` as fallback). So changing
 alone, for consistency across surfaces. The single resolver is
 `src/ui/render/tool-label.ts`.
 
-## Live tool row (v0.43 — amendment to v0.42)
+## Live tool row (v0.43 + v0.51)
 
 The **live** tool activity row (root or child) is transient again, as in
-v0.40.0: it appears while a tool runs, follows the transcript tail, and
-disappears once the tool finishes — with no new committed entry. When the live
-row appears, `total` grows and sticky-tail shifts the window, so history may
-move up. When the live row disappears and `total` shrinks, the window **does not
-shift back**: committed rows keep their on-screen position and the space below
-may be empty.
+v0.40.0: it appears while a tool runs, follows the transcript tail (capped
+adaptively at `max(3, floor(viewH * 0.5))` since v0.51, prioritising
+root/parallel sub-agents with `+N` overflow in the footer), and disappears once
+the tool finishes — with no new committed entry. When the live row appears,
+`total` grows and sticky-tail shifts the window, so history may move up. When
+the live row disappears and `total` shrinks, the window **does not shift back**:
+committed rows keep their on-screen position and the space below may be empty.
 
 The mechanism is a **per-turn `scrollBack` ratchet** — it only ever grows, never
 shrinks — reset on `turn:started`, a new prompt, or `/clear`. The live row is

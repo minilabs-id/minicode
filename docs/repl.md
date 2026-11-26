@@ -1,7 +1,7 @@
 # TUI — Slash & Keyboard (satu tampilan fullscreen)
 
-Ketik `/` di prompt → dropdown polos (tanpa bingkai; `max 8` baris, daftar panjang dipotong tanpa baris `… N more` — baris itu hanya ada di `askLine`/dialog linear). `↑`/`↓`
-navigasi, `Enter` lengkapi + submit, `Esc` tutup. Sejak v0.36 dropdown
+Ketik `/` di prompt (case-insensitive) atau `@` untuk mention file workspace → dropdown polos (tanpa bingkai; `max 8` baris, daftar panjang dipotong tanpa baris `… N more` — baris itu hanya ada di `askLine`/dialog linear). `↑`/`↓`
+navigasi, `Tab` atau `Enter` melengkapi (lalu submit untuk perintah `/` yang lengkap), klik pada item memilih lalu klik ulang pada item terpilih melengkapinya, `Esc` tutup. Sejak v0.36 dropdown
 digambar **overlay di dalam frame `paint()` yang sama** (satu `stdout.write`,
 I1) dan **tidak mengurangi `viewH`** — ia menimpa baris transkrip bawah, bukan
 menggeser transkrip, serta TIDAK memakai `paintRegion()` terpisah (menghindari
@@ -27,9 +27,10 @@ bahasa user (`/lang`).
 | `/provider [sync]` | Kelola provider: popup — picker preset + form (URL/key/scope/timpa), hapus (`d`, menyebut jumlah model yang ikut hilang), ubah (`e`). `sync` = segarkan daftar model semua provider (hanya bilang restart bila benar ada model baru) |
 | `/model [cari]` | Popup semua `provider::model` (argumen = filter awal; di dalam ketik langsung cari live, Ctrl+U clear, Esc keluar filter). Del = hapus (konfirmasi). Enter = pilih + atur thinking effort (`default/low/medium/high`, tersimpan di provider, berlaku sesi berikutnya; Esc = batal total). Effort non-default tampil badge `[low|medium|high]` |
 | `/context [nilai]` | Tabel jendela konteks efektif tiap model + asal angkanya (`manual`/`endpoint`/`katalog`/`models.dev`/`flag`/`default aman`). Dengan argumen: setel untuk model aktif (`128k`, `1m`, `1024x1024`, `auto`) — langsung berlaku turn berikutnya. Detail di [Konfigurasi](config.md) |
-| `/undo [n\|list]` | Undo percakapan **dan** berkas sampai sebelum turn `n` (tanpa argumen: picker terbaru-dulu; `last`: turn terakhir). `Esc Esc` saat composer kosong membuka picker. Sesi lama tetap utuh; prompt target dibuka sebagai draft di sesi cabang. `list` menampilkan nomor turn. Di DISCUSS, undo yang menyentuh berkas ditolak; undo percakapan-saja tetap boleh |
+| `/undo [n\|list]` | Undo percakapan **dan** berkas sampai sebelum turn `n` (tanpa argumen: picker terbaru-dulu; `last`: turn terakhir). Sesi lama tetap utuh; prompt target dibuka sebagai draft di sesi cabang. `list` menampilkan nomor turn. Di DISCUSS, undo yang menyentuh berkas ditolak; undo percakapan-saja tetap boleh |
 | `/redo` | Kembali ke sesi asal setelah `/undo` dan pulihkan workspace ke keadaan sebelum undo; ditolak bila sudah ada turn baru di cabang |
 | `/sessions [id\|history\|branches]` | Tanpa argumen = popup picker resume; `<id>` = langsung resume; `history` = 20 riwayat prompt; `branches` = daftar cabang undo |
+| `/logs` | Tampilkan log error runtime & turn sesi aktif dalam popup |
 | `/status` | Runtime + pemakaian & biaya **kumulatif sesi** |
 | `/mode [discuss\|build\|auto\|ask]` | Tanpa argumen = popup dua sumbu: WorkMode (`discuss`/`build`) + PermissionMode (`auto`/`ask`). WorkMode membatasi cara agent bekerja: `DISCUSS` investigasi/perencanaan read-only (+ artefak rencana), `BUILD` tidak menambah ceiling (identitas internal `EXECUTE`). Nilai invalid ditolak dan mode aktif tidak berubah. Tab/Shift+Tab tetap pintasan cepat. |
 | `/lang [en|id]` | Bahasa UI; tanpa argumen = tampilkan aktif |
@@ -59,17 +60,19 @@ Did-you-mean: typo `/sessoons` → `Did you mean /sessions?` (jarak ≤ 2).
 | `mouse drag` | Select teks transkrip; `Ctrl+C` menyalin selection app-level |
 | `mouse wheel` | Gulir chat (klik/press di area padding diabaikan, drag di-clamp); klik prompt memindahkan kursor. Saat dropdown `/` terbuka, klik/wheel di area dropdown memilih item menu, bukan menggulir transkrip |
 | `home` / `end` | Awal/akhir baris; saat baris kosong tanpa dropdown: bawa chat ke tepi atas/bawah (di picker/manager: lompat atas/bawah daftar) |
-| `←` / `→` | Geser kursor (di form select/confirm: ganti opsi/nilai) |
-| `ctrl+a` / `ctrl+e` | Awal / akhir baris. **Sejak v0.37:** `ctrl+a` = key `selectAll` — bila composer kosong & dropdown tertutup memilih **seluruh baris logis transkrip**; bila ada draft atau menu terbuka ia **tetap Home** (kompatibel). `ctrl+e` tetap akhir baris |
-| `delete` / `backspace` | Hapus karakter (di filter: pangkas query; di /model browse: Del = hapus model dengan konfirmasi) |
-| `ctrl+r` | Cari riwayat prompt (prefix) |
-| `ctrl+j` | Baris baru (multiline; Enter tetap submit) |
-| `ctrl+w` | Hapus satu kata sebelum kursor |
+| `←` / `→` | Geser kursor (melompati token paste `{paste …}` secara atomik; di form select/confirm: ganti opsi/nilai) |
+| `ctrl+←` / `ctrl+→` / `alt+b` / `alt+f` | Lompat per kata (juga melompati token paste secara atomik) |
+| `ctrl+a` / `ctrl+e` | Awal / akhir baris. **Sejak v0.37:** `ctrl+a` = key `selectAll` — bila composer kosong & dropdown tertutup memilih **seluruh baris logis transkrip**; saat composer berisi memblok seluruh teks draft (juga berlaku di form teks). `ctrl+e` tetap akhir baris |
+| `delete` / `backspace` | Hapus karakter atau seluruh token paste secara atomik (di filter: pangkas query; di /model browse: Del = hapus model dengan konfirmasi) |
+| `ctrl+r` | Cari riwayat prompt (substring, tekan berulang untuk siklus kecocokan; `Esc` memulihkan draft awal) |
+| `ctrl+j` / `ctrl+enter` | Baris baru (multiline; Enter tetap submit) |
+| `ctrl+w` / `alt+backspace` | Hapus satu kata (atau token paste) sebelum kursor |
+| `ctrl+k` | Hapus dari kursor sampai akhir baris |
 | `ctrl+u` | Kosongkan baris (di filter: kosongkan query) |
 | `ctrl+o` | Tanpa binding sejak v0.34 (modal detail Live dihapus bersama sidebar) |
 | `ctrl+t` | Tanpa binding (dulu toggle thinking; kini tidak ada aksi) |
-| `esc` | Tutup dropdown/picker; dua-tahap di form (tekan-1 bersihkan field, tekan-2 batal); busy = batalkan turn; idle + composer kosong: dua Esc dalam 500 ms membuka picker `/undo` |
-| `ctrl+c` | Salin selection (TUI), **termasuk saat drag masih aktif** — drag di-finalisasi dulu menjadi seleksi (bukan no-op/abort, sejak v0.37); tanpa selection = no-op. Abort turn pakai `Esc` (`Esc` dua kali dalam 1,5 dtk, atau `Ctrl+D` baris-kosong, saat abort macet) |
+| `esc` | Tutup dropdown/picker atau batalkan seleksi aktif; dua-tahap di form/wizard; saat busy = batalkan turn (`Esc` dua kali dalam 1,5 dtk bila macet; ter-reset otomatis setelah turn selesai); saat `ctrl+r` = pulihkan draft awal |
+| `ctrl+c` | Salin selection (termasuk saat drag aktif) → bila tidak ada selection saat busy: batalkan turn → bila idle & draft berisi: bersihkan draft → bila draft kosong: tampilkan toast hint keluar (`/exit` / `Ctrl+D`) |
 | `paste` (multi-baris) | Bracketed paste aktif sejak v0.37: `?2004h` saat masuk, `?2004l` saat keluar — TUI, `askLine`/`askSecret`, dan output-window. Sequence ditulis **di luar frame** (I1: satu `write` per frame tetap utuh). CR di dalam paste dibaca sebagai newline draft, **bukan submit** — tidak ada submit bertingkat |
 | `ctrl+d` | Keluar saat baris kosong; saat busy baris-kosong = abort turn lalu keluar |
 | `/update` (handoff, v0.41) | Handoff terminal untuk auto-update di TUI: alt-screen dilepas → install → restart dengan `MINICODE_AUTO_UPDATE_DONE=1` → exit. Bila latest/opt-out/gagal terminal di-reacquire & hasil ditampilkan. Non-TTY/one-shot/ACP: "not available", tanpa spawn npm. Kegagalan install menyebut langkah & alasan yang diredaksi (ANSI/token/URL kredensial dibuang, ≤300 char), bukan pesan generik |
@@ -94,28 +97,36 @@ Detail per-tool, rekap `✦`, dan finding `[EVALUATE]` tampil di chat; reasoning
 penuh tetap di jurnal dan bisa ditampilkan sebagai baris `+ thinking` lewat
 `/view thinking`. Notifikasi scheduler/job memakai micro-toast footer.
 
-## Composer & dropdown (v0.36–v0.37)
+## Composer & dropdown (v0.43+)
 
-- **Tinggi composer maksimal 2 baris** (dulu hingga 5; v0.36 tidak dicabut).
-  Draft yang lebih panjang memakai **jendela geser** yang mengikuti kursor —
-  tidak menambah baris di frame dan **tidak menggeser transkrip**. Satu baris
-  kosong pemisah composer–footer tetap ada (I13/I17).
-- **Satu geometri prompt (v0.37):** `composerWidth()` dan `chatWidth()`
-  berasal dari satu sumber di `src/ui/render/chat-column.ts`. Semua perhitungan
-  composer, wrap, kursor `↑`/`↓`, `Home`/`End`, dan klik-untuk-pindah memakai
-  `composerWidth()` (I14). Capnya sekarang **progresif**:
-  `min(chatCols, 100 + floor(max(0, chatCols-100)/4))` — `100→100`, `200→125`,
-  `300→150`, `500→200` (menggantikan cap lama `min(100, chatWidth())`).
-- **Prefix adaptif (v0.37):** `minicode › ` bila ruang isi `w−14 ≥ 24` (yaitu
-  `w ≥ 38`), sebaliknya `› `; baris lanjutan memakai `· `. Ambang lama "≥60
-  kolom" sudah ditimpa.
-- **Dropdown `/` = overlay dalam frame yang sama** (I19/I1): tidak mengurangi
-  `viewH`, menimpa baris transkrip bawah, tanpa `paintRegion()` terpisah. Klik
-  di area dropdown memilih item menu, bukan seleksi transkrip. Sejak v0.37
-  dropdown **ditutup saat transisi busy/abort**.
-- **Echo prompt (v0.37):** gema prompt user disimpan **satu baris logis** dan
-  di-wrap **sekali** oleh proyektor selebar **kolom chat**, bukan lebar terminal
-  penuh — menghindari double-wrap akibat padding centre.
+- **Kotak garis tipis & tinggi dinamis 1–2 baris:** sejak v0.43 composer
+  dibingkai kotak tipis bersudut lengkung (`╭─╮`/`│ │`/`╰─╯`, atau ASCII
+  `+-+`/`|` pada `MINICODE_ASCII=1`) dengan tinggi isi **1–2 baris dinamis**
+  (default 1 baris, otomatis melebar ke 2 baris saat teks > 1 baris). Draft yang
+  lebih panjang memakai **jendela geser** (`↑`/`↓` atau wheel mouse, dengan
+  indikator `↑`/`↓`) — tidak menambah tinggi frame dan **tidak menggeser
+  transkrip**.
+- **Satu geometri prompt (`contentCols = chatCols - 6`):** `composerWidth()`
+  dan `chatWidth()` berasal dari satu sumber di `src/ui/render/chat-column.ts`.
+  Baris chat dan composer mendapat margin simetris **3 kolom kiri + 3 kolom
+  kanan** dari padding frame (`chatCols - 6`), sementara kotak composer memakai
+  lebar isi `composerBoxWidth() - 4`. Capnya progresif:
+  `min(contentCols, 100 + floor(max(0, contentCols-100)/4))` dan dipakai
+  konsisten oleh word-wrap, kursor vertikal, klik mouse, dan seleksi teks
+  composer (drag mouse / `Ctrl+A` / `Ctrl+C`; `Ctrl+A` saat composer kosong
+  memilih seluruh transkrip).
+- **Tanpa prefix di dalam composer:** kotak input tampil bersih tanpa label
+  `minicode ›`; gema prompt user di transkrip tetap memakai `minicode › `.
+  Paste multi-baris/panjang diringkas sebagai `{paste text N lines}` dan
+  diekspansi penuh saat submit/enqueue.
+- **Dropdown `/` dan `@mention` = overlay dalam frame yang sama** (I19/I1):
+  tidak mengurangi `viewH`, menimpa baris transkrip bawah, tanpa
+  `paintRegion()` terpisah. Klik di area dropdown memilih item menu; `Tab` atau
+  `Enter` melengkapi kandidat `@mention`. Dropdown **ditutup saat transisi
+  busy/abort**.
+- **Echo prompt:** gema prompt user disimpan **satu baris logis** dan
+  di-wrap **sekali** oleh proyektor selebar `contentCols` (`chatCols - 6`),
+  bukan lebar terminal penuh — menghindari double-wrap akibat padding centre.
 
 Klausa lama tentang composer hingga 5 baris, dropdown yang mengurangi tinggi
 transkrip, cap `min(100, chatWidth())`, ambang prefix ≥60 kolom, dan kursor yang

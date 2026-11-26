@@ -108,7 +108,7 @@ describe("F1: jendela quit pasca-abort diprogram flag eksplisit", () => {
     await runP
   })
 
-  test("Esc dua kali idle (500ms) tetap membuka /undo setelah disarm", async () => {
+  test("Esc dua kali idle (500ms) tidak memicu /undo tersembunyi setelah disarm", async () => {
     const { boot, releaseSlow, calls } = setup()
     const { runP } = await boot()
     await tty!.send("awal")
@@ -116,18 +116,14 @@ describe("F1: jendela quit pasca-abort diprogram flag eksplisit", () => {
     await new Promise((r) => setTimeout(r, 10))
     await tty!.send(KEY.esc, 60)
     await releaseSlow()
-    // First Esc after abort clears the freshly typed draft (and disarms quit).
     await tty!.send("x")
     await tty!.send(KEY.esc, 90)
     expect(tty!.all()).not.toContain("\x1b[?1049l")
-    // Gesture idle lama tak berubah: dua Esc berikutnya dalam 500ms = /undo.
+    // Esc dua kali idle sekarang aman (tidak menjalankan /undo diam-diam).
     await tty!.send(KEY.esc, 90)
     await tty!.send(KEY.esc, 90)
-    const deadline = Date.now() + 2000
-    while (!calls.includes("/undo") && Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 5))
-    }
-    expect(calls).toContain("/undo")
+    await new Promise((r) => setTimeout(r, 120))
+    expect(calls).toEqual(["awal"])
     await tty!.send(KEY.ctrlD)
     await runP
   })

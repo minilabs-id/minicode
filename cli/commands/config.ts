@@ -36,7 +36,7 @@ const CONFIG_HELP = `minicode config — provider, MCP, and LSP
   minicode config mcp <add|list|remove>    MCP servers used by minicode
   minicode config lsp <add|list|remove>    language servers per extension
 
-  [--allow-local-config] baca .minicode/config.json lokal (default: abaikan)`
+  [--allow-local-config] read local .minicode/config.json (default: ignore)`
 
 const MCP_HELP = `minicode config mcp — MCP servers used by minicode
 
@@ -55,11 +55,13 @@ const LSP_HELP = `minicode config lsp — language servers per file extension
 
   [--global|--local]   save to ~/.minicode (default) or local .minicode/`
 
+const errLog = (msg: string): void => console.error(msg)
+
 /** Cetak help lalu keluar: 0 bila user memang meminta, 2 bila salah pakai
  * (aturan kontrak: gagal runtime = 1). */
 function showHelp(text: string, asked: boolean, unknown?: string): never {
   if (!asked)
-    console.error(`unknown subcommand: ${unknown === undefined ? "" : sanitizeAnsiLine(unknown)}\n`)
+    errLog(`unknown subcommand: ${unknown === undefined ? "" : sanitizeAnsiLine(unknown)}\n`)
   console.log(text)
   process.exit(asked ? 0 : 2)
 }
@@ -74,7 +76,7 @@ function showHelp(text: string, asked: boolean, unknown?: string): never {
  * `never` menjaga alur kontrol (setelahnya unreachable) seperti `process.exit`.
  */
 function usageError(message: string): never {
-  console.error(message)
+  errLog(message)
   process.exit(2)
 }
 
@@ -110,20 +112,30 @@ export async function handleConfig(
   _help: string,
 ): Promise<never> {
   const sub = args[1]
+  const wantHelp = args.includes("--help") || args.includes("-h")
   if (sub === "add") {
+    if (wantHelp) showHelp(CONFIG_HELP, true)
     const baseUrl = getArg("--baseUrl")
     const apiKey = getArg("--apiKey")
     const id = getArg("--id")
     if (!baseUrl || !apiKey) {
       usageError("usage: minicode config add --baseUrl <url> --apiKey <key> [--id <id>]")
     }
-    const entry = await detectAndSave(baseUrl, apiKey, id, {
-      // Default GLOBAL seperti remove/set-key: menulis provider+key ke
-      // .minicode/ repo diam-diam rawan ikut ter-commit plaintext.
-      // Eksplisit --local bila memang mau per-repo.
-      global: !args.includes("--local"),
-      cwd: getArg("--cwd"),
-    })
+    const useLocal = args.includes("--local")
+    let entry: Awaited<ReturnType<typeof detectAndSave>>
+    try {
+      entry = await detectAndSave(baseUrl, apiKey, id, {
+        // Default GLOBAL seperti remove/set-key: menulis provider+key ke
+        // .minicode/ repo diam-diam rawan ikut ter-commit plaintext.
+        // Eksplisit --local bila memang mau per-repo.
+        global: !useLocal,
+        cwd: getArg("--cwd"),
+        allowLocal: useLocal,
+      })
+    } catch (e) {
+      errLog(`failed: ${formatError(e)}`)
+      process.exit(1)
+    }
     console.log(
       `${c.green("ok")} Saved provider "${c.bold(sanitizeAnsiLine(entry.id))}" (${sanitizeAnsiLine(entry.providerHint ?? "?")}) models: ${entry.models
         .slice(0, 5)
@@ -161,16 +173,22 @@ export async function handleConfig(
     }
     process.exit(0)
   } else if (sub === "remove") {
+    if (wantHelp) showHelp(CONFIG_HELP, true)
     const id = positionalArg(args, 2)
     if (!id) {
       usageError("usage: minicode config remove <id> [--global|--local] [--cwd <dir>]")
     }
-    await removeProvider(id, { global: !args.includes("--local"), cwd: getArg("--cwd") })
+    const useGlobal = !args.includes("--local")
+    const cwdArg = getArg("--cwd")
+    const existing = await loadConfig(useGlobal ? undefined : cwdArg, { allowLocal: !useGlobal })
+    const found = existing.providers.some((p) => p.id === id)
+    if (found) await removeProvider(id, { global: useGlobal, cwd: cwdArg })
     console.log(
-      `${c.green("ok")} Removed provider ${sanitizeAnsiLine(id)} (${!args.includes("--local") ? "global" : "local"})`,
+      `${c.green("ok")} Removed provider ${sanitizeAnsiLine(id)} (${useGlobal ? "global" : "local"}${found ? "" : " — was not configured"})`,
     )
     process.exit(0)
   } else if (sub === "context-window") {
+    if (wantHelp) showHelp(CONFIG_HELP, true)
     // Jendela konteks MANUAL untuk model yang providernya tidak melaporkan
     // kapasitas. Tanpa ini satu-satunya jalan adalah mengedit JSON dan menebak
     // angka; salah tebak ke atas = request ditolak 400 di tengah turn, ke bawah
@@ -293,6 +311,7 @@ ${c.bold(`Context windows — ${sanitizeAnsiLine(provider.id)}`)}
     }
     process.exit(0)
   } else if (sub === "set-key" || sub === "delete-key") {
+    if (wantHelp) showHelp(CONFIG_HELP, true)
     // Pindahkan API key provider dari config plaintext ke penyimpanan OS
     // (Windows: DPAPI user-scope; selain itu: berkas chmod 600 + peringatan
     // jujur). Config hanya menyimpan referensi `keystore:provider:<id>`.
@@ -378,6 +397,7 @@ ${c.bold(`Context windows — ${sanitizeAnsiLine(provider.id)}`)}
     process.exit(0)
   } else if (sub === "mcp") {
     const mcpSub = args[2]
+    if (wantHelp) showHelp(MCP_HELP, true)
     if (mcpSub === "add") {
       const id = positionalArg(args, 3)
       const command = getArg("--command")
@@ -472,6 +492,7 @@ ${c.bold(`Context windows — ${sanitizeAnsiLine(provider.id)}`)}
     }
   } else if (sub === "lsp") {
     const lspSub = args[2]
+    if (wantHelp) showHelp(LSP_HELP, true)
     if (lspSub === "add") {
       const ext = positionalArg(args, 3)
       const command = getArg("--command")

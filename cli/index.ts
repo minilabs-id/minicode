@@ -9,8 +9,14 @@ import { resolveSandbox, sandboxRefusalReason } from "../src/policy/sandbox-poli
 import { budgetStatus } from "../src/policy/usage.ts"
 import { VerifyWorkModeConflictError } from "../src/policy/work-mode.ts"
 import { resolveRuntimeMode } from "../src/runtime/production-execution.ts"
+import { SessionBusyError } from "../src/session/authority.ts"
 import { AdoptionRefusedError, parseAdoptTaskArg } from "../src/session/cross-session-adoption.ts"
-import { mintSessionId } from "../src/session/identity.ts"
+import {
+  mintSessionId,
+  SessionAliasError,
+  SessionKeyCollisionError,
+  SessionNotFoundError,
+} from "../src/session/identity.ts"
 import { attachMutationJournal } from "../src/session/journal.ts"
 import { findSkill, renderSkill } from "../src/skills/loader.ts"
 // [PHASE 6X] SATU resolver gate produksi, diimpor langsung supaya call-site
@@ -18,21 +24,23 @@ import { findSkill, renderSkill } from "../src/skills/loader.ts"
 import { GATE_ENABLED, resolveSchedulerGate } from "../src/task/production-scheduler.ts"
 import { writeTrace } from "../src/telemetry/trace.ts"
 import { setSubAgentSessionFactory } from "../src/tools/task.ts"
-import { formatError } from "../src/ui/assistant/simple.ts"
+import { formatError, formatMachineError } from "../src/ui/assistant/simple.ts"
 import { t } from "../src/ui/i18n/locale.ts"
 import { formatUsd } from "../src/ui/render/money.ts"
-import { c } from "../src/ui/render/theme.ts"
+import { c, cErr } from "../src/ui/render/theme.ts"
 import {
   allowLocalConfig,
   displayWorkMode,
   flagsAfterPromptBoundary,
   hasFlag,
+  missingValueFlags,
   parseRuntimeNumericFlags,
   promptFromArgs,
   getArg as rawGetArg,
   readPrompt,
   resolveToolScope,
   resolveWorkModeFlag,
+  unknownFlagsBeforePrompt,
 } from "./args.ts"
 import { buildHelpJson, HELP, readVersion } from "./help.ts"
 import { dispatch } from "./router.ts"
@@ -56,9 +64,13 @@ async function emitDelegateRecoveryLines(
   try {
     const { committedDelegatesSince } = await import("../src/session/journal.ts")
     const { formatDelegateRecoveryLine } = await import("./recovery-warning.ts")
+    const { emitTuiInfoLine } = await import("./tui.ts")
     const done = await committedDelegatesSince(sessionId, cwd, sinceTs)
     for (const d of done) {
-      process.stderr.write(c.yellow(`${formatDelegateRecoveryLine(d)}\n`))
+      const line = formatDelegateRecoveryLine(d)
+      if (!emitTuiInfoLine(line)) {
+        process.stderr.write(cErr.yellow(`${line}\n`))
+      }
     }
     return done.length
   } catch {
@@ -261,6 +273,16 @@ if (args.includes("-h") || args.includes("--help")) {
   process.exit(0)
 }
 
+const missingVals = missingValueFlags(args)
+const unknownFlags = unknownFlagsBeforePrompt(args)
+if (missingVals.length > 0 || unknownFlags.length > 0) {
+  const msgs: string[] = []
+  if (missingVals.length > 0) msgs.push(`${missingVals.join(", ")} requires a value`)
+  if (unknownFlags.length > 0) msgs.push(`unknown option(s): ${unknownFlags.join(", ")}`)
+  console.error(`[error] ${msgs.join("; ")} — run 'minicode --help'`)
+  process.exit(2)
+}
+
 // -- flag parsing --
 const verbose = hasFlag(args, "--verbose")
 const allowAll = hasFlag(args, "--allow-all") || hasFlag(args, "-y")
@@ -422,31 +444,19 @@ try {
     const skill = await findSkill(skillName, cwd, { allowLocal })
     if (skill) {
       effectivePrompt = await renderSkill(skill, skillArgs)
-      console.error(c.dim(`[loaded skill /${skill.name}]`))
+      console.error(cErr.dim(`[loaded skill /${skill.name}]`))
     }
   }
 } catch {}
 
 // -- build session --
-// Session setup (provider/RAG/MCP/session) bisa makan detik (network + spawn)
-// TANPA output — user melihat kursor mati. Bar loading transient TTY-only
-// selama setup, dibersihkan sebelum TUI agar tak ada jejak.
-// Bar berjalan di atas createCliSession — termasuk saat wizard setup pertama
-// (picker gateway + prompt API key) memegang terminal. Lewat paintWrite,
-// lukisannya otomatis BERHENTI selama layar interaktif aktif
-// (statusline.beginInteractiveScreen di openAltScreen): dulu tulis mentah
-// `\r\x1b[2K` menghapus baris prompt wizard, sehingga user baru hanya melihat
-// "Menyiapkan sesi…" tanpa cara menyelesaikan setup (laporan: minicode dari
-// home selalu macet).
-// v7.44: progress startup = SATU baris angka (`start 57%`), bukan LoadingBar
-// berlabel. Baik fase auto-update (di atas) maupun fase sesi memakai format
-// angka yang sama; `createStartupProgress` dari cli/tui.ts menangani sesi.
 const startupProgress = (await import("./tui.ts")).createStartupProgress({
-  resume: Boolean(resumeId || sessionFlag),
+  resume: Boolean(resumeId),
 })
 // finally: createCliSession yang melempar (provider/MCP gagal) tak boleh
 // membocorkan painter — tutup angka progres walau sesi gagal dibuat.
 let ctx: Awaited<ReturnType<typeof createCliSession>>
+let setupOk = false
 try {
   ctx = await createCliSession({
     cwd,
@@ -484,44 +494,37 @@ try {
     // v7.44: angka saja, area sekitar bersih — tidak ada label fase/kalimat.
     onPhase: startupProgress.onPhase,
   })
+  setupOk = true
 } catch (e) {
-  // Tanpa provider = setup gagal sebelum sesi ada. Pesan + exit(1) sama
-  // persis seperti dulu (provider-layer tak lagi exit sendiri agar
-  // exec --json bisa memasang envelope mesinnya — lihat exec.ts).
   if (e instanceof NoProviderError) {
     console.error(e.message)
     process.exit(1)
   }
-  // [P14] Refusal adopsi adalah keputusan kebijakan, bukan crash: tampilkan
-  // satu baris, bukan stack trace. Detail sudah memuat alasan yang bisa
-  // ditindaklanjuti operator (stale, busy, conflict, unresolved relation).
-  // DIGABUNG ke cabang NoProvider di atas (satu writer untuk kelas
-  // "setup menolak, bukan gagal"): menambah penulis kedua hanya untuk satu
-  // format pesan menaikkan inventaris writer tanpa menambah informasi.
-  if (e instanceof AdoptionRefusedError || e instanceof VerifyWorkModeConflictError) {
+  if (
+    e instanceof AdoptionRefusedError ||
+    e instanceof VerifyWorkModeConflictError ||
+    e instanceof SessionNotFoundError ||
+    e instanceof SessionBusyError ||
+    e instanceof SessionAliasError ||
+    e instanceof SessionKeyCollisionError
+  ) {
     console.error(e.message)
     process.exit(e instanceof VerifyWorkModeConflictError ? 2 : 1)
   }
   throw e
 } finally {
-  // Tutup angka progres walau createCliSession melempar (provider/MCP gagal) —
-  // tanpa ini baris `start N%` menggantung tanpa newline.
-  startupProgress.finish()
+  // Hapus baris progres bila setup gagal (tidak palsu "start 100%").
+  if (setupOk) startupProgress.finish()
+  else startupProgress.abort?.()
 }
 
-// Auto-update REPL — dijalankan di sini, BUKAN sebelum createCliSession.
-// Sesi sudah berdiri tetapi runTui belum menerima input pertama: satu-satunya
-// jendela aman untuk install + restart. maybeAutoUpdate memanggil process.exit
-// saat restart (auto-update.ts:140-146); membiarkannya berjalan setelah input
-// pertama akan memotong TUI aktif/turn yang sedang berjalan. Jalur one-shot
-// tetap fire-and-forget di atas (tidak tersentuh).
-// v7.44: format progres dipertahankan persis — `update 33%\r` … `update 100%\n`,
-// hanya angka yang berubah; notice asli didahului `\r\x1b[2K` agar tak menimpa.
 if (enterRepl) {
   let updateStarted = false
   const writeUpdate = (pct: number) => {
-    process.stderr.write(`update ${pct}%\r`)
-    updateStarted = true
+    if (process.stderr.isTTY) {
+      process.stderr.write(`update ${pct}%\r`)
+      updateStarted = true
+    }
   }
   const ctrl = new AbortController()
   const to = setTimeout(() => ctrl.abort(), 1800)
@@ -529,18 +532,22 @@ if (enterRepl) {
     const { maybeAutoUpdate } = await import("./auto-update.ts")
     const { readGlobalInstalledVersion } = await import("../src/policy/update-check.ts")
     await maybeAutoUpdate(readVersion(), ctrl.signal, {
-      // Tidak ada painter transient lagi — tidak perlu stop.
       onLongOp: () => {},
-      // v0.33: verifikasi dari prefix npm global, bukan package.json di samping
-      // modul (bisa cache/transpilasi) — akar "versi tidak cocok" lalu rollback.
+      onBeforeRespawn: async () => {
+        await ctx.close()
+      },
       getInstalledVersion: readGlobalInstalledVersion,
       onPhase: (phase) => {
-        if (phase === "check") writeUpdate(33)
-        else if (phase === "install") writeUpdate(66)
-        else if (phase === "restart") writeUpdate(95)
+        // Timer 1800ms hanya untuk fase check HTTP — cabut begitu install dimulai
+        // supaya batas check tidak meng-abort fase install/verify di tengah jalan.
+        if (phase === "install") {
+          clearTimeout(to)
+          writeUpdate(50)
+        } else if (phase === "restart") {
+          writeUpdate(95)
+        }
       },
       onNotice: (line) => {
-        // Tutup garis progres dulu bila ada, supaya notice tak menimpa angka.
         if (updateStarted) process.stderr.write("\r\x1b[2K")
         process.stderr.write(line)
         updateStarted = false
@@ -548,8 +555,6 @@ if (enterRepl) {
     })
   } catch {}
   clearTimeout(to)
-  // Tutup garis update HANYA bila fase update benar-benar pernah berjalan;
-  // jalur tanpa update (kasus paling umum) tetap nol byte.
   if (updateStarted) process.stderr.write("update 100%\n")
 }
 
@@ -621,18 +626,20 @@ if (enterRepl) {
     const status = budgetStatus(b, u.cost, strict ?? false, u.totalTokens)
     if (status === "over" && u.cost != null && b != null) {
       process.stderr.write(
-        c.red(`[budget] ${formatUsd(u.cost)} > ${formatUsd(b)} - over budget, stopping.\n`),
+        cErr.red(`[budget] ${formatUsd(u.cost)} > ${formatUsd(b)} - over budget, stopping.\n`),
       )
       overBudget = true
     } else if (status === "unknown-strict" && b != null) {
       process.stderr.write(
-        c.red(
+        cErr.red(
           `[budget] cost unknown (model without pricing) with ${u.totalTokens} tokens spent - over budget, stopping.\n`,
         ),
       )
       overBudget = true
     } else if (b != null && u.cost != null && u.cost > b * 0.8)
-      process.stderr.write(c.yellow(`[budget] ${formatUsd(u.cost)} / ${formatUsd(b)} (80% used)\n`))
+      process.stderr.write(
+        cErr.yellow(`[budget] ${formatUsd(u.cost)} / ${formatUsd(b)} (80% used)\n`),
+      )
     // persistCurrent menyimpan pemakaian turn (usage.get()), bukan total sesi.
     await persistCurrent(usage.get(modelRef.current))
     // P2.2: histori yang tak durable = kegagalan jujur (bukan exit 0 diam).
@@ -643,14 +650,14 @@ if (enterRepl) {
       await close()
       process.exit(1)
     }
-    const statusLine = c.muted(
+    const statusLine = cErr.muted(
       `\n  ${u.totalTokens.toLocaleString()} token${u.cost != null ? ` · ${formatUsd(u.cost)}` : ""} · ${session.state.stepCount} langkah · ${Math.round((Date.now() - t0) / 1000)}s`,
     )
     process.stderr.write(`${statusLine}`)
     const mUsed = usage.modelUsed()
     if (mUsed.effective && mUsed.effective !== modelRef.current) {
       process.stderr.write(
-        c.dim(
+        cErr.dim(
           `  (via ${mUsed.provider ?? "?"}/${mUsed.effective} - requested ${modelRef.current})`,
         ),
       )
@@ -680,7 +687,7 @@ if (enterRepl) {
     // Error provider biasanya sudah dirender ramah oleh event handler
     // (takePendingError) — cetak sekali saja, jangan dua blok error.
     const shown = ctx.uiState.takePendingError()
-    process.stderr.write(`\n${c.red("failed")} ${shown ?? formatError(e)}\n`)
+    process.stderr.write(`\n${cErr.red("failed")} ${shown ?? formatError(e)}\n`)
     // Audit #04 P1: sama seperti REPL — turn gagal setelah delegasi
     // committed = efek anak tetap ada. One-shot tak punya retry loop, tapi
     // user yang menjalankan ulang manual butuh peringatan yang sama.
@@ -702,7 +709,7 @@ if (enterRepl) {
       outputTokens: uErr.outputTokens,
       model: usage.modelUsed().effective ?? modelRef.current ?? ctx.effectiveInitialModel,
       ok: false,
-      error: formatError(e),
+      error: formatMachineError(e),
       memoryHits: ctx.memoryHits,
       overBudget: b != null && uErr.cost != null && uErr.cost > b,
     })

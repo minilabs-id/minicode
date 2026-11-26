@@ -8,6 +8,7 @@ import { createDecoderState, createKeyStreamPump } from "../input/prompt-engine.
 import type { HintItem } from "../render/hint.ts"
 import { sanitizeAnsiLine } from "../render/sanitize.ts"
 import { c } from "../render/theme.ts"
+import { tSystem } from "../render/tool-label.ts"
 import { wrapByWidth } from "../render/width.ts"
 import { openAltScreen } from "../runtime/screen.ts"
 import { canRenderModal, type DialogSpec, dialogBox } from "./dialog.ts"
@@ -63,17 +64,17 @@ export function wizardWindowSpec(opts: WizardWindowOptions): DialogSpec {
   })
 }
 
-/** Tunggu tombol tutup (Enter/Esc/Ctrl+C/Ctrl+D) pada dialog error wizard. */
-async function waitForWizardDismiss(renderErr: () => void): Promise<void> {
-  return new Promise<void>((resolve) => {
+/** Tunggu keputusan user pada dialog error wizard (`retry` / `back` / `cancel`). */
+async function waitForWizardDismiss(renderErr: () => void): Promise<"retry" | "back" | "cancel"> {
+  return new Promise<"retry" | "back" | "cancel">((resolve) => {
     let done = false
     let onData!: (chunk: Buffer) => void
     let onResize!: () => void
     const idle = createIdleTimer({
       cancelMs: IDLE_WARN_MS + IDLE_CANCEL_MS,
-      onCancel: () => finish(),
+      onCancel: () => finish("cancel"),
     })
-    const finish = () => {
+    const finish = (choice: "retry" | "back" | "cancel") => {
       if (done) return
       done = true
       idle.dispose()
@@ -89,15 +90,30 @@ async function waitForWizardDismiss(renderErr: () => void): Promise<void> {
       try {
         process.stdin.setRawMode(false)
       } catch {}
-      resolve()
+      resolve(choice)
     }
     const pump = createKeyStreamPump({
       state: createDecoderState(),
       onKeys: (keys) => {
         for (const d of keys) {
-          const k = d.key.type
-          if (k === "enter" || k === "esc" || k === "ctrl-c" || k === "ctrl-d") {
-            finish()
+          const k = d.key
+          if (k.type === "enter") {
+            finish("retry")
+            return true
+          }
+          if (k.type === "char") {
+            const ch = k.ch.toLowerCase()
+            if (ch === "r") {
+              finish("retry")
+              return true
+            }
+            if (ch === "b") {
+              finish("back")
+              return true
+            }
+          }
+          if (k.type === "esc" || k.type === "ctrl-c" || k.type === "ctrl-d") {
+            finish("cancel")
             return true
           }
         }
@@ -110,7 +126,7 @@ async function waitForWizardDismiss(renderErr: () => void): Promise<void> {
       try {
         pump.push(new Uint8Array(chunk))
       } catch {
-        finish()
+        finish("cancel")
       }
     }
     onResize = () => {
@@ -126,7 +142,7 @@ async function waitForWizardDismiss(renderErr: () => void): Promise<void> {
       idle.reset()
       renderErr()
     } catch {
-      finish()
+      finish("cancel")
     }
   })
 }
@@ -149,14 +165,12 @@ function sleepUnref(ms: number): Promise<void> {
 export async function runSetupWizardView(opts: SetupWizardViewOptions): Promise<boolean> {
   if (!process.stdin.isTTY) return false
   const screen = openAltScreen()
-  if (!screen.ok || !canRenderModal(process.stdout.columns || 80, process.stdout.rows || 24)) {
-    try {
-      screen.close()
-    } catch {}
-    return false
-  }
   let exitMsg: string | null = null
   try {
+    if (!screen.ok || !canRenderModal(process.stdout.columns || 80, process.stdout.rows || 24)) {
+      exitMsg = `${tSystem("msg.tooSmall")}\n`
+      return false
+    }
     const CUSTOM = "\u0000custom"
     const items = [
       ...opts.presets.map((p) => ({ name: p.label, provider: "", value: p.baseUrl })),
@@ -183,126 +197,139 @@ export async function runSetupWizardView(opts: SetupWizardViewOptions): Promise<
       return false
     }
 
-    // URL via form dalam popup (validasi inline, bukan gagal saat detect).
-    const urlForm = await runForm(
-      {
-        title: t("wiz.stepUrl"),
-        fields: [
-          {
-            id: "url",
-            label: picked === CUSTOM ? t("wiz.urlLabel") : `${t("wiz.urlLabel")} [${picked}]`,
-            kind: "text",
-            initial: picked === CUSTOM ? "" : (picked as string),
-            validate: (v) => {
-              const val = v.trim() || (picked === CUSTOM ? "" : (picked as string))
-              if (!val) return t("form.required")
-              return validateUrl(val)
-            },
-          },
-        ],
-      },
-      screen,
-    )
-    if (urlForm.cancelled || !urlForm.values) {
-      exitMsg = `${t("wiz.canceled")}\n`
-      return false
-    }
-    const rawUrl = (urlForm.values.url ?? "").trim()
-    const targetUrl = rawUrl || (picked === CUSTOM ? "" : (picked as string))
-    if (!targetUrl) {
-      exitMsg = `${t("wiz.canceled")}\n`
-      return false
-    }
-
-    // Endpoint lokal (Ollama/LM Studio) tidak butuh API key; kirim placeholder
-    // agar header Authorization tetap terbentuk.
-    const lokal = /^(https?:\/\/)(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/.test(targetUrl)
-    let apiKey = "ollama"
-    if (!lokal) {
-      const keyForm = await runForm(
+    let draftUrl = picked === CUSTOM ? "" : (picked as string)
+    let draftKey = ""
+    // Loop langkah 2–3 agar kegagalan deteksi model mengizinkan Retry atau
+    // kembali memperbaiki URL/API key tanpa mengulang wizard dari awal.
+    for (;;) {
+      const urlForm = await runForm(
         {
-          title: t("wiz.stepKey"),
+          title: t("wiz.stepUrl"),
           fields: [
             {
-              id: "key",
-              label: t("wiz.keyLabel", { url: targetUrl }),
-              kind: "secret",
-              validate: (v) => (v.trim() ? null : t("form.required")),
+              id: "url",
+              label: picked === CUSTOM ? t("wiz.urlLabel") : `${t("wiz.urlLabel")} [${picked}]`,
+              kind: "text",
+              initial: draftUrl,
+              validate: (v) => {
+                const val = v.trim() || (picked === CUSTOM ? "" : (picked as string))
+                if (!val) return t("form.required")
+                return validateUrl(val)
+              },
             },
           ],
         },
         screen,
       )
-      if (keyForm.cancelled || !keyForm.values) {
+      if (urlForm.cancelled || !urlForm.values) {
         exitMsg = `${t("wiz.canceled")}\n`
         return false
       }
-      apiKey = (keyForm.values.key ?? "").trim()
-      if (!apiKey) {
-        exitMsg = `${t("wiz.keyLater")}\n`
+      const rawUrl = (urlForm.values.url ?? "").trim()
+      const targetUrl = rawUrl || (picked === CUSTOM ? "" : (picked as string))
+      if (!targetUrl) {
+        exitMsg = `${t("wiz.canceled")}\n`
         return false
       }
-    }
+      draftUrl = targetUrl
 
-    // Progres sebagai baris dalam kotak (bukan spinner liar di bawah popup).
-    // Frame seragam: lebar/tinggi/footer dari windowSpec, judul tetap wiz.title.
-    const box = dialogBox(
-      wizardWindowSpec({
-        body: [c.muted(t("wiz.detecting"))],
-        cols: screen.cols || 80,
-        rows: screen.rows || 24,
-      }),
-      screen.cols,
-      screen.rows,
-    )
-    screen.paintRegion(box.lines, box.topRow)
-    screen.setCursorVisible(false)
-    try {
-      const message = await withTimeout(() => opts.onSubmit(targetUrl, apiKey), 60_000)
-      // Pesan dari jaringan (nama model/gateway) — sanitasi sebelum tampil.
-      screen.clearRegion()
-      // Kotak sukses memakai frame yang SAMA dengan kotak deteksi — salient
-      // untuk transisi status tanpa "lompat lebar" saat pesan tiba.
-      const doneBox = dialogBox(
-        wizardWindowSpec({
-          body: [sanitizeAnsiLine(message), "", t("wiz.done")],
-          cols: screen.cols || 80,
-          rows: screen.rows || 24,
-        }),
-        screen.cols,
-        screen.rows,
-      )
-      screen.paintRegion(doneBox.lines, doneBox.topRow)
-      screen.setCursorVisible(false)
-      await sleepUnref(1200)
-      return true
-    } catch (e) {
-      screen.clearRegion()
-      const errRaw = t("wiz.detectFail", { msg: formatError(e) })
-      const renderErr = () => {
-        // Bungkus memakai lebar isi frame seragam (chrome dialogBox = 4 kolom),
-        // bukan lebar popup lama — kalau tidak, pesan error meluap saat resize.
-        const innerW = Math.max(10, windowWidth(screen.cols || 80) - 4)
-        const wrapped = errRaw
-          .split("\n")
-          .flatMap((line) => (line.trim() ? wrapByWidth(c.error(line), innerW) : [""]))
-        // Esc cancel sudah jadi bagian windowFooter; yang khas langkah ini
-        // hanyalah Enter = tutup, dilewatkan sebagai extraHints.
-        const errBox = dialogBox(
+      // Endpoint lokal (Ollama/LM Studio) tidak butuh API key; kirim placeholder
+      // agar header Authorization tetap terbentuk.
+      const lokal = /^(https?:\/\/)(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/.test(targetUrl)
+      let apiKey = "ollama"
+      if (!lokal) {
+        const keyForm = await runForm(
+          {
+            title: t("wiz.stepKey"),
+            fields: [
+              {
+                id: "key",
+                label: t("wiz.keyLabel", { url: targetUrl }),
+                kind: "secret",
+                initial: draftKey,
+                validate: (v) => (v.trim() ? null : t("form.required")),
+              },
+            ],
+          },
+          screen,
+        )
+        if (keyForm.cancelled || !keyForm.values) {
+          exitMsg = `${t("wiz.canceled")}\n`
+          return false
+        }
+        apiKey = (keyForm.values.key ?? "").trim()
+        if (!apiKey) {
+          exitMsg = `${t("wiz.keyLater")}\n`
+          return false
+        }
+        draftKey = apiKey
+      }
+
+      // Inner loop untuk Retry deteksi langsung dengan URL + key yang sama.
+      let goBack = false
+      for (;;) {
+        const box = dialogBox(
           wizardWindowSpec({
-            body: wrapped,
+            body: [c.muted(t("wiz.detecting"))],
             cols: screen.cols || 80,
             rows: screen.rows || 24,
-            extraHints: [{ key: "Enter", label: t("hint.close") }],
           }),
           screen.cols,
           screen.rows,
         )
-        screen.paintRegion(errBox.lines, errBox.topRow)
+        screen.paintRegion(box.lines, box.topRow)
         screen.setCursorVisible(false)
+        try {
+          const message = await withTimeout(() => opts.onSubmit(targetUrl, apiKey), 60_000)
+          screen.clearRegion()
+          const doneBox = dialogBox(
+            wizardWindowSpec({
+              body: [sanitizeAnsiLine(message), "", t("wiz.done")],
+              cols: screen.cols || 80,
+              rows: screen.rows || 24,
+            }),
+            screen.cols,
+            screen.rows,
+          )
+          screen.paintRegion(doneBox.lines, doneBox.topRow)
+          screen.setCursorVisible(false)
+          await sleepUnref(1200)
+          return true
+        } catch (e) {
+          screen.clearRegion()
+          const errRaw = t("wiz.detectFail", { msg: formatError(e) })
+          const renderErr = () => {
+            const innerW = Math.max(10, windowWidth(screen.cols || 80) - 4)
+            const wrapped = errRaw
+              .split("\n")
+              .flatMap((line) => (line.trim() ? wrapByWidth(c.error(line), innerW) : [""]))
+            const errBox = dialogBox(
+              wizardWindowSpec({
+                body: wrapped,
+                cols: screen.cols || 80,
+                rows: screen.rows || 24,
+                extraHints: [
+                  { key: "r/Enter", label: t("hint.retry") },
+                  { key: "b", label: t("hint.back") },
+                ],
+              }),
+              screen.cols,
+              screen.rows,
+            )
+            screen.paintRegion(errBox.lines, errBox.topRow)
+            screen.setCursorVisible(false)
+          }
+          const action = await waitForWizardDismiss(renderErr)
+          if (action === "retry") continue
+          if (action === "back") {
+            goBack = true
+            break
+          }
+          exitMsg = `${t("wiz.canceled")}\n`
+          return false
+        }
       }
-      await waitForWizardDismiss(renderErr)
-      return false
+      if (goBack) continue
     }
   } finally {
     try {

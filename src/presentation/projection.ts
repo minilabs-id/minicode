@@ -77,6 +77,7 @@ export interface ActivityDescription {
   toolCallId: string
   name: string
   target?: string
+  intent?: string
   status: ToolStatus
   summary?: string
   message?: string
@@ -110,6 +111,7 @@ export interface ActivityLike {
   toolCallId: string
   name?: string
   target?: string
+  intent?: string
   status: ToolStatus
   summary?: string
   durationMs?: number
@@ -135,6 +137,7 @@ export function describeActivity(
     toolCallId: activity.toolCallId,
     name,
     ...(activity.target ? { target: activity.target } : {}),
+    ...(activity.intent ? { intent: activity.intent } : {}),
     status: activity.status,
     ...(activity.summary ? { summary: activity.summary } : {}),
     ...(activity.error ? { message: activity.error.message } : {}),

@@ -98,6 +98,8 @@ function setup(
     getSnapshot?: () => UiPresentationSnapshot | null
     /** Teks submit yang digate slowGate (default "/slow") — dipakai test busy. */
     gateText?: string
+    /** Kandidat autocomplete `@file`. */
+    listFiles?: (query: string) => string[]
   } = {},
 ) {
   const columns = opts.columns ?? 60
@@ -130,6 +132,7 @@ function setup(
         ...(pinnedActivity ? { pinnedActivity } : {}),
       })),
     listCommands: (prefix) => ["/model", "/help", "/exit"].filter((c) => c.startsWith(prefix)),
+    ...(opts.listFiles ? { listFiles: opts.listFiles } : {}),
     submit: async (text) => {
       calls.push(text)
       if (text === "/exit") return { quit: true }
@@ -200,19 +203,14 @@ async function waitForCall(calls: string[], text: string, timeoutMs = 2000): Pro
 }
 
 describe("TuiApp", () => {
-  test("Esc Esc idle membuka undo tanpa menambah command; mengetik membatalkan gesture", async () => {
+  test("Esc Esc idle aman (tidak memicu /undo tersembunyi)", async () => {
     const { app, calls } = setup()
     const runP = app.run()
     await tty!.ready()
     await tty!.send(KEY.esc, 90)
+    await tty!.send(KEY.esc, 90)
+    await new Promise((r) => setTimeout(r, 80))
     expect(calls).toEqual([])
-    await tty!.send("x")
-    await tty!.send(KEY.esc, 90)
-    await tty!.send(KEY.esc, 90)
-    expect(calls).toEqual([])
-    await tty!.send(KEY.esc, 90)
-    await waitForCall(calls, "/undo")
-    expect(calls).toEqual(["/undo"])
     app.requestQuit()
     await runP
   })
@@ -1343,10 +1341,7 @@ describe("TuiApp", () => {
     await runP
     expect(tty!.all()).toContain("\x1b[?1049l")
   })
-  test("H4: turn abort selesai cepat → Esc kedua tetap quit, bukan /undo", async () => {
-    // Gagal-di-kode-lama: requestAbort() early-return saat !isBusy(), jadi Esc
-    // kedua jatuh ke cabang idle dan tak pernah mengakhiri sesi (bisa memicu
-    // gesture /undo). Jendela 1.5 dtk harus dicek SEBELUM split busy/idle.
+  test("H4: turn abort selesai cepat → jendela Esc quit otomatis mati saat turn selesai (tidak salah quit)", async () => {
     const { app, calls, releaseSlow } = setup()
     const runP = app.run()
     await tty!.ready()
@@ -1354,33 +1349,38 @@ describe("TuiApp", () => {
     await tty!.send("/slow")
     await tty!.send(KEY.enter)
     await waitForCall(calls, "/slow")
-    // Esc pertama mengirim abort.
     await tty!.send(KEY.esc, 90)
-    // Turn selesai LEBIH CEPAT dari jari user menekan Esc kedua.
     await releaseSlow()
-    await new Promise((r) => setTimeout(r, 20))
-    // Esc kedua masih dalam jendela abort → quit.
+    await new Promise((r) => setTimeout(r, 30))
     await tty!.send(KEY.esc, 90)
+    await new Promise((r) => setTimeout(r, 60))
+    expect(tty!.all()).not.toContain("\x1b[?1049l")
+    expect(calls).toEqual(["/slow"])
+    app.requestQuit()
     await runP
-    expect(tty!.all()).toContain("\x1b[?1049l")
-    expect(calls).toEqual(["/slow"]) // tak ada /undo yang ikut terkirim
   })
-  test("busy + Ctrl+C diabaikan; Esc yang abort", async () => {
-    const { app, calls, screenText } = setup()
+  test("busy + Ctrl+C tanpa seleksi langsung abort turn; idle Ctrl+C membersihkan draft atau beri hint keluar", async () => {
+    const { app, calls, releaseSlow, screenText } = setup()
     const runP = app.run()
     await tty!.ready()
     await tty!.waitForOutput((o) => o.includes("00.00.00"))
+    // Idle dengan draft → Ctrl+C membersihkan draft
+    await tty!.send("draft")
+    expect(screenText()).toContain("draft")
+    await tty!.send(KEY.ctrlC, 90)
+    expect(screenText()).not.toContain("draft")
+    // Idle kosong → Ctrl+C tampilkan hint keluar tanpa abort/quit
+    await tty!.send(KEY.ctrlC, 90)
+    await tty!.waitForScreen((f) => f.join("\n").includes(tSystem("msg.quitHint")))
+    // Busy → Ctrl+C mengirim abort
     await tty!.send("/slow")
     await tty!.send(KEY.enter)
     await waitForCall(calls, "/slow")
     await tty!.send(KEY.ctrlC, 90)
-    expect(screenText()).not.toContain(tSystem("msg.abortedHint"))
-    await tty!.send(KEY.esc, 90)
-    expect(screenText()).toContain(tSystem("msg.abortedHint"))
-    expect(screenText()).not.toMatch(/\b(Working|Thinking|Running|Stopping)\b/)
-    await tty!.send(KEY.esc, 90)
+    await tty!.waitForScreen((f) => f.join("\n").includes(tSystem("msg.cancelling")))
+    await releaseSlow()
+    app.requestQuit()
     await runP
-    expect(tty!.all()).toContain("\x1b[?1049l")
   })
 
   test("terminal 40 kolom: hint abort dipotong bila perlu, frame tetap <= cols", async () => {
@@ -1479,6 +1479,8 @@ describe("TuiApp", () => {
     bus.emit("turn:completed", {})
     await tty!.waitForScreen((frame) => frame.some((line) => line.includes("new · PgDn")))
     expect(screenText()).toContain("PgDn")
+    // Timer tetap terlihat berdampingan di footer (tidak ditimpa indikator scroll).
+    expect(screenText()).toContain("00.00.00")
     // Ketikan baru kembali ke ekor + indikator hilang.
     await tty!.send("y")
     expect(screenText()).not.toContain("new · PgDn")
@@ -2348,10 +2350,12 @@ describe("TuiApp", () => {
       transcript.push(`NARASI-${i}`, { kind: "assistant" })
       app.repaint()
     }
+    // v0.51: tail live adaptif max(3, floor(viewH * 0.5)) → pada viewH=10 kap = 5,
+    // jadi 20 live tetap menyisakan separuh viewport untuk narasi committed.
     expect(activities).toHaveLength(20)
     expect(narVisible()).toBe(true) // narasi tetap tampil walau live aktif
     expect(liveRows().length).toBeGreaterThan(0) // minimal satu baris live tampil
-    expect(liveRows().length).toBeLessThanOrEqual(3) // ...tapi paling banyak 3
+    expect(liveRows().length).toBeLessThanOrEqual(5) // ...dibatasi adaptif 50% viewport
     expect(transcript.total()).toBeGreaterThan(0) // narasi tetap tersimpan
     expect(composerRow()).toBe(compBefore)
     expect(height()).toBe(heightBefore)
@@ -2456,7 +2460,7 @@ describe("TuiApp", () => {
     await tty!.ready()
     await tty!.waitForScreen((f) => f.some((l) => l.includes("NAR-11")))
 
-    // Empat aktivitas live → tail dipotong jadi 3 baris → floor = 12 + 3 - 10 = 5 (viewH=10).
+    // Empat aktivitas live → viewH=10 (kap adaptif 5), jadi ke-4 tampil → floor = 12 + 4 - 10 = 6.
     activities = [
       liveActivity("call-1"),
       liveActivity("call-2"),
@@ -2466,19 +2470,19 @@ describe("TuiApp", () => {
     app.repaint()
     activities = []
     app.repaint()
-    // Terkunci di 5: NAR-05 jadi baris pertama yang terlihat.
-    expect(tty!.screen().findIndex((l) => l.includes("NAR-05"))).toBe(0)
+    // Terkunci di 6: NAR-06 jadi baris pertama yang terlihat.
+    expect(tty!.screen().findIndex((l) => l.includes("NAR-06"))).toBe(0)
 
     // Prompt baru: doSubmit me-reset floor. Gema panjang menambah 5 baris
-    // (blank + 3 baris wrap + blank) → maxBack = 17 - 10 = 7 > floor lama 5.
-    // Tanpa reset jendela tetap di 5 dan NAR-05 masih tampil; dengan reset
-    // followTail() menggeser ke ekor (7) sehingga NAR-05 hilang.
+    // (blank + 3 baris wrap + blank) → maxBack = 17 - 10 = 7 > floor lama 6.
+    // Tanpa reset jendela tetap di 6 dan NAR-06 masih tampil; dengan reset
+    // followTail() menggeser ke ekor (7) sehingga NAR-06 hilang.
     const prompt = `baru ${"x".repeat(100)}`
     await tty!.send(prompt)
     await tty!.send(KEY.enter)
     await waitForCall(calls, prompt)
     await new Promise((r) => setTimeout(r, 20))
-    expect(tty!.screen().findIndex((l) => l.includes("NAR-05"))).toBe(-1)
+    expect(tty!.screen().findIndex((l) => l.includes("NAR-06"))).toBe(-1)
     expect(screenText()).toContain("baru")
 
     await tty!.send(KEY.ctrlD)
@@ -2712,5 +2716,49 @@ describe("TUI: slash command ditunda sampai turn selesai", () => {
       await tty!.send(KEY.ctrlD)
       await runP
     }
+  })
+})
+
+describe("Ctrl+R interactive history search & paste Ctrl+W", () => {
+  test("Ctrl+R mencocokkan substring mundur dan Esc memulihkan draft awal", async () => {
+    const { app, calls, screenText } = setup()
+    const runP = app.run()
+    await tty!.ready()
+    await tty!.send("refactor auth service")
+    await tty!.send(KEY.enter)
+    await waitForCall(calls, "refactor auth service")
+    await tty!.send("fix billing endpoint")
+    await tty!.send(KEY.enter)
+    await waitForCall(calls, "fix billing endpoint")
+    await tty!.send("check auth middleware")
+    await tty!.send(KEY.enter)
+    await waitForCall(calls, "check auth middleware")
+
+    await tty!.send("auth")
+    await tty!.send("\x12")
+    await tty!.waitForScreen((f) => f.join("\n").includes("check auth middleware"))
+    await tty!.send("\x12")
+    await tty!.waitForScreen((f) => f.join("\n").includes("refactor auth service"))
+    await tty!.send(KEY.esc, 90)
+    await tty!.waitForScreen((f) => f.slice(-5).some((line) => line.includes("│ auth")))
+    expect(screenText().split("\n").slice(-5).join("\n")).not.toContain("refactor auth service")
+    app.requestQuit()
+    await runP
+  })
+
+  test("autocomplete @mention menampilkan file dan Tab hanya mengganti token @query", async () => {
+    const files = ["src/app.ts", "src/auth.ts", "README.md"]
+    const { app, screenText } = setup({
+      listFiles: (q) => files.filter((f) => f.toLowerCase().includes(q.toLowerCase())),
+    })
+    const runP = app.run()
+    await tty!.ready()
+    await tty!.send("tolong cek @ap")
+    await tty!.waitForScreen((f) => f.join("\n").includes("@src/app.ts"))
+    await tty!.send(KEY.tab, 60)
+    await tty!.waitForScreen((f) => f.some((l) => l.includes("tolong cek @src/app.ts")))
+    expect(screenText()).not.toContain("@src/auth.ts")
+    app.requestQuit()
+    await runP
   })
 })

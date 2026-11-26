@@ -44,10 +44,10 @@ Subcommands are routed in `cli/router.ts` (`stats`, `sessions`, `mcp`, `config`,
 | `--budget <usd>` | Session cost cap; warn at 80%, exit/break when exceeded; unknown cost + usage = over (fail-closed default) |
 | `--budget-strict` | Explicit fail-closed assertion on top of the above (back-compat) |
 | `--tool-scope <s>` | `full` (default) \| `explore` = read-only subset of 12 tools |
-| `--plan` | **Deprecated** — alias for `--work-mode PLAN` (read-only planning) |
+| `--plan` | **Deprecated** — alias for `--work-mode DISCUSS` (read-only planning) |
 | `--allowlist` | Bash safe commands only (legacy tool-access policy) |
 | `--ask` | Request approval for gated calls (human-supervised) |
-| `--allow-all` | Privileged access profile (path jail + bash-guard still active) |
+| `-y, --allow-all` | Privileged access profile (path jail + bash-guard still active) |
 | `--model <name>` | Override the model (`providerId::model` forces a provider) |
 | `--provider <id>` | Force an agnostic provider id |
 | `--resume <id>` | Continue stored history; after compaction, older parts may be a summary + tail |
@@ -57,7 +57,7 @@ Subcommands are routed in `cli/router.ts` (`stats`, `sessions`, `mcp`, `config`,
 | `--max-steps <n>` | Tool step limit (default 200; 50 is the sub-agent cap, not the global default) |
 | `--context-window <n>` | Context window size (tokens) |
 | `--session <id>` | Session ID (random by default, sanitised) |
-| `--work-mode <m>` | `DISCUSS` \| `BUILD` (default: `DISCUSS`). **Work Mode**: `DISCUSS` = read-only investigation & planning, `BUILD` = implementation. Approval is only `AUTO`/`ASK` (default `AUTO`). See [TUI](repl.md) for `/mode` |
+| `--work-mode <m>` | `DISCUSS` \| `BUILD` (default: `DISCUSS`; alias `--mode <m>`). **Work Mode**: `DISCUSS` = read-only investigation & planning, `BUILD` = implementation. Approval is only `AUTO`/`ASK` (default `AUTO`). See [TUI](repl.md) for `/mode` |
 | `--enable-scheduler` | Opt-in autonomous scheduler (default **off**). Without this flag the scheduler is not built at all and `/scheduler` answers "not enabled". Execution is manual only via `/scheduler run` — no timers; autonomous turns are read-only. See `/scheduler status` and `/scheduler stop` |
 | `--runtime <mode>` | `off` (default) \| `constructed` \| `owned`. Execution architecture: `off` = current behaviour, unchanged; `constructed` = runtime + durable journal built, turns still run the old path; `owned` = every turn is admitted through the runtime (kernel + durable journal) and a rejected admission runs nothing. Unknown value = `off` |
 
@@ -72,7 +72,7 @@ after the system prompt, tools, and history are counted.
 
 In the TUI, **Tab** cycles Work Mode (`Discuss` -> `Build`) and **Shift+Tab** toggles Permission Mode (`Auto` <-> `Ask`). `/mode auto|ask` changes approval; `/mode discuss|build` changes the operating mode. The footer shows Work Mode on the left and Permission Mode in cyan on the right, near context usage; on narrow terminals the labels are condensed.
 
-Since v0.34 the right sidebar is gone: the chat is a centred middle column (at most 50% of terminal width, footer/composer centred with it). Tool lines, the `✦` aggregate, findings, and the `+ thinking` marker live in the chat; the old pane shortcuts (`Alt/Ctrl+PgUp/PgDn`, `Ctrl+O`) are unbound. Since v0.37 bracketed paste is active, `Ctrl+A` = select-all with an empty composer and closed dropdown (else `Home`), `Ctrl+C` copies even while a drag is active, resize stabilises auto-scroll/drag/cursor/anchor, and the prompt cap is progressive `min(chatCols, 100 + floor(max(0, chatCols-100)/4))` (the 2-row composer stays). Since v0.41 the `/update` slash command exists only in the interactive TUI; non-TTY/one-shot/`exec`/pipe/ACP answer "not available" without spawning npm. The shortcuts that remain are listed in [TUI — Slash Commands & Keyboard](repl.md).
+Since v0.34 the right sidebar is gone: the chat is a centred middle column (at most 50% of terminal width, footer/composer centred with it). Tool lines, the `✦` aggregate, findings, and the `+ thinking` marker live in the chat; the old pane shortcuts (`Alt/Ctrl+PgUp/PgDn`, `Ctrl+O`) are unbound. Since v0.43/v0.51 chat and composer share symmetrical 3-column left/right frame padding (`chatCols - 6`), the composer is a rounded thin-line box of **1–2 dynamic rows** without an inner prefix (scrollable when >2 rows, compact `{paste text N lines}` placeholders, composer drag/`Ctrl+A`/`Ctrl+C` selection, and word-wrap), `Ctrl+A` selects all transcript rows when the composer is empty and menus are closed (else composer/Home), `Ctrl+C` copies even while a drag is active, resize stabilises auto-scroll/drag/cursor/anchor, live tool rows adapt to `max(3, floor(viewH * 0.5))` with human intent/auto labels, and the prompt cap is progressive `min(contentCols, 100 + floor(max(0, contentCols-100)/4))`. Since v0.41 the `/update` slash command exists only in the interactive TUI; non-TTY/one-shot/`exec`/pipe/ACP answer "not available" without spawning npm. The shortcuts that remain are listed in [TUI — Slash Commands & Keyboard](repl.md).
 
 ## When to use what
 

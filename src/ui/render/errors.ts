@@ -305,7 +305,9 @@ function classifyGenericError(safeText: string): FriendlyError | null {
     lower.includes("ehostunreach") ||
     lower.includes("enetunreach") ||
     lower.includes("connection refused") ||
-    /\brefused\b/.test(lower) ||
+    /\b(?:connection|koneksi|socket|tcp|tls|connect)\s+refused\b|\brefused\s+(?:to\s+connect|connection)\b/.test(
+      lower,
+    ) ||
     lower.includes("network") ||
     lower.includes("fetch failed") ||
     lower.includes("socket hang up")
@@ -407,8 +409,8 @@ export function friendlyError(raw: string): FriendlyError {
  * bukan narasi percakapan. Semua cabang (termasuk target tak terpercaya)
  * tetap lewat redaksi → sanitasi → potong per kolom.
  *
- * v0.43: 13 pola dikenali (4 lama + sub-agent + 8 baru). Presedensi
- * `duplicate → subagent → guard → exit → EIO → 8 pola baru → fallback`
+ * v0.43+: 21 pola dikenali (6 jalur presedensi + 15 pola kanonik). Presedensi
+ * `duplicate → subagent → guard → shellQuoting → exit → EIO → 15 pola → fallback`
  * disengaja: ringkasan child bisa memuat `exit N`, jadi sub-agent harus
  * menang lebih dulu; guard internal mengalahkan `permission denied`.
  */
@@ -461,6 +463,10 @@ const TOOL_ERROR_PATTERNS = [
   {
     re: /^file not found\b|\bENOENT\b|\bnot found in\b|\bsource not found\b|\bcwd not found\b|\bjob "[^"]*" not found\b|\bnot found$/i,
     key: "msg.targetNotFound",
+  },
+  {
+    re: /\b(?:service|server|api|endpoint|upstream)\s+(?:is\s+)?unavailable\b|\btemporarily unavailable\b/i,
+    key: "msg.requestFailed",
   },
   {
     re: /\bno provider for sub[- ]?agent\b|\bnot configured\b|\bunavailable\b|\brefusing direct execution\b|\brequires MINICODE_SANDBOX\b/i,
@@ -533,6 +539,94 @@ export function friendlyToolErrorCanonical(message: string, target?: string): st
   const canonical = canonicalToolError(message, target)
   if (canonical === undefined) return ""
   return truncateToWidth(sanitizeAnsiLine(redactSecrets(canonical)), 120, "…")
+}
+
+const CANONICAL_TAG_BY_KEY: Readonly<
+  Record<
+    string,
+    | "tag.toolNotFound"
+    | "tag.permission"
+    | "tag.invalidArgs"
+    | "tag.timeout"
+    | "tag.planSync"
+    | "tag.editMismatch"
+    | "tag.targetNotFound"
+    | "tag.notConfigured"
+    | "tag.requestFailed"
+    | "tag.cancelled"
+    | "tag.fsAccess"
+    | "tag.network"
+    | "tag.parse"
+    | "tag.git"
+    | "tag.integration"
+  >
+> = {
+  "msg.toolNotFound": "tag.toolNotFound",
+  "msg.permissionDenied": "tag.permission",
+  "msg.invalidArgs": "tag.invalidArgs",
+  "msg.toolTimeout": "tag.timeout",
+  "msg.planSyncFailed": "tag.planSync",
+  "msg.editMismatch": "tag.editMismatch",
+  "msg.targetNotFound": "tag.targetNotFound",
+  "msg.notConfigured": "tag.notConfigured",
+  "msg.requestFailed": "tag.requestFailed",
+  "msg.cancelled": "tag.cancelled",
+  "msg.fsAccess": "tag.fsAccess",
+  "msg.networkTool": "tag.network",
+  "msg.parseError": "tag.parse",
+  "msg.gitError": "tag.git",
+  "msg.integrationError": "tag.integration",
+}
+
+/**
+ * Tag penyebab super-ringkas (1–3 kata) untuk disandingkan dengan label
+ * manusiawi saat tool gagal — tanpa membocorkan raw JSON/credential.
+ */
+export function friendlyToolFailureTag(message: string): string {
+  const raw = String(message ?? "")
+  if (!raw.trim()) return ""
+  if (TOOL_DUPLICATE_RE.test(raw)) return tSystem("tag.duplicate")
+  if (TOOL_SUBAGENT_RE.test(raw) && !TOOL_NO_PROVIDER_SUBAGENT_RE.test(raw)) {
+    const lower = raw.toLowerCase()
+    if (lower.includes("context window") || lower.includes("context length")) {
+      return tSystem("tag.contextFull")
+    }
+    if (lower.includes("aborted") || lower.includes("cancelled")) return tSystem("tag.aborted")
+    if (lower.includes("timed out") || lower.includes("timeout")) return tSystem("tag.timeout")
+    return tSystem("tag.subagent")
+  }
+  if (/LOOP_GUARD/i.test(raw)) return tSystem("tag.loopGuard")
+  if (TOOL_GUARD_RE.test(raw)) return tSystem("tag.guard")
+  if (TOOL_SHELL_QUOTING_RE.test(raw)) return tSystem("tag.shellQuoting")
+  if (TOOL_EXIT_RE.test(raw) && !TOOL_ZERO_EXIT_RE.test(raw)) {
+    const m = /\bexit(?:\s+code)?\s+([+-]?\d+)\b/i.exec(raw)
+    return m?.[1] ? tSystem("tag.exit", { code: m[1] }) : ""
+  }
+  if (TOOL_EIO_RE.test(raw)) return tSystem("tag.readError")
+  if (/\brate limited\b|\b429\b/i.test(raw)) return tSystem("tag.rateLimit")
+  const matched = TOOL_ERROR_PATTERNS.find(({ re }) => re.test(raw))
+  if (!matched) return ""
+  const tagKey = CANONICAL_TAG_BY_KEY[matched.key]
+  return tagKey ? tSystem(tagKey) : ""
+}
+
+/**
+ * Format kegagalan berbasis label manusiawi: `"<label> mengalami kegagalan"`
+ * plus tag penyebab singkat bila dikenali (tetap lewat redaksi & sanitasi).
+ */
+export function formatLabeledToolFailure(
+  intent: string,
+  rawMessage?: string,
+  denyReason?: string,
+): string {
+  const cleanLabel = truncateToWidth(sanitizeAnsiLine(redactSecrets(intent)).trim(), 72, "…")
+  const base = tSystem("msg.intentFailed", { label: cleanLabel })
+  const firstLine = String(rawMessage ?? "").split(/[\r\n]/)[0] ?? ""
+  const tag =
+    friendlyToolFailureTag(firstLine) ||
+    (denyReason ? truncateToWidth(sanitizeAnsiLine(redactSecrets(denyReason)).trim(), 32, "…") : "")
+  const line = tag ? `${base} (${tag})` : base
+  return truncateToWidth(sanitizeAnsiLine(redactSecrets(line)), 120, "…")
 }
 
 export function friendlyToolError(message: string, target?: string): string {

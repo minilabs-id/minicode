@@ -127,9 +127,32 @@ describe("child recap: guard fire", () => {
     expect(shouldFireChildRecap(idle(tracker, { aborted: true }))).toBe(false)
     expect(shouldFireChildRecap(idle(tracker, { suspended: true }))).toBe(false)
     expect(shouldFireChildRecap(idle(tracker, { queuedCount: 2 }))).toBe(false)
+    expect(shouldFireChildRecap(idle(tracker, { parentNarrated: true }))).toBe(false)
     // Semua guard gagal tapi data tetap tertahan untuk turn berikutnya.
     expect(tracker.pendingCount).toBe(1)
     expect(shouldFireChildRecap(idle(tracker))).toBe(true)
+  })
+
+  test("narasi induk pasca-delegasi menekan recap, tetapi preamble pra-delegasi tidak", () => {
+    const tracker = createChildRecapTracker(true)
+    tracker.noteStarted("c1", "delegate_task")
+    // Teks sebelum anak selesai (preamble) tidak memblokir recap bila setelahnya diam.
+    tracker.noteParentNarration()
+    expect(tracker.noteCompleted("c1", "hasil c1")).toBe(true)
+    expect(tracker.parentNarrated).toBe(false)
+    expect(shouldFireChildRecap(idle(tracker, { parentNarrated: tracker.parentNarrated }))).toBe(
+      true,
+    )
+
+    // Teks induk SETELAH anak selesai menandai sudah dirangkum → tidak perlu Turn 2.
+    tracker.noteParentNarration()
+    expect(tracker.parentNarrated).toBe(true)
+    expect(shouldFireChildRecap(idle(tracker, { parentNarrated: tracker.parentNarrated }))).toBe(
+      false,
+    )
+    tracker.clear()
+    expect(tracker.pendingCount).toBe(0)
+    expect(tracker.parentNarrated).toBe(false)
   })
 
   test("MINICODE_AUTORESUME_CHILD=0 → nonaktif, tak mengumpulkan & tak fire", () => {
@@ -388,6 +411,59 @@ test("integrasi: induk abort setelah anak selesai → recap tak bocor ke turn be
     await waitFor(() => h.submitted.length === 2, "turn 2 mulai")
     expect(h.submitted[1]).toBe("turn-2")
     expect(h.submitted[1]).not.toContain("sub-agent")
+  } finally {
+    h.release()
+    await tty.send(KEY.ctrlD)
+    await runP
+  }
+})
+
+test("integrasi: induk sudah menjawab setelah delegate_task → tidak memicu Turn 2 redundan", async () => {
+  const h = integrationHarness()
+  const runP = runTui(h.session)
+  tty = installFakeTty({ columns: 80, rows: 24 })
+  try {
+    await tty.ready()
+    await tty.waitForOutput((o) => o.includes("00.00.00"))
+    await tty.send("audit code")
+    await tty.send(KEY.enter)
+    await waitFor(() => h.submitted.length === 1, "turn 1 mulai")
+
+    h.emit({
+      type: "tool.started",
+      toolCallId: "c1",
+      stepId: 1,
+      identity: { origin: "builtin", name: "delegate_task", qualified: "delegate_task" },
+      argsSummary: { text: "" },
+    })
+    h.emit({
+      type: "tool.completed",
+      toolCallId: "c1",
+      durationMs: 1,
+      summary: "Audit selesai",
+      expandRef: { toolCallId: "c1", idx: 0 },
+    })
+    // Induk menerbitkan jawaban penuh di Turn 1 setelah delegate_task selesai.
+    ;(h.session.session.events as unknown as { emit(type: string, ev: unknown): void }).emit(
+      "provider:text",
+      {
+        type: "provider:text",
+        text: "Berikut laporan audit lengkap dari 3 sub-agent.",
+      },
+    )
+
+    h.release()
+    await waitFor(() => h.resets === 1, "turn 1 selesai")
+    await new Promise((r) => setTimeout(r, 30))
+    // Tidak boleh menembak Turn 2 recap.
+    expect(h.submitted.length).toBe(1)
+
+    // Turn user berikutnya tetap bersih, bukan membawa pending Turn 1.
+    await tty.send("lanjut")
+    await tty.send(KEY.enter)
+    await waitFor(() => h.submitted.length === 2, "turn user berikutnya mulai")
+    expect(h.submitted[1]).toBe("lanjut")
+    h.release()
   } finally {
     h.release()
     await tty.send(KEY.ctrlD)

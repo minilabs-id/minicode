@@ -87,4 +87,38 @@ describe("eskalasi jendela: dipicu hanya oleh overflow konteks", () => {
     await s.run("halo", {}).catch(() => undefined)
     expect(escalations).toHaveLength(0)
   }, 20000)
+
+  test("400 overflow jauh di bawah config 1M melakukan clamp turun (bukan naik 2M)", async () => {
+    const { toolCall } = await import("#minicore/test/fakes.ts")
+    const p = new FakeProvider([
+      { events: [toolCall("bigread", {}, "c1"), finish("tool_calls")] },
+      { error: new ProviderError("invalid_request", "prompt is too long: max 64k") },
+      { events: [text("pulih"), finish("stop")] },
+    ])
+    const escalations: Escalation[] = []
+    const clamped: Escalation[] = []
+    const s = await createMinicodeSession({
+      provider: p,
+      cwd: mkdtempSync(join(tmpdir(), "mc-clamp-")),
+      contextWindowTokens: 1_000_000,
+      keepRecentTurns: 0,
+      tools: [
+        {
+          name: "bigread",
+          description: "read large chunk",
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+          execute: async () => "z".repeat(240_000),
+        },
+      ],
+      onContextWindowEscalated: (info) => escalations.push(info),
+      onContextWindowClamped: (info) => clamped.push(info),
+    })
+    const res = await s.run("audit repo", {})
+    expect(escalations).toHaveLength(0)
+    expect(clamped.length).toBeGreaterThan(0)
+    expect(clamped[0]!.fromTokens).toBe(1_000_000)
+    expect(clamped[0]!.toTokens).toBeLessThan(70_000)
+    expect(clamped[0]!.toTokens).toBeGreaterThanOrEqual(8_192)
+    expect(res.finalText).toBe("pulih")
+  }, 20000)
 })

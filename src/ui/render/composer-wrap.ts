@@ -310,6 +310,27 @@ export interface PasteTokenMatch {
   token: string
 }
 
+/** Cari seluruh token paste `{paste ...}` beserta rentang UTF-16 dan grapheme-nya. */
+export function findPasteTokenSpans(
+  line: string,
+  pastes: ReadonlyMap<string, string>,
+): PasteTokenMatch[] {
+  if (!pastes.size || !line) return []
+  const re = pasteTokenRegex(pastes.keys())
+  if (!re) return []
+  const out: PasteTokenMatch[] = []
+  for (const match of line.matchAll(re)) {
+    const token = match[0]
+    const utfStart = match.index ?? -1
+    if (utfStart < 0) continue
+    const utfEnd = utfStart + token.length
+    const gStart = segmentGraphemes(line.slice(0, utfStart)).length
+    const gEnd = gStart + segmentGraphemes(token).length
+    out.push({ utfStart, utfEnd, gStart, gEnd, token })
+  }
+  return out
+}
+
 /**
  * Cari token placeholder paste yang terkena Backspace (tepat di kanan atau di
  * dalam token) atau Delete (tepat di kiri atau di dalam token) agar terhapus
@@ -321,19 +342,77 @@ export function findPasteTokenAtCursor(
   pastes: ReadonlyMap<string, string>,
   mode: "backspace" | "delete",
 ): PasteTokenMatch | null {
-  if (!pastes.size || !line) return null
-  const re = pasteTokenRegex(pastes.keys())
-  if (!re) return null
-  for (const match of line.matchAll(re)) {
-    const token = match[0]
-    const utfStart = match.index ?? -1
-    if (utfStart < 0) continue
-    const utfEnd = utfStart + token.length
-    const gStart = segmentGraphemes(line.slice(0, utfStart)).length
-    const gEnd = gStart + segmentGraphemes(token).length
+  for (const span of findPasteTokenSpans(line, pastes)) {
     const hit =
-      mode === "backspace" ? cursor > gStart && cursor <= gEnd : cursor >= gStart && cursor < gEnd
-    if (hit) return { utfStart, utfEnd, gStart, gEnd, token }
+      mode === "backspace"
+        ? cursor > span.gStart && cursor <= span.gEnd
+        : cursor >= span.gStart && cursor < span.gEnd
+    if (hit) return span
+  }
+  return null
+}
+
+/**
+ * Jepit posisi kursor grapheme agar tidak berhenti di tengah placeholder paste
+ * atomik (supaya navigasi horizontal/vertikal/klik mouse melompati token utuh).
+ */
+export function snapCursorOutOfPasteToken(
+  line: string,
+  cursor: number,
+  pastes: ReadonlyMap<string, string>,
+  bias: "left" | "right" | "nearest" = "nearest",
+): number {
+  for (const span of findPasteTokenSpans(line, pastes)) {
+    if (cursor > span.gStart && cursor < span.gEnd) {
+      if (bias === "left") return span.gStart
+      if (bias === "right") return span.gEnd
+      return cursor - span.gStart <= span.gEnd - cursor ? span.gStart : span.gEnd
+    }
+  }
+  return cursor
+}
+
+/** Perluas rentang seleksi grapheme [start, end] agar tidak membelah token paste. */
+export function expandRangeToPasteTokens(
+  line: string,
+  start: number,
+  end: number,
+  pastes: ReadonlyMap<string, string>,
+): { start: number; end: number } {
+  let lo = Math.min(start, end)
+  let hi = Math.max(start, end)
+  if (lo === hi) return { start: lo, end: hi }
+  for (const span of findPasteTokenSpans(line, pastes)) {
+    if (lo > span.gStart && lo < span.gEnd) lo = span.gStart
+    if (hi > span.gStart && hi < span.gEnd) hi = span.gEnd
+  }
+  return { start: lo, end: hi }
+}
+
+/**
+ * Deteksi apakah Ctrl+W di `cursor` menyentuh placeholder paste atomik (baik
+ * tepat di ujung kanan token maupun setelah spasi/tab di kanannya) karena token
+ * `{paste ...}` memuat spasi sehingga regex `\S+\s*$` akan merobeknya.
+ */
+export function findPasteTokenBeforeWordDelete(
+  line: string,
+  cursor: number,
+  pastes: ReadonlyMap<string, string>,
+): PasteTokenMatch | null {
+  if (!pastes.size || !line || cursor <= 0) return null
+  const graphemes = segmentGraphemes(line)
+  let nonSpaceEnd = Math.min(cursor, graphemes.length)
+  while (
+    nonSpaceEnd > 0 &&
+    (graphemes[nonSpaceEnd - 1] === " " || graphemes[nonSpaceEnd - 1] === "\t")
+  ) {
+    nonSpaceEnd--
+  }
+  if (nonSpaceEnd <= 0) return null
+  for (const span of findPasteTokenSpans(line, pastes)) {
+    if (nonSpaceEnd > span.gStart && nonSpaceEnd <= span.gEnd) {
+      return span
+    }
   }
   return null
 }

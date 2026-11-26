@@ -1,11 +1,13 @@
-# Kontrak Terminal MiniCode (TUI fullscreen — v0.43: chat + composer di-offset **3 kolom kiri + 3 kolom kanan sebagai padding FRAME simetris** (margin bukan spasi pada teks; footer tetap kolom 0 lebar `chatCols`; popup/dropdown full-screen), **kotak garis tipis bersudut lengkung keliling composer (`╭─╮`/`│ │`/`╰─╯`, warna `#36383E`/`236`, tanpa latar warna) dengan tinggi isi dinamis 1–2 baris (default 1 baris, otomatis melebar ke 2 baris saat teks > 1 baris, dapat digulir via panah `↑`/`↓` maupun mouse wheel bila > 2 baris dengan indikator `↑`/`↓`), tanpa prefix `minicode ›`, seleksi teks composer via drag/`Ctrl+A`/`Ctrl+C`** + **word-wrap** + **placeholder paste ringkas (`{paste text N lines}`)**; baris live tool transien ikut tail, **maksimal 3 baris terakhir** agar narasi committed tetap tampil; ratchet `scrollBack` per turn naik-saja, tidak turun saat live hilang; v0.42: baris live tool committed monoton + teks gagal ringkas (aspek transiensi ditimpa v0.43); v0.41: auto-update diagnostik + `/update` TUI + handoff terminal aman; v0.37: bracketed paste + select-all + resize stabilizer + echo prompt sekali-wrap + geometri prompt progresif; v0.36: composer ≤2 baris & dropdown overlay; v0.35: rekap committed statis & label aktivitas OS; v0.34: sidebar dihapus, chat kolom tengah)
+# Kontrak Terminal MiniCode (TUI fullscreen — v0.51 amandemen v0.43: label niat manusiawi per tool + reveal ketikan live + tail live adaptif `max(3, floor(viewH * 0.5))` + kegagalan berbasis label `<label> mengalami kegagalan (<penyebab>)`; v0.43: chat + composer di-offset **3 kolom kiri + 3 kolom kanan sebagai padding FRAME simetris** (margin bukan spasi pada teks; footer tetap kolom 0 lebar `chatCols`; popup/dropdown full-screen), **kotak garis tipis bersudut lengkung keliling composer (`╭─╮`/`│ │`/`╰─╯`, warna `#36383E`/`236`, tanpa latar warna) dengan tinggi isi dinamis 1–2 baris (default 1 baris, otomatis melebar ke 2 baris saat teks > 1 baris, dapat digulir via panah `↑`/`↓` maupun mouse wheel bila > 2 baris dengan indikator `↑`/`↓`), tanpa prefix `minicode ›`, seleksi teks composer via drag/`Ctrl+A`/`Ctrl+C`** + **word-wrap** + **placeholder paste ringkas (`{paste text N lines}`)**; ratchet `scrollBack` per turn naik-saja, tidak turun saat live hilang; v0.42: baris live tool committed monoton + teks gagal ringkas (aspek transiensi ditimpa v0.43); v0.41: auto-update diagnostik + `/update` TUI + handoff terminal aman; v0.37: bracketed paste + select-all + resize stabilizer + echo prompt sekali-wrap + geometri prompt progresif; v0.36: composer ≤2 baris & dropdown overlay; v0.35: rekap committed statis & label aktivitas OS; v0.34: sidebar dihapus, chat kolom tengah)
 
 > **Status & presedensi (dibaca dulu).** `v0.x` = versi produk, `v7.x` = versi
 > kontrak terminal — dua namespace, bukan peringkat numerik.
 >
-> **Aturan presedensi:** entri teratas / tanggal rilis terbaru menang; v0.43
-> meng-override klausa v0.42 **hanya pada aspek transiensi baris live tool**
-> (baris live kembali transien ikut tail, dibatasi 3 baris terakhir; history chat
+> **Aturan presedensi:** entri teratas / tanggal rilis terbaru menang; **v0.51**
+> mengamandemen v0.43 pada tail live adaptif `max(3, floor(viewH * 0.5))`, reveal
+> ketikan live, waiting indicator, serta redaksi kegagalan seragam
+> `<label> mengalami kegagalan (<tag>)`; **v0.43** mengamandemen v0.42 **hanya pada aspek
+> transiensi baris live tool** (baris live kembali transien ikut tail; history chat
 > committed tidak berubah; jendela transkrip memakai ratchet `scrollBack`
 > naik-saja per turn), sedangkan klausa
 > v0.42 lain (teks gagal ringkas, rekap tanpa `└`) tetap
@@ -20,10 +22,34 @@
 >
 > **Pointer per versi** (rincian di entri `## Perubahan v…` di bawah):
 >
+> - **v0.51 (amandemen atas v0.43)** — menyempurnakan tampilan tool live & error:
+>   (1) parameter opsional `label` hanya disuntikkan ke tool ber-intent terbuka
+>   (`bash`, `code_run`, `web_search`, `web_fetch`, dan MCP via `withMcpTools`;
+>   `delegate_task` tetap memakai `name`) untuk menghemat token skema, sementara
+>   tool sederhana memakai **auto-label manusiawi 0-token** di
+>   `formatActivityLabel` / `cleanAutoTarget`; (2) tail live bersifat **adaptif
+>   `max(3, floor(viewH * 0.5))`** (bukan kap keras `3` lagi) supaya seluruh
+>   aktivitas paralel tampil pada terminal wajar tanpa menelan chat atau
+>   meledakkan ruang ratchet, dan hitungan `+N` footer serta indikator scroll
+>   memakai batas adaptif `viewH` yang sama (plus prioritas seluruh root /
+>   sub-agent paralel saat kuota baris penuh); (3) pada TUI interaktif
+>   (`animateLive: true`), baris live memakai **jeda anti-kedip `60 ms`**
+>   (tool kilat tak berkedip sepotong) lalu muncul **per kata (`50 ms/kata`)** via
+>   ticker dinamis (kembali ke `200 ms` saat tuntas, tetap I1 1 write/frame);
+>   saat turn aktif namun layar masih kosong menunggu model/penyedia (`≥ 1,5 dtk`
+>   atau retry), tampil 1 baris status tunggu transien yang otomatis hilang
+>   begitu narasi/tool masuk; (4) **semua** kegagalan tool
+>   memakai satu format seragam `› <label/auto-label> mengalami kegagalan (<tag>)`
+>   (`formatLabeledToolFailure`), tanpa menggandakan `{target}` command mentah;
+>   (5) event `turn.cancelled (budget)`, replay `llm-failed` `context.compacted`,
+>   serta gangguan provider berat (`≥ 3` retry/error) dicatat ringkas di transkrip;
+>   (6) badge `retry` dan `new · PgDn` bergabung di footer tanpa menghilangkan
+>   timer atau konteks.
 > - **v0.43** — klarifikasi atas v0.42: yang tidak boleh hilang adalah **history
 >   chat yang sudah committed**; baris aktivitas tool **live kembali transien**
->   (hilang setelah tool selesai), mengikuti perilaku v0.40.0. Tail live
->   **dibatasi maksimal 3 baris terakhir** supaya narasi committed tetap tampil
+>   (hilang setelah tool selesai), mengikuti perilaku v0.40.0. Tail live awalnya
+>   dibatasi maksimal 3 baris terakhir (lalu diamandemen di **v0.51** menjadi
+>   adaptif **`max(3, floor(viewH * 0.5))`**) supaya narasi committed tetap tampil
 >   walau puluhan tool berjalan sekaligus; detail lengkap di jurnal/`--verbose`.
 >   Saat baris live muncul, `total` bertambah dan sticky-tail menggeser jendela —
 >   history boleh naik, tetapi maksimal 3 baris. Saat baris live hilang dan
@@ -110,14 +136,14 @@ saat baris live hilang**, sehingga posisi baris committed berubah di layar.
    ikut tail transkrip, dan dibuang saat tool mencapai status terminal — tanpa
    entri committed baru. Yang tidak boleh hilang adalah history committed,
    bukan baris live itu sendiri.
-2. **Muncul → `total` naik → jendela boleh naik, DIBATASI 3 BARIS.** Saat baris
-   live muncul, `total` bertambah dan sticky-tail menggeser jendela ke bawah;
-   baris committed yang terlihat boleh naik di layar — tetapi tail live dibatasi
-   **`MAX_LIVE_TAIL_ROWS = 3` aktivitas terakhir** (`src/ui/tui/transcript.ts`,
-   `runningRows()`), sehingga narasi committed terdorong maksimal 3 baris.
-   Puluhan baris live transien tak pernah mendorong narasi keluar viewport;
-   detail lengkap tetap di jurnal/`--verbose`. `liveRows()` (API overlay lama)
-   sengaja tidak dipotong — App tidak memakainya.
+2. **Muncul → `total` naik → jendela boleh naik, DIBATASI ADAPTIF VIEWPORT.**
+   Saat baris live muncul, `total` bertambah dan sticky-tail menggeser jendela ke
+   bawah; baris committed yang terlihat boleh naik di layar — tail live dibatasi
+   **`max(MIN_LIVE_TAIL_ROWS = 3, floor(viewH * 0.5))`** (`DEFAULT_MAX_LIVE_TAIL_ROWS = 12`
+   bila tinggi tak diketahui; `src/ui/tui/transcript.ts`, `runningRows()`),
+   sehingga seluruh tool paralel wajar tampil bersamaan tanpa mendorong narasi
+   keluar viewport. Detail lengkap tetap di jurnal/`--verbose`. `liveRows()` (API
+   overlay lama) sengaja tidak dipotong — App tidak memakainya.
 3. **Hilang → `total` turun → jendela tidak boleh geser balik (ratchet naik-saja).**
    Saat baris live hilang dan `total` menyusut, `scrollBack` **tidak diturunkan**:
    posisi tiap baris committed di layar tetap, dan ruang di bawah ekor boleh
@@ -151,13 +177,15 @@ saat baris live hilang**, sehingga posisi baris committed berubah di layar.
    kegagalan tool ringkas (`friendlyToolError()` + `tSystem()`, ≤120 kolom) dan
    rekap tanpa marker `└`. Arsip v0.42 dipertahankan sebagai sejarah sesuai
    aturan presedensi.
-6. **Amendemen redaksi kegagalan tool: 13 pola.** Perluasan atas klausa v0.42:
-   `friendlyToolError()` kini mengenali **13 pola** — 4 lama (idempotency
-   duplikat, `exit N`, `EIO`, `bash-guard internal error`), sub-agent, dan 8
-   pola baru (tool tak dikenal, izin ditolak, argumen invalid, timeout tool,
-   target tak ditemukan, dependensi tak dikonfigurasi, request gagal,
-   dibatalkan). Presedensi: duplikat → sub-agent → guard → exit → EIO → 8 pola
-   baru → fallback; sub-agent mengalahkan `exit N` karena ringkasan child bisa
+6. **Amendemen redaksi kegagalan tool: 21 pola kanonik (6 jalur presedensi + 15 pola).** Perluasan atas klausa v0.42:
+   `friendlyToolError()` kini mengenali **21 pola** — 6 jalur presedensi
+   (idempotency duplikat, sub-agent, `bash-guard internal error`, `cmd.exe quoting`,
+   `exit N`, `EIO`) dan 15 pola kanonik terstruktur (tool tak dikenal, izin ditolak,
+   argumen invalid, timeout tool, sinkronisasi rencana, edit mismatch, target tak
+   ditemukan, dependensi tak dikonfigurasi, request gagal, dibatalkan, akses FS,
+   jaringan/TLS, parse JSON/URL, galat git, integrasi MCP/LSP) → fallback OS-locale.
+   Presedensi: duplikat → sub-agent → guard → shellQuoting → exit → EIO → 15 pola
+   → fallback; sub-agent mengalahkan `exit N` karena ringkasan child bisa
    memuat kode keluar, guard mengalahkan `permission denied`. Deteksi memakai
    anchor/`\b`, bukan substring longgar, dan `exit` wajib memuat angka. Semua
    cabang tetap satu baris ≤120 kolom, lewat redaksi → sanitasi → potong per
@@ -205,18 +233,14 @@ saat baris live hilang**, sehingga posisi baris committed berubah di layar.
     indikator UI), dengan guard `last !== ""` agar tidak ada dua blank berturut.
     Hanya `lines[]`/`rowCache` yang disunting: I1 (satu write/frame) dan writer
     inventory tidak berubah.
-9. **Amendemen tinggi composer: 2 baris TETAP di semua state.** `composerHeight()`
-   dan `buildLayout()` tidak lagi bergantung pada `composerLive(busy)`/`editing`:
-   `composerH = COMPOSER_MAX_ROWS` (= 2) secara konstan — idle, saat mengetik,
-   saat busy, dan setelah turn selesai. Dulu `composerH` turun ke 1 saat submit
-   (`editing = false`), sehingga `viewH` membesar satu dan `composerTop`/prompt
-   bergeser satu baris; `finally` mengembalikannya. Jitter itu kini hilang.
-   Baris ke-2 sengaja di-pad kosong bila draft cuma satu baris atau sedang busy,
-   jadi tinggi frame tetap. `viewportHeight()` dan `menuRows()` mengikuti otomatis
-   lewat `composerHeight()` (rumus keduanya tidak diubah). Draft wrap, `Ctrl+J`,
-   dan dropdown `/` tidak tersentuh — tetap 2 baris seperti sebelumnya. I1 (satu
-   `stdout.write` per frame) utuh; clamp `contentBudget` untuk terminal sangat
-   pendek dibiarkan apa adanya.
+9. **Amendemen tinggi composer (disempurnakan butir 12 v0.43: dinamis 1–2 baris dalam kotak tipis).**
+   Semula butir 9 v0.43 menguji composer **2 baris tetap**; pada rilis final
+   v0.43 (butir 12 di bawah & entri teratas) tinggi isi composer ditetapkan
+   **dinamis 1–2 baris**: default **1 baris** saat kosong/1 baris/idle/busy,
+   otomatis melebar ke **2 baris** saat teks >1 baris (wrap atau `\n`), dan
+   **dapat digulir** (`↑`/`↓` atau wheel) bila >2 baris dalam kotak garis tipis
+   `╭─╮`/`│ │`/`╰─╯`. Teks bar 1–2 tetap memiliki batas keras 2 baris sehingga
+   `viewH`, `menuRows()`, dan tinggi frame tetap terkunci tanpa meluap (I1 utuh).
 
 10. **Amendemen `/copy` — sumber = yang terender, bukan buffer tool output.**
     `/copy [n]` kini mengambil teks dari `Transcript.copyTurnTexts(n)`, yaitu
@@ -239,15 +263,15 @@ saat baris live hilang**, sehingga posisi baris committed berubah di layar.
     menyinkronkan `sourceTexts` agar yang tersalin = angka kumulatif terakhir.
 11. **Amendemen redaksi error tanpa pola kanonik.** Ledger/status tool kini
     lewat `friendlyToolErrorCanonical()` (`src/ui/render/errors.ts`): bila pesan
-    tak cocok salah satu 13 pola kanonik, fungsi mengembalikan `""` dan
+    tak cocok salah satu 21 pola kanonik (v0.43+), fungsi mengembalikan `""` dan
     **`: <raw>` tidak dirender** — baris tool tetap tampil lewat
     `paintLedger(status, line)`, detail lengkap tetap di jurnal/`--verbose`.
-    Cabang 13 pola (duplikat → sub-agent → guard → exit → EIO → 8 pola baru)
-    identik dengan `friendlyToolError()` (locale OS via `tSystem()`, ≤120
+    Cabang 21 pola (duplikat → sub-agent → guard → shellQuoting → exit → EIO →
+    15 pola) identik dengan `friendlyToolError()` (locale OS via `tSystem()`, ≤120
     kolom). **Deny reason (P0) tetap wajib tampil** walau tak ada redaksi
     kanonik; sub-agent error tetap memakai `tSystem("msg.subagentFailed")`.
 12. **Amendemen kotak garis tipis bersudut lengkung keliling composer, margin kanan simetris, tanpa prefix, seleksi teks, word-wrap, dan placeholder paste.**
-    - **Kotak tipis sudut lengkung:** composer 2 baris dibingkai `╭─…─╮`,
+    - **Kotak tipis sudut lengkung:** composer 1–2 baris dinamis dibingkai `╭─…─╮`,
       `│ … │`, `╰─…─╯` (`+-+` / `|` pada `MINICODE_ASCII=1`) selebar
       `composerBoxWidth()` dengan warna garis lebih halus dari `faint`
       (`38;2;54;56;62` truecolor, `38;5;236` 256-warna, `90` 16-warna, polos di
@@ -290,18 +314,41 @@ saat baris live hilang**, sehingga posisi baris committed berubah di layar.
       `host.submit` / `host.enqueue`; recall histori `↑`/`↓` dan `Ctrl+R`
       memulihkan token beserta payload-nya (hingga 20 entri histori terakhir).
 
+13. **Amendemen kenyamanan input, navigasi, antrean, & ketahanan dialog.**
+    - **Atomik paste & navigasi kata:** token placeholder paste dijaga atomik
+      oleh `←`/`→`, `Ctrl+←`/`Ctrl+→`/`Alt+B`/`Alt+F`, `Ctrl+W`/`Alt+Backspace`,
+      klik mouse, seleksi drag, dan kursor vertikal; `Ctrl+K` menghapus ke
+      akhir baris; `Ctrl+Enter` menyisipkan `ctrl-j` newline.
+    - **Konsistensi `Esc` / `Ctrl+C` / `Ctrl+R`:** `Esc` di idle membatalkan
+      seleksi atau menutup dropdown tanpa memicu `/undo` diam-diam; state
+      fast-abort `Esc Esc` saat busy di-reset saat turn selesai. `Ctrl+C`
+      berantai: salin selection → abort saat busy → bersihkan draft → toast
+      hint keluar. `Ctrl+R` mendukung pencarian substring interaktif dan
+      `Esc` mengembalikan draft pra-pencarian.
+    - **Dropdown `/`, `@file`, & `/logs`:** `/` dicocokkan case-insensitive;
+      `@` membuka autocomplete file workspace (`Tab`/`Enter` mengganti token);
+      klik item pertama kali memilih lalu klik ulang pada item aktif
+      melengkapinya. `/logs` membuka ring buffer error sesi; footer
+      menampilkan badge antrean (`queuedCount`) dan luapan live tool (`+N`).
+    - **Syntax highlight & modal parity:** blok kode bertanda pagar pada
+      narasi asisten diwarnai oleh `highlightCode`; lebar gema prompt user
+      sejajar margin simetris `- 6 - 1`; dialog persetujuan memakai antrean
+      FIFO & pembatalan `AbortSignal`; form mendukung `Ctrl+A` + bracketed
+      paste; wizard menyediakan Retry/Back saat deteksi provider gagal;
+      pelukis transien `stderr` menggambar ulang lewat `onDisplace` saat
+      interaktif dilepas, memakai palet `cErr` sesuai warna `stderr`.
+
 Peta proteksi rekap: `test/audit-fix-live-inline-status.test.ts` (replaceEntry
 mencegah duplikasi & satu blank setelah rekap sebelum narasi).
 Peta proteksi: `test/tui-app.test.ts` (ratchet `scrollBack` per turn naik-saja:
 naik saat `total` bertambah, tidak turun saat `total` menyusut, reset pada
 `turn:started` / prompt baru / `/clear` / navigasi manual / resize; regresi
-60×14 — 20 live + narasi per siklus, narasi tetap terlihat dan 1–3 baris live
-tampil saat live aktif, narasi tetap tampil setelah live hilang, `total() > 0`,
-tinggi & composer konstan, I1 satu write; composer 2 baris tetap (butir 9) di
-dalam kotak tipis sudut lengkung (butir 12): prompt di baris yang sama di
-idle/ketik/busy/selesai, frame 60×14 konstan, footer di baris terakhir, baris
-ke-2 composer kosong, I1 satu write per repaint; draft 8 baris & dropdown
-tak menggeser baris prompt); tanpa prefix di composer (`promptFirst`/`promptCont`
+60×14 — 20 live + narasi per siklus, narasi tetap terlihat dan tail live
+adaptif `max(3, floor(viewH * 0.5))` tampil saat live aktif, narasi tetap tampil
+setelah live hilang, `total() > 0`, tinggi & composer dinamis 1–2 baris (butir 9 & 12) di
+dalam kotak tipis sudut lengkung: prompt di baris yang sama pada tiap state,
+frame 60×14 konstan, footer di baris terakhir, I1 satu write per repaint; draft 8
+baris & dropdown tak menggeser baris prompt); tanpa prefix di composer (`promptFirst`/`promptCont`
 kosong, caret mulai kolom `padLeft + 3 + 2 + 1`): prompt kosong,
 CJK/emoji per kolom, wrap multiline, klik mouse, drag seleksi + `Ctrl+A` /
 `Ctrl+C` di dalam composer, panah vertikal, dropdown, I1 satu write; offset
@@ -319,16 +366,16 @@ kwitansi tetap di footer), `test/chat-column.test.ts` (geometri & lebar composer
 chat 53/94/53 vs footer 50/100/50 pada cols=200),
 `test/tui-scroll-width.test.ts` (wrap memakai `contentCols = chatCols - 6`),
 `test/tui-transcript.test.ts` (viewport transkrip: history committed utuh, tail
-live dipotong maksimal 3 aktivitas terakhir walau 20 running, posisi committed
+live dipotong oleh batas adaptif `max(3, floor(viewH * 0.5))` walau 20 running, posisi committed
 stabil saat baris live hilang; regresi baris ledger `delegate_task` gagal + 1
 child: tanpa `statusWord`/`child tools`, satu baris ≤120 kolom, warna status via
-`paintLedger`; regresi butir 11: error tanpa 13 pola kanonik tak menghasilkan
+`paintLedger`; regresi butir 11: error tanpa pola kanonik tak menghasilkan
 `: <raw>`, deny reason tetap tampil), `test/tui-copy-turn.test.ts` (butir 10/11:
 `copyTurnTexts()` hanya narasi + rekap, 2 grup oldest→newest, pembaca murni;
 payload OSC 52 decode base64 = persis narasi+rekap, baris >120 kolom utuh,
 output tool >20.000 char di `#lastTurnText` tak ikut tersalin; error mentah tak
 muncul, deny reason & `tSystem("msg.subagentFailed")` tetap),
-`test/errors-usage.test.ts` (13 pola
+`test/errors-usage.test.ts` (21 pola
 `friendlyToolError()`: presedensi sub-agent/guard, tabel en/id via `tSystem()`,
 negatif anchor, redaksi ≤120 kolom tanpa SGR dengan rahasia teredaksi). Angka
 gate tidak ditaruh di entri kontrak; hasil kandidat ada di

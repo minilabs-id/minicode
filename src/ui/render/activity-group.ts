@@ -34,6 +34,7 @@ const GROUP_BY_TOOL: Readonly<Record<string, ActivityGroupKind>> = {
   write_file: "edit",
   delete_file: "edit",
   move_file: "edit",
+  lsp_rename: "edit",
   // ── execute: menjalankan proses / perintah ──
   bash: "execute",
   code_run: "execute",
@@ -42,6 +43,8 @@ const GROUP_BY_TOOL: Readonly<Record<string, ActivityGroupKind>> = {
   git_log: "execute",
   git_commit: "execute",
   git_push: "execute",
+  git_restore: "execute",
+  git_checkout: "execute",
   mcp_list: "execute",
   mcp_call: "execute",
   mcp_read: "execute",

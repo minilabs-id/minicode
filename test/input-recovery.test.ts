@@ -109,11 +109,13 @@ test("A4: discard state preserves independent controls, UTF-8 and new sequences"
 
 test("A5: unsupported modified arrows are ignored at every split", () => {
   for (const prefix of ["\x1b[", "\x1bO"]) {
-    for (const arrow of ["A", "B", "C", "D"]) {
+    for (const arrow of ["A", "B"]) {
       const sequence = `${prefix}1;5${arrow}`
       everySplit(`${sequence}x`, [{ type: "ignore" }, { type: "char", ch: "x" }])
       expect(decodeKey(sequence, 0)).toEqual({ key: { type: "ignore" }, width: sequence.length })
     }
+    everySplit(`${prefix}1;5Cx`, [{ type: "word-right" }, { type: "char", ch: "x" }])
+    everySplit(`${prefix}1;5Dx`, [{ type: "word-left" }, { type: "char", ch: "x" }])
   }
   for (const sequence of ["\x1b[99~", "\x1b[5;34R", "\x1bOP"]) {
     everySplit(sequence, [{ type: "ignore" }])

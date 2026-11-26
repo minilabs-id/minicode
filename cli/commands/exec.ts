@@ -24,11 +24,13 @@ import {
   displayWorkMode,
   flagsAfterPromptBoundary,
   hasFlag,
+  missingValueFlags,
   parseRuntimeNumericFlags,
   promptFromArgs,
   getArg as rawGetArg,
   resolveToolScope,
   resolveWorkModeFlag,
+  unknownFlagsBeforePrompt,
 } from "../args.ts"
 import { createCliSession } from "../setup.ts"
 
@@ -43,7 +45,22 @@ const warnStderr = (msg: string): void => {
 
 const EXEC_HELP = `minicode exec — headless one-shot execution (JSONL/linear)
 
-  minicode exec [--json] [--work-mode DISCUSS|BUILD] [--cwd <dir>] [--model <m>] [--sandbox docker|os] "prompt"`
+  minicode exec [options] "prompt"
+
+Options:
+  --json                  JSONL machine event stream
+  --work-mode DISCUSS|BUILD  execution ceiling (default: DISCUSS)
+  --cwd <dir>             workspace root
+  --model <provider::m>   override model
+  --sandbox docker|os     bash sandbox mode
+  --verify                auto-verify + self-heal (requires BUILD)
+  --auto-continue         continue if turn hits --max-steps
+  --max-turns <n>         auto-continue turn cap (default: 3, max: 20)
+  --max-steps <n>         max tool steps per turn
+  --timeout <ms>          run timeout in ms (default: 900000)
+  --budget <usd>          session cost ceiling
+  --runtime off|constructed|owned  execution architecture
+  --allow-local-config    trust repo .minicode/config.json`
 
 /** Prompt lanjutan (Phase D auto-continue): minta model menyelesaikan sisa
  * pekerjaan dari titik berhenti, memanfaatkan progres parsial yang sudah
@@ -70,12 +87,26 @@ export async function handleExec(
     console.log(EXEC_HELP)
     process.exit(0)
   }
+  const jsonMode = hasFlag(subArgs, "--json") || rawGetArg(subArgs, "--output-format") === "json"
+  const missingVals = missingValueFlags(subArgs)
+  const unknownFlags = unknownFlagsBeforePrompt(subArgs)
+  if (missingVals.length > 0 || unknownFlags.length > 0) {
+    const msgs: string[] = []
+    if (missingVals.length > 0) msgs.push(`${missingVals.join(", ")} requires a value`)
+    if (unknownFlags.length > 0) msgs.push(`unknown option(s): ${unknownFlags.join(", ")}`)
+    warnStderr(`[error] ${msgs.join("; ")} — run 'minicode exec --help'\n`)
+    if (jsonMode) {
+      writeMachineLine(
+        JSON.stringify(machineFailure(promptFromArgs(subArgs).trim(), new Error(msgs.join("; ")))),
+      )
+    }
+    process.exit(2)
+  }
   // Bersihkan state submit_result dari run sebelumnya — tanpa ini, exec
   // berturut-turut dalam proses sama bisa membaca hasil run lama.
   clearSubmittedResult()
   // Prompt diambil lewat promptFromArgs() — selaras dengan jalur non-exec.
   const prompt = promptFromArgs(subArgs) || (rawGetArg(subArgs, "--prompt") ?? "")
-  const jsonMode = hasFlag(subArgs, "--json") || rawGetArg(subArgs, "--output-format") === "json"
   const cwdRaw = getArg("--cwd")
   const cwd = cwdRaw ? resolvePath(cwdRaw) : undefined
   const modelOverride = getArg("--model")
@@ -151,10 +182,12 @@ export async function handleExec(
   const autoContinue =
     hasFlag(subArgs, "--auto-continue") || process.env.MINICODE_AUTO_CONTINUE === "1"
   const maxTurnsRaw = getArg("--max-turns")
+  const maxTurnsNum = maxTurnsRaw !== undefined ? Number(maxTurnsRaw) : NaN
+  if (maxTurnsRaw !== undefined && (!Number.isFinite(maxTurnsNum) || maxTurnsNum <= 0)) {
+    warnStderr(`[warn] --max-turns requires a positive number, ignoring "${maxTurnsRaw}"\n`)
+  }
   const autoContinueBudget =
-    maxTurnsRaw && Number.isFinite(Number(maxTurnsRaw)) && Number(maxTurnsRaw) > 0
-      ? Math.min(20, Math.floor(Number(maxTurnsRaw)))
-      : 3
+    Number.isFinite(maxTurnsNum) && maxTurnsNum > 0 ? Math.min(20, Math.floor(maxTurnsNum)) : 3
 
   const ignoredFlags = flagsAfterPromptBoundary(subArgs)
   if (ignoredFlags.length > 0) {

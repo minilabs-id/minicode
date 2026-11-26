@@ -13,6 +13,7 @@ import type {
   UiPresentationSnapshot,
 } from "../src/ui/contract.ts"
 import { resetLocaleState, setSessionLocale } from "../src/ui/i18n/locale.ts"
+import { glyphs } from "../src/ui/render/theme.ts"
 import { humanToolLabel } from "../src/ui/render/tool-label.ts"
 import { TRANSCRIPT_CAP, Transcript, type TranscriptMeta } from "../src/ui/tui/transcript.ts"
 import { createFakeBus, installFakeTty } from "./helpers/tui-harness.ts"
@@ -63,7 +64,7 @@ describe("P5 transcript projection", () => {
     const { transcript, setSnapshot } = setup()
     setSnapshot({ activities: [activity({ tsStart: Date.now() - 3000 })], turns: [] })
     const out = transcript.view(100, 4, 0).join("\n")
-    expect(out).toContain("› read_file a.ts … running (3s)")
+    expect(out).toContain(`${humanToolLabel("read_file")} a.ts … running (3s)`)
   })
 
   test("event turn dan approval tidak membuat phantom activity", () => {
@@ -98,9 +99,9 @@ describe("P5 transcript projection", () => {
       status: "denied",
     })
     const out = transcript.view(100, 4, 0).join("\n")
-    // Status non-sukses dipisah `·` dari target; sukses tidak mencetak kata
-    // status sama sekali (lihat test berikutnya).
-    expect(out).toContain(`${humanToolLabel("read_file")} a.ts · denied`)
+    // Status non-sukses dipisah `·` dari target; kegagalan v0.51 memakai
+    // format `read file a.ts failed`.
+    expect(out).toContain(`${humanToolLabel("read_file")} a.ts failed`)
   })
 
   test("retry dan grup anak tetap satu baris ledger induk", () => {
@@ -180,7 +181,7 @@ describe("P5 transcript projection", () => {
     })
     const out = transcript.view(120, 20, 0).join("\n")
     // v0.33: semua aktivitas child disatukan jadi SATU baris agregat.
-    expect(out).toContain("✦ 1 sub agent · 1 tool · 0 failed")
+    expect(out).toContain(`${glyphs.sparkle} 1 sub agent · 1 tool · 0 failed`)
     expect(out).not.toContain("↳")
     expect(out).not.toContain("run_abcdef01")
     expect(out).not.toContain("explore-auth")
@@ -236,9 +237,9 @@ describe("P5 transcript projection", () => {
       turns: [],
     })
     const out = transcript.view(120, 20, 0).join("\n")
-    expect(out).toContain("↳ audit·allowlist read_file config.ts")
+    expect(out).toContain(`↳ audit·allowlist ${humanToolLabel("read_file")} config.ts`)
     expect(out).not.toContain("↳ explore-1")
-    expect(out).toContain("↳ explore-2 grep auth.ts")
+    expect(out).toContain(`↳ explore-2 ${humanToolLabel("grep")} auth.ts`)
   })
 
   // FALLBACK sengaja dipertahankan: event lama / jalur tanpa label tak boleh
@@ -263,7 +264,7 @@ describe("P5 transcript projection", () => {
     emitPresentation({ type: "tool.completed", seq: 3, turnId: 1, toolCallId: child.toolCallId })
     const out = transcript.view(120, 20, 0).join("\n")
     // Identitas run tidak dibocorkan ke layar — cukup hitungan agregat.
-    expect(out).toContain("✦ 1 sub agent · 1 tool · 0 failed")
+    expect(out).toContain(`${glyphs.sparkle} 1 sub agent · 1 tool · 0 failed`)
     expect(out).not.toContain("sub_fedcba98")
   })
 
@@ -295,7 +296,7 @@ describe("P5 transcript projection", () => {
     const out = transcript.view(120, 30, 0).join("\n")
     // Tiap run punya baris sendiri keyed label-nya — bukan "n child tools".
     for (const ch of ["a", "b", "c"] as const) {
-      expect(out).toContain(`↳ explore-${ch} read_file ${ch}.ts … running`)
+      expect(out).toContain(`↳ explore-${ch} ${humanToolLabel("read_file")} ${ch}.ts … running`)
       expect(out).not.toContain(`run_${ch.repeat(8)}`)
     }
     expect(out).not.toContain("child tools")
@@ -317,7 +318,7 @@ describe("P5 transcript projection", () => {
     emitPresentation({ type: "tool.completed", seq: 2, turnId: 1, toolCallId: child.toolCallId })
     const out = transcript.view(120, 10, 0).join("\n")
     // Label tak lagi dirender (agregat), jadi CSI non-SGR & bidi tak boleh bocor.
-    expect(out).toContain("✦ 1 sub agent · 1 tool · 0 failed")
+    expect(out).toContain(`${glyphs.sparkle} 1 sub agent · 1 tool · 0 failed`)
     expect(out).not.toContain("\x1b[2J")
     expect(out).not.toContain("\u202E")
     expect(out).not.toContain("evil")
@@ -441,7 +442,7 @@ describe("P5 transcript projection", () => {
     }
     expect(views[1]).toEqual(views[0])
     expect(views[0]!.join("\n")).toContain(
-      `› ${humanToolLabel("delegate_task")} ↻ retry 1 child tools`,
+      `${glyphs.arrow} ${humanToolLabel("delegate_task")} ↻ retry 1 child tools`,
     )
   })
 
@@ -599,7 +600,7 @@ describe("F-AGENT-1: renderer linear (non-TTY) marker run", () => {
       // v0.43: marker `↳ <label>` dan status [failed] tetap tampil; redaksi
       // error mentah "boom" sengaja disembunyikan (tak cocok 13 pola kanonik
       // friendlyToolError()). runId tetap tak bocor.
-      expect(raw).toContain("↳ plan-build bash ls")
+      expect(raw).toContain(`↳ plan-build ${humanToolLabel("bash")}: ls failed`)
       expect(raw).toContain("[failed]")
       expect(raw).not.toContain("run_abcdef01")
       expect(raw).not.toContain("boom")
@@ -628,8 +629,8 @@ describe("I26: proyeksi presentasi menghormati locale id", () => {
       status: "denied",
     })
     const view = transcript.view(120, 10, 0).join("\n")
-    expect(view).toContain("read_file a.ts … berjalan (3s)")
-    expect(view).toContain(`${humanToolLabel("write_file")} b.ts · ditolak`)
+    expect(view).toContain(`${humanToolLabel("read_file")} a.ts … berjalan (3s)`)
+    expect(view).toContain(`${humanToolLabel("write_file")} b.ts`)
   })
 
   test("attachSimpleLogger memakai status Indonesia saat locale id aktif", () => {
@@ -658,7 +659,8 @@ describe("I26: proyeksi presentasi menghormati locale id", () => {
         status: "denied",
       })
       detach()
-      expect(tty.allErr()).toContain("write_file x.ts [ditolak]")
+      expect(tty.allErr()).toContain(`${humanToolLabel("write_file")} x.ts`)
+      expect(tty.allErr()).toContain("[ditolak]")
     } finally {
       tty.restore()
     }

@@ -14,6 +14,7 @@
 
 import { describe, expect, test } from "bun:test"
 import type { UiPresentationActivity, UiPresentationSnapshot } from "../src/ui/contract.ts"
+import { glyphs } from "../src/ui/render/theme.ts"
 import { humanToolLabel, systemLocale } from "../src/ui/render/tool-label.ts"
 import { UiSessionState } from "../src/ui/session-state.ts"
 import { Transcript } from "../src/ui/tui/transcript.ts"
@@ -89,7 +90,7 @@ describe("footer narasi: tool → narasi → rekap → tool", () => {
     expect(second).toBeGreaterThan(first)
     // Rekap untuk tool SEBELUM narasi muncul SETELAH narasi yang mengikutinya.
     expect(recap).toBeGreaterThan(second)
-    expect(rows.join("\n")).toContain(`› ${humanToolLabel("read_file")} a.ts`)
+    expect(rows.join("\n")).toContain(`${glyphs.arrow} ${humanToolLabel("read_file")} a.ts`)
   })
 
   test("hitungan di-RESET tiap segmen — tidak akumulatif", () => {
@@ -113,7 +114,7 @@ describe("footer narasi: tool → narasi → rekap → tool", () => {
     expect(recaps).toHaveLength(2)
     expect(recaps[0]).toContain("1 read")
     expect(recaps.at(-1)).toContain("1 command")
-    expect(recaps.at(-1)).toContain("1 command · 1 read")
+    expect(recaps.at(-1)).toContain(`1 command ${glyphs.dot} 1 read`)
     // Tak ada kategori yang hitungannya mencapai 2 di rekap PER SEGMEN;
     // baris kumulatif memang boleh `1 command · 1 read` (bukan 2 per kategori).
     expect(text).not.toMatch(/2 (command|read|edit|subagent|thought|other)/)
@@ -191,7 +192,7 @@ describe("footer narasi: tool → narasi → rekap → tool", () => {
     // Kumulatif mengulang kedua angka (cakupan seluruh turn) di baris terakhir.
     expect(text.match(/\b1 read\b/g)?.length).toBe(2)
     expect(text.match(/\b1 command\b/g)?.length).toBe(1)
-    expect(recapLines(rows).at(-1)).toContain("1 command · 1 read")
+    expect(recapLines(rows).at(-1)).toContain(`1 command ${glyphs.dot} 1 read`)
   })
 
   test("chat tak pernah memuat baris `Tool:` — indeks kategori menggantikannya", () => {
@@ -265,8 +266,8 @@ describe("regresi render rekap (v0.43.0)", () => {
     // `replaceEntry()` menimpa `10 read` dengan angka kumulatif → pasangan
     // bertumpuk hilang, rekap kumulatif tetap jadi baris terakhir.
     expect(recaps).toHaveLength(2)
-    expect(recaps[0]).toContain("2 command · 154 read")
-    expect(recaps.at(-1)).toContain("2 command · 164 read")
+    expect(recaps[0]).toContain(`2 command ${glyphs.dot} 154 read`)
+    expect(recaps.at(-1)).toContain(`2 command ${glyphs.dot} 164 read`)
     expect(recaps.some((l) => /\b10 read\b/.test(l))).toBe(false)
   })
 

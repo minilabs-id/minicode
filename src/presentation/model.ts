@@ -51,6 +51,8 @@ export interface ActivityEntry {
    * replay event lama tetap terbaca; UI memakai ini sebelum code-derived marker.
    */
   label?: string
+  /** Deskripsi aktivitas manusiawi dari argumen model (`label` / `delegate_task.name`). */
+  intent?: string
   identity: ToolIdentity
   target?: string
   status: ToolStatus

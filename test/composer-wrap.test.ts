@@ -10,11 +10,14 @@ import {
   cleanPastedText,
   countPastedLines,
   expandPasteTokens,
+  expandRangeToPasteTokens,
   findPasteTokenAtCursor,
+  findPasteTokenBeforeWordDelete,
   highlightPasteTokens,
   shaveWordWrapped,
   shaveWrapped,
   shouldCollapsePaste,
+  snapCursorOutOfPasteToken,
   wrapComposerLine,
 } from "../src/ui/render/composer-wrap.ts"
 import { chunkByWidth } from "../src/ui/render/width.ts"
@@ -245,5 +248,20 @@ describe("helper placeholder paste", () => {
     expect(findPasteTokenAtCursor(line, 2, map, "delete")?.token).toBe(token)
     expect(findPasteTokenAtCursor(line, 23, map, "delete")).toBeNull()
     expect(findPasteTokenAtCursor(line, 10, map, "backspace")?.gStart).toBe(2)
+  })
+
+  test("snapCursorOutOfPasteToken, expandRangeToPasteTokens, dan findPasteTokenBeforeWordDelete menjaga keutuhan token", () => {
+    const token = "{paste text 19 lines}"
+    const map = new Map([[token, "isi"]])
+    const line = `hai ${token} ok`
+    // gStart = 4, gEnd = 25
+    expect(snapCursorOutOfPasteToken(line, 10, map, "left")).toBe(4)
+    expect(snapCursorOutOfPasteToken(line, 10, map, "right")).toBe(25)
+    expect(snapCursorOutOfPasteToken(line, 4, map, "nearest")).toBe(4)
+    expect(expandRangeToPasteTokens(line, 2, 12, map)).toEqual({ start: 2, end: 25 })
+    expect(expandRangeToPasteTokens(line, 12, 27, map)).toEqual({ start: 4, end: 27 })
+    expect(findPasteTokenBeforeWordDelete(line, 25, map)?.gStart).toBe(4)
+    expect(findPasteTokenBeforeWordDelete(line, 26, map)?.gStart).toBe(4)
+    expect(findPasteTokenBeforeWordDelete(line, 28, map)).toBeNull()
   })
 })

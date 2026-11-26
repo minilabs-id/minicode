@@ -123,7 +123,7 @@ available" without spawning npm.
 | `MINICODE_SCRIM` | `none` -> force the backdrop scrim to `faint` only (no dark `48;5;236` background) — diagnostics/terminals that map 256-colour oddly |
 | `MINICODE_COMPACT` | `1` -> compact tool calls, `0` -> expanded. Default: compact in the TUI, expanded in one-shot/exec |
 | `MINICODE_JUSTIFY` | `1` -> enable justified model text output. Default: off (opt-in) — justification injects spaces that change the original text when copied/piped |
-| `MINICODE_DROPDOWN` | `0` -> disable the dropdown, use inline hints (legacy consoles). Since v0.36 the dropdown (when active) is drawn as an **overlay inside the same `paint()` frame**, not a separate `paintRegion()`, and does not reduce `viewH` — prompt/cursor width uses `composerWidth()` with a progressive cap (100->100, 200->125, 300->150, 500->200; since v0.37) |
+| `MINICODE_DROPDOWN` | `0` -> disable the dropdown, use inline hints (legacy consoles). When active, the dropdown is drawn as an **overlay inside the same `paint()` frame**, not a separate `paintRegion()`, and does not reduce `viewH` — chat and composer content width uses symmetrical frame margins (`chatCols - 6`) with the progressive `composerWidth()` cap |
 | `MINICODE_MOUSE_SELECTION` | `0`/`false`/`off`/`no` -> disable TUI mouse tracking; default `1` for drag selection + wheel |
 | `MINICODE_MOTION` | `0` -> disable status animation (the pulse spark while a turn runs becomes a static glyph) — accessibility/screen recording/slow SSH |
 | `MINICODE_BELL` | `0` -> disable the `\x07` bell on approval (accessibility) |

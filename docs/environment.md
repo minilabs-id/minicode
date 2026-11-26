@@ -122,7 +122,7 @@ di TUI interaktif; non-TTY/one-shot/ACP menjawab "not available" tanpa spawn npm
 | `MINICODE_SCRIM` | `none` → paksa scrim backdrop jadi `faint` saja (tanpa latar gelap `48;5;236`) — diagnostik/tema terminal yang memetakan 256-warna aneh |
 | `MINICODE_COMPACT` | `1` → tool call ringkas, `0` → expanded. Default: compact di TUI, expanded di one-shot/exec. Toggle `/view compact` sudah dihapus; `Ctrl+O` juga dihapus sejak v0.34 (v0.33 pernah membuka modal detail Live di sidebar) |
 | `MINICODE_JUSTIFY` | `1` → aktifkan rata kanan-kiri (justify) keluaran teks model. Default: mati (opt-in) — justify menyuntik spasi yang mengubah teks asli saat di-copy/–pipe |
-| `MINICODE_DROPDOWN` | `0` → matikan dropdown, pakai hint inline (konsol legacy). Sejak v0.36 dropdown (bila aktif) digambar sebagai **overlay di dalam frame `paint()` yang sama**, bukan `paintRegion()` terpisah, dan tidak mengurangi `viewH` — lebar prompt/kursor memakai `composerWidth()` dengan cap progresif (100→100, 200→125, 300→150, 500→200; sejak v0.37) |
+| `MINICODE_DROPDOWN` | `0` → matikan dropdown, pakai hint inline (konsol legacy). Bila aktif, dropdown digambar sebagai **overlay di dalam frame `paint()` yang sama**, bukan `paintRegion()` terpisah, dan tidak mengurangi `viewH` — lebar isi chat & composer memakai margin simetris frame (`chatCols - 6`) dengan cap progresif `composerWidth()` |
 | `MINICODE_MOUSE_SELECTION` | `0`/`false`/`off`/`no` → matikan mouse tracking TUI; default `1` untuk drag selection + wheel |
 | `MINICODE_MOTION` | `0` → matikan animasi status (pulse spark saat turn berjalan jadi glyph statis) — aksesibilitas/rekaman layar/SSH lambat |
 | `MINICODE_BELL` | `0` → matikan bell `\x07` saat approval (aksesibilitas) |

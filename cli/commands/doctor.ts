@@ -30,6 +30,8 @@ interface DoctorReport {
   fallbackNote: string
   configGlobal: boolean
   configLocal: boolean
+  configError?: string
+  memoryError?: string
   hardening: { bashGuard: boolean; jail: boolean; scrub: boolean; perms: boolean }
 }
 
@@ -37,14 +39,21 @@ interface DoctorReport {
 // pola `codex doctor`: satu perintah untuk "apakah mesin ini siap jalan".
 // Murni baca lokal: tanpa request jaringan, tanpa LLM, tanpa tulis file.
 export async function buildDoctorReport(cwd?: string, allowLocal?: boolean): Promise<DoctorReport> {
-  const cfg = await loadConfig(cwd, { allowLocal }).catch(() => ({ providers: [] }))
+  let configError: string | undefined
+  const cfg = await loadConfig(cwd, { allowLocal }).catch((e) => {
+    configError = String((e as Error)?.message ?? e)
+    return { providers: [] }
+  })
   const providers = cfg.providers ?? []
   await loadPricingOverlay().catch(() => {})
   const meta = pricingOverlayMeta()
   let memRows = 0
+  let memoryError: string | undefined
   try {
     memRows = getMemoryStats(cwd).rows
-  } catch {}
+  } catch (e) {
+    memoryError = String((e as Error)?.message ?? e)
+  }
   const osSandbox = osSandboxAvailable() ? osSandboxTypeName() : "none"
   const docker = dockerAvailable()
   // Hardening probes — ringan, offline, tanpa LLM/jaringan
@@ -89,6 +98,8 @@ export async function buildDoctorReport(cwd?: string, allowLocal?: boolean): Pro
           : "sandbox available",
     configGlobal: existsSync(globalConfigPath()),
     configLocal: existsSync(resolve(cwd ?? ".", ".minicode", "config.json")),
+    ...(configError ? { configError } : {}),
+    ...(memoryError ? { memoryError } : {}),
     hardening: { bashGuard, jail, scrub, perms },
   }
 }
@@ -117,14 +128,14 @@ export function renderDoctorText(r: DoctorReport): string {
   const lines = [
     `\n${c.bold("minicode doctor")}`,
     `  runtime    ${r.bun} on ${r.platform}`,
-    `  providers  ${r.providers} (${r.providerModels} models) ${r.providers && r.providerModels ? ok : `${warn} ${r.providers ? "(no models — run: minicode sync)" : "(run wizard or config add)"}`}`,
+    `  providers  ${r.providers} (${r.providerModels} models) ${r.providers && r.providerModels ? ok : `${warn} ${r.providers ? "(no models — run: minicode providers sync)" : "(run wizard or config add)"}`}`,
     `  pricing    ${r.pricing.models} overlay models` +
       (r.pricing.ageH == null
-        ? ` ${warn} (never synced — run: pricing sync)`
+        ? ` ${warn} (never synced — run: minicode pricing sync)`
         : `, age ${r.pricing.ageH}h${r.pricing.stale ? ` ${warn} (stale)` : ""}`),
-    `  memory     ${r.memoryRows} rows`,
+    `  memory     ${r.memoryError ? `${warn} (${r.memoryError})` : `${r.memoryRows} rows`}`,
     `  sandbox    os=${r.sandboxOs} docker=${r.sandboxDocker ? "yes" : "no"} — ${r.fallbackNote}`,
-    `  config     global=${r.configGlobal ? "yes" : "no"} ~/.minicode/config.json local=${r.configLocal ? "yes" : "no"}`,
+    `  config     global=${r.configGlobal ? "yes" : "no"} ~/.minicode/config.json local=${r.configLocal ? "yes" : "no"}${r.configError ? ` ${warn} (${r.configError})` : ""}`,
     `  hardening  bash-guard:${hk.bashGuard ? ok : warn} jail:${hk.jail ? ok : warn} scrub:${hk.scrub ? ok : warn} perms:${hk.perms ? ok : warn} ${hardOk ? ok : warn}`,
   ]
   return lines.join("\n")

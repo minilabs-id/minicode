@@ -9,6 +9,7 @@ import type {
   UiPresentationSnapshot,
 } from "../src/ui/contract.ts"
 import { setSessionLocale } from "../src/ui/i18n/locale.ts"
+import { glyphs } from "../src/ui/render/theme.ts"
 import { Transcript } from "../src/ui/tui/transcript.ts"
 import { createFakeBus } from "./helpers/tui-harness.ts"
 
@@ -71,9 +72,9 @@ test("tiga tool child identik jadi satu baris agregat, bukan tiga baris ↳", ()
     })
   }
   const out = screen()
-  expect(out).toContain("✦ 1 sub agent · 3 tool · 0 failed")
+  expect(out).toContain(`${glyphs.sparkle} 1 sub agent · 3 tool · 0 failed`)
   expect(out).not.toContain("↳")
-  expect(out.match(/✦/g)?.length).toBe(1)
+  expect(out.split(glyphs.sparkle).length - 1).toBe(1)
 })
 
 test("target berbeda tetap satu baris agregat (tool dihitung unik)", () => {
@@ -91,7 +92,7 @@ test("target berbeda tetap satu baris agregat (tool dihitung unik)", () => {
     })
   })
   const out = screen()
-  expect(out).toContain("✦ 1 sub agent · 2 tool · 0 failed")
+  expect(out).toContain(`${glyphs.sparkle} 1 sub agent · 2 tool · 0 failed`)
   expect(out).not.toContain("functions/index.js")
   expect(out).not.toContain("firestore.rules")
 })
@@ -108,13 +109,13 @@ test("turn.started mengosongkan agregat — toolCallId dipakai ulang tak menumpu
   const out = screen()
   // Satu baris per turn (transkrip append-only), tetapi hitungan turn kedua
   // di-reset — tidak mewarisi "2 tool" dari turn pertama.
-  expect(out.match(/✦/g)?.length).toBe(2)
+  expect(out.split(glyphs.sparkle).length - 1).toBe(2)
   expect(
     out
       .split("\n")
-      .filter((l) => l.includes("✦"))
+      .filter((l) => l.includes(glyphs.sparkle))
       .at(-1),
-  ).toContain("✦ 1 sub agent · 1 tool · 0 failed")
+  ).toContain(`${glyphs.sparkle} 1 sub agent · 1 tool · 0 failed`)
 })
 
 test("mode normal: chat memuat ✦, subagent dan read (tak ada lagi pemindahan ke sidebar)", () => {
@@ -137,7 +138,7 @@ test("mode normal: chat memuat ✦, subagent dan read (tak ada lagi pemindahan k
   const chat = screen()
   // Agregat dan rekap kategori keduanya hidup di chat: tidak ada lagi guard
   // yang mengalihkan baris ke permukaan lain.
-  expect(chat).toContain("✦")
+  expect(chat).toContain(glyphs.sparkle)
   expect(chat).toContain("subagent")
   expect(chat).toContain("read")
   expect(chat).not.toContain("↳")
@@ -165,7 +166,7 @@ test("kegagalan dikelompokkan per alasan di satu baris", () => {
     })
   })
   const out = screen()
-  expect(out).toContain("✦ 1 sub agent · 2 tool · 2 failed")
+  expect(out).toContain(`${glyphs.sparkle} 1 sub agent · 2 tool · 2 failed`)
   expect(out).toContain("1 abort")
   expect(out).toContain("1 timeout")
 })

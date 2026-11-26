@@ -521,8 +521,45 @@ test("decodeKey: kontrol C0 tak dikenal dibuang, bukan jadi karakter", () => {
   for (const [code, nama] of kontrol) {
     const keys = decodeKeys(new Uint8Array([code]))
     expect(keys.length, nama).toBe(1)
-    expect(keys[0]?.key.type, nama).toBe(nama === "ctrl+t" ? "ctrl-t" : "ignore")
+    const expected = nama === "ctrl+t" ? "ctrl-t" : nama === "ctrl+k" ? "ctrl-k" : "ignore"
+    expect(keys[0]?.key.type, nama).toBe(expected)
   }
+})
+
+test("Alt+Backspace, Ctrl+Enter, word-left/right, dan Ctrl+K berfungsi di prompt-engine", () => {
+  expect(decodeKeys(new TextEncoder().encode("\x1b\x7f")).map((d) => d.key.type)).toEqual([
+    "ctrl-w",
+  ])
+  expect(
+    decodeKeysStream(new Uint8Array([0x1b, 0x08]), createDecoderState()).map((d) => d.key.type),
+  ).toEqual(["ctrl-w"])
+  expect(decodeKeys(new TextEncoder().encode("\x1b[13;5u")).map((d) => d.key.type)).toEqual([
+    "ctrl-j",
+  ])
+  expect(decodeKeys(new TextEncoder().encode("\x1bb")).map((d) => d.key.type)).toEqual([
+    "word-left",
+  ])
+  expect(decodeKeys(new TextEncoder().encode("\x1bf")).map((d) => d.key.type)).toEqual([
+    "word-right",
+  ])
+  expect(decodeKeys(new TextEncoder().encode("\x1b[1;5D")).map((d) => d.key.type)).toEqual([
+    "word-left",
+  ])
+  expect(decodeKeys(new TextEncoder().encode("\x1b[1;5C")).map((d) => d.key.type)).toEqual([
+    "word-right",
+  ])
+
+  let s = typeAll("satu dua tiga")
+  s = applyKey(s, { type: "word-left" }, hints).state
+  expect(s.cursor).toBe(9)
+  s = applyKey(s, { type: "word-left" }, hints).state
+  expect(s.cursor).toBe(5)
+  s = applyKey(s, { type: "word-right" }, hints).state
+  expect(s.cursor).toBe(8)
+  const killed = applyKey(s, { type: "ctrl-k" }, hints)
+  expect(killed.action).toBe("render")
+  expect(killed.state.line).toBe("satu dua")
+  expect(killed.state.cursor).toBe(8)
 })
 
 test("decodeKey: Ctrl+N punya tipe sendiri (tambah model)", () => {

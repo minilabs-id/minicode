@@ -56,7 +56,7 @@ export interface NoProgressOptions {
   readonly maxRepeatedErrors?: number
   /** Maksimum siklus kembali ke hash file lama tanpa verifikasi hijau (default 2). */
   readonly maxOscillations?: number
-  /** Maksimum panggilan PURE_READ berturut-turut di postur aktif (default 15). */
+  /** Maksimum panggilan PURE_READ berturut-turut di postur aktif (default 30). */
   readonly maxConsecutiveReadCalls?: number
   /** Postur sesi saat ini; non-"active" menonaktifkan detektor read-only thrashing. */
   readonly getPosture?: () => NoProgressPosture
@@ -65,6 +65,13 @@ export interface NoProgressOptions {
    * (default 1). Hard cap absolut: tidak pernah menambah budget tanpa batas.
    */
   readonly maxNewEvidenceRetries?: number
+  /** Hook observabilitas non-autoritatif saat guard memblokir panggilan. */
+  readonly onGuardEvent?: (event: {
+    kind: LoopGuardKind
+    reason: LoopGuardReason
+    tool?: string
+    detail?: string
+  }) => void
 }
 
 function canonicalize(value: unknown): string {
@@ -243,7 +250,7 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
     Number.isFinite(options.maxConsecutiveReadCalls) &&
     options.maxConsecutiveReadCalls >= 1
       ? Math.floor(options.maxConsecutiveReadCalls)
-      : 15
+      : 30
   const getPosture = options.getPosture ?? (() => "active" as const)
   const maxNewEvidenceRetries =
     typeof options.maxNewEvidenceRetries === "number" &&
@@ -251,6 +258,16 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
     options.maxNewEvidenceRetries >= 0
       ? Math.floor(options.maxNewEvidenceRetries)
       : 1
+  const emitGuard = (ev: {
+    kind: LoopGuardKind
+    reason: LoopGuardReason
+    tool?: string
+    detail?: string
+  }) => {
+    try {
+      options.onGuardEvent?.(ev)
+    } catch {}
+  }
 
   let lastErrorFingerprint: string | null = null
   let lastErrorActionKey: string | null = null
@@ -262,6 +279,20 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
   let activeBlock: { fingerprint: string; actionKey: string; streak: number } | null = null
   let newEvidenceAfterBlock = false
   let justifiedRetries = 0
+  // Sidik jari observasi baca `(tool + canonicalArgs + hash(content))` berbatas
+  // FIFO: bacaan ulang dengan argumen & isi identik tanpa mutasi di antaranya
+  // tidak dianggap bukti baru untuk membuka blokir error berulang.
+  const MAX_SEEN_READ_EVIDENCE = 64
+  const seenReadEvidence = new Set<string>()
+  const rememberReadEvidence = (key: string): boolean => {
+    if (seenReadEvidence.has(key)) return false
+    if (seenReadEvidence.size >= MAX_SEEN_READ_EVIDENCE) {
+      const oldest = seenReadEvidence.values().next().value
+      if (oldest !== undefined) seenReadEvidence.delete(oldest)
+    }
+    seenReadEvidence.add(key)
+    return true
+  }
 
   let consecutiveReadCalls = 0
 
@@ -307,6 +338,12 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
         newEvidenceAfterBlock = false
         return { allowed: true }
       }
+      emitGuard({
+        kind: "NO_PROGRESS",
+        reason: "REPEATED_ACTION_ERROR",
+        tool: name,
+        detail: `blocked persistent streak=${activeBlock.streak}`,
+      })
       return {
         allowed: false,
         kind: "NO_PROGRESS",
@@ -324,6 +361,12 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
       lastErrorActionKey !== null &&
       actionKey === lastErrorActionKey
     ) {
+      emitGuard({
+        kind: "NO_PROGRESS",
+        reason: "REPEATED_ACTION_ERROR",
+        tool: name,
+        detail: `streak=${repeatedErrorStreak}`,
+      })
       return {
         allowed: false,
         kind: "NO_PROGRESS",
@@ -354,6 +397,12 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
         const key = normalizeTrackPath(rel ?? rawPath)
         const tracker = fileTrackers.get(key) ?? fileTrackers.get(normalizeTrackPath(rawPath))
         if (tracker?.oscillationMessage) {
+          emitGuard({
+            kind: "OSCILLATION",
+            reason: "WORKSPACE_REVERT_CYCLE",
+            tool: name,
+            detail: key,
+          })
           return {
             allowed: false,
             kind: "OSCILLATION",
@@ -366,6 +415,12 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
       for (const cand of shellCandidatePaths(call, workspaceRoot)) {
         const tracker = fileTrackers.get(cand)
         if (tracker?.oscillationMessage) {
+          emitGuard({
+            kind: "OSCILLATION",
+            reason: "WORKSPACE_REVERT_CYCLE",
+            tool: name,
+            detail: cand,
+          })
           return {
             allowed: false,
             kind: "OSCILLATION",
@@ -396,6 +451,12 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
           // Reset setelah satu intervensi supaya model menerima peringatan keras
           // sebagai tool error dan dapat langsung memanggil todo_write / bertindak.
           consecutiveReadCalls = 0
+          emitGuard({
+            kind: "NO_PROGRESS",
+            reason: "READ_ONLY_THRASHING",
+            tool: name,
+            detail: `count=${observedCount}`,
+          })
           return {
             allowed: false,
             kind: "NO_PROGRESS",
@@ -520,7 +581,10 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
       if (/^\[LOOP_GUARD kind=(?:NO_PROGRESS|OSCILLATION)\b/.test(content.trimStart())) {
         return { allowed: true }
       }
-      if (input.isError === true) {
+      const isSubAgentFail =
+        name === "delegate_task" &&
+        /^\[sub-agent (?:skipped|[^\]\n]*error)\]/.test(content.trimStart())
+      if (input.isError === true || isSubAgentFail) {
         const fp = computeActionErrorFingerprint(name, input.args, content)
         const actionKey = `${name}\0${canonicalArgsHash(input.args)}`
         if (fp === lastErrorFingerprint && actionKey === lastErrorActionKey) {
@@ -554,19 +618,30 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
         return { allowed: true }
       }
       // Eksekusi sukses memutus streak error berulang. [Fase 6A / ACE-04]
-      // Sukses baca diagnostik atau mutasi workspace = bukti baru yang
-      // membenarkan SATU retry; sukses lain tidak membuka blokir.
-      if (activeBlock !== null) {
-        const tier = contractForTool(name)?.sideEffectTier
-        if (tier === "PURE_READ" || tier === "WORKSPACE_MUTATION") {
+      // Mutasi workspace menandai perubahan nyata (membuka retry & menyegarkan
+      // baseline bacaan); bacaan PURE_READ hanya membuka retry bila observasi
+      // `(tool + args + hash isi)` benar-benar baru — mengulang bacaan file &
+      // isi yang identik tidak lagi membuka blokir.
+      const tier = contractForTool(name)?.sideEffectTier
+      if (tier === "PURE_READ") {
+        const contentHash = createHash("sha256").update(content, "utf8").digest("hex")
+        const evKey = `${name}\0${canonicalArgsHash(input.args)}\0${contentHash}`
+        const isNovelObservation = rememberReadEvidence(evKey)
+        if (activeBlock !== null && isNovelObservation) {
           newEvidenceAfterBlock = true
         }
+      } else if (tier === "WORKSPACE_MUTATION") {
+        seenReadEvidence.clear()
+        if (activeBlock !== null) {
+          newEvidenceAfterBlock = true
+        }
+      } else if (tier === "LOCAL_ENV_MUTATION") {
+        seenReadEvidence.clear()
       }
       // Sukses pada mutasi lokal non-deklaratif (bash/code_run/git_commit/dll.)
       // menandakan progres nyata -> putus streak read-only. Tool gagal atau
       // baca-eksternal (web_search/web_fetch) TIDAK mereset.
       if (name !== "web_search" && name !== "web_fetch") {
-        const tier = contractForTool(name)?.sideEffectTier
         if (tier === "LOCAL_ENV_MUTATION" || tier === "WORKSPACE_MUTATION") {
           consecutiveReadCalls = 0
         }
@@ -629,6 +704,7 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
       activeBlock = null
       newEvidenceAfterBlock = false
       justifiedRetries = 0
+      seenReadEvidence.clear()
       lastErrorFingerprint = null
       lastErrorActionKey = null
       repeatedErrorStreak = 0
@@ -644,6 +720,7 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
       activeBlock = null
       newEvidenceAfterBlock = false
       justifiedRetries = 0
+      seenReadEvidence.clear()
       fileTrackers.clear()
       inflightPreHash.clear()
       inflightExecPreHashes.clear()

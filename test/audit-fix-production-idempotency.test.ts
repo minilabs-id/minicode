@@ -21,7 +21,11 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Tool, ToolContext } from "#minicore"
-import { createOrderedDomainPublisher, productionIdempotencyKey } from "../cli/setup.ts"
+import {
+  createOrderedDomainPublisher,
+  isReadOnlyObservationBash,
+  productionIdempotencyKey,
+} from "../cli/setup.ts"
 import type { DomainEvent } from "../src/presentation/events.ts"
 import { finalizeJournal } from "../src/session/journal.ts"
 import {
@@ -103,6 +107,15 @@ test("kunci idempotency produksi terdefinisi, stabil, dan bisa dinormalisasi", (
   // argsHash kanonik: urutan kunci objek tak mengubah kunci.
   expect(productionIdempotencyKey("write_file", { path: "a.txt", mode: "x" }, 3)).toBe(
     productionIdempotencyKey("write_file", { mode: "x", path: "a.txt" }, 3),
+  )
+  // Perintah bash observasi read-only dipisahkan per observationEpoch tanpa memecah bash mutasi.
+  expect(isReadOnlyObservationBash({ cmd: "git status --short" })).toBe(true)
+  expect(isReadOnlyObservationBash({ cmd: "dir /b" })).toBe(true)
+  expect(isReadOnlyObservationBash({ cmd: "git status > out.txt" })).toBe(false)
+  expect(isReadOnlyObservationBash({ cmd: "rm -rf tmp" })).toBe(false)
+  expect(isReadOnlyObservationBash({ cmd: "bun test" })).toBe(false)
+  expect(productionIdempotencyKey("bash", { cmd: "git status --short" }, 1, 0, 0)).not.toBe(
+    productionIdempotencyKey("bash", { cmd: "git status --short" }, 1, 0, 1),
   )
 })
 

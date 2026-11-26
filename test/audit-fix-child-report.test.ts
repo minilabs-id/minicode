@@ -16,8 +16,10 @@ import { join } from "node:path"
 import { createPresentationAdapter } from "../src/presentation/adapter.ts"
 import type { DomainEvent, EventBusLike } from "../src/presentation/events.ts"
 import {
+  cleanChildFinalText,
   clearSubAgentSessionFactory,
   delegateTaskTool,
+  formatFindingNote,
   type SubAgentSpec,
   setSubAgentSessionFactory,
 } from "../src/tools/task.ts"
@@ -155,4 +157,18 @@ test("adapter: child-report tanpa finding/childId diabaikan (tidak ada finding p
 
   expect(events.filter((e) => e.type === "finding.detected")).toHaveLength(0)
   adapter.dispose()
+})
+
+test("task helpers: bersihkan [FINDING] pipe mentah di jawaban akhir anak", () => {
+  expect(formatFindingNote("[FINDING] high | src/x.ts:12 | bypass guard")).toBe(
+    "high (src/x.ts:12): bypass guard",
+  )
+  const mixed = "[FINDING] high | src/x.ts:12 | bypass guard\nRingkasan bersih untuk induk."
+  expect(cleanChildFinalText(mixed)).toBe("Ringkasan bersih untuk induk.")
+
+  const onlyFindings = "[FINDING] low | a.ts:1 | note A\n[FINDING] med | b.ts:2 | note B"
+  expect(cleanChildFinalText(onlyFindings)).toBe("low (a.ts:1): note A\nmed (b.ts:2): note B")
+  expect(cleanChildFinalText("Ringkasan normal tanpa marker.")).toBe(
+    "Ringkasan normal tanpa marker.",
+  )
 })

@@ -5,7 +5,7 @@
 import { describe, expect, test } from "bun:test"
 import type { UiPresentationEvent } from "../src/ui/contract.ts"
 import { setSessionLocale } from "../src/ui/i18n/locale.ts"
-import { stripAnsi } from "../src/ui/render/theme.ts"
+import { glyphs, stripAnsi } from "../src/ui/render/theme.ts"
 import { humanToolLabel } from "../src/ui/render/tool-label.ts"
 import { UiSessionState } from "../src/ui/session-state.ts"
 import { Transcript } from "../src/ui/tui/transcript.ts"
@@ -134,8 +134,8 @@ describe("compact tool summary per turn", () => {
     // Narasi detail hidup di chat: baris `› nama target` tetap ada, dan rekap
     // kategori menjadi separator satu baris (bukan pengganti detail).
     const chat = screen().join("\n")
-    expect(chat).toContain(`› ${humanToolLabel("write_file")} a.ts`)
-    expect(chat).toContain(`› ${humanToolLabel("read_file")} b.ts`)
+    expect(chat).toContain(`${glyphs.arrow} ${humanToolLabel("write_file")} a.ts`)
+    expect(chat).toContain(`${glyphs.arrow} ${humanToolLabel("read_file")} b.ts`)
     expect(summaryLines(screen())).toHaveLength(1)
   })
 

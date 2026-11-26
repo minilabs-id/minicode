@@ -28,6 +28,7 @@ Usage:
   minicode daemon <cmd>         # daemon host / status / stop / issue / sessions
   echo "prompt" | minicode        # via pipe
   minicode sync                   # refresh models from all providers
+  minicode doctor [--json]        # local health & config diagnostics
   minicode openwork               # cross-session unfinished work (P14, read-only)
 Options:
   -h, --help          show help
@@ -42,7 +43,7 @@ Options:
   --model <name>      override model (provider::model)
   --provider <id>     force provider id
   --session <id>      session id (default random)
-  --allow-all         allow all tools (privileged access profile; hard jail/guard still apply)
+  -y, --allow-all     allow all tools (privileged access profile; hard jail/guard still apply)
   --ask               ask per tool (y/n/a) — human-supervised execution
   --allowlist         bash allowlist only (see MINICODE_BASH_ALLOWLIST)
   --max-steps <n>     max tool steps (default ${LIMITS.DEFAULT_MAX_STEPS})
@@ -55,8 +56,8 @@ Options:
   --budget <usd>      session cost limit
   --budget-strict     unknown cost + spend counts as over budget (fail-closed default)
   --tool-scope <s>    full (default) | explore (read-only subset)
-  --work-mode <m>     DISCUSS | BUILD (default: DISCUSS). Operating mode: DISCUSS =
-                      read-only investigation, discussion & planning, BUILD = implementation.
+  --work-mode <m>     DISCUSS | BUILD (default: DISCUSS; alias --mode <m>). Operating mode:
+                      DISCUSS = read-only investigation, discussion & planning, BUILD = implementation.
   --tui               deprecated no-op (interactive mode is always the fullscreen TUI)
   --enable-scheduler  EXPERIMENTAL: opt in to the autonomous scheduler (default: off).
                       Manual only - run /scheduler run. No timer; autonomous turns are
@@ -67,10 +68,10 @@ Options:
                       admitted through the runtime (kernel + durable journal); a rejected
                       admission runs nothing. Unknown value = off.
 
-TUI: /help /provider /model /context /status /sessions /init /update /exit /mode /undo /redo /clear /copy /view /lang /scheduler
+TUI: /help /provider /model /context /status /logs /sessions /init /update /exit /mode /undo /redo /clear /copy /view /lang /scheduler
 Keys: Enter submit · Tab work-mode · Shift+Tab permission · Up/Down history · Mouse wheel/PgUp/PgDn scroll (Shift = half page)
-      Home/End jump to transcript top/tail · Ctrl+R search · Esc abort turn (twice = quit) · Ctrl+D exit
-Subcommand flags (config/mcp/sessions/skills/exec/...): see 'minicode <cmd> --help'.
+      Home/End jump to transcript top/tail · Ctrl+R search · Ctrl+C copy/abort/clear · Esc abort turn (twice = quit) · Ctrl+D exit
+Subcommand flags (config/mcp/sessions/skills/doctor/exec/...): see 'minicode <cmd> --help'.
 `
 
 /** Versi machine-readable dari help yang sama (dipakai entry tipis & index.ts). */
@@ -84,7 +85,7 @@ export function buildHelpJson(): object {
       'minicode exec "prompt" [--json]',
       "minicode acp",
       "minicode daemon <start|status|stop|issue|sessions>",
-      "minicode providers|models|sync|config|mcp|skills|sessions|stats|memory",
+      "minicode providers|models|sync|config|mcp|skills|sessions|stats|memory|doctor",
       "minicode openwork — cross-session unfinished work portfolio (P14)",
     ],
     options: [
@@ -121,7 +122,7 @@ export function buildHelpJson(): object {
         flag: "--timeout <ms>",
         desc: "hard deadline per run (default 3600000 = 60min; 0 = Infinity)",
       },
-      { flag: "--allow-all", desc: "allow all tools (privileged access profile)" },
+      { flag: "-y, --allow-all", desc: "allow all tools (privileged access profile)" },
       { flag: "--ask", desc: "ask per tool (human-supervised)" },
       { flag: "--allowlist", desc: "bash allowlist only" },
       { flag: "--interactive", desc: "interactive TUI" },
@@ -133,7 +134,11 @@ export function buildHelpJson(): object {
       { flag: "--tool-scope <full|explore>", desc: "tool subset (explore = read-only)" },
       {
         flag: "--work-mode <DISCUSS|BUILD>",
-        desc: "operating mode: DISCUSS (default, read-only), BUILD",
+        desc: "operating mode: DISCUSS (default, read-only), BUILD (alias --mode)",
+      },
+      {
+        flag: "--runtime <off|constructed|owned>",
+        desc: "execution architecture (default: off)",
       },
       { flag: "--json", desc: "JSON output (help/exec)" },
       { flag: "--tui", desc: "deprecated no-op (interactive is always the fullscreen TUI)" },

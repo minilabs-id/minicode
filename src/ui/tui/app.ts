@@ -34,10 +34,13 @@ import {
   cleanPastedText,
   countPastedLines,
   expandPasteTokens,
+  expandRangeToPasteTokens,
   findPasteTokenAtCursor,
+  findPasteTokenBeforeWordDelete,
   highlightPasteTokens,
   shaveWordWrapped,
   shouldCollapsePaste,
+  snapCursorOutOfPasteToken,
   wrapComposerLine,
 } from "../render/composer-wrap.ts"
 import { formatError, friendlyToolErrorCanonical } from "../render/errors.ts"
@@ -81,6 +84,8 @@ export interface TuiHost {
   getStatus(): TuiStatusSnapshot
   /** Hint dropdown untuk baris "/" (slash + skill, difilter prefix). */
   listCommands(prefix: string): string[]
+  /** Hint dropdown opsional untuk autocomplete "@file" dari workspace. */
+  listFiles?(query: string): string[]
   /**
    * Eksekusi baris yang di-submit: builtin (/exit, /clear, /help, …) atau
    * prompt ke model. Resolve {quit:true} untuk keluar. Throw = App tampilkan
@@ -93,9 +98,9 @@ export interface TuiHost {
    * ditunda sampai turn selesai (mode/UI mutasi butuh idle). `false` = ditolak
    * (command berdampak destruktif, mis. `/clear`), dan controller sudah
    * menjelaskan alasannya lewat toast. Absen = perilaku lama: input beku total
-   * saat busy.
+   * saat busy. `displayText` menjaga placeholder paste ringkas saat digema.
    */
-  enqueue?(text: string): boolean
+  enqueue?(text: string, displayText?: string): boolean
   /** Batalkan turn yang berjalan (Esc saat busy). */
   abort(): void
   copySelection(text: string): boolean
@@ -167,10 +172,13 @@ const BUSY_TYPING_KEYS = new Set([
   "delete",
   "enter",
   "ctrl-j",
+  "ctrl-k",
   "ctrl-u",
   "ctrl-w",
   "left",
   "right",
+  "word-left",
+  "word-right",
   "up",
   "down",
   "home",
@@ -187,6 +195,8 @@ const promptFirst = (): string => ""
 const promptCont = (): string => ""
 const TIMER_TEXT = "00.00.00"
 const DOT_INTERVAL_MS = 200
+/** Interval ticker cepat sementara saat baris live sedang dwell/reveal per kata. */
+const TYPEWRITER_INTERVAL_MS = 50
 /** v7.29: peta laju stream teks → interval kedip spark (sama seperti turn-status). */
 const SPARK_INTERVALS = [120, 150, 220, 320] as const
 /** Badge job background berputar lebih pelan dari dots (tidak berkedip). */
@@ -448,6 +458,7 @@ export class TuiApp {
   private streamIntervalMs = 0
   private turnStartedAt = 0
   private activityTimer: ReturnType<typeof setTimeout> | undefined
+  private activityClockInterval = DOT_INTERVAL_MS
   // Clock badge job background: TERPISAH dari activityTimer karena job hidup
   // justru saat turn IDLE (activityTimer hanya jalan saat busy).
   private waitingTimer: ReturnType<typeof setTimeout> | undefined
@@ -456,12 +467,18 @@ export class TuiApp {
    * double-tap Esc = quit. Timestamp saja basi setelah draft baru diketik. */
   private lastAbortAt = 0
   /**
-   * Jendela "Esc lagi = quit" setelah abort. Beda dari `lastIdleEscapeAt` (/undo
-   * saat idle). Draft baru/submit/lewat 1,5 dtk mematikan flag agar Esc berikutnya
-   * tak menyalahartikan "hapus draft" sebagai quit.
+   * Jendela "Esc lagi = quit" setelah abort. Draft baru/submit/turn selesai/1,5 dtk
+   * mematikan flag agar Esc berikutnya tak salah mengira quit.
    */
   private awaitingSecondEsc = false
-  private lastIdleEscapeAt = 0
+  /** State Ctrl+R interaktif (cycle sub-string mundur + Esc pulihkan draft). */
+  private historySearchState: {
+    query: string
+    draft: string
+    draftPastes: Map<string, string>
+    matches: number[]
+    matchPos: number
+  } | null = null
   /** Hint "tekan lagi untuk keluar" tampil sekali setelah abort pertama. */
   private abortHintOn = false
   /** Micro-toast 2 detik di slot footer saat mengganti bahasa/salin. */
@@ -820,7 +837,8 @@ export class TuiApp {
       sub("execution:started", () => {})
       sub("execution:completed", () => {})
       sub("turn:completed", () => {
-        this.closeMenu()
+        this.syncMenuState()
+        this.disarmAbortQuit()
         this.retryInfo = null
         this.retrySince = 0
         this.retryToastUntil = 0
@@ -953,7 +971,7 @@ export class TuiApp {
 
   // ── Penanganan key ──
 
-  private requestAbort(): void {
+  private requestAbort(armEscQuit = true): void {
     if (!this.isBusy()) return
     // Dropdown yang masih terbuka saat abort tak boleh muncul lagi setelah
     // turn selesai (state line bisa kosong tapi menuOpen tetap true).
@@ -961,6 +979,13 @@ export class TuiApp {
     try {
       this.host.abort()
     } catch {}
+    if (!armEscQuit) {
+      this.disarmAbortQuit()
+      this.showToast(tSystem("msg.cancelling"))
+      this.startActivityClock()
+      this.paintCurrent()
+      return
+    }
     const now = Date.now()
     // Flag eksplisit, bukan `lastAbortAt` saja: timestamp dari abort lama bisa
     // masih dalam jendela 1,5 dtk saat user sudah mengetik draft baru (audit).
@@ -1053,7 +1078,15 @@ export class TuiApp {
   }
 
   private handleKey(key: PromptKey, pasted = false): void {
-    if (key.type !== "esc") this.lastIdleEscapeAt = 0
+    if (
+      key.type !== "ctrl-r" &&
+      key.type !== "esc" &&
+      key.type !== "mouse" &&
+      key.type !== "wheelup" &&
+      key.type !== "wheeldown"
+    ) {
+      this.historySearchState = null
+    }
     if (key.type === "mouse") {
       this.handleMouse(key)
       return
@@ -1134,21 +1167,40 @@ export class TuiApp {
       if (this.composerSelection) {
         if (this.composerSelection.dragging) this.composerSelection.dragging = false
         if (this.copyComposerSelection()) return
+        this.composerSelection = null
       }
       if (this.selection) {
-        // Ctrl+C di tengah drag = salin seleksi yang sudah ada, BUKAN no-op
-        // dan bukan abort. Lepaskan drag dulu supaya timer auto-scroll mati.
+        // Ctrl+C di tengah drag = salin seleksi yang sudah ada, BUKAN abort.
+        // Lepaskan drag dulu supaya timer auto-scroll mati.
         if (this.selection.dragging) {
           this.selection.dragging = false
           this.stopAutoScroll()
         }
         this.copySelection()
+        return
       }
+      if (this.isBusy()) {
+        this.requestAbort(false)
+        return
+      }
+      if (this.state.line.length > 0) {
+        this.state = createState()
+        this.pastedBlocks.clear()
+        this.composerSelection = null
+        this.composerScrollOffset = null
+        this.composerCache = null
+        this.preferredCol = null
+        this.histIdx = -1
+        this.editing = true
+        this.disarmAbortQuit()
+        this.paintCurrent()
+        return
+      }
+      this.showToast(tSystem("msg.quitHint"))
       return
     }
-    // Esc saat ada seleksi teks composer (ketika tidak busy) = batalkan seleksi dulu.
-    if (key.type === "esc" && !this.isBusy() && this.composerSelectionRange()) {
-      this.lastIdleEscapeAt = 0
+    // Esc saat ada seleksi teks composer = batalkan seleksi dulu (baik idle maupun busy).
+    if (key.type === "esc" && this.composerSelectionRange()) {
       this.composerSelection = null
       this.paintCurrent()
       return
@@ -1159,17 +1211,12 @@ export class TuiApp {
     // atau Ctrl+D baris-kosong, = abort + quit. Tanpa ini sesi hanya bisa
     // dibunuh kill -9 (kontrak I14).
     if (key.type === "esc" && this.selection) {
-      this.lastIdleEscapeAt = 0
       this.selection = null
       this.paintCurrent()
       return
     }
     if (key.type === "esc") {
-      // Cek jendela abort DULUAN, sebelum cabang busy/idle. Turn yang dibatalkan
-      // bisa selesai lebih cepat dari jari user: tanpa ini Esc kedua jatuh ke
-      // cabang idle dan (dalam kondisi gesture tertentu) memicu /undo, bukan quit.
-      // Jendela diprogram oleh FLAG eksplisit, bukan timestamp saja: timestamp
-      // basi setelah draft baru diketik (audit VERIFIED). Lewat 1,5 dtk = mati.
+      // Cek jendela abort DULUAN sebelum cabang busy/idle saat masih menyusul abort.
       if (this.awaitingSecondEsc && Date.now() - this.lastAbortAt >= 1500) {
         this.disarmAbortQuit()
       }
@@ -1178,24 +1225,24 @@ export class TuiApp {
         return
       }
       if (this.isBusy()) {
-        this.lastIdleEscapeAt = 0
         this.requestAbort()
         return
       }
       if (this.tooSmall()) return
+      if (this.historySearchState) {
+        const saved = this.historySearchState
+        this.historySearchState = null
+        this.statusToast = ""
+        this.setLine(saved.draft, saved.draftPastes)
+        return
+      }
       if (this.state.menuOpen) {
-        this.lastIdleEscapeAt = 0
         this.applyEngine(key)
         return
       }
       if (!this.state.line) {
-        const now = Date.now()
-        const doubleTap = this.lastIdleEscapeAt > 0 && now - this.lastIdleEscapeAt < 500
-        this.lastIdleEscapeAt = doubleTap ? 0 : now
-        if (doubleTap) void this.doSubmit("/undo")
         return
       }
-      this.lastIdleEscapeAt = 0
       if (this.state.line || this.editing) {
         this.state = createState()
         this.pastedBlocks.clear()
@@ -1243,22 +1290,39 @@ export class TuiApp {
       return
     }
     if (key.type === "tab") {
-      // Saat dropdown `/` sedang terbuka dan punya kandidat, Tab melengkapi
-      // command ke composer tanpa langsung submit; selain itu putar WorkMode.
-      const hasMenu =
-        this.editing &&
-        this.state.menuOpen &&
-        this.state.line.startsWith("/") &&
-        this.host.listCommands(this.state.line).length > 0
-      if (hasMenu) {
-        this.applyEngine(key)
-        return
+      // Saat dropdown `/` atau `@mention` sedang terbuka dan punya kandidat,
+      // Tab melengkapi pilihan ke composer; selain itu putar WorkMode.
+      if (this.editing && this.state.menuOpen) {
+        const sug = this.activeSuggestions()
+        if (sug.items.length > 0) {
+          if (sug.kind === "mention") {
+            const pick =
+              this.state.sel >= 0 && this.state.sel < sug.items.length
+                ? sug.items[this.state.sel]!
+                : sug.items[0]!
+            this.completeMention(pick, sug.tokenStart, sug.tokenEnd)
+            return
+          }
+          this.applyEngine(key)
+          return
+        }
       }
       this.host.cycleWorkMode(1)
       // Pembaruan WorkMode langsung mengubah label di bar footer tanpa
       // menutup footer dengan toast sementara.
       this.paintCurrent()
       return
+    }
+    if (key.type === "enter" && !this.isBusy() && this.editing && this.state.menuOpen) {
+      const sug = this.activeSuggestions()
+      if (sug.kind === "mention" && sug.items.length > 0) {
+        const pick =
+          this.state.sel >= 0 && this.state.sel < sug.items.length
+            ? sug.items[this.state.sel]!
+            : sug.items[0]!
+        this.completeMention(pick, sug.tokenStart, sug.tokenEnd)
+        return
+      }
     }
     if (key.type === "shift-tab") {
       this.host.togglePermissionMode()
@@ -1286,10 +1350,26 @@ export class TuiApp {
       if (hadCompSel && this.histIdx === prevHistIdx) this.paintCurrent()
       return
     }
-    if ((key.type === "left" || key.type === "right") && this.composerSelectionRange()) {
+    if (
+      (key.type === "left" ||
+        key.type === "right" ||
+        key.type === "word-left" ||
+        key.type === "word-right") &&
+      this.composerSelectionRange()
+    ) {
       const range = this.composerSelectionRange()!
       this.composerSelection = null
-      this.state = { ...this.state, cursor: key.type === "left" ? range.start : range.end }
+      const rawCursor = key.type === "left" || key.type === "word-left" ? range.start : range.end
+      const cursor =
+        this.pastedBlocks.size > 0
+          ? snapCursorOutOfPasteToken(
+              this.state.line,
+              rawCursor,
+              this.pastedBlocks,
+              key.type === "left" || key.type === "word-left" ? "left" : "right",
+            )
+          : rawCursor
+      this.state = { ...this.state, cursor }
       this.preferredCol = null
       this.paintCurrent()
       return
@@ -1328,12 +1408,43 @@ export class TuiApp {
       )
       if (hit) {
         const nextLine = this.state.line.slice(0, hit.utfStart) + this.state.line.slice(hit.utfEnd)
-        const menuOpen = nextLine.startsWith("/")
-        const hintCount = menuOpen ? this.host.listCommands(nextLine).length : 0
+        const sug = this.activeSuggestions(nextLine, hit.gStart)
+        const menuOpen = sug.items.length > 0
         this.state = {
           line: nextLine,
           cursor: hit.gStart,
-          sel: menuOpen ? Math.min(Math.max(this.state.sel, -1), hintCount - 1) : -1,
+          sel: menuOpen ? Math.min(Math.max(this.state.sel, -1), sug.items.length - 1) : -1,
+          menuOpen,
+        }
+        this.pruneUnusedPasteBlocks()
+        this.composerScrollOffset = null
+        this.composerCache = null
+        this.selection = null
+        this.preferredCol = null
+        this.editing = true
+        this.disarmAbortQuit()
+        this.followTail()
+        this.paintCurrent()
+        return
+      }
+    }
+    if (key.type === "ctrl-w" && this.pastedBlocks.size > 0) {
+      this.composerSelection = null
+      const hit = findPasteTokenBeforeWordDelete(
+        this.state.line,
+        this.state.cursor,
+        this.pastedBlocks,
+      )
+      if (hit) {
+        const units = toGraphemes(this.state.line)
+        units.splice(hit.gStart, this.state.cursor - hit.gStart)
+        const nextLine = units.join("")
+        const hints = this.activeSuggestions(nextLine, hit.gStart).items
+        const menuOpen = hints.length > 0
+        this.state = {
+          line: nextLine,
+          cursor: hit.gStart,
+          sel: menuOpen ? Math.min(Math.max(this.state.sel, -1), hints.length - 1) : -1,
           menuOpen,
         }
         this.pruneUnusedPasteBlocks()
@@ -1356,18 +1467,58 @@ export class TuiApp {
     this.composerSelection = null
     this.composerScrollOffset = null
     this.preferredCol = null
-    if (["char", "backspace", "delete", "enter", "ctrl-j"].includes(key.type)) this.selection = null
-    const hints = (line: string) => (line.startsWith("/") ? this.host.listCommands(line) : [])
+    if (["char", "backspace", "delete", "enter", "ctrl-j", "ctrl-k", "ctrl-w"].includes(key.type)) {
+      this.selection = null
+    }
+    const hints = (line: string) =>
+      this.activeSuggestions(
+        line,
+        line === this.state.line ? this.state.cursor : toGraphemes(line).length,
+      ).items
     // Fast path kursor: panah/Home/End hanya memindahkan kursor — isi frame
     // (transkrip, menu, footer) tak berubah satu sel pun. Menyusun ulang frame
     // penuh + diff per sel hanya untuk menggeser kursor membuang kerja O(frame).
     // Tangkap visIdx SEBELUM key supaya posisi baris kursor baru bisa dihitung
     // dari layout lama tanpa buildLayout.
     const cursorOnly =
-      key.type === "left" || key.type === "right" || key.type === "home" || key.type === "end"
+      key.type === "left" ||
+      key.type === "right" ||
+      key.type === "word-left" ||
+      key.type === "word-right" ||
+      key.type === "home" ||
+      key.type === "end"
     const prevVisIdx =
       cursorOnly && this.editing && this.currentScreen?.ok ? this.composerLayout().visIdx : -1
-    const { state, action } = applyKey(this.state, key, hints)
+    const result = applyKey(this.state, key, hints)
+    let { state } = result
+    const { action } = result
+    if (this.pastedBlocks.size > 0 && action === "render" && cursorOnly) {
+      const bias =
+        key.type === "left" || key.type === "word-left"
+          ? "left"
+          : key.type === "right" || key.type === "word-right"
+            ? "right"
+            : "nearest"
+      const snapped = snapCursorOutOfPasteToken(state.line, state.cursor, this.pastedBlocks, bias)
+      if (snapped !== state.cursor) state = { ...state, cursor: snapped }
+    }
+    // Sinkronkan menuOpen & sel dengan posisi kursor terbaru (penting untuk
+    // autocomplete `@file` di tengah kalimat maupun pembatalan menu saat Esc).
+    if (
+      key.type !== "esc" &&
+      key.type !== "tab" &&
+      key.type !== "enter" &&
+      action !== "submit" &&
+      !cursorOnly
+    ) {
+      const sug = this.activeSuggestions(state.line, state.cursor)
+      const menuOpen = sug.items.length > 0
+      state = {
+        ...state,
+        menuOpen,
+        sel: menuOpen ? Math.min(Math.max(state.sel, -1), sug.items.length - 1) : -1,
+      }
+    }
     const lineUnchanged = state.line === this.state.line
     this.state = state
     // Baris berubah = user mengedit draft. Jendela "Esc lagi = quit" dari abort
@@ -1478,7 +1629,7 @@ export class TuiApp {
       this.disarmAbortQuit()
       if (expandedLine) {
         this.rememberHistory(displayLine, activePastes)
-        this.host.enqueue?.(expandedLine)
+        this.host.enqueue?.(expandedLine, displayLine)
       }
       this.followTail()
       this.paintCurrent()
@@ -1543,7 +1694,8 @@ export class TuiApp {
     } finally {
       this.busy = false
       this.editing = true
-      this.closeMenu()
+      this.syncMenuState()
+      this.disarmAbortQuit()
       this.turnStartedAt = 0
       // [retry-visibility] Turn selesai (sukses/gagal/abort) = retry indicator
       // harus hilang. finally adalah pagar terakhir kalau event bus terlewat.
@@ -1738,6 +1890,11 @@ export class TuiApp {
    * indikator, follow). Sebelum paint pertama belum ada `lastLayout`, jadi
    * hitung dari geometri dengan input yang sama seperti buildLayout.
    */
+  /** Lebar area isi chat saat ini (untuk konsistensi wrap gema steer/antre). */
+  getChatWidth(): number {
+    return this.chatWidth()
+  }
+
   private chatWidth(): number {
     // Margin kiri 3 + kanan 3 adalah padding FRAME (simetris), jadi lebar isi =
     // chatCols - 6. Semua jalur wrap/scroll memakai angka ini supaya teks tak
@@ -1827,6 +1984,7 @@ export class TuiApp {
   }
 
   private historyNav(dir: -1 | 1): void {
+    this.historySearchState = null
     if (!this.history.length) return
     if (this.histIdx === -1) {
       if (dir > 0) return
@@ -1847,14 +2005,45 @@ export class TuiApp {
   }
 
   private historySearch(): void {
-    const prefix = this.state.line
-    for (let i = this.history.length - 1; i >= 0; i--) {
-      const h = this.history[i]!
-      if (h !== prefix && h.startsWith(prefix)) {
-        this.setLine(h, this.historyPastes[i])
+    if (!this.historySearchState) {
+      const query = this.state.line
+      const qLower = query.toLowerCase()
+      const matches: number[] = []
+      const seen = new Set<string>()
+      for (let i = this.history.length - 1; i >= 0; i--) {
+        const h = this.history[i]!
+        if (seen.has(h)) continue
+        if (!query || h.toLowerCase().includes(qLower)) {
+          seen.add(h)
+          matches.push(i)
+        }
+      }
+      if (!matches.length) {
+        this.showToast(tSystem("msg.historySearchEmpty"))
         return
       }
+      this.historySearchState = {
+        query,
+        draft: this.state.line,
+        draftPastes: new Map(this.pastedBlocks),
+        matches,
+        matchPos: 0,
+      }
+    } else {
+      this.historySearchState.matchPos =
+        (this.historySearchState.matchPos + 1) % this.historySearchState.matches.length
     }
+    const st = this.historySearchState
+    const idx = st.matches[st.matchPos]!
+    this.setLine(this.history[idx] ?? "", this.historyPastes[idx])
+    this.showToast(
+      tSystem("msg.historySearch", {
+        n: st.matchPos + 1,
+        total: st.matches.length,
+        q: st.query || "*",
+      }),
+      3500,
+    )
   }
 
   private setLine(line: string, pastes?: ReadonlyMap<string, string>): void {
@@ -1986,6 +2175,8 @@ export class TuiApp {
 
   private startActivityClock(): void {
     if (this.activityTimer || this.quitRequested) return
+    const interval = this.transcript.hasLiveAnimation() ? TYPEWRITER_INTERVAL_MS : DOT_INTERVAL_MS
+    this.activityClockInterval = interval
     const tick = () => {
       this.activityTimer = undefined
       if (!this.isBusy() || this.quitRequested) return
@@ -1993,7 +2184,7 @@ export class TuiApp {
       if (this.quitRequested) return
       this.startActivityClock()
     }
-    this.activityTimer = setTimeout(tick, DOT_INTERVAL_MS)
+    this.activityTimer = setTimeout(tick, interval)
     try {
       ;(this.activityTimer as unknown as { unref?: () => void }).unref?.()
     } catch {}
@@ -2307,7 +2498,12 @@ export class TuiApp {
     const desiredCol = this.preferredCol ?? Math.max(0, col - 1)
     this.preferredCol = desiredCol
     this.composerScrollOffset = null
-    this.state = { ...this.state, cursor: cursorAtVisualRowColumn(visual[targetIdx]!, desiredCol) }
+    const rawCursor = cursorAtVisualRowColumn(visual[targetIdx]!, desiredCol)
+    const cursor =
+      this.pastedBlocks.size > 0
+        ? snapCursorOutOfPasteToken(this.state.line, rawCursor, this.pastedBlocks, "nearest")
+        : rawCursor
+    this.state = { ...this.state, cursor }
     this.selection = null
     this.paintCurrent()
     return true
@@ -2340,10 +2536,12 @@ export class TuiApp {
     if (visIdx < nextOff || visIdx >= nextOff + shown) {
       const targetRow = dir < 0 ? nextOff : nextOff + shown - 1
       const desiredCol = this.preferredCol ?? Math.max(0, col - 1)
-      this.state = {
-        ...this.state,
-        cursor: cursorAtVisualRowColumn(visual[targetRow]!, desiredCol),
-      }
+      const rawCursor = cursorAtVisualRowColumn(visual[targetRow]!, desiredCol)
+      const cursor =
+        this.pastedBlocks.size > 0
+          ? snapCursorOutOfPasteToken(this.state.line, rawCursor, this.pastedBlocks, "nearest")
+          : rawCursor
+      this.state = { ...this.state, cursor }
       this.composerSelection = null
     }
     if (nextOff !== curOff) this.paintCurrent()
@@ -2486,15 +2684,78 @@ export class TuiApp {
     return { rows, visIdx, col, visual }
   }
 
+  private activeSuggestions(
+    line = this.state.line,
+    cursor = this.state.cursor,
+  ): { kind: "cmd" | "mention"; tokenStart: number; tokenEnd: number; items: string[] } {
+    if (line.startsWith("/")) {
+      return {
+        kind: "cmd",
+        tokenStart: 0,
+        tokenEnd: toGraphemes(line).length,
+        items: this.host.listCommands(line),
+      }
+    }
+    if (this.host.listFiles) {
+      const pts = toGraphemes(line)
+      const bounded = Math.max(0, Math.min(cursor, pts.length))
+      const before = pts.slice(0, bounded).join("")
+      const m = /(?:^|\s)@([^\s@]*)$/.exec(before)
+      if (m) {
+        const q = m[1] ?? ""
+        const qLen = toGraphemes(q).length
+        const atStart = bounded - qLen - 1
+        const files = this.host.listFiles(q).map((f) => (f.startsWith("@") ? f : `@${f}`))
+        return { kind: "mention", tokenStart: atStart, tokenEnd: bounded, items: files }
+      }
+    }
+    return { kind: "cmd", tokenStart: 0, tokenEnd: 0, items: [] }
+  }
+
+  private completeMention(item: string, tokenStart: number, tokenEnd: number): void {
+    const pts = toGraphemes(this.state.line)
+    const insertPts = toGraphemes(`${item} `)
+    pts.splice(tokenStart, Math.max(0, tokenEnd - tokenStart), ...insertPts)
+    this.state = {
+      line: pts.join(""),
+      cursor: tokenStart + insertPts.length,
+      sel: -1,
+      menuOpen: false,
+    }
+    this.composerSelection = null
+    this.composerScrollOffset = null
+    this.composerCache = null
+    this.preferredCol = null
+    this.editing = true
+    this.disarmAbortQuit()
+    this.followTail()
+    this.paintCurrent()
+  }
+
+  /** Pulihkan menu dropdown bila draft masih memuat `/cmd` atau `@mention` aktif. */
+  private syncMenuState(): void {
+    if (!this.state.line) {
+      this.closeMenu()
+      return
+    }
+    const sug = this.activeSuggestions()
+    const menuOpen = sug.items.length > 0
+    this.state = {
+      ...this.state,
+      menuOpen,
+      sel: menuOpen ? Math.min(Math.max(this.state.sel, -1), sug.items.length - 1) : -1,
+    }
+  }
+
   private menuRows(
     rows: number,
     cols: number,
     busy = this.isBusy(),
   ): { lines: string[]; start: number } {
-    if (!this.editing || busy || !this.state.menuOpen || !this.state.line.startsWith("/")) {
+    if (!this.editing || busy || !this.state.menuOpen) {
       return { lines: [], start: 0 }
     }
-    const hints = this.host.listCommands(this.state.line)
+    const hints = this.activeSuggestions().items
     if (!hints.length) return { lines: [], start: 0 }
     const room = Math.max(0, rows - 2 - this.composerHeight(busy) - 3)
     const visible = Math.max(1, Math.min(MAX_DROPDOWN_ROWS, room))
@@ -2510,7 +2771,8 @@ export class TuiApp {
     const out: string[] = []
     shown.forEach((h, i) => {
       const picked = start + i === this.state.sel
-      const text = sanitizeAnsiLine(h).replace(/^\/+/, "")
+      const clean = sanitizeAnsiLine(h)
+      const text = clean.startsWith("@") ? clean : clean.replace(/^\/+/, "")
       // Marker `›` + kolom marker tetap: seleksi terbaca tanpa warna dan
       // label tak bergeser saat panah berpindah.
       out.push(listRow(text, picked))
@@ -2556,10 +2818,12 @@ export class TuiApp {
     key: Extract<PromptKey, { type: "mouse" }>,
     clamp: boolean,
   ): number | null {
-    // Translasi x layar → x dalam kolom isi chat. Margin 3 milik frame, lalu
-    // dikurangi 2 kolom padding kiri blok composer.
+    // Translasi x layar → x dalam kolom kotak composer (bukan contentCols penuh
+    // yang bisa lebih lebar saat kotak composer di-cap 100 kolom).
     const chatX = key.x - layout.padLeft - ASSISTANT_LEFT_MARGIN
-    if (!clamp && (chatX < 1 || chatX > layout.contentCols)) return null
+    const boxW = this.composerBoxWidth()
+    const innerW = Math.max(1, boxW - COMPOSER_BOX_CHROME_COLS)
+    if (!clamp && (chatX < 1 || chatX > boxW)) return null
     const relativeRow = key.y - 1 - layout.composerTop
     const shownRows = layout.composerRowsShown
     if (!clamp && (relativeRow < 0 || relativeRow >= shownRows)) return null
@@ -2569,9 +2833,12 @@ export class TuiApp {
     let targetRow = layout.composerOffset + clampedRel
     if (!clamp && (targetRow < 0 || targetRow >= visual.length)) return null
     targetRow = Math.max(0, Math.min(visual.length - 1, targetRow))
-    const clampedChatX = Math.max(1, Math.min(layout.contentCols, chatX))
-    const innerCol = Math.max(0, clampedChatX - 1 - COMPOSER_BOX_LEFT_COLS)
-    return cursorAtVisualRowColumn(visual[targetRow]!, innerCol)
+    const clampedChatX = Math.max(1, Math.min(boxW, chatX))
+    const innerCol = Math.max(0, Math.min(innerW, clampedChatX - 1 - COMPOSER_BOX_LEFT_COLS))
+    const rawCursor = cursorAtVisualRowColumn(visual[targetRow]!, innerCol)
+    return this.pastedBlocks.size > 0
+      ? snapCursorOutOfPasteToken(this.state.line, rawCursor, this.pastedBlocks, "nearest")
+      : rawCursor
   }
 
   /**
@@ -2653,8 +2920,16 @@ export class TuiApp {
         this.composerSelection = null
         if (!this.isBusy() && this.state.menuOpen) {
           const idx = menu.firstIndex + (key.y - menu.top)
-          const hints = this.host.listCommands(this.state.line)
-          if (idx >= 0 && idx < hints.length) {
+          const sug = this.activeSuggestions()
+          if (idx >= 0 && idx < sug.items.length) {
+            if (this.state.sel === idx) {
+              if (sug.kind === "mention") {
+                this.completeMention(sug.items[idx]!, sug.tokenStart, sug.tokenEnd)
+                return
+              }
+              this.applyEngine({ type: "tab" })
+              return
+            }
             this.state = { ...this.state, sel: idx }
             this.paintCurrent()
           }
@@ -2662,7 +2937,7 @@ export class TuiApp {
         return
       }
       if (!insideTranscript) {
-        if (!this.isBusy() && this.editing) {
+        if (this.editing) {
           const pos = this.resolveComposerCursor(layout, key, false)
           if (pos !== null) {
             this.state = { ...this.state, cursor: pos }
@@ -2841,7 +3116,11 @@ export class TuiApp {
     const a = Math.max(0, Math.min(max, sel.anchor))
     const b = Math.max(0, Math.min(max, sel.focus))
     if (a === b) return null
-    return { start: Math.min(a, b), end: Math.max(a, b) }
+    const lo = Math.min(a, b)
+    const hi = Math.max(a, b)
+    return this.pastedBlocks.size > 0
+      ? expandRangeToPasteTokens(this.state.line, lo, hi, this.pastedBlocks)
+      : { start: lo, end: hi }
   }
 
   private deleteComposerSelection(): boolean {
@@ -2853,12 +3132,12 @@ export class TuiApp {
     const units = toGraphemes(this.state.line)
     units.splice(range.start, range.end - range.start)
     const nextLine = units.join("")
-    const menuOpen = nextLine.startsWith("/")
-    const hintCount = menuOpen ? this.host.listCommands(nextLine).length : 0
+    const sug = this.activeSuggestions(nextLine, range.start)
+    const menuOpen = sug.items.length > 0
     this.state = {
       line: nextLine,
       cursor: range.start,
-      sel: menuOpen ? Math.min(Math.max(this.state.sel, -1), hintCount - 1) : -1,
+      sel: menuOpen ? Math.min(Math.max(this.state.sel, -1), sug.items.length - 1) : -1,
       menuOpen,
     }
     this.composerSelection = null
@@ -2965,38 +3244,20 @@ export class TuiApp {
     // v7.28: indikator "baris baru" muncul saat user TIDAK berada di ekor.
     // Ambangnya memakai VIEWH FINAL yang sama dengan frame (bukan hitungan
     // terpisah yang bisa melenceng saat menu/draft berubah).
-    const maxBackForIndicator = Math.max(0, this.transcript.wrappedLength(contentCols) - viewH)
+    const maxBackForIndicator = Math.max(
+      0,
+      this.transcript.wrappedLength(contentCols, viewH) - viewH,
+    )
     const awayFromTail = this.scrollBack < maxBackForIndicator
     const newCount = awayFromTail ? this.transcript.total() - this.scrollBase : 0
-    // Baris indikator WAJIB dipotong ke lebar frame seperti baris lain: teks
-    // locale id lebih panjang dari terminal sempit (51 kolom untuk abort hint),
-    // dan baris lebih lebar dari `cols` membungkus sendiri → frame jadi
-    // `rows+1`, alt-screen scroll, seluruh diff CUP meleset (audit 2026-11-12,
-    // HIGH-3).
-    // Indikator status (abort hint / "N baris di bawah") TIDAK memakai baris
-    // frame sendiri: ia MENGGANTIKAN isi baris footer selama aktif (lihat
-    // `frame` di bawah). Dua alasan:
-    //   (a) tinggi frame tidak bergantung status. Dulu baris indikator
-    //       menambah/mengurangi satu baris, dan karena `viewH` memilih jendela
-    //       transkrip, seluruh isi layar bergeser di antara frame — gejala
-    //       "teks naik-turun";
-    //   (b) tidak memakan satu baris transkrip permanen demi pesan sementara.
-    // v7.30: toast (kwitansi perintah) lebih baru daripada hint abort —
-    // kalau hint menang, pesan toast tak pernah terlihat (pesan dijamin tampil).
-    // Urutan baru: toast > hint abort > indikator "baris baru". Tinggi frame
-    // tetap satu baris, jadi geometri/composer tidak berubah.
-    // v0.33: retry adalah MICRO-TOAST yang DITAMBAHKAN ke footer — bukan
-    // pengganti. Footer (model/konteks/timer/mode) tetap utuh; toast hilang
-    // sendiri setelah 4 dtk atau saat turn selesai.
-    const retryLine =
+    const retryBadge =
       busy && this.retryInfo && Date.now() < this.retryToastUntil ? this.retryIndicatorText() : ""
+    const scrollBadge = newCount > 0 ? t("app.newBelow", { n: newCount }) : ""
     const indicatorLine = this.statusToast
       ? c.accent(truncateToWidth(this.statusToast, width))
       : busy && this.abortHintOn
         ? c.warning(truncateToWidth(tSystem("msg.abortedHint"), width))
-        : newCount > 0
-          ? c.muted(truncateToWidth(t("app.newBelow", { n: newCount }), width))
-          : ""
+        : ""
 
     // Rebase scroll saat lebar berubah: indeks baris mentah melompat ketika
     // wrap berubah. Simpan anchor (id, offset) dari baris viewport pertama di
@@ -3026,11 +3287,19 @@ export class TuiApp {
       // `MAX_LIVE_TAIL_ROWS`), jadi narasi committed tak terdorong keluar
       // viewport. Saat live hilang `total` menyusut tetapi floor menahan
       // jendela: posisi baris committed di layar tetap, bawah boleh kosong.
-      const maxBack = Math.max(0, this.transcript.wrappedLength(contentCols) - viewH)
+      const maxBack = Math.max(0, this.transcript.wrappedLength(contentCols, viewH) - viewH)
       this.scrollBack = Math.max(maxBack, this.turnScrollFloor)
       this.turnScrollFloor = Math.max(this.turnScrollFloor, this.scrollBack)
     }
     const viewport = this.transcript.viewport(contentCols, viewH, this.scrollBack)
+    if (
+      this.isBusy() &&
+      this.transcript.hasLiveAnimation() &&
+      this.activityClockInterval !== TYPEWRITER_INTERVAL_MS
+    ) {
+      this.stopActivityClock()
+      this.startActivityClock()
+    }
     if (
       this.selection &&
       (!this.transcript.hasSource(this.selection.anchor.id) ||
@@ -3166,10 +3435,14 @@ export class TuiApp {
       busy && !motionReduced() ? Math.max(1, Math.floor((now - started) / sparkInterval) + 1) : 0
     const elapsed = now - started
     const timer = busy ? formatTimer(elapsed) : TIMER_TEXT
+    const runningExtra = busy ? this.transcript.runningExtraCount(viewH) : 0
     const footer =
       renderFooter(
         {
           ...snap.footer,
+          runningExtra,
+          ...(retryBadge ? { retryBadge } : {}),
+          ...(scrollBadge ? { scrollBadge } : {}),
           sparkFrame,
           streamIntervalMs: this.streamIntervalMs,
           timer,
@@ -3202,9 +3475,7 @@ export class TuiApp {
       ...cardRows,
       ...boxedComposer,
       bottomBorder,
-      indicatorLine
-        ? truncateToWidth(indicatorLine, chatCols)
-        : truncateToWidth(retryLine ? `${c.warning(retryLine)}  ${footer}` : footer, chatCols),
+      indicatorLine ? truncateToWidth(indicatorLine, chatCols) : truncateToWidth(footer, chatCols),
     ]
     const rawLength = frame.length
     const crop = Math.max(0, rawLength - height)

@@ -29,6 +29,7 @@ import {
   isAppBusy,
   isTurnIdleForBackground,
   liveToolsCount,
+  partitionStartupNotices,
   runTui,
 } from "../cli/tui.ts"
 import { resetLocaleState, setSessionLocale } from "../src/ui/i18n/locale.ts"
@@ -154,6 +155,25 @@ describe("turn stability: turn-state reset (#2)", () => {
 
     // BeginTurn berikutnya (turn user sah) tak mewarisi flag recap.
     expect(g.beginTurn().isChildRecapTurn).toBe(false)
+  })
+})
+
+describe("turn stability: pemilahan startupNotices TUI", () => {
+  test("notice teknis internal masuk logs, warning & resume tetap di chat awal", () => {
+    const res = partitionStartupNotices([
+      "\x1b[2m[thread sid=s1 tid=th_default head=3]\x1b[0m\n",
+      "[select sid=s1 basis=full-history freshness=fresh head=3]\n",
+      "[config] local config enabled: /repo/.minicode/config.json\n",
+      "[context] no configured window for fake::m; using fallback 131072 tokens\n",
+      "[recovery] unfinished mutations need verification — see system note\n",
+      "[child] 1 orphaned sub-agent run(s) tombstoned (INTERRUPTED/UNKNOWN)\n",
+      "[resume] WorkMode BUILD restored from session; pass --work-mode DISCUSS|BUILD to override\n",
+    ])
+    expect(res.logs).toHaveLength(4)
+    expect(res.chat).toHaveLength(3)
+    expect(res.chat.join("")).toContain("[recovery]")
+    expect(res.chat.join("")).toContain("[child]")
+    expect(res.chat.join("")).toContain("[resume]")
   })
 })
 
@@ -370,6 +390,42 @@ test("integrasi #2: abort → budget early-return → steering diterima lagi", a
   } finally {
     h.releasePersist()
     h.releaseTurn()
+    try {
+      await tty!.send(KEY.ctrlD)
+    } catch {}
+    await runP
+  }
+})
+
+test("integrasi #3: max_steps_exceeded menampilkan status jeda eskalasi tanpa crash doSubmit", async () => {
+  const h = harness()
+  h.session.runPromptWithVerify = async () => {
+    ;(h.session.session.events as unknown as { emit(type: string, ev: unknown): void }).emit(
+      "provider:extension",
+      {
+        type: "provider:extension",
+        kind: "max-steps-escalated",
+        data: { fromSteps: 200, toSteps: 400, observedSteps: 200 },
+      },
+    )
+    throw Object.assign(new Error("exceeded 200 steps"), {
+      kind: "max_steps_exceeded",
+      details: { steps: 200, maxSteps: 200 },
+    })
+  }
+  const runP = runTui(h.session)
+  tty = installFakeTty({ columns: 100, rows: 24 })
+  try {
+    await tty.ready()
+    await tty.waitForOutput((o) => o.includes("00.00.00"))
+    await tty.send("jalankan tugas panjang")
+    await tty.send(KEY.enter)
+    await tty.waitForScreen((f) => f.some((line) => line.includes("400")))
+    await waitFor(() => h.persistCount === 1, "persist mulai pada max_steps_exceeded")
+    h.releasePersist()
+    await waitFor(() => h.resets === 1, "usage reset dipanggil pada max_steps_exceeded")
+  } finally {
+    h.releasePersist()
     try {
       await tty!.send(KEY.ctrlD)
     } catch {}

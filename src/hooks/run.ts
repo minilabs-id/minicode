@@ -16,6 +16,8 @@ export interface RunHookCtx {
 export interface RunHooksOptions {
   /** Izinkan hook lokal `<cwd>/.minicode/hooks` (hanya bila `--allow-local-config`). */
   allowLocal?: boolean
+  /** Sink opsional untuk notice `[hooks] <phase>: <file>` agar TUI tak tertimpa stderr mentah. */
+  onNotice?: (message: string) => void
 }
 
 /**
@@ -92,7 +94,9 @@ export async function runRunHooks(
     // system — operator wajib bisa melihat APA yang jalan (nama berkas saja;
     // output hook tetap dibuang, isi tak pernah di-log).
     try {
-      process.stderr.write(`[hooks] ${phase}: ${file.split(/[\\/]/).pop()}\n`)
+      const notice = `[hooks] ${phase}: ${file.split(/[\\/]/).pop()}`
+      if (opts.onNotice) opts.onNotice(notice)
+      else process.stderr.write(`${notice}\n`)
     } catch {}
     await new Promise<void>((res) => {
       const p = spawn(process.execPath, [file], {

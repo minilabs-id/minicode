@@ -199,8 +199,40 @@ function extractTarget(args: unknown): string | undefined {
   return undefined
 }
 
-function summarize(args: unknown): ArgsSummary {
-  return { target: extractTarget(args), text: summarizeArgs(args) }
+function extractIntent(args: unknown, toolName?: string): string | undefined {
+  if (typeof args !== "object" || args === null) return undefined
+  const a = args as Record<string, unknown>
+  const raw =
+    typeof a.label === "string" && a.label.trim()
+      ? a.label
+      : toolName === "delegate_task" && typeof a.name === "string" && a.name.trim()
+        ? a.name
+        : undefined
+  if (!raw) return undefined
+  let clean = ""
+  for (const ch of raw) {
+    const code = ch.codePointAt(0) ?? 0
+    if (
+      code === 0x1b ||
+      code === 0x7f ||
+      (code < 0x20 && ch !== "\t") ||
+      (code >= 0x80 && code <= 0x9f)
+    )
+      continue
+    clean += ch === "\n" || ch === "\r" ? " " : ch
+  }
+  clean = clean.replace(/\s+/g, " ").trim()
+  if (!clean) return undefined
+  return clean.length > 80 ? `${Array.from(clean).slice(0, 79).join("")}…` : clean
+}
+
+function summarize(args: unknown, toolName?: string): ArgsSummary {
+  const intent = extractIntent(args, toolName)
+  return {
+    target: extractTarget(args),
+    ...(intent ? { intent } : {}),
+    text: summarizeArgs(args),
+  }
 }
 
 function firstLine(content: unknown, max: number): string {
@@ -265,7 +297,7 @@ function isExitCodeFailure(content: unknown): boolean {
  */
 function isSubAgentFailureSummary(content: unknown): boolean {
   const text = typeof content === "string" ? content : contentText(content)
-  return /^\[sub-agent [^\]\n]*error\]/.test(text.trimStart())
+  return /^\[sub-agent (?:skipped|[^\]\n]*error)\]/.test(text.trimStart())
 }
 
 /**
@@ -403,6 +435,7 @@ export function createPresentationAdapter(
   const taskIdentityProvider = opts.taskIdentityProvider
   let seq = opts.initialSeq ?? 0
   let currentTurn = opts.initialTurn ?? 0
+  let hasStartedTurn = (opts.initialSeq ?? 0) > 0 || (opts.initialTurn ?? 0) > 0
   let turnStartTs = opts.initialTurnStartTs ?? 0
   let turnSummaryProvider: TurnSummaryProvider | undefined
   let currentStep = 0
@@ -862,7 +895,15 @@ export function createPresentationAdapter(
       diag.anomalies++
       cascadeOpenTools("parent-ended")
     }
-    currentTurn = typeof e?.turn === "number" ? e.turn : currentTurn + 1
+    // Sesi yang baru saja gagal me-rollback `state.turnCount` di kernel sehingga turn
+    // berikutnya tetap memancarkan `e.turn` lama. Jaga `turnId` tetap monoton naik.
+    const reported = typeof e?.turn === "number" ? e.turn : undefined
+    if (!hasStartedTurn) {
+      currentTurn = reported ?? currentTurn
+      hasStartedTurn = true
+    } else {
+      currentTurn = reported !== undefined && reported > currentTurn ? reported : currentTurn + 1
+    }
     currentStep = 0
     reasoningText = ""
     reasoningTruncated = false
@@ -1010,7 +1051,7 @@ export function createPresentationAdapter(
           turnId: currentTurn,
           stepId: currentStep,
           identity: parseQualifiedName(call.name),
-          argsSummary: summarize(call.args),
+          argsSummary: summarize(call.args, call.name),
         })
         return
       }
@@ -1021,7 +1062,7 @@ export function createPresentationAdapter(
         turnId: currentTurn,
         stepId: currentStep,
         identity: parseQualifiedName(call.name),
-        argsSummary: summarize(call.args),
+        argsSummary: summarize(call.args, call.name),
       })
     },
   )
@@ -1397,7 +1438,7 @@ export function createPresentationAdapter(
   const publishApproval: PresentationAdapter["publishApproval"] = (e) => {
     try {
       const identity = parseQualifiedName(String(e.call?.name ?? "tool"))
-      const argsSummary = summarize(e.call?.args)
+      const argsSummary = summarize(e.call?.args, identity.qualified)
       const toolCallId = typeof e.call?.id === "string" ? e.call.id : undefined
       const childMeta = toolCallId ? openTools.get(toolCallId) : undefined
       const eventBase = childMeta?.childSessionId

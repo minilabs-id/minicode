@@ -27,7 +27,7 @@ describe("runOutputWindow", () => {
     const text = frame.join("\n")
     expect(text).toContain("Commands:")
     expect(text).toContain("/model")
-    expect(text).toContain("Esc cancel")
+    expect(text).toContain("Esc close")
     expect(text).not.toContain("scroll")
     await tty.send(KEY.esc, 90)
     expect(await p).toBe(true)

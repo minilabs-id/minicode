@@ -42,6 +42,8 @@ export interface ApprovalRequestInput {
   argsHash?: string | null
   /** Identitas pemanggilan (tool call id) yang di-approve. */
   invocationId?: string | null
+  /** Sinyal pembatalan caller (mis. Ctrl+C/timeout); abort → settle "deny". */
+  signal?: AbortSignal
 }
 
 interface Waiter {
@@ -114,6 +116,7 @@ export class ApprovalBroker {
    * tak tertangkap di sana mengubah "ditolak" jadi "crash sesi".
    */
   async request(input: ApprovalRequestInput): Promise<ApprovalDecision> {
+    if (input.signal?.aborted) return "deny"
     const ttl = Math.max(1_000, input.ttlMs ?? DEFAULT_TTL_MS)
     const approvalId = `apr_${randomUUID()}`
     const now = Date.now()
@@ -147,8 +150,28 @@ export class ApprovalBroker {
     }
 
     const decision = await new Promise<ApprovalDecision>((resolve) => {
-      const waiter: Waiter = { resolve, timer: null }
+      let settled = false
+      const cleanup = () => {
+        if (input.signal) input.signal.removeEventListener("abort", onAbort)
+      }
+      const finish = (d: ApprovalDecision) => {
+        if (settled) return
+        settled = true
+        cleanup()
+        resolve(d)
+      }
+      const waiter: Waiter = { resolve: finish, timer: null }
+      const onAbort = () => {
+        this.#settle(approvalId, "deny", "cancelled")
+      }
       this.#waiters.set(approvalId, waiter)
+      if (input.signal) {
+        if (input.signal.aborted) {
+          this.#settle(approvalId, "deny", "cancelled")
+          return
+        }
+        input.signal.addEventListener("abort", onAbort, { once: true })
+      }
       waiter.timer = setTimeout(() => {
         this.#settle(approvalId, "deny", "expired")
       }, ttl)
@@ -332,6 +355,8 @@ export class ApprovalBroker {
    */
   asPermissionAsk(opts: { sid: () => string; runId?: () => string | null }): PermissionAsk {
     return async (call) => {
+      const sig = (call as { signal?: AbortSignal } | undefined)?.signal
+      if (sig?.aborted) return "deny"
       const sid = opts.sid()
       if (!sid) return "deny"
       const tool = String(call?.name ?? "unknown")
@@ -347,6 +372,7 @@ export class ApprovalBroker {
         // [Fase 2 / LOOP-INV-08] Ikat keputusan ke argumen kanonis + id call.
         argsHash: hashArgs(call?.args ?? {}),
         invocationId: typeof call?.id === "string" && call.id !== "" ? call.id : null,
+        ...(sig ? { signal: sig } : {}),
       })
       return decision === "allow" ? "allow" : "deny"
     }

@@ -122,9 +122,10 @@ Audit complete · 18 files · 42s
 ## 2b. Chat kolom tengah (v0.34 — menggantikan split sidebar v0.33)
 
 Sidebar kanan DIHAPUS total. Chat berisi narration + category recap (mis.
-`3 command · 2 read · 5 subagent`) + baris tool, agregat `✦`, `finding.detected`,
-marker `+ thinking`, dan jawaban akhir. Label `Tool:`, `/expand`, dan collapsed
-buffer tetap DIHAPUS; jalur linear juga menaruh finding di transkrip.
+`3 command · 2 read · 5 subagent`) + baris tool, agregat `✦`, marker
+`+ thinking`, dan jawaban akhir (catatan mentah `finding.detected` / `[EVALUATE]`
+masuk `/logs`, bukan chat utama). Label `Tool:`, `/expand`, dan collapsed
+buffer tetap DIHAPUS.
 
 Chat adalah kolom tengah: `cols ≥ 120 && rows ≥ 20` → `chatCols = floor(cols/2)`
 dengan padding kiri/kanan (maks 50% terminal), footer/composer ikut ter-centre;

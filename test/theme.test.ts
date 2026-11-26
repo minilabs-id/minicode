@@ -3,7 +3,7 @@
 // truecolor, NO_COLOR mematikan semuanya, alias legacy konsisten dengan token
 // semantik, dan stripAnsi menangkap semua pola ANSI.
 import { afterAll, beforeEach, expect, test } from "bun:test"
-import { c, ESC, stripAnsi } from "../src/ui/render/theme.ts"
+import { c, cErr, ESC, stripAnsi } from "../src/ui/render/theme.ts"
 
 const origColorterm = process.env.COLORTERM
 const origNoColor = process.env.NO_COLOR
@@ -21,6 +21,7 @@ beforeEach(() => {
 
 afterAll(() => {
   Object.defineProperty(process.stdout, "isTTY", { value: false, configurable: true })
+  Object.defineProperty(process.stderr, "isTTY", { value: false, configurable: true })
   if (origColorterm == null) delete process.env.COLORTERM
   else process.env.COLORTERM = origColorterm
   if (origNoColor == null) delete process.env.NO_COLOR
@@ -125,4 +126,16 @@ test("stripAnsi: DCS/APC/PM/SOS + final CSI non-huruf (F-01)", () => {
   expect(stripAnsi("a\x1b_Xpayload\x1b\\b")).toBe("ab")
   expect(stripAnsi("a\x1b[3~b")).toBe("ab")
   expect(stripAnsi("a\x1b[@b")).toBe("ab")
+})
+
+test("cErr mengikuti TTY stderr, tidak bocorkan ANSI saat stderr piped", () => {
+  // stdout TTY true, stderr piped (false) -> cErr polos, c tetap berwarna
+  Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
+  Object.defineProperty(process.stderr, "isTTY", { value: false, configurable: true })
+  expect(cErr.error("boom")).toBe("boom")
+  expect(c.error("boom")).toContain(ESC)
+
+  Object.defineProperty(process.stderr, "isTTY", { value: true, configurable: true })
+  expect(cErr.error("boom")).toContain(ESC)
+  expect(stripAnsi(cErr.warning("warn"))).toBe("warn")
 })

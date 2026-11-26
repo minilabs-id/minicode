@@ -110,6 +110,7 @@ function printLines(lines: readonly string[]): void {
 }
 
 function usageError(message: string): never {
+  if (process.argv.includes("--json")) emitJson({ ok: false, error: message })
   console.error(`${message}\n\n${OPENWORK_HELP}`)
   process.exit(2)
 }

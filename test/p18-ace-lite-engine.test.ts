@@ -251,6 +251,38 @@ describe("ACE-04 no-progress new-evidence unlocker", () => {
     expect(det.snapshot().newEvidenceSinceFailure).toBe(true)
     expect(det.evaluateBeforeCall(failingCall).allowed).toBe(true)
   })
+
+  test("repeating an identical PURE_READ does not unlock REPEATED_ACTION_ERROR", () => {
+    const det = createNoProgressDetector({ maxRepeatedErrors: 3 })
+    det.recordOutcome({
+      name: "read_file",
+      args: { path: "schema.sql" },
+      isError: false,
+      content: "CREATE TABLE t (id INT);",
+    })
+    failThreeTimes(det)
+    expect(det.evaluateBeforeCall(failingCall).allowed).toBe(false)
+
+    // Mengulang bacaan dengan argumen & isi yang sama persis -> bukan bukti baru.
+    det.recordOutcome({
+      name: "read_file",
+      args: { path: "schema.sql" },
+      isError: false,
+      content: "CREATE TABLE t (id INT);",
+    })
+    expect(det.snapshot().newEvidenceSinceFailure).toBe(false)
+    expect(det.evaluateBeforeCall(failingCall).allowed).toBe(false)
+
+    // File berubah (isi berbeda) -> barulah dihitung sebagai bukti baru.
+    det.recordOutcome({
+      name: "read_file",
+      args: { path: "schema.sql" },
+      isError: false,
+      content: "CREATE TABLE t (id BIGINT);",
+    })
+    expect(det.snapshot().newEvidenceSinceFailure).toBe(true)
+    expect(det.evaluateBeforeCall(failingCall).allowed).toBe(true)
+  })
 })
 
 // ── 3. ACE-03: provisional lesson gate ──────────────────────────────────────

@@ -4,9 +4,11 @@ import {
   flagsAfterPromptBoundary,
   getArg,
   hasHelpFlag,
+  missingValueFlags,
   parseToggleArg,
   positionalSubArg,
   promptFromArgs,
+  unknownFlagsBeforePrompt,
 } from "../cli/args.ts"
 
 test("getArg returns value after flag", () => {
@@ -189,4 +191,16 @@ test("helper subcommand: positionalSubArg, hasHelpFlag, allowLocalSubcommand, pa
   expect(parseToggleArg("OFF")).toBe(false)
   expect(parseToggleArg("0")).toBe(false)
   expect(parseToggleArg("bogus")).toBe("invalid")
+})
+
+test("missingValueFlags & unknownFlagsBeforePrompt menangkap salah pakai flag sebelum prompt", () => {
+  expect(missingValueFlags(["--model"])).toEqual(["--model"])
+  expect(missingValueFlags(["--model", "--ask", "tolong"])).toEqual(["--model"])
+  expect(missingValueFlags(["--model=gpt-4o", "tolong"])).toEqual([])
+  expect(missingValueFlags(["tolong", "--model"])).toEqual([])
+
+  expect(unknownFlagsBeforePrompt(["--bogus", "halo"])).toEqual(["--bogus"])
+  expect(unknownFlagsBeforePrompt(["--cwd", "/tmp", "--bogus=1", "halo"])).toEqual(["--bogus"])
+  expect(unknownFlagsBeforePrompt(["--", "--bogus", "halo"])).toEqual([])
+  expect(unknownFlagsBeforePrompt(["halo", "--bogus"])).toEqual([])
 })

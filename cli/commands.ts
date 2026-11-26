@@ -196,6 +196,7 @@ export const DRIVER_HELP_COMMANDS: BuiltinCommand[] = [
   { name: "clear", descKey: "help.desc.clear" },
   { name: "copy", args: "[n]", descKey: "help.desc.copy" },
   { name: "view", args: "[action]", descKey: "help.desc.view" },
+  { name: "logs", descKey: "help.desc.logs" },
   // [PHASE 6AB] Hanya di /help, bukan dropdown: scheduler mati di sesi default,
   // jadi memajangkannya di completion membuat command yang selalu menjawab "not
   // enabled" tinggal satu tombol. Tetap penuh ditemukan di /help, tempat operator
@@ -209,7 +210,18 @@ export const DRIVER_HELP_COMMANDS: BuiltinCommand[] = [
 export const HELP_GROUPS: readonly { key: MsgKey; names: readonly string[] }[] = [
   {
     key: "help.gGeneral",
-    names: ["help", "status", "sessions", "clear", "copy", "init", "shell", "update", "exit"],
+    names: [
+      "help",
+      "status",
+      "logs",
+      "sessions",
+      "clear",
+      "copy",
+      "init",
+      "shell",
+      "update",
+      "exit",
+    ],
   },
   { key: "help.gModel", names: ["model", "context", "provider"] },
   { key: "help.gMode", names: ["mode", "undo", "redo", "lang"] },
@@ -227,12 +239,14 @@ const KEYBOARD_HELP: [string, MsgKey][] = [
   ["pgup / pgdn", "help.k.scroll"],
   ["home / end (empty prompt)", "help.k.jumpTop"],
   ["left / right", "help.k.move"],
+  ["alt+b/f / ctrl+arrow", "help.k.wordMove"],
   ["home / end", "help.k.jump"],
   ["delete", "help.k.delChar"],
   ["ctrl+a / ctrl+e", "help.k.lineEnds"],
   ["ctrl+r", "help.k.histSearch"],
-  ["ctrl+j", "help.k.newline"],
+  ["ctrl+j / ctrl+enter", "help.k.newline"],
   ["ctrl+w", "help.k.delWord"],
+  ["ctrl+k", "help.k.killLine"],
   ["ctrl+u", "help.k.clearLine"],
   ["esc", "help.k.esc"],
   ["ctrl+c", "help.k.ctrlC"],

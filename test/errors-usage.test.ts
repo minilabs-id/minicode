@@ -612,4 +612,14 @@ describe("friendlyToolError", () => {
     expect(matched).toBe("Unknown tool · check the name")
     expect(matched).not.toContain(SENTINEL_BEARER)
   })
+
+  test("refused non-jaringan tak salah masuk network; service unavailable masuk requestFailed", () => {
+    __setSystemLocaleForTest("en")
+    expect(friendlyError("policy refused this operation").message).toBe(tSystem("err.unknown"))
+    expect(friendlyError("connection refused to 127.0.0.1").message).toBe(tSystem("err.network"))
+    expect(friendlyToolError("service unavailable")).toBe(tSystem("msg.requestFailed"))
+    expect(friendlyToolError("docker unavailable — refusing direct execution")).toBe(
+      tSystem("msg.notConfigured"),
+    )
+  })
 })

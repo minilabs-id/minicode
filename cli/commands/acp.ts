@@ -513,15 +513,25 @@ export async function runAcpSession(
               : ctx.usage.getSession(ctx.modelRef.current)
           await persist(turnUsage)
         }
-        // P2.2: respons sukses sudah terkirim di atas (tepat-sekali per run);
-        // histori yang tak durable dilaporkan via stderr diagnostik, bukan
-        // pesan protokol kedua.
-        if (ctx.isWriterStale()) {
+        // P2.2 / P03-C: respons sukses sudah terkirim di atas (tepat-sekali
+        // per run); kegagalan persist dilaporkan via stderr diagnostik, bukan
+        // ditelan diam-diam atau mengirim envelope protokol kedua.
+        if (typeof ctx.isWriterStale === "function" && ctx.isWriterStale()) {
           writeStderrLine(
             `[writer] stale writer sid=${ctx.sessionId}, history NOT durable: ${ctx.writerStaleNote()}`,
           )
         }
-      } catch {}
+      } catch (err) {
+        if (typeof ctx.isWriterStale === "function" && ctx.isWriterStale()) {
+          writeStderrLine(
+            `[writer] stale writer sid=${ctx.sessionId}, history NOT durable: ${ctx.writerStaleNote()}`,
+          )
+        } else {
+          writeStderrLine(
+            `[writer] persist failed sid=${ctx.sessionId}: ${formatMachineError(err)}`,
+          )
+        }
+      }
       await ctx.close()
     }
   } catch (e) {

@@ -1,5 +1,6 @@
 import { sanitizeAnsiLine } from "../render/sanitize.ts"
-import { c, glyphs } from "../render/theme.ts"
+import { cErr, glyphs } from "../render/theme.ts"
+import { motionReduced } from "./motion.ts"
 import { acquireTransientPaint, paintWrite } from "./statusline.ts"
 
 // Jaga agar kursor terminal selalu ter-restore meski proses dihentikan
@@ -35,6 +36,16 @@ export interface SpinnerOptions {
 
 export function createSpinner(initialMessage: string = "", opts: SpinnerOptions = {}): Spinner {
   const isTTY = process.stderr.isTTY
+  const isDumb = (process.env.TERM ?? "").toLowerCase() === "dumb"
+  const isWinLegacy =
+    process.platform === "win32" &&
+    !(
+      process.env.WT_SESSION ||
+      process.env.TERM_PROGRAM ||
+      process.env.ANSICON ||
+      process.env.ConEmuANSI
+    )
+  const canAnimate = isTTY && !isDumb && !isWinLegacy && !motionReduced()
   const intervalMs = opts.intervalMs ?? 120
   const delayMs = opts.delayMs ?? 0
   // Pesan spinner bisa datang dari hasil tool yang tidak terpercaya — SGR boleh
@@ -55,7 +66,7 @@ export function createSpinner(initialMessage: string = "", opts: SpinnerOptions 
   const frames = glyphs.spinnerFrames
 
   const tick = () => {
-    const frame = c.info(frames[frameIdx % frames.length]!)
+    const frame = cErr.info(frames[frameIdx % frames.length]!)
     frameIdx++
     painted = true
     paintWrite(`\r${frame} ${message}\x1b[K`)
@@ -65,6 +76,13 @@ export function createSpinner(initialMessage: string = "", opts: SpinnerOptions 
   // frame lanjutan/delay kedua akan membuat spinner tak pernah muncul.
   const startPaint = (withDelay = false) => {
     if (!isTTY || stopped || intervalId || delayTimer) return
+    if (isDumb || isWinLegacy) {
+      if (!painted && message) {
+        painted = true
+        paintWrite(`${message}\n`)
+      }
+      return
+    }
     if (withDelay && delayMs > 0) {
       delayTimer = setTimeout(() => {
         delayTimer = undefined
@@ -79,8 +97,15 @@ export function createSpinner(initialMessage: string = "", opts: SpinnerOptions 
     // Hide cursor during spin
     installExitHook()
     paintWrite("\x1b[?25l")
-    owned = acquireTransientPaint("spinner", tick)
+    owned = acquireTransientPaint("spinner", tick, () => {
+      if (intervalId) {
+        clearInterval(intervalId)
+        intervalId = undefined
+      }
+      owned = null
+    })
     tick()
+    if (!canAnimate) return
     intervalId = setInterval(tick, intervalMs)
     try {
       ;(intervalId as unknown as { unref?: () => void }).unref?.()
@@ -100,7 +125,7 @@ export function createSpinner(initialMessage: string = "", opts: SpinnerOptions 
       clearInterval(intervalId)
       intervalId = undefined
     }
-    if (isTTY && painted) {
+    if (isTTY && painted && !isDumb && !isWinLegacy) {
       paintWrite("\r\x1b[K\x1b[?25h")
     }
     painted = false
@@ -124,13 +149,13 @@ export function createSpinner(initialMessage: string = "", opts: SpinnerOptions 
       if (stopped) return
       stopped = true
       stopTimer()
-      process.stderr.write(`${c.green("ok")} ${sanitizeAnsiLine(msg)}\n`)
+      process.stderr.write(`${cErr.green("ok")} ${sanitizeAnsiLine(msg)}\n`)
     },
     error(msg: string) {
       if (stopped) return
       stopped = true
       stopTimer()
-      process.stderr.write(`${c.red("failed")} ${sanitizeAnsiLine(msg)}\n`)
+      process.stderr.write(`${cErr.red("failed")} ${sanitizeAnsiLine(msg)}\n`)
     },
   }
 }

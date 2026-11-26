@@ -166,17 +166,7 @@ v0.34 the **right sidebar is removed**: the chat is a centred middle column —
 terminal) with left/right padding and a centred footer/composer; below that
 threshold the chat uses the full width. Popups/modals remain full-screen centred
 on `cols` (I20 unchanged), and one frame / one `stdout.write` (I1) is unchanged.
-Since v0.36 the composer is capped at **2 lines** (long drafts use a sliding
-window — no added lines and no transcript shift); the `/` dropdown is an
-**overlay inside the same frame**, without reducing `viewH` (no separate
-`paintRegion()`, avoiding a second write and flicker on steer); prompt/cursor
-width comes from the single helper `composerWidth()` (v0.36 cap
-`min(100, chatWidth())`, **superseded in v0.37** by the progressive cap
-`min(chatCols, 100 + floor(max(0, chatCols-100)/4))`); the prefix adapts —
-`minicode › ` when the content room `w−14 ≥ 24` (v0.37; v0.36 used ≥60 columns),
-else `› `, with `· ` for continuation rows. Since v0.37 bracketed paste is active
-and `Ctrl+A` = select-all with an empty composer and closed dropdown, with a
-resize stabiliser.
+Since v0.43/v0.51 the composer is framed in a rounded thin-line box of **1–2 dynamic rows** without an inner prefix (longer drafts scroll in a sliding window — no added lines and no transcript shift); symmetrical 3-column left/right frame padding yields `contentCols = chatCols - 6` wrapped once; the `/` and `@mention` dropdown is an **overlay inside the same frame**, without reducing `viewH` (no separate `paintRegion()`, avoiding a second write and flicker on steer); prompt/cursor width comes from the single helper `composerWidth()` using the progressive cap `min(contentCols, 100 + floor(max(0, contentCols-100)/4))`; bracketed paste, `{paste text N lines}` placeholders, composer drag/`Ctrl+A`/`Ctrl+C`, and a resize stabiliser are active; and live tool rows use adaptive tail quota `max(3, floor(viewH * 0.5))` with human intent/auto labels.
 The non-interactive path (one-shot prompt, `exec`, pipe/redirect/CI, `TERM=dumb`,
 screens under 10 lines) stays shell-first: plain append-only output to the
 scrollback with no cursor control.

@@ -20,6 +20,7 @@ import {
   killAllBackgroundJobs,
   listBackgroundJobs,
 } from "../src/tools/bash.ts"
+import { allTools } from "../src/tools/index.ts"
 
 const ctx = {
   signal: new AbortController().signal,
@@ -145,7 +146,10 @@ describe("F-03 wiring composition root (tool-layer)", () => {
     expect(outBound).toBeTruthy()
     expect(bashBound).not.toBe(bashTool)
     const unbound = await setupToolLayer(cfg)
-    expect(unbound.sessionTools.find((t) => t.name === "bash")).toBe(bashTool)
+    expect(unbound.sessionTools.find((t) => t.name === "bash")).toBe(
+      allTools.find((t) => t.name === "bash"),
+    )
+    expect(unbound.sessionTools.find((t) => t.name === "bash_output")).toBe(bashOutputTool)
     // Enforcement lewat instance hasil wiring: pemilik boleh, sid lain ditolak.
     const id = await startBg(bashBound as Tool, echoCmd)
     const other = createBashJobTools("f03-tl-b")

@@ -44,7 +44,9 @@ function footerLine(frame: readonly string[]): string | undefined {
     .map(stripAnsi)
     .find(
       (l) =>
-        l.includes(t("hint.move")) && l.includes(t("hint.select")) && l.includes(t("hint.cancel")),
+        l.includes(t("hint.move")) &&
+        (l.includes(t("hint.select")) || l.includes(t("hint.save"))) &&
+        l.includes(t("hint.cancel")),
     )
 }
 
@@ -120,7 +122,9 @@ describe("format jendela seragam v0.33", () => {
     const ffLine = footerLine(ff)
     expect(fp).toBeTruthy()
     expect(ffLine).toBeTruthy()
-    for (const label of [t("hint.move"), t("hint.select"), t("hint.cancel")]) {
+    expect(fp).toContain(t("hint.select"))
+    expect(ffLine).toContain(t("hint.save"))
+    for (const label of [t("hint.move"), t("hint.cancel")]) {
       expect(fp).toContain(label)
       expect(ffLine).toContain(label)
     }

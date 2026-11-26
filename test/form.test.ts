@@ -75,7 +75,7 @@ describe("runForm", () => {
     )
     await tty!.ready()
     await tty!.send("X")
-    expect(tty!.screen().join("\n")).toContain("Xhttps://preset.example")
+    expect(tty!.screen().join("\n")).toContain("https://preset.exampleX")
     await tty!.send(KEY.esc, 90)
     // Prefill kembali utuh, form TETAP terbuka.
     const frame = tty!.screen().join("\n")

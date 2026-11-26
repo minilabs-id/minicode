@@ -692,7 +692,7 @@ export async function saveSession(
     // P2.2: upsert MEMPERTAHANKAN writer_epoch. INSERT OR REPLACE menghapus
     // lalu menyisipkan ulang (epoch kembali 0!) — dilarang untuk baris sesi.
     db.prepare(
-      "INSERT INTO sessions (id, created_at, updated_at, cwd, system, writer_epoch, work_mode) VALUES (?, ?, ?, ?, ?, COALESCE((SELECT writer_epoch FROM sessions WHERE id = ?), 0), ?) ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at, cwd = excluded.cwd, system = excluded.system, work_mode = COALESCE(excluded.work_mode, sessions.work_mode)",
+      "INSERT INTO sessions (id, created_at, updated_at, cwd, system, writer_epoch, work_mode) VALUES (?, ?, ?, ?, ?, COALESCE((SELECT writer_epoch FROM sessions WHERE id = ?), 0), ?) ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at, cwd = CASE WHEN excluded.cwd = '' THEN sessions.cwd ELSE excluded.cwd END, system = CASE WHEN excluded.system = '' THEN sessions.system ELSE excluded.system END, work_mode = COALESCE(excluded.work_mode, sessions.work_mode)",
     ).run(id, createdAt, now, cwd ?? "", system ?? "", id, opts?.workMode ?? null)
     // P2.4: histori dimiliki default Thread — ensure atomik dalam txn yang
     // sama (sesi + thread tak pernah terpisah; tak ada sesi threadless yang
@@ -2226,8 +2226,8 @@ export function createChildSession(opts: {
           // tetap menunjuk baris `sessions` kanonik. saveSession parent kemudian
           // menimpanya dengan cwd/system lengkap.
           db.prepare(
-            "INSERT INTO sessions (id, created_at, updated_at, cwd, system, writer_epoch) VALUES (?, ?, ?, '', ?, 0) ON CONFLICT(id) DO NOTHING",
-          ).run(opts.parentSessionId, now, now, opts.system ?? "")
+            "INSERT INTO sessions (id, created_at, updated_at, cwd, system, writer_epoch) VALUES (?, ?, ?, ?, ?, 0) ON CONFLICT(id) DO UPDATE SET cwd = CASE WHEN sessions.cwd = '' THEN excluded.cwd ELSE sessions.cwd END",
+          ).run(opts.parentSessionId, now, now, cwd ?? "", opts.system ?? "")
         }
         if (opts.expectedParentEpoch !== undefined) {
           assertWriterEpochInTxn(db, opts.parentSessionId, opts.expectedParentEpoch)
@@ -2259,11 +2259,12 @@ export function createChildSession(opts: {
           }
         }
         db.prepare(
-          "INSERT INTO sessions (id, created_at, updated_at, cwd, system, writer_epoch, parent_session_id, parent_run_id) VALUES (?, ?, ?, '', ?, 0, ?, ?) ON CONFLICT(id) DO UPDATE SET parent_session_id = excluded.parent_session_id, parent_run_id = excluded.parent_run_id",
+          "INSERT INTO sessions (id, created_at, updated_at, cwd, system, writer_epoch, parent_session_id, parent_run_id) VALUES (?, ?, ?, ?, ?, 0, ?, ?) ON CONFLICT(id) DO UPDATE SET cwd = CASE WHEN sessions.cwd = '' THEN excluded.cwd ELSE sessions.cwd END, parent_session_id = excluded.parent_session_id, parent_run_id = excluded.parent_run_id",
         ).run(
           childSessionId,
           now,
           now,
+          cwd ?? "",
           opts.system ?? "",
           opts.parentSessionId,
           opts.parentRunId ?? null,
@@ -3258,6 +3259,43 @@ export function shrinkThreadHistory(
       perfEnabled() ? performance.now() - __t : 0,
       newMessages.length,
     )
+    db.close()
+  }
+}
+
+/**
+ * Catat baris `turns` setelah `shrinkThreadHistory` (jalur kompaksi menulis
+ * ulang histori di luar `saveSession`, sehingga token turn itu tidak hilang).
+ */
+export function recordTurnUsage(
+  sessionId: string,
+  usage: unknown,
+  cwd?: string,
+  opts?: { expectedEpoch?: number },
+): void {
+  if (!usage) return
+  const db = open(cwd)
+  const now = Date.now()
+  try {
+    withBusyRetrySync(() =>
+      db.transaction(() => {
+        if (opts?.expectedEpoch !== undefined) {
+          assertWriterEpochInTxn(db, sessionId, opts.expectedEpoch)
+        }
+        if (!sessionRowExistsInTxn(db, sessionId)) return
+        const maxRow = db
+          .prepare("SELECT MAX(turn_idx) as m FROM turns WHERE session_id = ?")
+          .get(sessionId) as { m: number | null } | null
+        const nextIdx = (maxRow?.m ?? -1) + 1
+        db.prepare("INSERT INTO turns (session_id, turn_idx, usage, ts) VALUES (?, ?, ?, ?)").run(
+          sessionId,
+          nextIdx,
+          JSON.stringify(usage),
+          now,
+        )
+      })(),
+    )
+  } finally {
     db.close()
   }
 }

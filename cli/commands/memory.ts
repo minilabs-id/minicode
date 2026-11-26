@@ -63,13 +63,13 @@ export async function handleMemory(
       console.log(
         asJson
           ? JSON.stringify(res)
-          : `reconciled ${res.reconciled} entri ${dot} diadopsi dari vector ${res.vectorOnlyAdopted} ${dot} ditambah dari file ${res.fileOnlyAdded} ${dot} superseded dilewati ${res.supersededSkipped} ${dot} baris superseded dibersihkan ${res.supersededFileRemoved} ${dot} legacy perlu review ${res.legacySuspectLines}`,
+          : `reconciled ${res.reconciled} entries ${dot} adopted from vector ${res.vectorOnlyAdopted} ${dot} added from files ${res.fileOnlyAdded} ${dot} superseded skipped ${res.supersededSkipped} ${dot} superseded lines cleaned ${res.supersededFileRemoved} ${dot} legacy needing review ${res.legacySuspectLines}`,
       )
       process.exit(0)
     } catch (e) {
       // Fail-closed dengan pesan actionable: DB tak terbuka (mis. path rusak)
       // bukan alasan mencetak stack trace mentah ke user.
-      err(`memory reconcile gagal: ${(e as Error).message}`)
+      err(`memory reconcile failed: ${(e as Error).message}`)
       process.exit(1)
     }
   }

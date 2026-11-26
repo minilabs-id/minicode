@@ -83,6 +83,7 @@ function mapPresentationEvent(event: DomainEvent): UiPresentationEvent | null {
         name: event.identity.name,
         qualified: event.identity.qualified,
         target: event.argsSummary.target,
+        ...(event.argsSummary.intent ? { intent: event.argsSummary.intent } : {}),
         status: "running",
         tsStart: event.ts,
         ...(event.parentLink ? { parentToolCallId: event.parentLink.parentToolCallId } : {}),

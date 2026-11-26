@@ -19,13 +19,39 @@ const TOOL_LABEL_KEYS: Readonly<Record<string, MsgKey>> = {
   move_file: "activity.tool.moveFile",
   bash: "activity.tool.bash",
   bash_output: "activity.tool.bashOutput",
+  bash_kill: "activity.tool.bashKill",
   grep: "activity.tool.grep",
   glob: "activity.tool.glob",
-  ls: "activity.tool.ls",
-  stat: "activity.tool.stat",
+  read_memory: "activity.tool.readMemory",
+  write_memory: "activity.tool.writeMemory",
+  forget_memory: "activity.tool.forgetMemory",
   delegate_task: "activity.tool.delegate",
   todo_write: "activity.tool.plan",
+  todo_read: "activity.tool.todoRead",
+  submit_result: "activity.tool.submitResult",
+  ask_user: "activity.tool.askUser",
   reasoning: "activity.tool.thought",
+  git_status: "activity.tool.gitStatus",
+  git_diff: "activity.tool.gitDiff",
+  git_log: "activity.tool.gitLog",
+  git_commit: "activity.tool.gitCommit",
+  git_push: "activity.tool.gitPush",
+  git_restore: "activity.tool.gitRestore",
+  git_checkout: "activity.tool.gitCheckout",
+  web_search: "activity.tool.webSearch",
+  web_fetch: "activity.tool.webFetch",
+  code_run: "activity.tool.codeRun",
+  lsp_diagnostics: "activity.tool.lsp",
+  lsp_definition: "activity.tool.lsp",
+  lsp_references: "activity.tool.lsp",
+  lsp_hover: "activity.tool.lsp",
+  lsp_symbols: "activity.tool.lsp",
+  lsp_workspace_symbols: "activity.tool.lsp",
+  lsp_rename: "activity.tool.lsp",
+  mcp_call: "activity.tool.mcp",
+  mcp_list: "activity.tool.mcp",
+  mcp_read: "activity.tool.mcp",
+  mcp_prompt: "activity.tool.mcp",
 }
 
 let cachedSystemLocale: Locale | null = null
@@ -64,6 +90,7 @@ export function tSystem(key: MsgKey, params?: Record<string, string | number>): 
 /** Subset activity yang dipakai label delegate (structural: UiPresentationActivity cocok). */
 export interface HumanToolActivity {
   label?: string
+  intent?: string
   summary?: string
   target?: string
 }
@@ -75,8 +102,76 @@ export function humanToolLabel(rawName: string, activity?: HumanToolActivity): s
   const dict = systemLocale() === "id" ? id : en
   let label: string = key ? (dict[key] ?? rawName) : rawName
   if (rawName === "delegate_task") {
-    const extra = activity?.label ?? activity?.summary ?? activity?.target
+    const extra = activity?.intent ?? activity?.label ?? activity?.summary ?? activity?.target
     if (extra) label = `${label} · ${extra}`
   }
   return truncateToWidth(sanitizeAnsiLine(label), 40, "…")
+}
+
+/**
+ * Rapikan target argumen untuk label manusiawi otomatis: hilangkan noise `cd … &&`
+ * pada bash, ringkas path panjang menjadi basename bila >36 kolom, dan buang
+ * awalan `pattern=`/`query=`/`glob=` agar nyaman dibaca.
+ */
+export function cleanAutoTarget(rawName: string, rawTarget?: string): string {
+  if (!rawTarget) return ""
+  let clean = sanitizeAnsiLine(rawTarget).trim()
+  if (!clean) return ""
+  if (rawName === "bash" || rawName === "code_run") {
+    clean = clean.replace(/^\$\s+/, "")
+    clean = clean.replace(/^cd\s+(?:\/d\s+)?(?:"[^"]+"|\S+)\s*&&\s*/i, "")
+    return truncateToWidth(clean.trim(), 44, "…")
+  }
+  if (rawName === "grep" || rawName === "glob") {
+    clean = clean.replace(/^(?:pattern|query|glob)=/i, "")
+    return truncateToWidth(clean.trim(), 40, "…")
+  }
+  if (
+    rawName === "read_file" ||
+    rawName === "read_image" ||
+    rawName === "write_file" ||
+    rawName === "edit" ||
+    rawName === "apply_patch" ||
+    rawName === "delete_file" ||
+    rawName === "move_file" ||
+    rawName === "stat" ||
+    rawName === "ls" ||
+    rawName === "git_restore" ||
+    rawName.startsWith("lsp_")
+  ) {
+    if (clean.length > 36 && !clean.includes(" → ")) {
+      const normalized = clean.replace(/\\/g, "/")
+      const base = normalized.slice(normalized.lastIndexOf("/") + 1)
+      if (base) clean = base
+    }
+    return truncateToWidth(clean, 40, "…")
+  }
+  return truncateToWidth(clean, 48, "…")
+}
+
+/**
+ * Judul utama aktivitas tool untuk live & ledger:
+ * - `text` / `isIntent=true`: memakai label niat eksplisit dari model (`args.label`).
+ * - `autoText`: label manusiawi deterministik 0-token (tanpa menunggu model).
+ */
+export function formatActivityLabel(
+  rawName: string,
+  activity?: HumanToolActivity,
+  opts: { maxCols?: number } = {},
+): { text: string; autoText: string; isIntent: boolean } {
+  const maxCols = opts.maxCols ?? 72
+  const cleanIntent = activity?.intent ? sanitizeAnsiLine(activity.intent).trim() : ""
+  const baseLabel = humanToolLabel(rawName, activity)
+  // `delegate_task` sudah menyertakan extra (label/summary/target) di `humanToolLabel`.
+  const cleanTarget = rawName === "delegate_task" ? "" : cleanAutoTarget(rawName, activity?.target)
+  const autoRaw = cleanTarget
+    ? rawName === "bash" || rawName === "code_run"
+      ? `${baseLabel}: ${cleanTarget}`
+      : `${baseLabel} ${cleanTarget}`
+    : baseLabel
+  const autoText = truncateToWidth(autoRaw, maxCols, "…")
+  if (cleanIntent) {
+    return { text: truncateToWidth(cleanIntent, maxCols, "…"), autoText, isIntent: true }
+  }
+  return { text: baseLabel, autoText, isIntent: false }
 }

@@ -58,15 +58,17 @@ bash_kill({ id: "bg_xxxxxxxx" })
 
 Bounded by `BASH_BACKGROUND_MAX_JOBS`; every job dies when the CLI exits.
 
-## Git (read + a single writer)
+## Git (read + gated writers)
 
 | Tool | Function | Notes |
 |---|---|---|
 | `git_status` | `status --porcelain + diff --stat + log -10` | cwd jail |
 | `git_diff` | Unstaged `diff` or `--staged` | — |
 | `git_log` | `log --oneline -n` | — |
-| `git_commit` | Commit only | **Gated** like `delegate_task` (TTY asks once, non-TTY denies; `readonly/plan/allowlist` deny). Refuses before staging if the effective Git config carries a custom filter; review trusted filters then commit manually. Sub-agents do not get it. Deliberately absent: amend/reset/rebase/checkout/branch -D/stash drop. The message goes through a single `-m` so `$()`/backticks are not expanded; `git add -- <paths>` so a file named `-weird.txt` is not treated as a flag |
+| `git_commit` | Commit only | **Gated** like `delegate_task` (TTY asks once, non-TTY denies; `readonly/plan/allowlist` deny). Refuses before staging if the effective Git config carries a custom filter; review trusted filters then commit manually. Sub-agents do not get it. Deliberately absent: amend/reset/rebase/branch -D/stash drop. The message goes through a single `-m` so `$()`/backticks are not expanded; `git add -- <paths>` so a file named `-weird.txt` is not treated as a flag |
 | `git_push` | Push a local branch to a remote | **Gated** like `git_commit`; requires an explicit branch/remote or `setUpstream`. `GIT_SAFE_BASE` hardening neutralises pre-push hooks + repo filters. In `unrestricted` mode, narrow git credentials (`GH_TOKEN`/`GITHUB_TOKEN`/`SSH_AUTH_SOCK`) are forwarded to the subprocess; in other modes the push only succeeds when credentials are already available on the machine (e.g. an OS credential helper). Sub-agents do not get it |
+| `git_restore` | Restore ONE path from index/ref (`git restore`) | GIT WRITE, **gated** like `git_commit`. Narrow: single `path`, optional `ref` (`--source`) / `staged`; no branch/ref deletion, no `--force`. Array argv + `runGit` neutralises repo hooks/filters. Fail-closed outside root/sensitive/owned-state |
+| `git_checkout` | Restore ONE path from index (`git checkout -- <path>`) | GIT WRITE, **gated** like `git_commit`. Path-restore only — never branch switching. Array argv + `runGit` neutralises hooks/filters; refuses outside root/sensitive/owned-state |
 
 ## Web
 
@@ -94,7 +96,7 @@ For JavaScript-rendered pages or UI clicks/forms/verification, `agent-browser` v
 
 | Tool | Function | Notes |
 |---|---|---|
-| `delegate_task` | Isolated `explore`/`plan` sub-agent | Pool of 3 by default (`MINICODE_SUB_AGENT_POOL_SIZE`, 1..16), separate context/memory/signal/budget, abort-aware. Pass `scope` (`file`/`dir`/`subtree`/`repo`) for budgets 12/18/26/36 steps (`plan` ×1.5, clamped to `[8,50]`), escalated through `[8,12,20,32,50]` when stalled — do **not** set `maxSteps` yourself (it disables escalation); without `scope`, the 5/15 fallback applies. Split wide fan-out into 2–3 per turn and give children a `name` for human labels. `timeoutMs` overrides the 300,000 ms default (`MINICODE_SUB_AGENT_TIMEOUT_MS`); on timeout streamed text is kept and file effects are not rolled back. Under ASK a TTY requests approval and non-TTY denies (even with the daemon approval broker injected — `allowNonTtyAsk` is only for non-gated tools); AUTO runs without a prompt when authorised. A parent PermissionMode of `ASK`/`plan`/`readonly` forces `explore`; WorkMode `DISCUSS` restricts child tools to the exploration subset, while `BUILD` lets a `plan` child keep the available base tools. Children get no commit, no memory/todo writes, no nesting, no background jobs; built-in MCP tools (`mcp_call`/`mcp_read`/`mcp_prompt`) are included only in a child `plan` mode under `BUILD`. One approval covers one delegation (no "Always" option); a turn that fails after the child committed yields a `[recovery]` warning |
+| `delegate_task` | Isolated `explore`/`plan` sub-agent | Pool of 3 by default (`MINICODE_SUB_AGENT_POOL_SIZE`, 1..16), separate context/memory/signal/budget, abort-aware. Pass `scope` (`file`/`dir`/`subtree`/`repo`) for budgets 16/24/40/64 steps (`plan` ×1.5, clamped to `[8,100]`), escalated through `[8,12,20,32,50,75,100]` when stalled — do **not** set `maxSteps` yourself (it disables escalation); without `scope`, the 5/15 fallback applies. Split wide fan-out into 2–3 per turn and give children a `name` for human labels. `timeoutMs` overrides the 300,000 ms default (`MINICODE_SUB_AGENT_TIMEOUT_MS`); on timeout streamed text is kept and file effects are not rolled back. Under ASK a TTY requests approval and non-TTY denies (even with the daemon approval broker injected — `allowNonTtyAsk` is only for non-gated tools); AUTO runs without a prompt when authorised. A parent PermissionMode of `ASK`/`plan`/`readonly` forces `explore`; WorkMode `DISCUSS` restricts child tools to the exploration subset, while `BUILD` lets a `plan` child keep the available base tools. Children get no commit, no memory/todo writes, no nesting, no background jobs; built-in MCP tools (`mcp_call`/`mcp_read`/`mcp_prompt`) are included only in a child `plan` mode under `BUILD`. One approval covers one delegation (no "Always" option); a turn that fails after the child committed yields a `[recovery]` warning |
 
 ## MCP
 

@@ -12,6 +12,7 @@ import type {
   UiPresentationSnapshot,
   UiToolStatus,
 } from "../src/ui/contract.ts"
+import { glyphs } from "../src/ui/render/theme.ts"
 import { humanToolLabel } from "../src/ui/render/tool-label.ts"
 import { UiSessionState } from "../src/ui/session-state.ts"
 import { Transcript } from "../src/ui/tui/transcript.ts"
@@ -110,8 +111,8 @@ describe("activity fold (minimizeActivity)", () => {
     emit({ type: "tool.completed", seq: 2, turnId: 1, toolCallId: "c2", status: "completed" })
     emit({ type: "turn.completed", seq: 3, turnId: 1 })
     const view = transcript.view(40, 10, 0).join("\n")
-    expect(view).toContain(`› ${humanToolLabel("read_file")} a.ts`)
-    expect(view).toContain(`› ${humanToolLabel("bash")}`)
-    expect(recapLines(view)[0]).toContain("1 command · 1 read")
+    expect(view).toContain(`${glyphs.arrow} ${humanToolLabel("read_file")} a.ts`)
+    expect(view).toContain(`${glyphs.arrow} ${humanToolLabel("bash")}`)
+    expect(recapLines(view)[0]).toContain(`1 command ${glyphs.dot} 1 read`)
   })
 })

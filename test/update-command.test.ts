@@ -10,6 +10,7 @@ import {
   handleBuiltinCommand,
   type ManualUpdateOutcome,
 } from "../cli/commands.ts"
+import { createTuiUpdateHandler } from "../cli/tui.ts"
 import { en } from "../src/ui/i18n/en.ts"
 import { id } from "../src/ui/i18n/id.ts"
 import { resetLocaleState, setSessionLocale, t } from "../src/ui/i18n/locale.ts"
@@ -146,4 +147,122 @@ test.each(["en", "id"] as const)("update: muncul di /help (%s)", async (locale) 
   const { lines, value } = await captureOutput(() => handleBuiltinCommand("/help", dummyCtx()))
   expect(value.handled).toBe(true)
   expect(lines.join("\n")).toContain("/update")
+})
+
+test("createTuiUpdateHandler: check tetap di alt-screen saat alreadyLatest / preflight gagal", async () => {
+  const events: string[] = []
+  const handler = createTuiUpdateHandler({
+    releaseTerminal: () => events.push("releaseTerminal"),
+    reacquireTerminal: () => {
+      events.push("reacquireTerminal")
+      return true
+    },
+    requestQuit: () => events.push("requestQuit"),
+    resumeStdin: () => events.push("resumeStdin"),
+    closeSession: async () => {
+      events.push("closeSession")
+    },
+    writeStatusLine: (line) => events.push(`status:${line}`),
+    runUpdate: async ({ onPhase }) => {
+      await onPhase?.("check")
+      events.push("checked")
+      return { ok: true, alreadyLatest: true }
+    },
+    respawn: async () => {
+      events.push("respawn")
+      return 0
+    },
+    exit: (() => {
+      events.push("exit")
+      throw new Error("exit")
+    }) as never,
+  })
+  const res = await handler()
+  expect(res).toEqual({ ok: true, alreadyLatest: true })
+  expect(events).toEqual(["checked"])
+})
+
+test("createTuiUpdateHandler: lepas terminal saat install lalu closeSession() SEBELUM spawn", async () => {
+  const events: string[] = []
+  let exitCode: number | undefined
+  const handler = createTuiUpdateHandler({
+    releaseTerminal: () => events.push("releaseTerminal"),
+    reacquireTerminal: () => {
+      events.push("reacquireTerminal")
+      return true
+    },
+    requestQuit: () => events.push("requestQuit"),
+    resumeStdin: () => events.push("resumeStdin"),
+    closeSession: async () => {
+      events.push("closeSession")
+    },
+    writeStatusLine: (line) => events.push(`status:${line}`),
+    runUpdate: async ({ onPhase }) => {
+      await onPhase?.("check")
+      events.push("run:check")
+      await onPhase?.("install", "2.5.0")
+      events.push("run:install")
+      await onPhase?.("verify", "2.5.0")
+      return { ok: true, latest: "2.5.0" }
+    },
+    respawn: async (v) => {
+      events.push(`respawn:${v}`)
+      return 0
+    },
+    exit: ((code: number) => {
+      exitCode = code
+      events.push(`exit:${code}`)
+      throw new Error("EXITED")
+    }) as never,
+  })
+  await expect(handler()).rejects.toThrow("EXITED")
+  expect(exitCode).toBe(0)
+  expect(events).toEqual([
+    "run:check",
+    "releaseTerminal",
+    "status:Installing minicode-ai@2.5.0 (verifying signatures)…",
+    "run:install",
+    "closeSession",
+    "respawn:2.5.0",
+    "exit:0",
+  ])
+})
+
+test("createTuiUpdateHandler: install gagal pasca-release memulihkan terminal tanpa close/spawn", async () => {
+  const events: string[] = []
+  const handler = createTuiUpdateHandler({
+    releaseTerminal: () => events.push("releaseTerminal"),
+    reacquireTerminal: () => {
+      events.push("reacquireTerminal")
+      return false
+    },
+    requestQuit: () => events.push("requestQuit"),
+    resumeStdin: () => events.push("resumeStdin"),
+    closeSession: async () => {
+      events.push("closeSession")
+    },
+    writeStatusLine: (line) => events.push(`status:${line}`),
+    runUpdate: async ({ onPhase }) => {
+      await onPhase?.("check")
+      await onPhase?.("install", "2.5.0")
+      return { ok: false, step: "npm audit signatures", reason: "invalid signature" }
+    },
+    respawn: async () => {
+      events.push("respawn")
+      return 0
+    },
+    exit: (() => {
+      events.push("exit")
+      throw new Error("exit")
+    }) as never,
+  })
+  const res = await handler()
+  expect(res).toEqual({ ok: false, step: "npm audit signatures", reason: "invalid signature" })
+  expect(events).toEqual([
+    "releaseTerminal",
+    "status:Installing minicode-ai@2.5.0 (verifying signatures)…",
+    "resumeStdin",
+    "reacquireTerminal",
+    "requestQuit",
+  ])
 })

@@ -15,6 +15,7 @@ import { c, glyphs, stripAnsi } from "../render/theme.ts"
 import { displayWidth, truncateToWidth } from "../render/width.ts"
 import { type AltScreen, openAltScreen } from "../runtime/screen.ts"
 import { boxLeftPad, canRenderModal, dialogBox } from "./dialog.ts"
+import { IDLE_CANCEL_MS, IDLE_WARN_MS } from "./form.ts"
 import { createIdleTimer } from "./lifecycle.ts"
 import { windowSpec, windowWidth } from "./window.ts"
 
@@ -92,7 +93,7 @@ export async function runPicker(opts: PickerOptions): Promise<void> {
     const screen: AltScreen = opts.screen ?? openAltScreen()
     // Footer seragam dari windowFooter (nav/pilih/tutup). Aksi khusus picker
     // filterable cukup jadi extraHints — bukan hint ad-hoc di dalam body.
-    const extraHints: readonly HintItem[] = isFilterable
+    const baseExtraHints: readonly HintItem[] = isFilterable
       ? [{ key: glyphs.caret, label: t("hint.edit") }]
       : []
     // Lebar dinamis terhadap terminal saat render/resize (tetap stabil saat filter).
@@ -176,6 +177,12 @@ export async function runPicker(opts: PickerOptions): Promise<void> {
 
     const render = () => {
       const { lines, filterShown } = bodyLines()
+      const extraHints: readonly HintItem[] = [
+        ...(idleWarned
+          ? [{ key: "!", label: t("form.idleWarning", { s: Math.ceil(IDLE_CANCEL_MS / 1000) }) }]
+          : []),
+        ...baseExtraHints,
+      ]
       // Popup komposit: HANYA region kotak yang dilukis (tanpa clear) di atas
       // konten pemilik layar (transkrip App / alt-buffer wizard).
       // Satu aturan jendela (v0.33): judul+footer+lebar/tinggi dari windowSpec —
@@ -215,17 +222,16 @@ export async function runPicker(opts: PickerOptions): Promise<void> {
     }
 
     let done = false
+    let idleWarned = false
     let onData!: (chunk: Buffer) => void
     let onResize!: () => void
-    // Bun 1.4.0 Windows: raw-mode yang ditahan >60 dtk rawan segfault
-    // (lihat laporan `panic: Segmentation fault at address 0xA0D` setelah
-    // 133 dtk idle di picker). Timer idle 90 dtk auto-batal agar raw-mode
-    // tidak digenggam selamanya — tanpa ini picker bisa crash Bun sebelum
-    // user menekan apa pun. Bukan perubahan perilaku: idle sepanjang itu
-    // memang harusnya batal. Satu sumber idle via helper bersama (audit D1).
-    // `cleanup`/`resolve` dirujuk sebagai closure (dievaluasi saat timer fire).
     const idle = createIdleTimer({
-      cancelMs: 90_000,
+      warnMs: IDLE_WARN_MS,
+      cancelMs: IDLE_CANCEL_MS,
+      onWarn: () => {
+        idleWarned = true
+        render()
+      },
       onCancel: () => {
         cleanup()
         opts.onCancel()
@@ -424,6 +430,7 @@ export async function runPicker(opts: PickerOptions): Promise<void> {
     const pickerPump = createKeyStreamPump({ state: decoder, onKeys: handlePickerKeys })
 
     onData = (chunk: Buffer) => {
+      idleWarned = false
       idle.reset()
       try {
         pickerPump.push(chunk)

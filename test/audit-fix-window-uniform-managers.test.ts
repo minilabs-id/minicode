@@ -38,8 +38,8 @@ interface FrameMetrics {
 }
 
 /** Ukur frame kotak dari grid layar yang sudah di-parse harness. */
-function readFrame(frame: string[]): FrameMetrics {
-  const { tl, v } = boxGlyphs()
+function readFrame(frame: string[], g = boxGlyphs()): FrameMetrics {
+  const { tl, v } = g
   const top = frame.findIndex((line) => line.includes(tl))
   if (top < 0) throw new Error("kotak manager tak ditemukan di frame")
   const width = displayWidth((frame[top] ?? "").trimStart())
@@ -134,6 +134,7 @@ describe("jendela seragam: frame hasil render", () => {
     const rows = 24
 
     tty = installFakeTty({ columns: cols, rows })
+    const modelGlyphs = boxGlyphs()
     const { done: modelDone } = await openModel()
     const modelFrame = tty.screen()
     // Tangkap string locale saat fake TTY aktif — restore() me-reset locale.
@@ -146,6 +147,7 @@ describe("jendela seragam: frame hasil render", () => {
     tty = undefined
 
     tty = installFakeTty({ columns: cols, rows })
+    const providerGlyphs = boxGlyphs()
     const { done: providerDone } = await openProvider()
     const providerFrame = tty.screen()
     const providerTitle = t("out.titleProviders")
@@ -157,8 +159,8 @@ describe("jendela seragam: frame hasil render", () => {
     tty.restore()
     tty = undefined
 
-    const m = readFrame(modelFrame)
-    const p = readFrame(providerFrame)
+    const m = readFrame(modelFrame, modelGlyphs)
+    const p = readFrame(providerFrame, providerGlyphs)
     // Lebar: aturan yang sama, terlihat sama di kedua frame.
     expect(m.width).toBe(windowWidth(cols))
     expect(p.width).toBe(windowWidth(cols))

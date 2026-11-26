@@ -300,16 +300,20 @@ export function getArg(argv: string[], name: string): string | undefined {
     if (flag) {
       if (a === name) {
         const v = argv[i + 1]
-        if (v !== undefined && (v === "-" || !v.startsWith("-") || /^-?\d+(\.\d+)?$/.test(v)))
-          found = v
-        if (valueFlags.has(flag) && !a.includes("=")) i++
+        const hasVal =
+          v !== undefined && (v === "-" || !v.startsWith("-") || /^-?\d+(\.\d+)?$/.test(v))
+        if (hasVal) found = v
+        if (hasVal && valueFlags.has(flag) && !a.includes("=")) i++
         continue
       } else if (a.startsWith(`${name}=`)) {
         const v = a.slice(name.length + 1)
         if (v !== "") found = v
         continue
       }
-      if (valueFlags.has(flag) && !a.includes("=")) i++
+      if (valueFlags.has(flag) && !a.includes("=")) {
+        const v = argv[i + 1]
+        if (v !== undefined && (v === "-" || !v.startsWith("-") || /^-?\d+(\.\d+)?$/.test(v))) i++
+      }
       continue
     }
     if (a.startsWith("-")) {
@@ -359,10 +363,64 @@ export function promptFromArgs(argv: string[]): string {
       continue
     }
     if (!VALUE_FLAGS.has(fname)) continue
-    // value flag sebelum prompt: lewati flag + nilainya
-    if (!a.includes("=")) i++
+    // value flag sebelum prompt: lewati flag + nilainya (hanya jika benar nilai, bukan flag lain)
+    if (!a.includes("=")) {
+      const v = argv[i + 1]
+      if (v !== undefined && (v === "-" || !v.startsWith("-") || /^-?\d+(\.\d+)?$/.test(v))) i++
+    }
   }
   return out.join(" ")
+}
+
+/**
+ * Deteksi flag bernilai sebelum batas prompt yang tidak diberi nilai (mis.
+ * `minicode --cwd --verbose` atau `minicode --model` di ujung) agar CLI
+ * menolak dengan jelas alih-alih melompati flag berikutnya atau diam-diam kosong.
+ */
+export function missingValueFlags(argv: string[]): string[] {
+  const missing: string[] = []
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]
+    if (a === undefined || a === "--") break
+    const fname = flagNameOf(a)
+    if (fname === null) {
+      if (a.startsWith("--")) continue
+      break
+    }
+    if (!valueFlags.has(fname) || a.includes("=")) continue
+    const v = argv[i + 1]
+    const hasVal = v !== undefined && (v === "-" || !v.startsWith("-") || /^-?\d+(\.\d+)?$/.test(v))
+    if (!hasVal) missing.push(fname)
+    else i++
+  }
+  return missing
+}
+
+/**
+ * Deteksi token `--...` tak dikenal sebelum kata prompt pertama agar typo
+ * (`--workmode`, `--modle`) dilaporkan jelas daripada dikirim ke LLM sebagai prompt.
+ */
+export function unknownFlagsBeforePrompt(argv: string[]): string[] {
+  const unknown: string[] = []
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]
+    if (a === undefined || a === "--") break
+    const fname = flagNameOf(a)
+    if (fname !== null) {
+      if (valueFlags.has(fname) && !a.includes("=")) {
+        const v = argv[i + 1]
+        if (v !== undefined && (v === "-" || !v.startsWith("-") || /^-?\d+(\.\d+)?$/.test(v))) i++
+      }
+      continue
+    }
+    if (a.startsWith("--")) {
+      const eq = a.indexOf("=")
+      unknown.push(eq === -1 ? a : a.slice(0, eq))
+      continue
+    }
+    break
+  }
+  return unknown
 }
 
 /**

@@ -145,10 +145,10 @@ dan `message` (`hint` opsional). Tool `denied` harus membawa `reason`; `denied` 
 boleh berubah menjadi generic `failed` hanya karena satu renderer tidak tahu policy.
 
 Temuan (`finding.detected`) dari child-agent dihasilkan adapter dari event bus
-`minicode:child-report` yang berasal dari baris `[FINDING]`. Sejak v0.34 temuan
-tampil di chat (TUI) dan di transkrip (linear) sebagai entri tersendiri — v0.33
-memproyeksikannya ke panel Activity log sidebar, sekarang dicabut. Keduanya
-memakai event semantic yang sama.
+`minicode:child-report` yang berasal dari baris `[FINDING]`. Event ini tetap durable
+di SQLite dan dipancarkan ke ACP sebagai JSON bertipe, sementara di TUI disalurkan ke
+`/logs` (bukan ditumpahkan ke chat percakapan utama) sehingga hanya ringkasan terverifikasi
+induk yang muncul di narasi chat.
 
 ### Error, recovery, dan lifecycle
 

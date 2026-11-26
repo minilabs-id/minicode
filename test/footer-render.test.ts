@@ -402,4 +402,31 @@ describe("footer render", () => {
       expect(renderFooter(args, 80)[0]).toBe(plain)
     })
   })
+
+  test("cache footer invalidates on runningExtra, queuedCount, retryBadge, and scrollBadge", () => {
+    withMono(() => {
+      tty = installFakeTty({ columns: 100 })
+      const base = {
+        mode: "auto",
+        workMode: "EXECUTE",
+        model: "m1",
+        cwd: "D:\\Github\\minicode",
+        context: "42%",
+        timer: "00.00.12",
+      }
+      const f0 = renderFooter(base, 100)[0]!
+      const fExtra = renderFooter({ ...base, runningExtra: 2 }, 100)[0]!
+      const fQueue = renderFooter({ ...base, queuedCount: 1 }, 100)[0]!
+      const fRetry = renderFooter({ ...base, retryBadge: "Retrying 2/10 · 3s" }, 100)[0]!
+      const fScroll = renderFooter({ ...base, scrollBadge: "↓ 4 new · PgDn" }, 100)[0]!
+      expect(fExtra).toContain("+2 running")
+      expect(fQueue).toContain("1 queued")
+      expect(fRetry).toContain("Retrying 2/10 · 3s")
+      expect(fRetry).toContain("00.00.12")
+      expect(fRetry).toContain("42%")
+      expect(fScroll).toContain("↓ 4 new · PgDn")
+      expect(fScroll).toContain("00.00.12")
+      expect(fScroll).not.toBe(f0)
+    })
+  })
 })

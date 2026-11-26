@@ -175,8 +175,7 @@ popup tidak boleh membuat listener stdin kedua.
   baris tool, agregat `✦`, finding, marker `+ thinking`, dan final answer. Sidebar
   v0.33 yang menampung detail per-tool sudah dihapus; label `Tool:`, `/expand`, dan
   collapsed buffer tetap DIHAPUS.
-- Finding: `finding.detected` tampil di chat pada TUI dan di transkrip pada jalur
-  linear (klaim lama "Activity log sidebar bila aktif" sudah dicabut).
+- Finding: `finding.detected` (`[EVALUATE]` / temuan sementara child) dicatat ke `/logs` di TUI (bukan ditumpahkan ke chat utama) dan tetap disimpan durable di SQLite serta dikirim pada jalur machine/ACP; jalur linear (`simple.ts`) juga tidak menumpahkan baris `[EVALUATE]` mentah ke output teks.
 - Context compaction: system entry, tidak menghapus history.
 - Summary: system node dari canonical turn summary, bukan hasil hitung ulang widget.
 - Error: node dengan category/cause/hint; tidak hanya string merah.
@@ -221,42 +220,45 @@ pengecualian sempit dari prioritas i18n lama: khusus label `› …`, OS locale
 yang menang agar kosakata tool identik lintas permukaan. Resolusi terpusat di
 `src/ui/render/tool-label.ts`.
 
-## 5c. Composer & dropdown overlay (v0.36)
+## 5c. Composer & dropdown overlay (v0.43+)
 
-Composer memakai **tinggi maksimal 2 baris**. Contoh draft panjang (jendela
-geser mengikuti kursor; transkrip di atas tetap utuh, tidak bergeser):
+Composer memakai bingkai **kotak tipis bersudut lengkung** (`╭─…─╮` / `│ … │` /
+`╰─…─╯`, atau `+-+`/`|` pada `MINICODE_ASCII=1`) dengan tinggi isi **dinamis 1–2
+baris** (default 1 baris, otomatis 2 baris bila teks > 1 baris). Draft panjang
+menggulir lewat jendela geser (`↑`/`↓` atau wheel, transkrip di atas tetap
+utuh):
 
 ```text
-┌ transkrip (viewH baris, tidak berubah saat dropdown/ketik) ──┐
-│ … baris lama …                                             │
-│ 2 command · 118 read · 1 other                             │
-├── composer (maks 2 baris, ter-centre, lebar composerWidth) ┤
-│ minicode › baris draft pertama yang sangat panjang …       │
-│ · lanjutan draft baris kedua ← kursor                      │
-├── 1 spacer ────────────────────────────────────────────────┤
-│ ✦ 00.00.00 Discuss  model  cwd … context  Auto ●          │
-└────────────────────────────────────────────────────────────┘
+┌ transkrip (viewH baris, margin simetris 3+3 = chatCols - 6) ─┐
+│ … baris lama …                                               │
+│ 2 command · 118 read · 1 other                               │
+├── composer (kotak tipis 1–2 baris isi, tanpa prefix) ────────┤
+╭──────────────────────────────────────────────────────────────╮
+│ baris draft pertama yang panjang …                           │
+│ lanjutan draft baris kedua ← kursor                          │
+╰──────────────────────────────────────────────────────────────╯
+│ ✦ 00.00.00 Discuss  model  cwd … context  Auto ●            │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-Lebar composer sejak v0.37 = `composerWidth() =
-min(chatCols, 100 + floor(max(0, chatCols-100)/4))` (100→100, 200→125,
-300→150, 500→200; menggantikan cap lama `min(100, chatWidth())`); prefix
-`minicode › ` bila ruang isi `w−14 ≥ 24` (`w ≥ 38`), else `› `; baris lanjutan
-`· `. Gema prompt user adalah **satu baris logis** yang di-wrap **sekali**
-selebar kolom chat, bukan lebar terminal penuh (v0.37 — mencegah double-wrap
-dari padding centre).
+Lebar isi chat & composer memakai margin simetris frame (`contentCols =
+chatCols - 6`), kotak composer selebar `composerBoxWidth()` (area teks
+`composerBoxWidth() - 4`), tanpa prefix `minicode ›` di dalam composer; gema
+prompt di transkrip tetap memakai `minicode › ` dan di-wrap **sekali** selebar
+`contentCols`. Tail live tool pada TUI memakai kuota adaptif
+`max(3, floor(viewH * 0.5))` (v0.51).
 
-Saat dropdown `/` terbuka, menu **menimpa baris transkrip bawah** di dalam frame
-yang sama (overlay, `viewH` tidak berubah) — bukan region terpisah:
+Saat dropdown `/` atau `@mention` terbuka, menu **menimpa baris transkrip bawah**
+di dalam frame yang sama (overlay, `viewH` tidak berubah) — bukan region terpisah:
 
 ```text
-│ … baris transkrip atas tetap tampil …                      │
-│ › /mo  → /model        ← dropdown menimpa 2 baris bawah    │
-│ › /mod → /mode                                            │
-├── composer (maks 2 baris) ─────────────────────────────────┤
-│ minicode › /mo                                             │
-├── 1 spacer ────────────────────────────────────────────────┤
-│ ✦ 00.00.00 Discuss  model  cwd … context  Auto ●          │
+│ … baris transkrip atas tetap tampil …                        │
+│ › /mo  → /model        ← dropdown menimpa 2 baris bawah      │
+│ › /mod → /mode                                              │
+╭──────────────────────────────────────────────────────────────╮
+│ /mo                                                          │
+╰──────────────────────────────────────────────────────────────╯
+│ ✦ 00.00.00 Discuss  model  cwd … context  Auto ●            │
 ```
 
 Klik mouse di area dropdown memilih item menu, bukan seleksi transkrip. Tidak
@@ -373,7 +375,7 @@ belum diverifikasi. Tampilan antar terminal tetap dapat berbeda.
 | turn cancelled | stopped/abort state | stopped/error | `turn.cancelled` + summary | `turn.cancelled`/error |
 | file receipt | activity/source | receipt line | typed receipt | typed receipt |
 | context compacted | system entry | warning | typed system event | typed system event |
-| finding detected | chat (TUI) / transkrip (linear) | transkrip | `finding.detected` | `finding.detected` |
+| finding detected | `/logs` (TUI) / tidak di chat linear | `/logs` (TUI) | `finding.detected` | `finding.detected` |
 | duration | pinned/summary | suffix | field | field |
 | parent/child | grouped | grouped | IDs/link | IDs/link |
 

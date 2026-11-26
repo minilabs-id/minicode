@@ -17,6 +17,7 @@ import type {
 import { resetLocaleState, setSessionLocale } from "../src/ui/i18n/locale.ts"
 import { setCompactMode } from "../src/ui/render/detail.ts"
 import { stripAnsi } from "../src/ui/render/theme.ts"
+import { humanToolLabel } from "../src/ui/render/tool-label.ts"
 import { createFakeBus, type FakeTty, installFakeTty } from "./helpers/tui-harness.ts"
 
 let tty: FakeTty | undefined
@@ -190,9 +191,10 @@ describe("P6 linear projection", () => {
     })
     detach()
     const text = out()
-    expect(text).toContain("write_file src/a.ts")
+    const label = `${humanToolLabel("write_file")} src/a.ts`
+    expect(text).toContain(label)
     expect(text).toContain("denied")
-    expect(text.match(/write_file src\/a\.ts/g)).toHaveLength(1)
+    expect(text.split(label).length - 1).toBe(1)
   })
 
   test("policy bag vs inline legacy: output linear identik (parity)", () => {
@@ -534,7 +536,8 @@ describe("P6 ACP lifecycle projection", () => {
     const err = tty.allErr()
     expect(out).toContain("MODEL_OUT")
     expect(out).not.toContain("write_file")
-    expect(err).toContain("write_file src/a.ts [denied]")
+    expect(err).toContain(`${humanToolLabel("write_file")} src/a.ts`)
+    expect(err).toContain("[denied]")
     expect(err).not.toContain("MODEL_OUT")
     // Kontrak I2/I6: non-TTY bebas CSI/OSC cursor control.
     const esc = String.fromCharCode(0x1b)

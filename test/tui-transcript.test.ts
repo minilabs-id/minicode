@@ -5,7 +5,7 @@ import type { UiPresentationActivity, UiPresentationSnapshot } from "../src/ui/c
 import { t } from "../src/ui/i18n/locale.ts"
 import { paintLedger } from "../src/ui/render/ledger.ts"
 import { c, glyphs, stripAnsi } from "../src/ui/render/theme.ts"
-import { humanToolLabel, tSystem } from "../src/ui/render/tool-label.ts"
+import { humanToolLabel } from "../src/ui/render/tool-label.ts"
 import { displayWidth } from "../src/ui/render/width.ts"
 import { Transcript } from "../src/ui/tui/transcript.ts"
 import { createFakeBus } from "./helpers/tui-harness.ts"
@@ -103,7 +103,7 @@ describe("Transcript", () => {
     })
     emit("tool.completed", { seq: 1, turnId: 1, toolCallId: "call-1", status: "completed" })
     const out = t.view(60, 2, 0).join("\n")
-    expect(out).toContain(`› ${humanToolLabel("write_file")} a.ts`)
+    expect(out).toContain(`${glyphs.arrow} ${humanToolLabel("write_file")} a.ts`)
     // Sukses tidak mencetak kata status: baris hijau sudah menyatakannya, dan
     // daftar tool yang panjang jadi derau bila setiap baris berakhir "completed".
     expect(out).not.toContain("completed")
@@ -153,7 +153,7 @@ describe("Transcript", () => {
       turns: [],
     })
     const out = t.view(80, 4, 0).join("\n")
-    expect(out).toContain("grep src/")
+    expect(out).toContain(`${humanToolLabel("grep")} src/`)
     expect(out).toContain("running")
   })
   test("jawaban model me-render markdown inline (bold/code/heading)", () => {
@@ -226,8 +226,8 @@ describe("Transcript", () => {
     // v7.29: prompt adalah history biasa — gema `minicode › …` tampil di
     // viewport dengan markdown LITERAL (tak di-render jadi bold, tak pindah ke card).
     const out = t.view(60, 4, 0).join("\n")
-    expect(out).toContain("minicode › pakai **bintang** ya")
-    expect(out).not.toContain("minicode › pakai bintang ya")
+    expect(out).toContain(`minicode ${glyphs.arrow} pakai **bintang** ya`)
+    expect(out).not.toContain(`minicode ${glyphs.arrow} pakai bintang ya`)
   })
   test("gema user + error + info + clear", () => {
     const { t } = setup()
@@ -502,7 +502,7 @@ describe("v0.43 — baris ledger error ringkas (tanpa duplikasi status/child)", 
     })
 
     const rows = t.view(120, 6, 0)
-    const redaksi = tSystem("msg.subagentFailed")
+    const redaksi = `${humanToolLabel("delegate_task", { label: "delegate_task" })} failed`
     // Satu baris ledger, bukan dua: status/child tak jadi baris sendiri.
     expect(rows.filter((row) => row.includes(redaksi))).toHaveLength(1)
     const painted = rows.find((row) => row.includes(redaksi))!
@@ -628,7 +628,9 @@ describe("Transcript.replayHistory (resume)", () => {
     // v7.29: echo user adalah baris transkrip nyata, bukan helper/card —
     // replay harus mengembalikan gema `minicode › …` yang benar-benar tampil.
     const out = t.view(120, 8, 0).join("\n")
-    expect(out.split("\n").some((line) => line.includes("minicode › buat file a.ts"))).toBe(true)
+    expect(
+      out.split("\n").some((line) => line.includes(`minicode ${glyphs.arrow} buat file a.ts`)),
+    ).toBe(true)
     expect(out).toContain("Baik, saya buat file-nya.")
   })
 
@@ -691,7 +693,7 @@ describe("Transcript UI audit regressions (Fase 3.2-3.4)", () => {
     // ada di viewport (dulu disembunyikan demi card), tapi chrome tetap dikecualikan
     // dari sumber seleksi seperti sebelum kartu diperkenalkan.
     // v0.43: margin milik frame — sumber (hello) mulai di kolom 11 (dulu 14).
-    const prompt = rows.find((r) => r.text.includes("minicode › hello world"))!
+    const prompt = rows.find((r) => r.text.includes(`minicode ${glyphs.arrow} hello world`))!
     expect(prompt.displayStart).toBe(11)
     const start = t.pointAt(prompt, 11)!
     const end = t.pointAt(prompt, 16)!
@@ -849,7 +851,7 @@ describe("v0.40 — baris live tool tetap tail transien (bukan commit-in-place)"
 
     set({ activities: [run], turns: [] })
     const live = t.view(80, 6, 0).join("\n")
-    expect(live).toContain("grep src/")
+    expect(live).toContain(`${humanToolLabel("grep")} src/`)
     expect(live).toContain("running")
     // Baris live TIDAK pernah masuk `lines[]`/proyeksi.
     expect(t.size()).toBe(0)
@@ -871,7 +873,7 @@ describe("v0.40 — baris live tool tetap tail transien (bukan commit-in-place)"
     emit("tool.completed", { seq: 1, turnId: 1, toolCallId: "m1", status: "completed" })
 
     const after = t.view(80, 6, 0).join("\n")
-    expect(after).toContain(`› ${humanToolLabel("grep")} src/`)
+    expect(after).toContain(`${glyphs.arrow} ${humanToolLabel("grep")} src/`)
     expect(after).not.toContain("running")
     expect(t.size()).toBe(1)
   })
@@ -902,7 +904,7 @@ describe("v0.40 — baris live tool tetap tail transien (bukan commit-in-place)"
     expect(
       after.split("\n").filter((l) => l.includes("read_file") || l.includes("read file")),
     ).toHaveLength(0)
-    expect(after).toContain("✦ 1 sub agent · 1 tool · 0 failed")
+    expect(after).toContain(`${glyphs.sparkle} 1 sub agent · 1 tool · 0 failed`)
     expect(after).not.toContain("running")
   })
 
@@ -924,7 +926,7 @@ describe("v0.40 — baris live tool tetap tail transien (bukan commit-in-place)"
     })
     const during = t.view(80, 8, 0)
     expect(during.findIndex((r) => r.includes("narasi committed yang stabil"))).toBe(idx)
-    expect(during.join("\n")).toContain("grep src/")
+    expect(during.join("\n")).toContain(`${humanToolLabel("grep")} src/`)
 
     set({ activities: [], turns: [] })
     const after = t.view(80, 8, 0)
@@ -963,9 +965,9 @@ describe("v0.40 — baris live tool tetap tail transien (bukan commit-in-place)"
     const rows = t.liveRows(40)
     expect(rows).toHaveLength(3)
     // Urutan root → anak → anak yatim (sama dengan tail lama).
-    expect(rows[0]).toContain("delegate_task")
-    expect(rows[1]).toContain("read_file")
-    expect(rows[2]).toContain("grep")
+    expect(rows[0]).toContain(humanToolLabel("delegate_task"))
+    expect(rows[1]).toContain(humanToolLabel("read_file"))
+    expect(rows[2]).toContain(humanToolLabel("grep"))
     for (const row of rows) {
       expect(displayWidth(row)).toBe(40)
       expect(row).not.toContain("\x1b[2J")
@@ -997,7 +999,7 @@ describe("v0.40 — baris live tool tetap tail transien (bukan commit-in-place)"
     expect(before.firstIndex).toBe(1)
     expect(before.rows).toHaveLength(h)
     expect(before.rows.map((r) => r.text).slice(0, 3)).toEqual(["dua", "tiga", "empat"])
-    expect(before.rows[3]!.text).toContain("grep")
+    expect(before.rows[3]!.text).toContain(humanToolLabel("grep"))
 
     // Tool selesai tanpa ledger: baris live hilang, total menyusut jadi 4
     // (maxBack 0). scrollBack belum di-rebase → tetap 1, kini > maxBack.
@@ -1045,7 +1047,7 @@ describe("v0.40 — baris live tool tetap tail transien (bukan commit-in-place)"
     expect(t.view(w, h, 0)).toEqual(["a", "b", "c"])
   })
 
-  test("v0.43: tail live dibatasi 3 aktivitas terakhir walau 20 running", () => {
+  test("v0.51: tail live adaptif viewport (12 default, floor(h*0.5) saat dirender) walau 20 running", () => {
     const activities = Array.from({ length: 20 }, (_, i) =>
       activity({
         toolCallId: `live-${i}`,
@@ -1056,21 +1058,20 @@ describe("v0.40 — baris live tool tetap tail transien (bukan commit-in-place)"
     )
     const { t, set } = setupMutable({ activities, turns: [] })
     const w = 80
-    // Tanpa committed, seluruh baris viewport = tail. Kap 3 → tepat 3 baris,
-    // bukan 20 (dulu puluhan baris live mendorong narasi keluar layar).
-    expect(t.wrappedLength(w)).toBe(3)
-    const live = t.view(w, 20, 0).filter((row) => row.includes("grep src/"))
-    expect(live).toHaveLength(3)
-    // Yang tampil = TIGA aktivitas terakhir (urutan root → anak tetap jujur).
-    expect(live[0]).toContain("src/17")
-    expect(live[1]).toContain("src/18")
-    expect(live[2]).toContain("src/19")
+    // Sebelum viewport dipanggil → kap default 12; saat viewport h=20 → floor(20*0.5)=10.
+    expect(t.wrappedLength(w)).toBe(12)
+    const live = t.view(w, 20, 0).filter((row) => row.includes(`${humanToolLabel("grep")} src/`))
+    expect(live).toHaveLength(10)
+    expect(live[0]).toContain("src/10")
+    expect(live.at(-1)).toContain("src/19")
     // Murni pembaca: tak ada baris live yang masuk `lines[]`.
     expect(t.size()).toBe(0)
     expect(t.total()).toBe(0)
 
     set({ activities: [], turns: [] })
     expect(t.wrappedLength(w)).toBe(0)
-    expect(t.view(w, 20, 0).filter((row) => row.includes("grep src/"))).toHaveLength(0)
+    expect(
+      t.view(w, 20, 0).filter((row) => row.includes(`${humanToolLabel("grep")} src/`)),
+    ).toHaveLength(0)
   })
 })

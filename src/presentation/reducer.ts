@@ -449,6 +449,7 @@ export function reduce(
           // Nama sub-agent ikut Activity supaya runMarker() di UI menampilkan
           // `explore-1` alih-alih kode `run_<8>` (placeholder manusiawi).
           ...(event.parentLink?.label ? { label: event.parentLink.label } : {}),
+          ...(event.argsSummary.intent ? { intent: event.argsSummary.intent } : {}),
           identity: event.identity,
           ...(target ? { target } : {}),
           status: "running",

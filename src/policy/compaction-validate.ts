@@ -55,6 +55,13 @@ const STRUCTURED_XML_RE = /<goal>[\s\S]*<\/open>/i
 const XML_BOILERPLATE_RE =
   /<\/?(?:goal|steering|decisions|files|findings|tasks|observations|open)>|\bunknown\b/gi
 
+/** Cek apakah satu path relatif terdukung oleh prefix input atau ada di disk (`cwd`). */
+function isPathGrounded(path: string, normalizedPrefix: string, cwd?: string): boolean {
+  if (normalizedPrefix.includes(path)) return true
+  if (cwd && !isAbsolute(path) && existsSync(join(cwd, path))) return true
+  return false
+}
+
 /**
  * Validasi ringkasan kompaksi terhadap fakta yang benar-benar dikirim ke
  * summarizer. Urutan penting: keamanan (scrub) → keberadaan → penumpukan →
@@ -68,7 +75,7 @@ export function validateCompactionSummary(
 ): CompactionValidation {
   // Gerbang tunggal untuk secret: input sudah di-scrub, tapi model bisa
   // membocorkan/mengarang kredensial dari potongan yang ikut terkirim.
-  const normalized = scrubSecrets(summary).trim()
+  let normalized = scrubSecrets(summary).trim()
 
   // Ringkasan kosong atau bukan ringkasan (dump/echo input) = tak ada gunanya.
   // Untuk dokumen XML terstruktur, ukur isi efektif tanpa tag/placeholder
@@ -96,9 +103,21 @@ export function validateCompactionSummary(
 
   // Path karangan: bila tak disebut di prefix DAN (saat cwd ada) tak ada di
   // disk, itu fakta buatan model — jangan sampai dipersist/di-inject.
+  // Kasus gabungan tanpa pemisah (mis. `docs/cli.md/docs/config.md`) dipecah
+  // lebih dulu; bila semua segmen nyata, perbaiki pemisahnya alih-alih gugur.
   for (const path of occurrences(SOURCE_PATH, normalized)) {
-    if (normalizedPrefix.includes(path)) continue
-    if (cwd && !isAbsolute(path) && existsSync(join(cwd, path))) continue
+    if (isPathGrounded(path, normalizedPrefix, cwd)) continue
+    const segments = path
+      .split(/(?=\/(?:src|test|docs)\/)/)
+      .map((s) => s.replace(/^\/+/, ""))
+      .filter(Boolean)
+    if (
+      segments.length > 1 &&
+      segments.every((seg) => isPathGrounded(seg, normalizedPrefix, cwd))
+    ) {
+      normalized = normalized.replace(path, segments.join(", "))
+      continue
+    }
     return { ok: false, reason: `hallucinated-path:${path}`, normalized }
   }
 

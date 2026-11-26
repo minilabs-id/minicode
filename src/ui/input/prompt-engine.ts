@@ -39,6 +39,8 @@ export type PromptKey =
   | { type: "delete" } // hapus karakter DI kursor (Del)
   | { type: "left" }
   | { type: "right" }
+  | { type: "word-left" }
+  | { type: "word-right" }
   | { type: "home" }
   | { type: "selectAll" } // Ctrl+A (0x01) — pilih seluruh baris; ditangani host TUI (app.ts)
   | { type: "end" }
@@ -61,6 +63,7 @@ export type PromptKey =
   | { type: "esc" }
   | { type: "ctrl-c" }
   | { type: "ctrl-d" }
+  | { type: "ctrl-k" } // hapus dari kursor hingga akhir baris
   | { type: "ctrl-u" } // clear line
   | { type: "ctrl-w" } // delete previous word
   | { type: "ctrl-o" } // expand detail (TUI)
@@ -201,14 +204,16 @@ export function applyKey(
     return state.sel >= 0 && state.sel < rows.length ? rows[state.sel]! : null
   }
 
-  // Setiap perubahan baris memakai aturan menu yang sama: menu terbuka bila
-  // baris dimulai "/", dan seleksi dijepit ke jumlah hint yang baru.
+  // Setiap perubahan baris memakai aturan menu yang sama: menu terbuka hanya
+  // bila `hints(line)` mengembalikan kandidat (baik `/cmd` maupun `@mention`),
+  // sehingga `/z` tanpa kandidat tak menahan Esc/panah secara kosong.
   const withLine = (line: string, cursor: number): PromptState => {
-    const menuOpen = line.startsWith("/")
+    const hintCount = countOf(line)
+    const menuOpen = hintCount > 0
     return {
       line,
       cursor: clampCursor(line, cursor),
-      sel: menuOpen ? Math.min(Math.max(state.sel, -1), countOf(line) - 1) : -1,
+      sel: menuOpen ? Math.min(Math.max(state.sel, -1), hintCount - 1) : -1,
       menuOpen,
     }
   }
@@ -269,6 +274,24 @@ export function applyKey(
       if (state.cursor >= pointLength(state.line)) return { state, action: "none" }
       return { state: { ...state, cursor: state.cursor + 1 }, action: "render" }
     }
+    case "word-left": {
+      if (state.cursor === 0) return { state, action: "none" }
+      const pts = toGraphemes(state.line)
+      let i = state.cursor
+      while (i > 0 && /\s/.test(pts[i - 1]!)) i--
+      while (i > 0 && !/\s/.test(pts[i - 1]!)) i--
+      if (i === state.cursor) return { state, action: "none" }
+      return { state: { ...state, cursor: i }, action: "render" }
+    }
+    case "word-right": {
+      const pts = toGraphemes(state.line)
+      if (state.cursor >= pts.length) return { state, action: "none" }
+      let i = state.cursor
+      while (i < pts.length && /\s/.test(pts[i]!)) i++
+      while (i < pts.length && !/\s/.test(pts[i]!)) i++
+      if (i === state.cursor) return { state, action: "none" }
+      return { state: { ...state, cursor: i }, action: "render" }
+    }
     case "home": {
       if (state.cursor === 0) return { state, action: "none" }
       return { state: { ...state, cursor: 0 }, action: "render" }
@@ -321,6 +344,14 @@ export function applyKey(
     case "shift-tab": // toggle permission mode — ditangani host TUI (app.ts)
     case "ignore":
       return { state, action: "none" }
+    case "ctrl-k": {
+      const at = unitIndex(state.line, state.cursor)
+      if (at >= state.line.length) return { state, action: "none" }
+      const nl = state.line.indexOf("\n", at)
+      const cutEnd = state.line[at] === "\n" ? at + 1 : nl === -1 ? state.line.length : nl
+      const line = state.line.slice(0, at) + state.line.slice(cutEnd)
+      return { state: withLine(line, state.cursor), action: "render" }
+    }
     case "ctrl-u": {
       if (!state.line.length) return { state, action: "none" }
       return { state: createState(), action: "render" }
@@ -605,6 +636,8 @@ function asciiKey(b: number): DecodedKey | null {
       return { key: { type: "ctrl-c" }, width: 0 }
     case 0x04:
       return { key: { type: "ctrl-d" }, width: 0 }
+    case 0x0b:
+      return { key: { type: "ctrl-k" }, width: 0 }
     case 0x15:
       return { key: { type: "ctrl-u" }, width: 0 }
     case 0x17:
@@ -848,6 +881,23 @@ export function decodeKeysStream(chunk: Uint8Array, state: DecoderState): Decode
       // esc+enter (abort + submit) saat Alt+Enter terbelah antar chunk.
       if (n1 === 0x0d && (i >= pendingCount || loneEscPending)) {
         out.push({ key: { type: "ctrl-j" }, width: 2 })
+        i += 2
+        continue
+      }
+      // Alt+Backspace (ESC + BS/DEL) → hapus kata sebelumnya, bukan Esc abort.
+      if (n1 === 0x08 || n1 === 0x7f) {
+        out.push({ key: { type: "ctrl-w" }, width: 2 })
+        i += 2
+        continue
+      }
+      // Alt+B / Alt+F (navigasi kata readline) — konsumsi sepasang ESC + huruf.
+      if (n1 === 0x62 || n1 === 0x42) {
+        out.push({ key: { type: "word-left" }, width: 2 })
+        i += 2
+        continue
+      }
+      if (n1 === 0x66 || n1 === 0x46) {
+        out.push({ key: { type: "word-right" }, width: 2 })
         i += 2
         continue
       }
@@ -1102,16 +1152,28 @@ export function decodeKey(s: string, i: number): DecodedKey | null {
       // Tanpa cabang eksplisit ini ia jatuh ke catch-all "esc" di bawah,
       // sehingga tipe "shift-tab" tidak pernah dihasilkan decodeKeys.
       if (kind === "Z") return { key: { type: "shift-tab" }, width: 3 }
-      // Shift+Enter / Alt+Enter modern: CSI-u (`\x1b[13;2u` / `\x1b[13;3u`) atau
-      // modifyOtherKeys (`\x1b[27;2;13~` / `\x1b[27;3;13~`) → sisip newline.
+      // Shift+Enter / Alt+Enter / Ctrl+Enter modern: CSI-u atau modifyOtherKeys.
       const csiWidth = scanCsi(s, i)
-      if (/^(?:13;[23]u|27;[23];13~)$/.test(s.slice(i + 2, i + csiWidth))) {
+      const csiBody = s.slice(i + 2, i + csiWidth)
+      if (/^(?:13;[235](?::\d+)?u|27;[235];13~)$/.test(csiBody)) {
         return { key: { type: "ctrl-j" }, width: csiWidth }
+      }
+      // Ctrl+Left/Right & Alt+Left/Right: ESC[1;5D / ESC[1;3D / ESC[1;5C / ESC[1;3C.
+      if (/^1;[35]D$/.test(csiBody)) {
+        return { key: { type: "word-left" }, width: csiWidth }
+      }
+      if (/^1;[35]C$/.test(csiBody)) {
+        return { key: { type: "word-right" }, width: csiWidth }
       }
       // ESC [ … lainnya -> konsumsi saja
       return { key: { type: "ignore" }, width: csiWidth }
     }
     if (s[i + 1] === "\r") return { key: { type: "ctrl-j" }, width: 2 }
+    if (s.charCodeAt(i + 1) === 0x08 || s.charCodeAt(i + 1) === 0x7f) {
+      return { key: { type: "ctrl-w" }, width: 2 }
+    }
+    if (s[i + 1] === "b" || s[i + 1] === "B") return { key: { type: "word-left" }, width: 2 }
+    if (s[i + 1] === "f" || s[i + 1] === "F") return { key: { type: "word-right" }, width: 2 }
     return { key: { type: "esc" }, width: 1 }
   }
   // Ctrl+A (0x01) = select-all (host TUI app.ts), bukan home. Home = ESC[H/1~/7~.
@@ -1129,9 +1191,10 @@ export function decodeKey(s: string, i: number): DecodedKey | null {
   if (c === "\t") return { key: { type: "tab" }, width: 1 }
   if (code === 0x03) return { key: { type: "ctrl-c" }, width: 1 }
   if (code === 0x04) return { key: { type: "ctrl-d" }, width: 1 }
+  if (code === 0x0b) return { key: { type: "ctrl-k" }, width: 1 }
   if (code === 0x15) return { key: { type: "ctrl-u" }, width: 1 }
   if (code === 0x17) return { key: { type: "ctrl-w" }, width: 1 }
-  // Kontrol C0 lain yang tidak punya arti di sini (Ctrl+L, Ctrl+K, Ctrl+V,
+  // Kontrol C0 lain yang tidak punya arti di sini (Ctrl+L, Ctrl+V,
   // Ctrl+Z, dst.) DIBUANG, bukan diteruskan sebagai karakter. Ctrl+V (0x16)
   // khusus: paste = urusan terminal via bracketed paste, bukan byte Ctrl+V —
   // jangan pernah dijadikan submit.

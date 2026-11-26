@@ -29,6 +29,8 @@ export interface ToolIdentity {
 export interface ArgsSummary {
   /** Target utama (`path` / `$ cmd` / pola / kueri) — untuk baris ledger. */
   target?: string
+  /** Label aktivitas manusiawi dari argumen model (`label`, atau `name` pada delegate_task). */
+  intent?: string
   /** Ringkasan satu-baris (di-scrub secret). */
   text: string
 }

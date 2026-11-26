@@ -6,17 +6,22 @@
 import { type ChildProcess, spawn } from "node:child_process"
 import {
   checkForUpdateFresh,
+  classifyInstallSource,
   formatUpdateError,
   formatUpdateMessage,
   getLastUpdateFailure,
   type InstallResult,
   installUpdate,
-  isInstalledCopy,
   shouldAutoUpdate,
   UPDATE_GUARD_ENV,
   verifyInstalledVersion,
 } from "../src/policy/update-check.ts"
 import { c } from "../src/ui/render/theme.ts"
+
+/** Tulis satu baris status progres saat alt-screen dilepas (dipakai /update). */
+export function writeUpdateStatusLine(line: string): void {
+  process.stderr.write(`${line.replace(/[\r\n]+/g, " ").trim()}\n`)
+}
 
 function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message
@@ -65,13 +70,15 @@ export async function maybeAutoUpdate(
     onPhase?: (phase: "check" | "install" | "restart") => void
     /** Sink pesan proses (deferred ke transcript saat bar aktif). */
     onNotice?: (line: string) => void
+    /** Hook opsional untuk menutup lease/session sebelum respawn ke versi baru. */
+    onBeforeRespawn?: () => Promise<void> | void
   },
 ): Promise<void> {
   let decision: ReturnType<typeof shouldAutoUpdate>
   try {
     decision = shouldAutoUpdate(process.argv.slice(2), {
       stdinTTY: process.stdin.isTTY,
-      installed: isInstalledCopy(),
+      installSource: classifyInstallSource(),
     })
   } catch {
     return
@@ -161,6 +168,9 @@ export async function maybeAutoUpdate(
   // bila dipanggil ulang di masa depan).
   try {
     opts?.onLongOp?.()
+  } catch {}
+  try {
+    await opts?.onBeforeRespawn?.()
   } catch {}
   const entry = process.argv[1] ?? ""
   const child = spawn(process.execPath, [entry, ...process.argv.slice(2)], {

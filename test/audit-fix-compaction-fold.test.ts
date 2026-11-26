@@ -7,6 +7,7 @@
 //     sourcePrefix (seleksi/copy tak membawa spasi chrome).
 import { describe, expect, test } from "bun:test"
 import { replayIsUnsafe } from "../src/policy/microcompact.ts"
+import { setSessionLocale } from "../src/ui/i18n/locale.ts"
 import {
   type CompactionTrimItem,
   compactionTrimIsStateful,
@@ -17,6 +18,7 @@ import {
 import { createFakeBus } from "./helpers/tui-harness.ts"
 
 function setup() {
+  setSessionLocale("id")
   const bus = createFakeBus()
   const t = new Transcript(bus as never)
   return { bus, t }
@@ -97,6 +99,7 @@ describe("klasifikasi murni tool kompaksi", () => {
   })
 
   test("ringkasan: read-only boleh diulang, stateful TIDAK pernah disuruh ulang", () => {
+    setSessionLocale("id")
     const readonlyItems: CompactionTrimItem[] = [
       { tool: "read_file", chars: 20_000 },
       { tool: "grep", chars: 15_000 },

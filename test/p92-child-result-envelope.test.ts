@@ -321,6 +321,9 @@ test("B4 error lain (termasuk kind tak-terpetakan) → error konservatif", async
     const term = await delegateTerminal("p92-b4", dir)
     expect(term.state).toBe("committed")
     expect(envelopeOf(term).childStatus).toBe("error")
+    const runs = listSessionRuns(r.spec!.journal!.sessionId, dir)
+    expect(runs).toHaveLength(1)
+    expect(runs[0]!.status).toBe("FAILED")
     // Error non-struktur juga `error`, bukan tebakan dari wording pesan —
     // walau pesannya mengandung kata "timeout", tanpa kind = error.
     const r2 = await delegateAttempt({

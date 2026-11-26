@@ -75,6 +75,47 @@ import { webFetchTool } from "./web_fetch.ts"
 import { webSearchTool } from "./web_search.ts"
 import { writeFileTool } from "./write_file.ts"
 
+const LABEL_SCHEMA = {
+  type: "string" as const,
+  description:
+    "optional short human-readable progress label in the user's language (e.g. 'Pengetesan gate sebagian')",
+}
+
+/** Tool ber-intent terbuka yang menerima argumen opsional `label` dari model.
+ *  Tool sederhana (read_file, edit, grep, git_*, dll.) tidak perlu `label` di
+ *  schema karena UI menghasilkan nama manusiawi otomatis dari argumennya
+ *  (menghemat ~1000 token definisi tool per request). */
+const OPEN_INTENT_LABEL_TOOLS = new Set(["bash", "code_run", "web_search", "web_fetch"])
+
+/**
+ * Suntikkan field opsional `label` hanya pada tool ber-intent terbuka & MCP
+ * agar tetap lolos `additionalProperties: false`, lalu kupas sebelum diteruskan
+ * ke `execute()` asli.
+ */
+function withActivityLabel(tool: Tool, force = false): Tool {
+  if (!force && !OPEN_INTENT_LABEL_TOOLS.has(tool.name)) return tool
+  const params = tool.parameters
+  const props = params?.properties
+  if (!props || "label" in props) return tool
+  return {
+    ...tool,
+    parameters: {
+      ...params,
+      properties: {
+        ...props,
+        label: LABEL_SCHEMA,
+      },
+    },
+    async execute(input, ctx) {
+      if (input && typeof input === "object" && !Array.isArray(input) && "label" in input) {
+        const { label: _ignored, ...rest } = input as Record<string, unknown>
+        return tool.execute(rest, ctx)
+      }
+      return tool.execute(input, ctx)
+    },
+  }
+}
+
 export const allTools: Tool[] = [
   readFileTool,
   writeFileTool,
@@ -117,10 +158,13 @@ export const allTools: Tool[] = [
   codeRunTool,
   submitResultTool,
   askUserTool,
-]
+].map((tool) => withActivityLabel(tool))
 
 // MCP server tools (prefixed "serverid.toolname") di-append runtime via connectAll()
 export function withMcpTools(base: Tool[], mcpTools: Tool[]): Tool[] {
   const seen = new Set(base.map((t) => t.name))
-  return [...base, ...mcpTools.filter((t) => !seen.has(t.name))]
+  return [
+    ...base,
+    ...mcpTools.filter((t) => !seen.has(t.name)).map((t) => withActivityLabel(t, true)),
+  ]
 }

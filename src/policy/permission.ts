@@ -98,6 +98,8 @@ export type PermissionAsk = (call: {
   diffPreview?: string
   /** P1.2: `always` tersedia hanya bila args dapat dipersist (≤ 2 KB JSON). */
   canAlways?: boolean
+  /** Sinyal abort turn agar dialog approval ikut gugur seketika saat dibatalkan. */
+  signal?: AbortSignal
 }) => Promise<"allow" | "deny" | "always">
 
 /** Batas args yang boleh dipersist sebagai grant `always` (fail-closed). */
@@ -769,7 +771,7 @@ function buildDiffPreview(name: string, args: unknown): string | undefined {
   // tak pernah boleh membocorkannya ke kartu UI.
   const out = (raw: string): string | undefined => {
     const s = scrubSecrets(raw.trim()).trim()
-    return s ? s.slice(0, 300) : undefined
+    return s ? s.slice(0, 500) : undefined
   }
   try {
     switch (name) {
@@ -779,35 +781,30 @@ function buildDiffPreview(name: string, args: unknown): string | undefined {
       }
       case "write_file": {
         const p = str(a.path)
-        const head = line(text(a.content))
+        const head = line(text(a.content), 160)
         return p ? out(`→ ${p}${head ? ` · ${head}` : ""}`) : undefined
       }
       case "edit": {
         const p = str(a.path)
         // Skema NYATA tool `edit` = `oldString`/`newString` (src/tools/edit.ts:133-142).
-        // `old_string`/`new_string` dipakai sebagai fallback legacy — bukan
-        // sebagai nama utama: memakai yang salah membuat preview kosong
-        // (menampilkan "hanya path") untuk operasi yang sebenarnya mengganti
-        // blok kode tertentu.
-        const oldv = line(str(a.oldString ?? a.old_string), 80)
-        const newv = line(str(a.newString ?? a.new_string), 80)
-        const delta = `${oldv ? ` -${oldv}` : ""}${newv ? ` +${newv}` : ""}`
+        const oldv = line(str(a.oldString ?? a.old_string), 140)
+        const newv = line(str(a.newString ?? a.new_string), 140)
+        const delta = `${oldv ? `\n  -${oldv}` : ""}${newv ? `\n  +${newv}` : ""}`
         return p ? out(`→ ${p}${delta}`) : undefined
       }
       case "apply_patch": {
         const p = str(a.path)
-        // Skema NYATA tool `apply_patch` = `patches: [{search, replace}]`
-        // (src/tools/patch.ts:18-35) — BUKAN `patch`/`diff`.
+        // Skema NYATA tool `apply_patch` = `patches: [{search, replace}]`.
         const patches = Array.isArray(a.patches)
           ? (a.patches as { search?: unknown; replace?: unknown }[])
           : []
         if (patches.length > 0) {
           const first = patches[0] ?? {}
-          const oldv = line(str(first.search), 80)
-          const newv = line(str(first.replace), 80)
+          const oldv = line(str(first.search), 140)
+          const newv = line(str(first.replace), 140)
           const more = patches.length > 1 ? ` (+${patches.length - 1} blok)` : ""
-          const delta = `${oldv ? ` -${oldv}` : ""}${newv ? ` +${newv}` : ""}`
-          return p ? out(`→ ${p}${delta}${more}`) : undefined
+          const delta = `${oldv ? `\n  -${oldv}` : ""}${newv ? `\n  +${newv}` : ""}`
+          return p ? out(`→ ${p}${more}${delta}`) : undefined
         }
         const head = line(text(a.patch ?? a.diff))
         return p ? out(`→ ${p}${head ? ` · ${head}` : ""}`) : undefined
@@ -1589,6 +1586,7 @@ export function createPermissionHandler(
                 // [AGENT-CONTROL-4] `delegate_task` tak pernah menawarkan
                 // "Always" — tiap delegasi butuh persetujuan tersendiri.
                 canAlways: canAlwaysForCall(call),
+                ...(signal ? { signal } : {}),
               }),
               signal,
             )

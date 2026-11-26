@@ -14,7 +14,7 @@ import type {
 import { t } from "../i18n/locale.ts"
 import { renderActivityPanel } from "../render/activity-panel.ts"
 import { renderDiffCard } from "../render/diff.ts"
-import { friendlyToolErrorCanonical } from "../render/errors.ts"
+import { formatLabeledToolFailure, friendlyToolErrorCanonical } from "../render/errors.ts"
 import { formatArgsPreview, formatProviderError, formatUsage } from "../render/format.ts"
 import { highlightCode } from "../render/highlight.ts"
 import { paintLedger, runMarker, statusWord } from "../render/ledger.ts"
@@ -30,7 +30,7 @@ import {
 } from "../render/sanitize.ts"
 import { renderMarkdownTable } from "../render/table-grid.ts"
 import { c, glyphs, stripAnsi } from "../render/theme.ts"
-import { humanToolLabel, tSystem } from "../render/tool-label.ts"
+import { formatActivityLabel, humanToolLabel, tSystem } from "../render/tool-label.ts"
 import { displayWidth, truncateToWidth } from "../render/width.ts"
 import { formatWrapped } from "../render/wrap.ts"
 import { runWithoutStatus } from "../runtime/statusline.ts"
@@ -614,32 +614,42 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
     presentedTerminals.add(event.toolCallId)
     const activity = presentationActivity(event.toolCallId)
     const desc = opts.policy && activity ? opts.policy.describeActivity(activity) : undefined
-    const name = sanitizeAnsiLine(desc?.name ?? activity?.name ?? event.name ?? "tool")
+    const rawName = sanitizeAnsiLine(desc?.name ?? activity?.name ?? event.name ?? "tool")
+    const intent = desc?.intent ?? activity?.intent ?? event.intent
+    const {
+      text: titleLabel,
+      autoText,
+      isIntent,
+    } = formatActivityLabel(rawName, {
+      label: activity?.label,
+      intent,
+      summary: desc?.summary ?? activity?.summary,
+      target: desc?.target ?? activity?.target ?? event.target,
+    })
     const target = desc?.target ?? activity?.target ?? event.target
-    const targetText = target ? ` ${truncateToWidth(sanitizeAnsiLine(target), 120, "")}` : ""
     const status = desc?.status ?? activity?.status ?? event.status ?? "failed"
     const message = event.message ?? desc?.message ?? activity?.error?.message
-    // v0.42: pesan kegagalan lewat redaksi ringkas kanonik (satu baris ≤120
-    // kolom). Nama/target tetap tampil di `line`; detail penuh ada di log.
-    // v0.43: pesan tak dikenali ("" ) tak menghasilkan `: ` kosong / spasi ganda
-    // — baris ledger/status tetap tampil, tanpa redaksi error mentah.
-    const canonical = message
-      ? friendlyToolErrorCanonical(
-          String(message).split(/[\r\n]/)[0] ?? "",
-          target ? String(target) : undefined,
-        )
-      : ""
-    const narrative =
-      canonical || (message || status !== "completed" ? tSystem("msg.unknownToolError") : "")
-    const detail = narrative ? `: ${narrative}` : ""
-    // F-AGENT-1: tool anak dirender sebagai baris run sendiri (`↳ <marker>`),
-    // bukan dicampur ke baris root — identitas childSessionId/runId tiap run.
-    // Child tanpa identitas run tetap tampil (kegagalan tak boleh hilang),
-    // hanya tanpa marker.
+    const denyReason =
+      status === "denied"
+        ? (desc?.denyReason ?? activity?.denyReason ?? (event.reason ? String(event.reason) : ""))
+        : ""
     const isChild = activity?.parentToolCallId !== undefined
     const marker = runMarker(activity)
     const prefix = isChild ? `    ↳ ${marker ? `${marker} ` : ""}` : `  ${glyphs.arrow} `
-    const line = `${prefix}${name}${targetText}${linearSuffix(activity)}${detail}`
+    if (isIntent || rawName !== "delegate_task" || target || activity?.summary) {
+      const failureSubject = isIntent ? titleLabel : autoText
+      const failurePhrase = formatLabeledToolFailure(failureSubject, message, denyReason)
+      const line = `${prefix}${failurePhrase}${linearSuffix(activity)}`
+      emitLedger(paintLedger(status, `${line}\n`))
+      return
+    }
+    const targetText = target ? ` ${truncateToWidth(sanitizeAnsiLine(target), 120, "")}` : ""
+    const firstLine = String(message ?? "").split(/[\r\n]/)[0] ?? ""
+    const canonical = message ? friendlyToolErrorCanonical(firstLine) : ""
+    const narrative =
+      canonical || (message || status !== "completed" ? tSystem("msg.unknownToolError") : "")
+    const detail = narrative ? `: ${narrative}` : ""
+    const line = `${prefix}${titleLabel}${targetText}${linearSuffix(activity)}${detail}`
     emitLedger(paintLedger(status, `${line}\n`))
   }
 
@@ -926,27 +936,44 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
       const args = (e.execution.call.args ?? {}) as Record<string, unknown>
       const suffix = linearSuffix(activity)
       // Keputusan error dari status kanonik bila policy/snapshot ada.
-      const status =
-        opts.policy && activity ? opts.policy.describeActivity(activity).status : activity?.status
+      const desc = opts.policy && activity ? opts.policy.describeActivity(activity) : undefined
+      const status = desc?.status ?? activity?.status
       const isError = status ? status !== "completed" : r.isError === true
       // Hasil string ikut ke buffer /copy (versi sanitize, cap per-add agar
       // satu read_file raksasa tak langsung memenuhi buffer sendirian).
       if (!isError && typeof r.content === "string")
         rememberTurn(ui, truncateToWidth(sanitizeAnsi(r.content), 20000, ""))
       if (isError) {
-        // v0.42: redaksi ringkas kanonik — exit N / idempotency / EIO /
-        // bash-guard tak lagi bocor mentah ke scrollback. Detail di --verbose.
-        // v0.43: bila tak ada pola kanonik yang cocok, render baris ledger saja
-        // (tanpa ":" dan tanpa redaksi) — error mentah tak pernah tampil.
+        // v0.42+: redaksi ringkas kanonik — exit N / idempotency / EIO /
+        // bash-guard tak lagi bocor mentah ke scrollback. Bila intent/summary
+        // tersedia, samakan format kegagalan dengan jalur presentasi utama.
         ui.setActiveSection(null)
-        const errorTarget = typeof args.path === "string" ? args.path : undefined
+        const errorTarget =
+          desc?.target ??
+          activity?.target ??
+          (typeof args.path === "string" ? args.path : undefined)
+        const intent = desc?.intent ?? activity?.intent
+        const {
+          text: titleLabel,
+          autoText,
+          isIntent,
+        } = formatActivityLabel(name, {
+          label: activity?.label,
+          intent,
+          summary: desc?.summary ?? activity?.summary,
+          target: errorTarget,
+        })
+        if (isIntent || activity?.summary) {
+          const failureSubject = isIntent ? titleLabel : autoText
+          const failurePhrase = formatLabeledToolFailure(failureSubject, String(r.content))
+          wErr(c.error(`  ${glyphs.arrow} ${failurePhrase}${suffix}\n`))
+          return
+        }
         const canonical =
           friendlyToolErrorCanonical(String(r.content), errorTarget) ||
           tSystem("msg.unknownToolError")
         wErr(
-          c.error(
-            `  ${glyphs.arrow} ${humanToolLabel(name, activity)}${suffix}${canonical ? `: ${canonical}` : ""}\n`,
-          ),
+          c.error(`  ${glyphs.arrow} ${titleLabel}${suffix}${canonical ? `: ${canonical}` : ""}\n`),
         )
         return
       }

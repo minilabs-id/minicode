@@ -47,18 +47,22 @@ export async function runProviderManager(opts: {
     }
   }
 
+  let activeModel = opts.currentModel
+  const loadViewState = async () =>
+    rowsFrom(await loadConfig(opts.cwd, { allowLocal: opts.allowLocalConfig }))
   await runProviderManagerView({
-    initialRows: rowsFrom(await loadConfig(opts.cwd, { allowLocal: opts.allowLocalConfig })),
+    initialRows: await loadViewState(),
     presets: GATEWAY_PRESETS.map((p) => ({ id: p.id, label: p.label, baseUrl: p.baseUrl })),
-    currentModel: opts.currentModel,
+    currentModel: activeModel,
+    getCurrentModel: () => activeModel,
     askScope: !!opts.cwd,
     onSelect: (row) => {
       if (row.firstModel && opts.setModelOverride) {
-        opts.setModelOverride(`${row.id}::${row.firstModel}`)
+        activeModel = `${row.id}::${row.firstModel}`
+        opts.setModelOverride(activeModel)
       }
     },
-    loadRows: async () =>
-      rowsFrom(await loadConfig(opts.cwd, { allowLocal: opts.allowLocalConfig })),
+    loadRows: loadViewState,
     onAdd: async ({ preset, baseUrl, apiKey, scope }): Promise<ProviderActionResult> => {
       const full = preset ? GATEWAY_PRESETS.find((p) => p.id === preset.id) : undefined
       const fallbackModels = full?.fallbackModels ?? ["gpt-4o-mini"]
@@ -115,6 +119,7 @@ export async function runProviderManager(opts: {
           global: saveGlobal,
           cwd: opts.cwd,
           fallbackModels: cur.models,
+          allowLocal: opts.allowLocalConfig,
         }).catch(() => {})
         const warn = await reloadSuffix()
         return { err: `${t("prov.updateFail", { msg: formatError(e) })}${warn}` }

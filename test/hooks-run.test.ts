@@ -72,3 +72,23 @@ test("findRunHooks: tanpa dir → kosong", () => {
   expect(found.pre.length).toBe(0)
   expect(found.post.length).toBe(0)
 })
+
+test("runRunHooks: onNotice menerima notice hook tanpa menulis ke stderr mentah", async () => {
+  const base = join(dir, "notice-test")
+  const hooks = join(base, ".minicode", "hooks")
+  mkdirSync(hooks, { recursive: true })
+  writeFileSync(join(hooks, "pre-ok.js"), "process.exit(0)\n")
+  const prev = process.env.MINICODE_HOOKS
+  process.env.MINICODE_HOOKS = "1"
+  const notices: string[] = []
+  try {
+    await runRunHooks("pre", { phase: "pre", cwd: base }, undefined, {
+      allowLocal: true,
+      onNotice: (line) => notices.push(line),
+    })
+    expect(notices).toEqual(["[hooks] pre: pre-ok.js"])
+  } finally {
+    if (prev === undefined) delete process.env.MINICODE_HOOKS
+    else process.env.MINICODE_HOOKS = prev
+  }
+})

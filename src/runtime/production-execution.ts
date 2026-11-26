@@ -65,8 +65,15 @@ export function resolveRuntimeMode(argv: readonly string[]): RuntimeModeResoluti
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i]
     if (token === "--") break
-    if (token !== RUNTIME_MODE_FLAG) continue
-    const value = argv[i + 1]
+    if (token === undefined) continue
+    let value: string | undefined
+    if (token === RUNTIME_MODE_FLAG) {
+      value = argv[i + 1]
+    } else if (token.startsWith(`${RUNTIME_MODE_FLAG}=`)) {
+      value = token.slice(RUNTIME_MODE_FLAG.length + 1)
+    } else {
+      continue
+    }
     if (value !== undefined && (RUNTIME_MODES as readonly string[]).includes(value))
       return { mode: value as RuntimeProductionMode }
     return {

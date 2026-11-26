@@ -50,6 +50,7 @@ import {
   type PermissionMode,
 } from "../policy/permission.ts"
 import {
+  isRecoverable,
   planRecovery,
   RECOVERY_ATTEMPT_QUOTA,
   RECOVERY_BUDGET_MS,
@@ -176,52 +177,88 @@ export function createRecoveryLedger(now: () => number = Date.now): RecoveryLedg
   }
 }
 
+function sanitizeProviderErrorForFallback(error: ProviderError): ProviderError {
+  const ra = error.retryAfterMs
+  if (ra != null && (!Number.isFinite(ra) || ra < 0)) {
+    const clean = new ProviderError(error.category, error.message, undefined)
+    Object.assign(clean, { cause: (error as unknown as { cause?: unknown }).cause })
+    return clean
+  }
+  if (ra != null && ra > LIMITS.RETRY_AFTER_MAX_MS) {
+    const capped = new ProviderError(error.category, error.message, LIMITS.RETRY_AFTER_MAX_MS)
+    Object.assign(capped, { cause: (error as unknown as { cause?: unknown }).cause })
+    return capped
+  }
+  return error
+}
+
+function evaluateCappedRecovery(
+  error: ProviderError,
+  attempt: number,
+  ledger?: RecoveryLedger,
+): RecoveryAction {
+  const category = error.category
+  // 402 / kuota habis tidak akan sembuh dengan retry — fail-fast.
+  if (
+    category === "unknown" &&
+    (/\b402\b/.test(error.message) ||
+      /quota_exceeded|insufficient_quota|exceeded its quota/i.test(error.message))
+  ) {
+    return { type: "throw" }
+  }
+  const ra = error.retryAfterMs
+  const saneRetryAfter =
+    ra != null && Number.isFinite(ra) && ra >= 0
+      ? Math.min(ra, LIMITS.RETRY_AFTER_MAX_MS)
+      : undefined
+
+  // 429 pakai plafon lebih ketat; jeda diserahkan anggaran bersama agar biaya tak berlipat.
+  const cap = category === "rate_limit" ? RATE_LIMIT_RETRY_ATTEMPTS : RECOVERY_ATTEMPT_QUOTA
+  if (attempt > cap) return { type: "throw" }
+
+  if (ledger) {
+    if (!isRecoverable({ category })) {
+      return defaultRecoveryPolicy.onError(sanitizeProviderErrorForFallback(error), attempt)
+    }
+    const next = ledger.nextDelay({
+      category,
+      ...(saneRetryAfter !== undefined ? { retryAfterMs: saneRetryAfter } : {}),
+    })
+    return next !== null ? { type: "retry", delayMs: next.delayMs } : { type: "throw" }
+  }
+
+  const decision = planRecovery(
+    {
+      category,
+      ...(saneRetryAfter !== undefined ? { retryAfterMs: saneRetryAfter } : {}),
+    },
+    // Jalur statis tanpa ledger: kuota percobaan yang menahan.
+    { startedAtMs: 0, nowMs: 0, attemptsUsed: attempt - 1 },
+    { hasPrompt: true },
+  )
+  if (decision.action === "retry") return { type: "retry", delayMs: decision.delayMs }
+
+  // Di luar anggaran bersama → kebijakan kernel (compaction/throw auth).
+  return defaultRecoveryPolicy.onError(sanitizeProviderErrorForFallback(error), attempt)
+}
+
+/** Buat policy recovery yang mengikat satu RecoveryLedger per panggilan logis. */
+export function createSessionRecoveryPolicy(getLedger: () => RecoveryLedger | undefined) {
+  return {
+    onError(error: ProviderError, attempt: number): RecoveryAction {
+      return evaluateCappedRecovery(error, attempt, getLedger())
+    },
+    onLength(compacted: boolean): RecoveryAction {
+      return defaultRecoveryPolicy.onLength(compacted)
+    },
+  }
+}
+
 /** Sanitasi `retryAfter`: nilai non-finite/negatif dibuang (`setTimeout(Infinity)`
  * ≈ 1 ms → hot fast-retry); nilai besar di-cap. Diekspor untuk test langsung. */
 export const cappedRecovery = {
   onError(error: ProviderError, attempt: number): RecoveryAction {
-    const category = error.category
-    // 402 / kuota habis tidak akan sembuh dengan retry — fail-fast.
-    if (
-      category === "unknown" &&
-      (/\b402\b/.test(error.message) ||
-        /quota_exceeded|insufficient_quota|exceeded its quota/i.test(error.message))
-    ) {
-      return { type: "throw" }
-    }
-    const ra = error.retryAfterMs
-    const saneRetryAfter =
-      ra != null && Number.isFinite(ra) && ra >= 0
-        ? Math.min(ra, LIMITS.RETRY_AFTER_MAX_MS)
-        : undefined
-
-    // 429 pakai plafon lebih ketat; jeda diserahkan anggaran bersama agar biaya tak berlipat.
-    const cap = category === "rate_limit" ? RATE_LIMIT_RETRY_ATTEMPTS : RECOVERY_ATTEMPT_QUOTA
-    if (attempt > cap) return { type: "throw" }
-
-    const decision = planRecovery(
-      {
-        category,
-        ...(saneRetryAfter !== undefined ? { retryAfterMs: saneRetryAfter } : {}),
-      },
-      // Sinkron tanpa jam (nol): pagar waktu ada di ledger; di sini kuota yang menahan.
-      { startedAtMs: 0, nowMs: 0, attemptsUsed: attempt - 1 },
-      { hasPrompt: true },
-    )
-    if (decision.action === "retry") return { type: "retry", delayMs: decision.delayMs }
-
-    // Di luar anggaran bersama → kebijakan kernel (compaction/throw auth).
-    if (ra != null && (!Number.isFinite(ra) || ra < 0)) {
-      const clean = new ProviderError(error.category, error.message, undefined)
-      Object.assign(clean, { cause: (error as unknown as { cause?: unknown }).cause })
-      return defaultRecoveryPolicy.onError(clean, attempt)
-    }
-    if (ra != null && ra > LIMITS.RETRY_AFTER_MAX_MS) {
-      const capped = new ProviderError(error.category, error.message, LIMITS.RETRY_AFTER_MAX_MS)
-      Object.assign(capped, { cause: (error as unknown as { cause?: unknown }).cause })
-      return defaultRecoveryPolicy.onError(capped, attempt)
-    }
-    return defaultRecoveryPolicy.onError(error, attempt)
+    return evaluateCappedRecovery(error, attempt)
   },
   onLength(compacted: boolean): RecoveryAction {
     return defaultRecoveryPolicy.onLength(compacted)
@@ -453,6 +490,13 @@ export async function createMinicodeSession(
       toTokens: number
       observedTokens: number
     }) => void
+    /** Dipanggil saat plafon jendela diturunkan setelah penolakan overflow di bawah angka config. */
+    onContextWindowClamped?: (info: {
+      model: string
+      fromTokens: number
+      toTokens: number
+      observedTokens: number
+    }) => void
     /** Dipanggil saat batas langkah naik setelah `max_steps_exceeded` (bukan
      * abort/timeout/error provider) untuk notifikasi user. */
     onMaxStepsEscalated?: (info: {
@@ -615,12 +659,17 @@ export async function createMinicodeSession(
     return "active"
   }
   const effectiveRoot = defaultCwd
+  let guardEventSink: ((ev: unknown) => void) | undefined
   const detector: NoProgressDetector | null =
     noProgress === false
       ? null
       : createNoProgressDetector({
           ...(noProgress ?? {}),
           getPosture: noProgress?.getPosture ?? livePosture,
+          onGuardEvent: (ev) => {
+            noProgress?.onGuardEvent?.(ev)
+            guardEventSink?.(ev)
+          },
         })
   if (detector && onNoProgress) onNoProgress(detector)
 
@@ -802,9 +851,13 @@ export async function createMinicodeSession(
       // Eskalasi adaptif = bukti endpoint, menang atas resolusi statis. Pin operator
       // dihormati di `contextWindowBase`, tapi bila terbukti kurang (overflow
       // nyata), naik satu tangga lebih baik daripada mengulang kegagalan.
-      const escalated = escalatedWindows.get(escalationKey(model))
-      if (escalated !== undefined) return escalated
-      return contextWindowBase(model)
+      // Sebaliknya bila penyedia menolak jauh di bawah jendela config, clamp
+      // turun agar kompaksi menargetkan ukuran nyata penyedia.
+      const key = escalationKey(model)
+      const escalated = escalatedWindows.get(key)
+      const rawWindow = escalated !== undefined ? escalated : contextWindowBase(model)
+      const capped = cappedWindows.get(key)
+      return capped !== undefined ? Math.min(rawWindow, capped) : rawWindow
     } finally {
       perfCount("session.contextWindowForModel", perfEnabled() ? performance.now() - __t : 0)
     }
@@ -828,9 +881,10 @@ export async function createMinicodeSession(
     } catch {}
     return undefined
   }
-  // ── Eskalasi jendela konteks ──
+  // ── Eskalasi & clamp jendela konteks ──
   // Hanya untuk sesi ini (bukan config: itu niat operator). Kunci `provider::model`.
   const escalatedWindows = new Map<string, number>()
+  const cappedWindows = new Map<string, number>()
   const escalationKey = (model?: string): string => {
     const raw = model ?? currentContextModel() ?? "default"
     return raw.includes("::") ? raw : `${provider.id}::${raw}`
@@ -848,6 +902,30 @@ export async function createMinicodeSession(
       ? explicit
       : DEFAULT_FALLBACK_CONTEXT_WINDOW_TOKENS
   }
+  /** Turunkan plafon sesi saat penyedia menolak di bawah kapasitas config agar kompaksi efektif. */
+  const clampContextWindow = (
+    model: string | undefined,
+    observedTokens: number,
+    currentLimit: number,
+  ) => {
+    if (!Number.isFinite(observedTokens) || observedTokens <= 0) return
+    const key = escalationKey(model)
+    const prev = cappedWindows.get(key) ?? currentLimit
+    // Ambil 72% dari titik penolakan (min 8192) supaya target kompaksi (50% = ~36%)
+    // serta ruang output berada jauh di bawah batas nyata penyedia.
+    const next = Math.max(8_192, Math.floor(observedTokens * 0.72))
+    if (next >= prev) return
+    escalatedWindows.delete(key)
+    cappedWindows.set(key, next)
+    try {
+      rest.onContextWindowClamped?.({
+        model: key,
+        fromTokens: prev,
+        toTokens: next,
+        observedTokens,
+      })
+    } catch {}
+  }
   /** Naik satu tangga setelah overflow terverifikasi. Otomatis (user tak tahu
    * tangga berikutnya; sesi mati lebih mahal), tapi BOUNDED: satu langkah per
    * kejadian, tak melewati batas atas, hanya sesi ini. */
@@ -856,14 +934,27 @@ export async function createMinicodeSession(
     observedTokens: number,
     fromClientGuard = false,
   ) => {
-    // Pin eksplisit operator tak boleh dinaikkan guard lokal tanpa bukti error provider.
-    if (fromClientGuard && rest.isExplicitContextWindow?.(model)) return
+    // Pin eksplisit operator atau plafon hasil clamp penolakan upstream tak boleh
+    // dinaikkan diam-diam oleh guard lokal tanpa bukti kapasitas baru dari provider.
     const key = escalationKey(model)
-    const base = escalatedWindows.get(key) ?? contextWindowBase(model)
+    if (fromClientGuard && (rest.isExplicitContextWindow?.(model) || cappedWindows.has(key))) return
+    const base = contextWindowForModel(model)
+    // Jika provider sendiri menolak jauh di bawah jendela aktif, jangan justru
+    // menaikkan jendela; turunkan plafon agar kompaksi berikutnya memperkecil payload.
+    if (
+      !fromClientGuard &&
+      Number.isFinite(observedTokens) &&
+      observedTokens > 0 &&
+      observedTokens < base * 0.9
+    ) {
+      clampContextWindow(model, observedTokens, base)
+      return
+    }
     // Naik dari nilai pengamatan bila sudah melewati dasar; jika tidak, dari jendela kini.
     const from = Math.max(base, Number.isFinite(observedTokens) ? observedTokens : 0)
     const next = nextLadderStep(from)
     if (next === undefined || next <= base) return
+    cappedWindows.delete(key)
     escalatedWindows.set(key, next)
     try {
       rest.onContextWindowEscalated?.({
@@ -976,8 +1067,14 @@ export async function createMinicodeSession(
         clientGuard = false,
         reclassified = false,
       ) => {
-        // `context_length_exceeded` → kernel force_compact_and_retry + eskalasi terikat (bukan 429/402/auth).
-        if (!reclassified) escalateContextWindow(model, actualInput + actualOutput, clientGuard)
+        // Jika penyedia menolak pada input jauh di bawah `limit`, turunkan plafon
+        // sesi (termasuk untuk `reclassified`) agar kompaksi segera menyusutkan payload.
+        if (!clientGuard && actualInput > 0 && actualInput < limit * 0.9) {
+          clampContextWindow(model, actualInput, limit)
+        } else if (!reclassified) {
+          // `context_length_exceeded` → kernel force_compact_and_retry + eskalasi terikat.
+          escalateContextWindow(model, actualInput + actualOutput, clientGuard)
+        }
         const total = actualInput + actualOutput
         // Pesan jujur: jangan tulis "exceeds" bila angka jauh di bawah jendela
         // (dulu menyesatkan diagnosis user).
@@ -1120,9 +1217,11 @@ export async function createMinicodeSession(
   // setelah `core` ada. Retry yang tak jadi (throw/compact) tak memancarkan
   // apa pun — jangan klaim kemajuan rekaan.
   let retrySink: ((info: RecoveryRetryTelemetry) => void) | undefined
+  let activeRecoveryLedger: RecoveryLedger | undefined
+  const sessionRecoveryPolicy = createSessionRecoveryPolicy(() => activeRecoveryLedger)
   const recoveryWithTelemetry: typeof cappedRecovery = {
     onError(error, attempt) {
-      const action = cappedRecovery.onError(error, attempt)
+      const action = sessionRecoveryPolicy.onError(error, attempt)
       if (action.type === "retry") {
         try {
           retrySink?.({
@@ -1140,7 +1239,7 @@ export async function createMinicodeSession(
       return action
     },
     onLength(compacted) {
-      return cappedRecovery.onLength(compacted)
+      return sessionRecoveryPolicy.onLength(compacted)
     },
   }
   const core = createCoreSession({
@@ -1185,6 +1284,13 @@ export async function createMinicodeSession(
       type: "provider:extension",
       kind: RECOVERY_RETRY_EVENT_KIND,
       data: info,
+    })
+  }
+  guardEventSink = (ev) => {
+    core.events.emit({
+      type: "provider:extension",
+      kind: "loop-guard",
+      data: ev,
     })
   }
   core.events.on("context:compacted", () => {
@@ -1264,6 +1370,9 @@ export async function createMinicodeSession(
     core.events.on("turn:completed", () => {
       detector.noteAssistantResponse()
     })
+    core.events.on("context:compacted", () => {
+      detector.noteAssistantResponse()
+    })
   }
   // Guard volume-baca (opt-in MINICODE_READ_VOLUME_GUARD=1): menghitung char hasil
   // tool per turn dan memperingatkan sekali saat lewat ambang. Guard token hanya
@@ -1308,13 +1417,17 @@ export async function createMinicodeSession(
     get contextTokens() {
       return core.contextTokens
     },
-    run(input: string, runOpts?: { signal?: AbortSignal; model?: string }) {
+    run(
+      input: string,
+      runOpts?: { signal?: AbortSignal; model?: string; recoveryLedger?: RecoveryLedger },
+    ) {
       const myToken = ++runSeq
       // Hanya pemilik core yang menulis state bersama; penolakan "busy" dari
       // run lain tak boleh menjalankan cleanup.
       if (stateOwner === 0) {
         stateOwner = myToken
         activeContextModel = runOpts?.model ?? opts.model
+        activeRecoveryLedger = runOpts?.recoveryLedger ?? createRecoveryLedger()
         const startMode: ModeSnapshot = {
           workMode: liveWorkModeForSystem(),
           permissionMode: livePermissionModeForSystem(),
@@ -1325,8 +1438,15 @@ export async function createMinicodeSession(
         turnSentStream = false
       }
       const modelForRun = runOpts?.model ?? opts.model
+      const coreRunOpts =
+        runOpts && (runOpts.signal !== undefined || runOpts.model !== undefined)
+          ? {
+              ...(runOpts.signal !== undefined ? { signal: runOpts.signal } : {}),
+              ...(runOpts.model !== undefined ? { model: runOpts.model } : {}),
+            }
+          : undefined
       return core
-        .run(input, runOpts)
+        .run(input, coreRunOpts)
         .finally(() => {
           // Bersihkan hanya bila masih pemilik; run "busy" tak boleh menyentuh state aktif.
           if (myToken !== stateOwner) return
@@ -1337,6 +1457,7 @@ export async function createMinicodeSession(
             }
           }
           activeTurnTransitionNote = ""
+          activeRecoveryLedger = undefined
           turnSentStream = false
           stateOwner = 0
         })
@@ -1354,7 +1475,8 @@ export async function createMinicodeSession(
             }
           }
           // Mentok batas langkah → naik satu tangga (bounded) untuk turn berikut;
-          // kerja turn ini tetap hilang, tapi turn lanjutan tak menabrak dinding sama.
+          // kernel sudah meng-commit langkah tuntas via `safeTurnBoundary`,
+          // sehingga turn lanjutan melanjutkan konteks tanpa mengulang dari nol.
           if (error instanceof AgentError && error.kind === "max_steps_exceeded") {
             const used = typeof error.details?.steps === "number" ? error.details.steps : 0
             escalateMaxSteps(used)

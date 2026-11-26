@@ -46,27 +46,35 @@ function noColorEnv(): boolean {
 function hasTruecolorEnv(): boolean {
   return process.env.COLORTERM === "truecolor" || process.env.COLORTERM === "24bit"
 }
-/** 0=mono, 1=16-color, 2=256-color, 3=truecolor */
-function colorLevel(): number {
+/** 0=mono, 1=16-color, 2=256-color, 3=truecolor untuk stream TTY tertentu. */
+function streamColorLevel(stream: NodeJS.WriteStream): number {
   // v7.29: warna aktif di TTY; MONOKROM adalah opt-out (MINICODE_COLOR=0 /
   // NO_COLOR). Pipe/redirect/TERM=dumb TETAP level 0 untuk determinisme.
   if (colorDisabledByFlag()) return 0
   if (noColorEnv()) return 0
   // Determinisme Unix: output ke pipe/redirect/file tidak boleh memuat ANSI,
   // apa pun TERM/COLORTERM di env (env sesi interaktif sering bocor ke proses
-  // yang di-pipe). Warna hanya untuk stdout yang benar-benar terminal.
-  if (!process.stdout.isTTY || process.env.TERM?.toLowerCase() === "dumb") return 0
+  // yang di-pipe).
+  if (!stream?.isTTY || process.env.TERM?.toLowerCase() === "dumb") return 0
   if (hasTruecolorEnv()) return 3
   if (process.env.TERM?.includes("256color")) return 2
   // Terminal/ConPTY sering tak mengisi TERM; env eksplisit di atas tetap menang.
   try {
     const depth = (
-      process.stdout as NodeJS.WriteStream & { getColorDepth?: () => number }
+      stream as NodeJS.WriteStream & { getColorDepth?: () => number }
     ).getColorDepth?.()
     if (depth != null && depth >= 24) return 3
     if (depth != null && depth >= 8) return 2
   } catch {}
   return 1
+}
+
+function colorLevel(): number {
+  return streamColorLevel(process.stdout)
+}
+
+function stderrColorLevel(): number {
+  return streamColorLevel(process.stderr)
 }
 
 export type ScrimMode = "bg" | "faint" | "none"
@@ -111,8 +119,8 @@ function colorDisabledByFlag(): boolean {
 type Paint = (s: string) => string
 const identity: Paint = (s) => s
 
-function wrap(open: number | string, close: number | string): Paint {
-  if (colorLevel() === 0) return identity
+function wrapFor(open: number | string, close: number | string, level: number): Paint {
+  if (level === 0) return identity
   const o = `\x1b[${open}m`
   const cl =
     typeof close === "number"
@@ -124,16 +132,14 @@ function wrap(open: number | string, close: number | string): Paint {
 }
 
 /** Warna token sesuai level terminal: 16 / 256 / truecolor. */
-function paintToken(token: ColorToken): Paint {
-  const level = colorLevel()
+function paintTokenFor(token: ColorToken, level: number): Paint {
   if (level === 0) return identity
   const code = level === 1 ? token.c16 : level === 2 ? token.c256 : token.rgb
   return (s: string) => `\x1b[${code}m${s}\x1b[39m`
 }
 
 /** Token + bold (untuk accent judul/terpilih). */
-function paintTokenBold(token: ColorToken): Paint {
-  const level = colorLevel()
+function paintTokenBoldFor(token: ColorToken, level: number): Paint {
   if (level === 0) return identity
   const code = level === 1 ? token.c16 : level === 2 ? token.c256 : token.rgb
   return (s: string) => `\x1b[1;${code}m${s}\x1b[39m`
@@ -228,47 +234,47 @@ interface Palette {
 
 const paletteCache = new Map<string, Palette>()
 
-function buildPalette(): Palette {
-  const mono = colorLevel() === 0
+function buildPalette(level: number): Palette {
+  const mono = level === 0
   return {
-    success: paintToken(TOKENS.success),
-    error: paintToken(TOKENS.error),
-    warning: paintToken(TOKENS.warning),
-    info: paintToken(TOKENS.info),
-    accent: paintToken(TOKENS.accent),
-    accentAlt: paintToken(ACCENT_ALT_TOKEN),
-    accentBold: paintTokenBold(TOKENS.accent),
+    success: paintTokenFor(TOKENS.success, level),
+    error: paintTokenFor(TOKENS.error, level),
+    warning: paintTokenFor(TOKENS.warning, level),
+    info: paintTokenFor(TOKENS.info, level),
+    accent: paintTokenFor(TOKENS.accent, level),
+    accentAlt: paintTokenFor(ACCENT_ALT_TOKEN, level),
+    accentBold: paintTokenBoldFor(TOKENS.accent, level),
     // Saat mono, `gray` memakai dim (SGR 2) alih-alih bright-black (SGR 90):
     // 90 adalah warna, dan mono adalah jalur aksesibilitas yang seharusnya
     // monokrom. Dim tetap memberi hierarki visual tanpa memakai kanal warna.
-    gray: mono ? attr(2, 22) : paintToken(GRAY_TOKEN),
+    gray: mono ? attrFor(2, 22, level) : paintTokenFor(GRAY_TOKEN, level),
     // Faint: garis footer hampir tak terlihat. Mono (aksesibilitas) jatuh ke
     // dim agar tetap ada hierarki tanpa kanal warna.
-    faint: mono ? attr(2, 22) : paintToken(TOKENS.faint),
+    faint: mono ? attrFor(2, 22, level) : paintTokenFor(TOKENS.faint, level),
     // Alias legacy: dipetakan ke token, bukan hex hardcoded.
-    red: paintToken(TOKENS.error),
-    green: paintToken(TOKENS.success),
-    yellow: paintToken(TOKENS.warning),
-    cyan: paintToken(TOKENS.info),
-    blue: paintToken(TOKENS.accent),
-    magenta: mono ? identity : paintToken(MAGENTA_TOKEN),
-    white: mono ? identity : paintToken(WHITE_TOKEN),
+    red: paintTokenFor(TOKENS.error, level),
+    green: paintTokenFor(TOKENS.success, level),
+    yellow: paintTokenFor(TOKENS.warning, level),
+    cyan: paintTokenFor(TOKENS.info, level),
+    blue: paintTokenFor(TOKENS.accent, level),
+    magenta: mono ? identity : paintTokenFor(MAGENTA_TOKEN, level),
+    white: mono ? identity : paintTokenFor(WHITE_TOKEN, level),
     // Slot syntax highlight — saat mono semuanya jadi teks biasa.
-    brightYellow: mono ? identity : paintToken(BRIGHT_YELLOW_TOKEN),
-    brightMagenta: mono ? identity : paintToken(BRIGHT_MAGENTA_TOKEN),
-    brightCyan: mono ? identity : paintToken(BRIGHT_CYAN_TOKEN),
-    string: paintToken(TOKENS.string),
-    thinking: paintToken(TOKENS.thinking),
+    brightYellow: mono ? identity : paintTokenFor(BRIGHT_YELLOW_TOKEN, level),
+    brightMagenta: mono ? identity : paintTokenFor(BRIGHT_MAGENTA_TOKEN, level),
+    brightCyan: mono ? identity : paintTokenFor(BRIGHT_CYAN_TOKEN, level),
+    string: paintTokenFor(TOKENS.string, level),
+    thinking: paintTokenFor(TOKENS.thinking, level),
   }
 }
 
-function palette(): Palette {
+function palette(level = colorLevel()): Palette {
   // Kunci cache memuat level warna: NO_COLOR / COLORTERM bisa berubah antar
   // proses (dan antar test), dan palette mono vs truecolor berbeda isi.
-  const key = `${colorLevel()}:${hasTruecolorEnv() ? 1 : 0}`
+  const key = `${level}:${hasTruecolorEnv() ? 1 : 0}`
   const cached = paletteCache.get(key)
   if (cached) return cached
-  const built = buildPalette()
+  const built = buildPalette(level)
   paletteCache.set(key, built)
   return built
 }
@@ -276,13 +282,16 @@ function palette(): Palette {
 // Atribut non-warna (dim/bold/italic) tetap lazy juga: NO_COLOR harus
 // mematikannya, dan itu dievaluasi saat pakai.
 const attrCache = new Map<string, Paint>()
-function attr(open: number, close: number): Paint {
-  const key = `${open}:${close}:${colorLevel()}`
+function attrFor(open: number, close: number, level: number): Paint {
+  const key = `${open}:${close}:${level}`
   const hit = attrCache.get(key)
   if (hit) return hit
-  const built = wrap(open, close)
+  const built = wrapFor(open, close, level)
   attrCache.set(key, built)
   return built
+}
+function attr(open: number, close: number): Paint {
+  return attrFor(open, close, colorLevel())
 }
 
 /**
@@ -383,6 +392,90 @@ export const c = {
   },
   get thinking() {
     return palette().thinking
+  },
+}
+
+/**
+ * Palet warna untuk penulis ke `stderr` (membaca `stderr.isTTY`, bukan
+ * `stdout.isTTY`) sehingga pesan diagnostik di terminal tetap berwarna meski
+ * `stdout` sedang di-pipe. Tetap getter runtime (tak membeku saat import).
+ */
+export const cErr = {
+  text: identity,
+  get muted() {
+    return attrFor(2, 22, stderrColorLevel())
+  },
+  get bold() {
+    return attrFor(1, 22, stderrColorLevel())
+  },
+  get italic() {
+    return attrFor(3, 23, stderrColorLevel())
+  },
+  get dim() {
+    return attrFor(2, 22, stderrColorLevel())
+  },
+  get success() {
+    return palette(stderrColorLevel()).success
+  },
+  get error() {
+    return palette(stderrColorLevel()).error
+  },
+  get warning() {
+    return palette(stderrColorLevel()).warning
+  },
+  get info() {
+    return palette(stderrColorLevel()).info
+  },
+  get accent() {
+    return palette(stderrColorLevel()).accent
+  },
+  get accentAlt() {
+    return palette(stderrColorLevel()).accentAlt
+  },
+  get accentBold() {
+    return palette(stderrColorLevel()).accentBold
+  },
+  get gray() {
+    return palette(stderrColorLevel()).gray
+  },
+  get faint() {
+    return palette(stderrColorLevel()).faint
+  },
+  get red() {
+    return palette(stderrColorLevel()).red
+  },
+  get green() {
+    return palette(stderrColorLevel()).green
+  },
+  get yellow() {
+    return palette(stderrColorLevel()).yellow
+  },
+  get cyan() {
+    return palette(stderrColorLevel()).cyan
+  },
+  get blue() {
+    return palette(stderrColorLevel()).blue
+  },
+  get magenta() {
+    return palette(stderrColorLevel()).magenta
+  },
+  get white() {
+    return palette(stderrColorLevel()).white
+  },
+  get brightYellow() {
+    return palette(stderrColorLevel()).brightYellow
+  },
+  get brightMagenta() {
+    return palette(stderrColorLevel()).brightMagenta
+  },
+  get brightCyan() {
+    return palette(stderrColorLevel()).brightCyan
+  },
+  get string() {
+    return palette(stderrColorLevel()).string
+  },
+  get thinking() {
+    return palette(stderrColorLevel()).thinking
   },
 }
 

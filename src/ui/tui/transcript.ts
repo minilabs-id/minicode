@@ -17,7 +17,12 @@ import {
   formatAgentProgress,
 } from "../render/agent-progress.ts"
 import { chatColumnGeometry, chatWidth as chatWidthFromGeometry } from "../render/chat-column.ts"
-import { friendlyToolErrorCanonical } from "../render/errors.ts"
+import {
+  formatError,
+  formatLabeledToolFailure,
+  friendlyToolErrorCanonical,
+} from "../render/errors.ts"
+import { highlightCode } from "../render/highlight.ts"
 import { paintLedger, runMarker, statusWord } from "../render/ledger.ts"
 import { parseFence, renderInline } from "../render/markdown.ts"
 import { computeAssistantLineLayout, formatAssistantSpacing } from "../render/markdown-layout.ts"
@@ -25,7 +30,7 @@ import { type MarkdownTable, parseMarkdownBlocks } from "../render/markdown-tabl
 import { sanitizeAnsi, sanitizeAnsiLine, stripSgr } from "../render/sanitize.ts"
 import { renderMarkdownTable } from "../render/table-grid.ts"
 import { c, glyphs } from "../render/theme.ts"
-import { humanToolLabel, tSystem } from "../render/tool-label.ts"
+import { formatActivityLabel, humanToolLabel, tSystem } from "../render/tool-label.ts"
 import { displayWidth, padToWidth, truncateToWidth, wrapByWidth } from "../render/width.ts"
 import { defaultUiState, MAX_COPY_TURNS, type UiSessionState } from "../session-state.ts"
 
@@ -107,11 +112,11 @@ function formatTrimChars(chars: number): string {
 export function compactionTrimSummary(items: readonly CompactionTrimItem[]): string {
   if (items.length === 0) return ""
   const chars = items.reduce((sum, item) => sum + item.chars, 0)
+  const formattedChars = formatTrimChars(chars)
   const stateful = items.filter((item) => compactionTrimIsStateful(item.tool)).length
-  const base = `${items.length} tool results dipangkas (${formatTrimChars(chars)})`
   return stateful > 0
-    ? `${base} · ${stateful} tool stateful: JANGAN jalankan ulang, verifikasi state dulu`
-    : `${base} · jalankan ulang bila perlu`
+    ? t("ts.trimSummaryStateful", { n: items.length, chars: formattedChars, s: stateful })
+    : t("ts.trimSummarySafe", { n: items.length, chars: formattedChars })
 }
 
 type CompactToolCategory = "command" | "edit" | "read" | "subagent" | "thought" | "other"
@@ -146,6 +151,7 @@ const COMPACT_COMMAND_TOOLS = new Set([
   "bash",
   "bash_output",
   "bash_kill",
+  "code_run",
   "git_status",
   "git_diff",
   "git_log",
@@ -162,7 +168,20 @@ const COMPACT_EDIT_TOOLS = new Set([
   // file nyata, bukan "other" (audit UI/CLI).
   "lsp_rename",
 ])
-const COMPACT_READ_TOOLS = new Set(["read_file", "read_image", "grep", "glob", "ls", "stat"])
+const COMPACT_READ_TOOLS = new Set([
+  "read_file",
+  "read_image",
+  "grep",
+  "glob",
+  "read_memory",
+  "todo_read",
+  "lsp_diagnostics",
+  "lsp_definition",
+  "lsp_references",
+  "lsp_hover",
+  "lsp_symbols",
+  "lsp_workspace_symbols",
+])
 const COMPACT_SUBAGENT_TOOLS = new Set(["delegate_task"])
 const COMPACT_THOUGHT_TOOLS = new Set(["reasoning"])
 
@@ -224,7 +243,7 @@ function lruSet<T>(map: Map<number, T>, key: number, value: T, max = 3): void {
 }
 
 function emptyFence(): FenceCursor {
-  return { open: false, char: "", len: 0 }
+  return { open: false, char: "", len: 0, lang: "" }
 }
 
 /**
@@ -238,13 +257,16 @@ function advanceFence(cursor: FenceCursor, line: string): FenceState {
     cursor.open = true
     cursor.char = fence.char
     cursor.len = fence.len
+    cursor.lang = fence.lang
     return fence.lang ? `open:${fence.lang}` : "boundary"
   }
   if (cursor.open && fence && fence.char === cursor.char && fence.len >= cursor.len) {
     cursor.open = false
+    cursor.lang = ""
     return "boundary"
   }
-  return cursor.open ? "inside" : "outside"
+  if (!cursor.open) return "outside"
+  return cursor.lang ? `inside:${cursor.lang}` : "inside"
 }
 
 /** Cap memori: baris logis tertua dibuang diam-diam (kontrak I12). */
@@ -261,12 +283,35 @@ const PENDING_MEMO_MAX_ENTRIES = 4000
 /** Baris thinking yang terlihat di area live (Fase 3). */
 const MAX_THINKING_ROWS = 10
 /**
- * Baris live tool yang terlihat di tail viewport. Cukup 3 baris terakhir
- * supaya narasi committed tetap tampil saat puluhan tool berjalan sekaligus;
- * detail lengkap tetap di jurnal/`--verbose`. `liveRows()` (overlay lama)
- * sengaja TIDAK dipotong — App tak memakainya.
+ * Batas baris live tool di tail viewport bersifat adaptif (~50% tinggi viewport,
+ * minimal 3 baris) agar seluruh aktivitas paralel tampil pada terminal wajar
+ * tanpa mendorong narasi committed keluar layar atau melebarkan ruang ratchet.
  */
-const MAX_LIVE_TAIL_ROWS = 3
+const MIN_LIVE_TAIL_ROWS = 3
+const DEFAULT_MAX_LIVE_TAIL_ROWS = 12
+/** Jeda anti-kedip: tool ultra-kilat <60 ms tak dimunculkan sepotong lalu lenyap. */
+const LIVE_DWELL_MS = 60
+/** Kecepatan reveal per kata (ms/kata) untuk animasi live ala ketikan. */
+const LIVE_WORD_STEP_MS = 50
+/** Ambang tunggu sebelum baris status fase tunggu tampil saat layar kosong. */
+const WAIT_ROW_THRESHOLD_MS = 1500
+/** Ambang retry provider per turn sebelum dicatat ringkas di transkrip. */
+const HEAVY_RETRY_THRESHOLD = 3
+
+function revealWords(
+  text: string,
+  wordsToShow: number,
+  fallbackCols: number,
+): { shown: string; complete: boolean } {
+  const chunks = text.match(/\S+\s*/g) ?? []
+  if (chunks.length <= 1) {
+    const fullCols = displayWidth(text)
+    if (fallbackCols >= fullCols) return { shown: text, complete: true }
+    return { shown: truncateToWidth(text, Math.max(4, fallbackCols), ""), complete: false }
+  }
+  if (wordsToShow >= chunks.length) return { shown: text, complete: true }
+  return { shown: chunks.slice(0, Math.max(1, wordsToShow)).join("").trimEnd(), complete: false }
+}
 const TRANSCRIPT_TRUNCATION_MARKER = "… [transcript truncated: turn cap exceeded]"
 /**
  * Sink approval TUI: pemilik layar (cli/tui.ts) mendaftarkan transkrip +
@@ -337,6 +382,10 @@ export interface TranscriptOptions {
    * Injeksi dari composition root — src/ui TIDAK boleh mengimpor cli/.
    */
   onEviction?: (removedByWidth: ReadonlyMap<number, number>) => void
+  /** Aktifkan animasi reveal seperti diketik untuk baris live tool (TUI interaktif). */
+  animateLive?: boolean
+  /** Jam opsional (ms) untuk determinisme animasi & elapsed di test. */
+  now?: () => number
 }
 
 export interface TranscriptPoint {
@@ -382,6 +431,7 @@ interface FenceCursor {
   open: boolean
   char: string
   len: number
+  lang: string
 }
 
 /**
@@ -452,7 +502,7 @@ function formatElapsed(ms: number): string {
   return `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, "0")}m`
 }
 
-type FenceState = "outside" | "inside" | "boundary" | `open:${string}`
+type FenceState = "outside" | "inside" | `inside:${string}` | "boundary" | `open:${string}`
 
 function clampCodeUnitBoundary(s: string, index: number): number {
   const idx = Math.max(0, Math.min(index, s.length))
@@ -471,7 +521,9 @@ function clampCodeUnitBoundary(s: string, index: number): number {
 function userEchoWidth(): number {
   const cols = Math.max(1, process.stdout.columns || 80)
   const rows = Math.max(1, process.stdout.rows || 24)
-  return Math.max(40, chatWidthFromGeometry(chatColumnGeometry(rows, cols)) - 1)
+  // Kurangi margin bingkai simetris 3+3 (FRAME_HORIZONTAL_MARGIN = 6) agar fallback
+  // lebar sama persis dengan contentCols milik TuiApp.
+  return Math.max(10, chatWidthFromGeometry(chatColumnGeometry(rows, cols)) - 6 - 1)
 }
 
 function renderAssistantLine(line: string, fenceState: FenceState): string | null {
@@ -482,7 +534,10 @@ function renderAssistantLine(line: string, fenceState: FenceState): string | nul
     const lang = fenceState.slice(5)
     return lang ? c.accent(`${glyphs.vLine} ${lang}`) : null
   }
-  if (fenceState === "inside") return line
+  if (fenceState === "inside" || fenceState.startsWith("inside:")) {
+    const lang = fenceState.startsWith("inside:") ? fenceState.slice(7) : ""
+    return lang ? highlightCode(line, lang) : line
+  }
   // v0.33: `__bold__` juga markdown — jangan bocor ke layar bila jadi satu-satunya marker.
   if (!/(?:\*{1,2}|_{2}|`|^#{1,6}\s|~~|\[[^\]]+\]\()/.test(line)) return line
   const heading = /^(#{1,6})\s+(.*)$/.exec(line)
@@ -641,9 +696,6 @@ export class Transcript {
    *  mengurangi hitungan `✦ … N gagal` pada agregat induk yang sama. */
   private agentFailureById = new Map<string, AgentFailureReason>()
   private presentedVerifications = new Set<string>()
-  // Dedup finding child (`finding.detected` / `[EVALUATE]`): event bisa datang
-  // ulang dari bridge/replay, jadi satu finding = satu baris.
-  private presentedFindings = new Set<string>()
   private summarizedTurns = new Set<number>()
   /** Lipat aktivitas: baris per-tool ditahan, lalu dirangkum jadi SATU baris
    * di akhir turn (+ detail di-buffer untuk /expand).
@@ -731,11 +783,30 @@ export class Transcript {
   private pendingVersion = 0
   /** Callback eviction (di-inject App; tidak mengimpor cli/). */
   onEviction: TranscriptOptions["onEviction"]
+  private animateLive: boolean
+  private nowFn: () => number
+  private liveRevealStart = new Map<string, number>()
+  private liveAnimating = false
+  private lastViewportHeight = 0
+  private replaying = false
+  private turnRetryCount = 0
+  private turnRetryReason = ""
+  private turnDisruptionFlushed = false
+  private turnActive = false
+  private turnStartTs = 0
+  private currentStepNumber = 0
+  private liveRetryState: {
+    attempt: number
+    quota: number
+    reason: string
+  } | null = null
 
   constructor(bus: UiBus, opts: TranscriptOptions = {}) {
     this.getSnapshot = opts.getSnapshot
     this.policy = opts.policy
     this.onEviction = opts.onEviction
+    this.animateLive = opts.animateLive ?? false
+    this.nowFn = opts.now ?? Date.now
     this.uiState = opts.uiState ?? defaultUiState
     this.maxPendingChars = Math.max(1, opts.maxPendingChars ?? TRANSCRIPT_TEXT_MAX_CHARS)
     // Gagal subscribe = transcript mati total; biarkan throw (fail-closed).
@@ -766,6 +837,13 @@ export class Transcript {
         this.narrationSinceFlush = false
         // Turn baru = event kompaksi baru; jangan sambung hitungan lama.
         this.compactionTrimRow = null
+        this.turnRetryCount = 0
+        this.turnRetryReason = ""
+        this.turnDisruptionFlushed = false
+        this.turnActive = true
+        this.turnStartTs = this.nowFn()
+        this.currentStepNumber = 0
+        this.liveRetryState = null
       }),
       bus.on("turn:completed", () => {
         // Satu panggilan `turnEnd`: flush sisa segmen DAN menutup akumulasi.
@@ -782,8 +860,14 @@ export class Transcript {
         // dikosongkan). Idempoten: akumulator dikosongkan setelah emit, jadi
         // jalur bus + presentation yang sama tak menulis dua kali.
         this.flushTurnTotal()
+        this.flushProviderDisruption()
+        this.turnActive = false
+        this.turnStartTs = 0
+        this.currentStepNumber = 0
+        this.liveRetryState = null
       }),
       bus.on("execution:started", () => {
+        this.liveRetryState = null
         this.commit()
         this.commitThinking()
       }),
@@ -836,6 +920,7 @@ export class Transcript {
   /** Teks model mengalir — ditahan sebagai ekor hidup sampai commit. */
   stream(text: string): void {
     if (!text) return
+    this.liveRetryState = null
     this.commitThinking()
     // Footer narasi: `tool → narasi → rekap → tool`. Teks model menandai
     // ujung segmen; rekap untuk tool SEBELUM narasi ditulis nanti, tepat saat
@@ -894,6 +979,32 @@ export class Transcript {
             kind: "diagnostic",
           })
         }
+      }
+      return
+    }
+    if (e.kind === "minicode:retry") {
+      const data = e.data as {
+        attempt?: unknown
+        quota?: unknown
+        category?: unknown
+        stalledMs?: unknown
+      } | null
+      const attempt = data?.attempt
+      if (typeof attempt === "number" && Number.isFinite(attempt) && attempt >= 1) {
+        const cleanAttempt = Math.floor(attempt)
+        const cleanQuota =
+          typeof data?.quota === "number" &&
+          Number.isFinite(data.quota) &&
+          data.quota >= cleanAttempt
+            ? Math.floor(data.quota)
+            : cleanAttempt
+        const reason = this.providerReasonText(
+          typeof data?.category === "string" ? data.category : "",
+          typeof data?.stalledMs === "number" && data.stalledMs > 0,
+        )
+        this.turnRetryCount = Math.max(this.turnRetryCount, cleanAttempt)
+        this.turnRetryReason = reason
+        this.liveRetryState = { attempt: cleanAttempt, quota: cleanQuota, reason }
       }
       return
     }
@@ -1055,7 +1166,7 @@ export class Transcript {
     const prefix = `minicode ${arrow} `
     // v0.33 (audit): jangan serahkan wrap ke terminal — baris lanjutan mulai di
     // kolom 0. Wrap di sini dengan lebar ISI chat (sudah dikurangi margin).
-    const width = availableWidth == null ? userEchoWidth() : Math.max(40, availableWidth - 1)
+    const width = availableWidth == null ? userEchoWidth() : Math.max(10, availableWidth - 1)
     const bodyWidth = Math.max(10, width - displayWidth(prefix))
     const chunks = wrapByWidth(first ?? "", bodyWidth)
     this.appendWithSource(
@@ -1210,7 +1321,6 @@ export class Transcript {
     this.ledgerRowIds.clear()
     this.agentFailureById.clear()
     this.presentedVerifications.clear()
-    this.presentedFindings.clear()
     this.summarizedTurns.clear()
     this.activityFold = []
     this.turnToolNames = []
@@ -1222,6 +1332,34 @@ export class Transcript {
     this.compactionTrimRow = null
     this.progressLabel = ""
     this.planLabel = ""
+    this.liveRevealStart.clear()
+    this.liveAnimating = false
+    this.turnRetryCount = 0
+    this.turnRetryReason = ""
+    this.turnDisruptionFlushed = false
+    this.turnActive = false
+    this.turnStartTs = 0
+    this.currentStepNumber = 0
+    this.liveRetryState = null
+  }
+
+  private providerReasonText(category: string, stalled = false): string {
+    if (stalled) return tSystem("tag.timeout")
+    const cLower = category.toLowerCase()
+    if (cLower.includes("rate")) return tSystem("retry.reason.rateLimit")
+    if (cLower.includes("network") || cLower.includes("timeout"))
+      return tSystem("retry.reason.network")
+    if (cLower.includes("server")) return tSystem("retry.reason.server")
+    return tSystem("retry.reason.other")
+  }
+
+  private flushProviderDisruption(): void {
+    if (this.turnDisruptionFlushed || this.turnRetryCount < HEAVY_RETRY_THRESHOLD) return
+    this.turnDisruptionFlushed = true
+    const reason = this.turnRetryReason || tSystem("retry.reason.other")
+    this.push(c.warning(tSystem("msg.providerDisruption", { n: this.turnRetryCount, reason })), {
+      kind: "diagnostic",
+    })
   }
 
   /** Jumlah baris logis (untuk test; bukan API paint). */
@@ -1338,7 +1476,7 @@ export class Transcript {
           hangingIndent = firstLead
         } else if (renderedBody !== "") {
           const layout = computeAssistantLineLayout(raw, outerMargin, w, {
-            inFence: fenceState === "inside",
+            inFence: fenceState === "inside" || fenceState.startsWith("inside:"),
           })
           firstLead = layout.firstLead
           hangingIndent = layout.hangingIndent
@@ -1790,7 +1928,7 @@ export class Transcript {
    * turn), supaya urutan footer `tool → narasi → rekap → tool` terjaga.
    * Dipisah supaya viewport bisa memotong langsung dari array committed (O(height)).
    */
-  private tailRows(width: number): TranscriptRow[] {
+  private tailRows(width: number, maxLiveRows?: number): TranscriptRow[] {
     const w = Math.max(10, width)
     const proj = this.projection(w)
     const out: TranscriptRow[] = []
@@ -1814,7 +1952,7 @@ export class Transcript {
     out.push(...this.thinkingRows(w))
     // Tool yang SEDANG berjalan — panel hanya memuat tool terminal, jadi running
     // tetap punya baris sendiri (tak ada duplikasi).
-    for (const row of this.runningRows()) {
+    for (const row of this.runningRows(maxLiveRows)) {
       out.push({
         text: row,
         sourceId: -1,
@@ -1973,17 +2111,30 @@ export class Transcript {
     return rows
   }
 
+  private maxLiveTailRows(height?: number): number {
+    if (height !== undefined && Number.isFinite(height) && height > 0) {
+      return Math.max(MIN_LIVE_TAIL_ROWS, Math.floor(height * 0.5))
+    }
+    if (this.lastViewportHeight > 0) {
+      return Math.max(MIN_LIVE_TAIL_ROWS, Math.floor(this.lastViewportHeight * 0.5))
+    }
+    return DEFAULT_MAX_LIVE_TAIL_ROWS
+  }
+
   /** O(1) setelah proyeksi lebar ini tersedia. */
-  wrappedLength(width: number): number {
-    return this.projection(width).rows.length + this.tailRows(width).length
+  wrappedLength(width: number, height?: number): number {
+    return (
+      this.projection(width).rows.length + this.tailRows(width, this.maxLiveTailRows(height)).length
+    )
   }
 
   viewport(width: number, height: number, scrollBack: number): TranscriptViewport {
+    const safeHeight = Math.max(1, Math.floor(height))
+    this.lastViewportHeight = safeHeight
     const proj = this.projection(width)
-    const tail = this.tailRows(width)
+    const tail = this.tailRows(width, this.maxLiveTailRows(safeHeight))
     const committedCount = proj.rows.length
     const total = committedCount + tail.length
-    const safeHeight = Math.max(1, Math.floor(height))
     // v7.28: anchor ATAS. `scrollBack = 0` = kepala, nilai besar = ekor.
     // Konten lebih pendek dari viewport → baris kosong ditaruh DI BAWAH.
     const maxBack = Math.max(0, total - safeHeight)
@@ -2240,18 +2391,26 @@ export class Transcript {
    * sehingga ledger/provenance mengacu data yang benar.
    */
   replayHistory(events: readonly UiPresentationEvent[]): void {
-    for (const event of events) {
-      if (event.type === "user.message") {
-        if (event.text) this.pushUser(event.text)
-        continue
+    this.replaying = true
+    try {
+      for (const event of events) {
+        if (event.type === "user.message") {
+          if (event.text) this.pushUser(event.text)
+          continue
+        }
+        if (event.type === "model.completed") {
+          if (event.text) this.appendAssistantText(event.text)
+          continue
+        }
+        // catatan v7.40: `finding.detected` KINI punya baris transkrip (lihat
+        // handler di presentationEvent). Event non-tool lain tetap no-op aman.
+        this.presentationEvent(event)
       }
-      if (event.type === "model.completed") {
-        if (event.text) this.appendAssistantText(event.text)
-        continue
-      }
-      // catatan v7.40: `finding.detected` KINI punya baris transkrip (lihat
-      // handler di presentationEvent). Event non-tool lain tetap no-op aman.
-      this.presentationEvent(event)
+    } finally {
+      this.replaying = false
+      this.turnActive = false
+      this.turnStartTs = 0
+      this.liveRetryState = null
     }
   }
 
@@ -2293,6 +2452,13 @@ export class Transcript {
       // Progres lama tak boleh bocor ke turn berikutnya.
       this.progressLabel = ""
       this.planLabel = ""
+      this.turnRetryCount = 0
+      this.turnRetryReason = ""
+      this.turnDisruptionFlushed = false
+      this.turnActive = true
+      this.turnStartTs = this.nowFn()
+      this.currentStepNumber = 0
+      this.liveRetryState = null
       return
     }
     if (event.type === "turn.completed") {
@@ -2305,12 +2471,17 @@ export class Transcript {
       this.flushActivityFold()
       // Rekap kumulatif seluruh tool turn ini (lihat bus `turn:completed`).
       this.flushTurnTotal()
+      this.flushProviderDisruption()
       // minimizeActivity ON / activityPanel ON → fold meringkas sendiri; baris
       // ringkas itu sudah cukup, turnSummary (turn · files · durasi) dilewati.
       if (!this.uiState.minimizeActivity && !this.uiState.activityPanel)
         this.turnSummary(event.summary, event)
       this.progressLabel = ""
       this.planLabel = ""
+      this.turnActive = false
+      this.turnStartTs = 0
+      this.currentStepNumber = 0
+      this.liveRetryState = null
       return
     }
     if (event.type === "turn.failed" || event.type === "turn.cancelled") {
@@ -2318,6 +2489,14 @@ export class Transcript {
       this.commit()
       this.flushActivityFold()
       this.flushTurnTotal()
+      this.flushProviderDisruption()
+      if (event.type === "turn.cancelled" && event.reason === "budget") {
+        this.push(c.warning(tSystem("msg.budgetStopped")))
+      } else if (this.replaying && event.type === "turn.failed" && event.error) {
+        const firstLine = String(event.error).split(/[\r\n]/)[0] ?? ""
+        const canonical = friendlyToolErrorCanonical(firstLine)
+        this.pushError(canonical || formatError(new Error(event.error)))
+      }
       // Turn gagal diikuti turn baru tanpa `turn.started` bisa terjadi saat
       // resume; tutup akumulator agar ringkasan lama tak menumpuk.
       this.compactionTrimRow = null
@@ -2327,6 +2506,33 @@ export class Transcript {
       this.agentFailureById.clear()
       this.progressLabel = ""
       this.planLabel = ""
+      this.turnActive = false
+      this.turnStartTs = 0
+      this.currentStepNumber = 0
+      this.liveRetryState = null
+      return
+    }
+    if (
+      this.replaying &&
+      event.type === "diagnostic.raised" &&
+      event.category === "PROVIDER_ERROR"
+    ) {
+      this.turnRetryCount++
+      const msg = String(event.message ?? "").toLowerCase()
+      this.turnRetryReason =
+        msg.includes("429") || msg.includes("rate")
+          ? tSystem("retry.reason.rateLimit")
+          : msg.includes("stall") || msg.includes("network") || msg.includes("timeout")
+            ? tSystem("retry.reason.network")
+            : tSystem("retry.reason.other")
+      return
+    }
+    if (
+      this.replaying &&
+      event.type === "context.compacted" &&
+      event.compactionReason?.startsWith("llm-failed:")
+    ) {
+      this.push(c.muted(this.compactedLabel(event.compactionReason)))
       return
     }
     // ── Baris progres live: update label internal + repaint, TANPA baris baru ──
@@ -2335,13 +2541,11 @@ export class Transcript {
     if (event.type === "step.started") {
       if (typeof event.step === "number" && Number.isFinite(event.step)) {
         const n = Math.max(1, Math.floor(event.step) + 1) // kernel 0-based
+        this.currentStepNumber = n
         this.progressLabel =
           typeof event.total === "number" && Number.isFinite(event.total) && event.total > 0
             ? t("progress.step", { n, total: Math.floor(event.total) })
             : t("progress.stepNoTotal", { n })
-        // v7.31: label progres tidak lagi punya surface di UI (v7.30 ringkasan
-        // tool jadi separator). Jangan paksa repaint pada setiap step —
-        // event bus App sudah menggambar ulang dari perubahan konten nyata.
       }
       return
     }
@@ -2350,10 +2554,10 @@ export class Transcript {
       // v7.31: sama seperti step — state disimpan, repaint tak dipaksa.
       return
     }
-    // Renderer flat: diagnostik non-tool (task/consequence/context/verification)
-    // tidak dirender sebagai baris transkrip — transkrip hanya user, jawaban,
-    // dan satu baris ringkas per tool. Event tetap dikonsumsi (return) agar
-    // tidak jatuh ke guard `tool.` di bawah.
+    // Renderer flat: diagnostik non-tool dan temuan mentah antar-agen
+    // (`finding.detected` / `[EVALUATE]`) tidak dirender ke chat utama — baik
+    // saat live maupun `--resume` replay. Detail tetap tersimpan durable di
+    // SQLite, tersedia via ACP, dan dicatat ke `/logs` oleh `cli/tui.ts`.
     if (
       event.type === "task.status" ||
       event.type === "consequence.decided" ||
@@ -2362,31 +2566,14 @@ export class Transcript {
       event.type === "verification.observed" ||
       // Judul diri sub-agent mengubah label di snapshot (LIVE panel), bukan
       // baris transkrip: append di sini akan menduplikasi baris childLedger.
-      event.type === "activity.label"
+      event.type === "activity.label" ||
+      event.type === "finding.detected"
     ) {
-      return
-    }
-    // v7.40: finding dari child (`[EVALUATE] …`) HARUS tampil di TUI — v7.35
-    // berjanji laporan live tapi cuma presenter linear yang merendernya.
-    // Tempatnya SEBELUM guard `tool.` karena tipenya bukan tool event.
-    if (event.type === "finding.detected") {
-      const id = event.findingId
-      if (!id || this.presentedFindings.has(id)) return
-      // v7.41 re-audit: bridge (presentation-bridge.ts:261) menaruh isi finding
-      // di `text`, bukan `summary` (summary di union bertipe UiTurnSummary).
-      // Dulu kode ini baca `event.summary as string` → selalu "" → baris finding
-      // tak pernah dirender (fitur v7.40 jadi no-op). Baca `text` yang benar.
-      const text = sanitizeAnsiLine(event.text ?? "")
-      if (!text) return
-      this.presentedFindings.add(id)
-      // Temuan audit adalah narasi: hidup di CHAT pada semua permukaan
-      // (termasuk jalur one-shot/CI) supaya tak ada yang hilang.
-      // "diagnostic" = baris observasi, bukan percakapan (lihat TranscriptMeta).
-      this.append(truncateToWidth(text, 200, "…"), { kind: "diagnostic" })
       return
     }
     if (!event.type.startsWith("tool.")) return
     if (event.type === "tool.started") {
+      this.liveRetryState = null
       // Tutup narasi/think yang masih menggantung supaya baris tool terminal
       // berikutnya muncul di bawahnya, bukan menempel di ekor jawaban.
       this.commit()
@@ -2521,13 +2708,25 @@ export class Transcript {
     // manusiawibahasa SISTEM) HANYA untuk baris tampilan. Keduanya jangan
     // disatukan — lihat kontrak `activityFold` di atas.
     const rawName = sanitizeAnsiLine(desc?.name ?? activity?.name ?? event.name ?? "tool")
-    const name = humanToolLabel(rawName, activity)
+    const target = desc?.target ?? activity?.target ?? event.target
+    const intent = desc?.intent ?? activity?.intent ?? event.intent
+    const {
+      text: titleLabel,
+      autoText,
+      isIntent,
+    } = formatActivityLabel(rawName, {
+      label: activity?.label,
+      intent,
+      summary: desc?.summary ?? activity?.summary,
+      target,
+    })
+    const name = isIntent ? titleLabel : humanToolLabel(rawName, activity)
     // Akumulator turn menyimpan rawName SETIAP tool terminal (jalur dedup &
     // child sudah return lebih awal di atas), bukan fold per-segmen. Retry
     // sukses mengganti slot attempt gagal — bukan menambah nama kedua.
     this.pushTurnToolName(toolId, supersedesId, rawName)
-    const target = desc?.target ?? activity?.target ?? event.target
-    const targetText = target ? ` ${truncateToWidth(sanitizeAnsiLine(target), 120, "")}` : ""
+    const targetText =
+      !isIntent && target ? ` ${truncateToWidth(sanitizeAnsiLine(target), 120, "")}` : ""
     const status = desc?.status ?? activity?.status ?? event.status ?? "completed"
     const retry = (desc ? desc.retryOf : activity?.supersedes) ? ` ${t("ts.retry")}` : ""
     // P2.11: penanda verifikasi/provenans dari deskripsi policy (ASCII aman).
@@ -2558,51 +2757,40 @@ export class Transcript {
         ? (desc?.denyReason ?? activity?.denyReason ?? (event.reason ? String(event.reason) : ""))
         : ""
     const errorMessage = event.message ?? desc?.message ?? activity?.error?.message
-    // Pesan error WAJIB satu baris: ledger adalah ringkasan, bukan dump. Teks
-    // datang dari provider/tool (tak terpercaya) dan bisa multi-baris. Potong
-    // di sini SEBELUM sanitasi: `sanitizeAnsiLine` memang sengaja mengubah \n
-    // menjadi spasi (untuk teks alir), jadi memotong sesudahnya tidak berguna —
-    // pesannya sudah tergabung menjadi satu baris panjang. Tanpa potongan awal,
-    // satu error ikut menyeret sisa pesannya ke dalam ledger.
     const firstLine = String(errorMessage ?? "").split(/[\r\n]/)[0] ?? ""
-    // v0.43: HANYA 13 redaksi kanonik yang boleh tampil di ledger. Fungsi
-    // `friendlyToolErrorCanonical()` mengembalikan "" bila tak ada pola cocok —
-    // error mentah tak diteruskan lagi (detail tetap di jurnal/--verbose).
-    // Nama/target tool sudah tampil di `line`; fungsi menerimanya hanya untuk
-    // frasa "Command failed · <target> · …". Deny reason (P0) tetap lewat cabang
-    // `message` di bawah, terlepas dari ada/tidaknya redaksi kanonik.
-    const canonical = errorMessage
-      ? friendlyToolErrorCanonical(firstLine, target ? String(target) : undefined)
-      : ""
-    // Bila error tool tak cocok pola kanonik dan bukan denyReason, tampilkan
-    // narasi fallback OS-locale agar detail mentah tak pernah bocor ke layar.
-    const friendly =
-      canonical ||
-      (errorMessage && !denyReason && status !== "completed" ? tSystem("msg.unknownToolError") : "")
-    const message = friendly
-      ? `: ${friendly}`
-      : denyReason
-        ? `: ${truncateToWidth(sanitizeAnsi(denyReason), 200, "…").split("\n")[0] ?? ""}`
-        : ""
-    // Bedakan redaksi kanonik (13 pola) dari fallback yang hanya meneruskan
-    // pesan mentah — mis. "boom" tetap butuh statusWord agar baris gagal jelas.
-    const rawFirstLine = truncateToWidth(sanitizeAnsiLine(firstLine), 120, "…")
-    const conciseRedaction = Boolean(friendly) && friendly !== rawFirstLine
-    // v0.43: bila redaksi ringkas dipakai pada baris GAGAL, kata status dan
-    // hitungan child TIDAK diulang — redaksi (mis. "Sub-agent failed · details
-    // in --verbose") sudah menyatakan kegagalan, dan "N child tools" bukan inti
-    // masalah (detail tetap di baris agregat ✦ & jurnal). Deny reason tanpa
-    // redaksi tetap memakai statusWord + alasannya seperti sebelumnya. Warna
-    // fail-closed TETAP lewat `paintLedger(status, line)` di bawah.
-    const compactFailure = conciseRedaction && status !== "completed"
-    const child = !compactFailure && children > 0 ? ` ${t("ts.childGroup", { n: children })}` : ""
-    // Format ledger: `› nama target` (kontrak grammar). Kata status HANYA
-    // dicetak saat bukan sukses: baris sukses berwarna hijau sudah menyatakan
-    // hasilnya, dan "selesai" di setiap baris membuat daftar tool jadi derau.
-    const statusSuffix =
-      status === "completed" || compactFailure ? "" : ` ${glyphs.dot} ${statusWord(status)}`
-    // v0.43: margin adalah padding FRAME — baris ledger polos di kolom 0.
-    const line = `${glyphs.arrow} ${name}${targetText}${statusSuffix}${retry}${child}${verificationMark}${provenanceMark}${message}`
+    let line: string
+    const useUnifiedFailureLabel =
+      status !== "completed" &&
+      (isIntent || rawName !== "delegate_task" || Boolean(target ?? activity?.summary))
+    if (useUnifiedFailureLabel) {
+      // Semua tool (ber-intent AI maupun auto-label sistem) memakai format
+      // kegagalan seragam: `<judul manusiawi> mengalami kegagalan (<penyebab>)`.
+      const failureSubject = isIntent ? titleLabel : autoText
+      const labeledFailure = formatLabeledToolFailure(failureSubject, firstLine, denyReason)
+      line = `${glyphs.arrow} ${labeledFailure}${retry}${verificationMark}${provenanceMark}`
+    } else if (isIntent) {
+      line = `${glyphs.arrow} ${name}${retry}${verificationMark}${provenanceMark}`
+    } else {
+      // Fallback khusus legacy delegate_task tanpa intent/target: pertahankan redaksi kanonik.
+      const canonical = errorMessage ? friendlyToolErrorCanonical(firstLine) : ""
+      const friendly =
+        canonical ||
+        (errorMessage && !denyReason && status !== "completed"
+          ? tSystem("msg.unknownToolError")
+          : "")
+      const message = friendly
+        ? `: ${friendly}`
+        : denyReason
+          ? `: ${truncateToWidth(sanitizeAnsi(denyReason), 200, "…").split("\n")[0] ?? ""}`
+          : ""
+      const rawFirstLine = truncateToWidth(sanitizeAnsiLine(firstLine), 120, "…")
+      const conciseRedaction = Boolean(friendly) && friendly !== rawFirstLine
+      const compactFailure = conciseRedaction && status !== "completed"
+      const child = !compactFailure && children > 0 ? ` ${t("ts.childGroup", { n: children })}` : ""
+      const statusSuffix =
+        status === "completed" || compactFailure ? "" : ` ${glyphs.dot} ${statusWord(status)}`
+      line = `${glyphs.arrow} ${name}${targetText}${statusSuffix}${retry}${child}${verificationMark}${provenanceMark}${message}`
+    }
     // Lipat aktivitas (opencode-like): saat minimizeActivity ATAU panel
     // aktivitas aktif, baris ledger per-tool TIDAK boleh menghilang diam-diam
     // — ditahan lalu dirangkum saat turn selesai (panel: per keluarga tool;
@@ -3025,25 +3213,56 @@ export class Transcript {
     return running
   }
 
-  /** Satu baris live untuk activity running — format SAMA persis dengan
-   *  implementasi tail lama supaya test/parity tak bergeser. Dipakai tail
-   *  viewport maupun `liveRows()` untuk overlay. */
+  /** True bila ada baris tool live yang masih dalam animasi reveal seperti diketik. */
+  hasLiveAnimation(): boolean {
+    return this.liveAnimating
+  }
+
+  /** Satu baris live untuk activity running — memakai label niat / auto-label
+   *  manusiawi, dengan jeda anti-kedip 120 ms & reveal per kata saat `animateLive`. */
   private runningLine(activity: UiPresentationActivity, child: boolean, marker: string): string {
-    const name = sanitizeAnsiLine(activity.name)
-    const target = activity.target
-      ? ` ${truncateToWidth(sanitizeAnsiLine(activity.target), 120, "")}`
-      : ""
-    const elapsed = Date.now() - activity.tsStart
+    const rawName = sanitizeAnsiLine(activity.name)
+    const {
+      text: titleLabel,
+      autoText,
+      isIntent,
+    } = formatActivityLabel(rawName, activity, {
+      maxCols: 72,
+    })
+    const bodyTitle = isIntent ? titleLabel : autoText
+    const now = this.nowFn()
+    const elapsed = now - activity.tsStart
     const showElapsed = this.policy
-      ? this.policy.elapsedVisible(activity.tsStart, Date.now())
+      ? this.policy.elapsedVisible(activity.tsStart, now)
       : elapsed >= 2000
     const elapsedText = showElapsed ? ` (${formatElapsed(elapsed)})` : ""
     const retry = activity.supersedes ? ` ${t("ts.retry")}` : ""
     const markerText = marker ? `${marker} ` : ""
     // v0.43: margin 3 milik FRAME. Indent 2 kolom anak tetap jadi hierarki.
     const prefix = child ? `  ↳ ` : `${glyphs.arrow} `
+    if (this.animateLive) {
+      const key = activity.toolCallId || `${rawName}:${activity.tsStart}`
+      let startTs = this.liveRevealStart.get(key)
+      if (startTs === undefined) {
+        startTs = now
+        this.liveRevealStart.set(key, startTs)
+      }
+      const dwellElapsed = Math.max(0, now - startTs)
+      if (dwellElapsed < LIVE_DWELL_MS) {
+        this.liveAnimating = true
+        return ""
+      }
+      const revealMs = dwellElapsed - LIVE_DWELL_MS
+      const wordsToShow = Math.max(1, Math.floor(revealMs / LIVE_WORD_STEP_MS) + 1)
+      const fallbackCols = Math.max(4, Math.floor((revealMs * 160) / 1000))
+      const { shown, complete } = revealWords(bodyTitle, wordsToShow, fallbackCols)
+      if (!complete) {
+        this.liveAnimating = true
+        return c.info(`${prefix}${markerText}${shown} …`)
+      }
+    }
     return c.info(
-      `${prefix}${markerText}${name}${target} … ${t("ts.statusRunning")}${elapsedText}${retry}`,
+      `${prefix}${markerText}${bodyTitle} … ${t("ts.statusRunning")}${elapsedText}${retry}`,
     )
   }
 
@@ -3072,15 +3291,107 @@ export class Transcript {
     return out
   }
 
-  /** Baris live transien untuk tail viewport — TIDAK masuk `lines[]`.
-   *  Cukup 3 aktivitas terakhir supaya narasi tetap tampil; detail lengkap
-   *  tetap di jurnal/`--verbose`. */
-  private runningRows(): string[] {
+  /** Total aktivitas tool yang sedang berjalan saat ini (untuk indikator +N footer). */
+  runningCount(): number {
     const snapshot = this.presentationSnapshot()
-    if (!snapshot) return []
-    return this.orderedRunning(snapshot)
+    return snapshot ? this.orderedRunning(snapshot).length : 0
+  }
+
+  /** Jumlah aktivitas live yang melampaui kap adaptif viewport `height`. */
+  runningExtraCount(height?: number): number {
+    return Math.max(0, this.runningCount() - this.maxLiveTailRows(height))
+  }
+
+  /**
+   * Pilih item live hingga `cap` baris dengan memprioritaskan seluruh aktivitas
+   * root (termasuk semua sub-agent `delegate_task` paralel) sebelum mengisi
+   * sisa slot dengan child terbaru dari belakang.
+   */
+  private selectRunningForTail(
+    ordered: { activity: UiPresentationActivity; child: boolean; marker: string }[],
+    cap: number,
+  ): { activity: UiPresentationActivity; child: boolean; marker: string }[] {
+    if (ordered.length <= cap) return ordered
+    const roots = ordered.filter((item) => !item.child)
+    const selected = new Set<(typeof ordered)[number]>()
+    for (const r of roots.slice(-cap)) selected.add(r)
+    if (selected.size < cap) {
+      // Ambil 1 child aktif terbaru per root lebih dulu, lalu isi sisa slot dari ekor.
+      const seenParents = new Set<string>()
+      for (let i = ordered.length - 1; i >= 0 && selected.size < cap; i--) {
+        const item = ordered[i]!
+        if (!item.child) continue
+        const p = item.activity.parentToolCallId ?? ""
+        if (p && !seenParents.has(p)) {
+          seenParents.add(p)
+          selected.add(item)
+        }
+      }
+      for (let i = ordered.length - 1; i >= 0 && selected.size < cap; i--) {
+        const item = ordered[i]!
+        if (!selected.has(item)) selected.add(item)
+      }
+    }
+    return ordered.filter((item) => selected.has(item))
+  }
+
+  /** Baris tunggu transien saat turn aktif namun belum ada narasi/tool tampil. */
+  private waitingStatusRow(): string | null {
+    if (
+      this.replaying ||
+      !this.turnActive ||
+      this.pending.length > 0 ||
+      this.thinkingTail.length > 0 ||
+      this.thinkingArea.length > 0
+    ) {
+      return null
+    }
+    if (this.liveRetryState) {
+      return c.warning(
+        `${glyphs.arrow} ${tSystem("ts.waitingRetry", {
+          n: this.liveRetryState.attempt,
+          total: this.liveRetryState.quota,
+          reason: this.liveRetryState.reason,
+        })}`,
+      )
+    }
+    if (this.turnStartTs > 0 && this.nowFn() - this.turnStartTs >= WAIT_ROW_THRESHOLD_MS) {
+      const msg =
+        this.currentStepNumber > 0
+          ? tSystem("ts.waitingStep", { n: this.currentStepNumber })
+          : tSystem("ts.waitingTurn")
+      return c.muted(`${glyphs.arrow} ${msg}`)
+    }
+    return null
+  }
+
+  /** Baris live transien untuk tail viewport — TIDAK masuk `lines[]`.
+   *  Adaptif hingga ~50% tinggi viewport supaya seluruh aktivitas paralel
+   *  tampil pada layar normal tanpa menenggelamkan narasi committed. */
+  private runningRows(maxRows?: number): string[] {
+    this.liveAnimating = false
+    const snapshot = this.presentationSnapshot()
+    const ordered = snapshot ? this.orderedRunning(snapshot) : []
+    if (!snapshot) {
+      this.liveRevealStart.clear()
+    } else if (this.animateLive) {
+      const activeKeys = new Set(
+        ordered.map(
+          ({ activity }) =>
+            activity.toolCallId || `${sanitizeAnsiLine(activity.name)}:${activity.tsStart}`,
+        ),
+      )
+      for (const k of this.liveRevealStart.keys()) {
+        if (!activeKeys.has(k)) this.liveRevealStart.delete(k)
+      }
+    }
+    const cap = maxRows ?? this.maxLiveTailRows()
+    const rows = this.selectRunningForTail(ordered, cap)
       .map(({ activity, child, marker }) => this.runningLine(activity, child, marker))
-      .slice(-MAX_LIVE_TAIL_ROWS)
+      .filter((row) => row.length > 0)
+    if (rows.length > 0) return rows
+    const wait = this.waitingStatusRow()
+    return wait ? [wait] : []
   }
 
   /**

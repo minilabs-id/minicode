@@ -15,7 +15,7 @@
 // sini (batas dependensi), jadi mereka tidak diubah — justru MEKANISME di sini
 // yang membuat tulis mentah mereka aman tanpa mereka sadari.
 
-type PaintOwner = { kind: string; paintNow(): void }
+type PaintOwner = { kind: string; paintNow(): void; onDisplace?: () => void }
 let owner: PaintOwner | null = null
 let ownerWriting = false
 let bound: RawWrite | null = null
@@ -220,6 +220,12 @@ export function beginInteractiveScreen(): () => void {
     if (released) return
     released = true
     screenDepth = Math.max(0, screenDepth - 1)
+    // Pulihkan lukisan owner transient (bila masih hidup) setelah overlay selesai.
+    if (screenDepth === 0 && owner) {
+      try {
+        owner.paintNow()
+      } catch {}
+    }
   }
 }
 
@@ -264,7 +270,11 @@ type Claim = PaintOwner & { token: number }
  * dicatat sekali lewat paintWrite — invariant mutual exclusion turn-painter vs
  * wizard-spinner di-enforce sebagai signal, bukan crash produksi.
  */
-export function acquireTransientPaint(kind: string, paintNow: () => void): TransientPaint {
+export function acquireTransientPaint(
+  kind: string,
+  paintNow: () => void,
+  onDisplace?: () => void,
+): TransientPaint {
   // Runtime stderr rusak (self-disable di atas): klaim jadi no-op agar
   // painter (turn-status/spinner) tetap "jalan" tanpa byte apa pun.
   if (transientBroken) return { kind, release() {} }
@@ -277,7 +287,12 @@ export function acquireTransientPaint(kind: string, paintNow: () => void): Trans
       paintWrite(`[transient-paint] ${kind} starts while ${owner.kind} active (overlap)\n`)
     }
   }
-  const claim: Claim = { kind, token: ++seq, paintNow }
+  if (owner) {
+    try {
+      owner.onDisplace?.()
+    } catch {}
+  }
+  const claim: Claim = { kind, token: ++seq, paintNow, onDisplace }
   owner = claim
   return {
     kind,

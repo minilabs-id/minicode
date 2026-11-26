@@ -167,11 +167,11 @@ I = bisa diinterupsi, L = bisa tiba setelah completion.
 | thinking effort | picker `/model` | badge + level per model | tidak | tidak | tidak | tidak | tidak |
 | usage | provider extension | verbose saja; masuk budget watcher | ya | tidak | ya (tail pasca-finish) | ya | ya (diabaikan aman) |
 | compaction | kernel loop | `… compacted: <reason>` dengan reason dibedakan (`pressure:*`, `…:no-op`, `recovery`, serta `fixpoint`/`impossible`/`llm-failed`); tidak menghapus history | tidak | tidak | tidak | tidak | tidak |
-| finding | `submit_result` / child `[FINDING]` | chat di TUI, transkrip di jalur linear; machine typed `finding.detected` | tidak | tidak | tidak | ya | tidak |
+| finding | `submit_result` / child `[FINDING]` | disalurkan ke `/logs` di TUI (tidak di chat utama); machine typed `finding.detected` | tidak | tidak | tidak | ya | tidak |
 | retry | recovery policy (`minicode:retry`) | satu micro-toast footer `retry n/total · Ns`, TTL 4 dtk, counter live; UI-transient, bukan envelope machine | ya | ya | tidak | ya | tidak |
 | permission request | executor → `ask` DI | header stdout + `askLine y/a/n`, fail-closed non-TTY | tidak | tidak | tidak | ya (deny) | tidak |
 | permission denied | executor | error tool penuh, tak pernah minimize + reason | tidak | tidak | tidak | tidak | tidak |
-| sub-agent | delegate_task → bus parent | v0.34: agregat `✦` tampil di chat (via `agent-progress.ts`); temuan `[FINDING]` → `minicode:child-report` → `finding.detected` → chat/transkrip; jalur linear tetap ledger | tidak | tidak (jurnal skip forward) | tidak | ya | tidak |
+| sub-agent | delegate_task → bus parent | v0.34: agregat `✦` tampil di chat (via `agent-progress.ts`); temuan `[FINDING]` → `minicode:child-report` → `finding.detected` ke `/logs` (TUI) & machine; jalur linear tetap ledger | tidak | tidak (jurnal skip forward) | tidak | ya | tidak |
 | error provider | provider extension | `pendingError` consume-once → satu pesan error berwarna oleh driver | tidak | tidak (E15) | tidak | ya | tidak |
 | warning | budget/recovery/verify | `[budget]`/`[recovery]`/`[verify]` kuning stderr | tidak | tidak (warned80 sekali) | tidak | tidak | tidak |
 | completion | kernel loop | flush + `finalizeAnswer` + footer idle | tidak | tidak | tidak | tidak | tidak |

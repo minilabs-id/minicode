@@ -3,11 +3,14 @@
 // mode machine/CI). Install runner di-inject agar tanpa efek samping.
 
 import { describe, expect, test } from "bun:test"
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
+  checkForUpdate,
+  classifyInstallSource,
   formatUpdateError,
+  formatUpdateMessage,
   getLastUpdateFailure,
   installUpdate,
   isInstalledCopy,
@@ -78,6 +81,19 @@ describe("isNewer", () => {
     expect(isNewer("0.10.0", "0.9.9")).toBe(false)
     expect(isNewer("1.0.0", "0.99.99")).toBe(false)
   })
+
+  test("semver pre-release dan build metadata (SemVer 2.0.0)", () => {
+    expect(isNewer("1.0.0-rc.1", "1.0.0")).toBe(true)
+    expect(isNewer("1.0.0", "1.0.0-rc.1")).toBe(false)
+    expect(isNewer("1.0.0", "1.0.1-alpha.1")).toBe(true)
+    expect(isNewer("1.0.0-alpha.2", "1.0.0-alpha.10")).toBe(true)
+    expect(isNewer("1.0.0-alpha.10", "1.0.0-alpha.2")).toBe(false)
+    expect(isNewer("1.0.0-1", "1.0.0-alpha")).toBe(true)
+    expect(isNewer("1.0.0-alpha", "1.0.0-1")).toBe(false)
+    expect(isNewer("1.0.0-alpha", "1.0.0-alpha.1")).toBe(true)
+    expect(isNewer("1.0.0+build1", "1.0.0+build2")).toBe(false)
+    expect(isNewer("1.0.0+build1", "1.0.1+build0")).toBe(true)
+  })
 })
 
 describe("isInstalledCopy", () => {
@@ -86,6 +102,56 @@ describe("isInstalledCopy", () => {
     expect(isInstalledCopy("C:\\npm\\node_modules\\@miniroom\\minicode\\cli\\index.ts")).toBe(true)
     expect(isInstalledCopy("/repo/minicode/cli/index.ts")).toBe(false)
     expect(isInstalledCopy("")).toBe(false)
+  })
+})
+
+describe("classifyInstallSource & dukungan package manager", () => {
+  test("membedakan npm-global, bun-global, bun-custom, dan dev symlink/git repo", () => {
+    expect(classifyInstallSource("/usr/local/lib/node_modules/minicode-ai/cli/index.ts")).toBe(
+      "npm-global",
+    )
+    expect(
+      classifyInstallSource("/home/u/.bun/install/global/node_modules/minicode-ai/cli/index.ts"),
+    ).toBe("bun-global")
+    expect(
+      classifyInstallSource(
+        "C:\\Users\\u\\.bun\\install\\global\\node_modules\\minicode-ai\\cli\\index.ts",
+      ),
+    ).toBe("bun-global")
+    expect(
+      classifyInstallSource(
+        "D:\\bun-custom\\install\\global\\node_modules\\minicode-ai\\cli\\index.ts",
+        {
+          env: env({ BUN_INSTALL: "D:\\bun-custom" }),
+        },
+      ),
+    ).toBe("bun-global")
+    // Simulasi symlink/junction bun link ke luar node_modules
+    expect(
+      classifyInstallSource("/home/u/.bun/install/global/node_modules/minicode-ai/cli/index.ts", {
+        realpath: () => "/home/u/src/minicode",
+      }),
+    ).toBe("source-checkout")
+    // Simulasi paket dalam node_modules yang mengandung .git
+    expect(
+      classifyInstallSource("/x/node_modules/minicode-ai/cli/index.ts", {
+        exists: (p) => p.endsWith(".git"),
+      }),
+    ).toBe("source-checkout")
+  })
+
+  test("shouldAutoUpdate fail-closed untuk bun-global agar tidak kena prefix npm salah", () => {
+    const d = shouldAutoUpdate([], { stdinTTY: true, env: env(), installSource: "bun-global" })
+    expect(d).toEqual({ run: false, reason: "unsupported-package-manager" })
+  })
+
+  test("formatUpdateMessage menyesuaikan perintah upgrade dengan install source", () => {
+    expect(formatUpdateMessage("0.50.0", "0.51.0", "npm-global")).toContain(
+      "npm install -g minicode-ai@0.51.0",
+    )
+    expect(formatUpdateMessage("0.50.0", "0.51.0", "bun-global")).toContain(
+      "bun add -g minicode-ai@0.51.0",
+    )
   })
 })
 
@@ -463,5 +529,113 @@ describe("runManualUpdate", () => {
       expect(result).toMatchObject({ ok: false, step: "verify" })
       expect(result.reason).toContain("3.9.9")
     })
+  })
+
+  test("preflight source-checkout ditolak sebelum network check", async () => {
+    await withEnv(clean, async () => {
+      let checkCalled = false
+      const result = await runManualUpdate({
+        installSource: "source-checkout",
+        check: async () => {
+          checkCalled = true
+          return "9.9.9"
+        },
+      })
+      expect(checkCalled).toBe(false)
+      expect(result.ok).toBe(false)
+      expect(result.step).toBe("preflight")
+      expect(result.reason).toContain("git pull")
+    })
+  })
+
+  test("preflight bun-global cek versi saja lalu beri perintah bun add -g", async () => {
+    await withEnv(clean, async () => {
+      let installCalled = false
+      const resNew = await runManualUpdate({
+        installSource: "bun-global",
+        check: async () => "2.1.0",
+        install: () => {
+          installCalled = true
+          return true
+        },
+      })
+      expect(installCalled).toBe(false)
+      expect(resNew.ok).toBe(false)
+      expect(resNew.step).toBe("preflight")
+      expect(resNew.reason).toContain("bun add -g minicode-ai@2.1.0")
+
+      const resLatest = await runManualUpdate({
+        installSource: "bun-global",
+        check: async () => null,
+      })
+      expect(resLatest).toEqual({ ok: true, alreadyLatest: true })
+    })
+  })
+})
+
+describe("checkForUpdate opt-out dan atomic cache", () => {
+  test("MINICODE_AUTO_UPDATE=0 mencegah fetch di checkForUpdate", async () => {
+    const tmpHome = mkdtempSync(join(tmpdir(), "mc-upd-optout-"))
+    const origFetch = globalThis.fetch
+    let fetched = false
+    globalThis.fetch = (async () => {
+      fetched = true
+      throw new Error("should not fetch")
+    }) as unknown as typeof fetch
+    const saved = {
+      MINICODE_HOME: process.env.MINICODE_HOME,
+      MINICODE_AUTO_UPDATE: process.env.MINICODE_AUTO_UPDATE,
+      NO_UPDATE_CHECK: process.env.NO_UPDATE_CHECK,
+      CI: process.env.CI,
+    }
+    try {
+      process.env.MINICODE_HOME = tmpHome
+      process.env.MINICODE_AUTO_UPDATE = "0"
+      delete process.env.NO_UPDATE_CHECK
+      delete process.env.CI
+      expect(await checkForUpdate("0.1.0")).toBeNull()
+      expect(fetched).toBe(false)
+    } finally {
+      globalThis.fetch = origFetch
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+      rmSync(tmpHome, { recursive: true, force: true })
+    }
+  })
+
+  test("writeCache menulis update-check.json secara atomik tanpa sisa file tmp", async () => {
+    const tmpHome = mkdtempSync(join(tmpdir(), "mc-upd-cache-"))
+    const origFetch = globalThis.fetch
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ version: "9.9.9" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as unknown as typeof fetch
+    const saved = {
+      MINICODE_HOME: process.env.MINICODE_HOME,
+      MINICODE_AUTO_UPDATE: process.env.MINICODE_AUTO_UPDATE,
+      NO_UPDATE_CHECK: process.env.NO_UPDATE_CHECK,
+      CI: process.env.CI,
+    }
+    try {
+      process.env.MINICODE_HOME = tmpHome
+      delete process.env.MINICODE_AUTO_UPDATE
+      delete process.env.NO_UPDATE_CHECK
+      delete process.env.CI
+      const latest = await checkForUpdate("0.1.0")
+      expect(latest).toBe("9.9.9")
+      const dir = join(tmpHome, ".minicode")
+      const files = readdirSync(dir)
+      expect(files).toEqual(["update-check.json"])
+    } finally {
+      globalThis.fetch = origFetch
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+      rmSync(tmpHome, { recursive: true, force: true })
+    }
   })
 })

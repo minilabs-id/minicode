@@ -9,7 +9,7 @@ Semua cara menjalankan Minicode: interaktif, sekali jalan, pipe, dan otomasi CI 
 | `minicode` | Mode interaktif (TUI fullscreen) + wizard bila belum ada provider |
 | `minicode "prompt"` | Sekali jalan (headless) |
 | `echo "prompt" \| minicode` | Via pipe |
-| `minicode exec "prompt" [--json]` | Headless CI — event JSONL + baris `{"type":"summary"}` di stdout |
+| `minicode exec "prompt" [--json] [--auto-continue] [--max-turns <n>]` | Headless CI — event JSONL + baris `{"type":"summary"}` di stdout |
 | `minicode acp` | Server JSON-RPC stdio untuk IDE (subset minimal: initialize/run/cancel/shutdown) |
 | `minicode daemon <start\|status\|stop\|issue\|sessions>` | Daemon lokal: host proses, status, hentikan, terbitkan perintah, daftar sesi anak |
 | `minicode --interactive` | Paksa TUI interaktif |
@@ -78,7 +78,7 @@ Di TUI, **Tab** meng-toggle Work Mode (`Discuss` ↔ `Build`) dan **Shift+Tab** 
 |---|---|
 | Memahami repo / menyusun rencana tanpa perubahan | Default (`DISCUSS` + `AUTO`) — investigasi & perencanaan read-only |
 | Meminta perubahan | `--work-mode BUILD` (`AUTO` default untuk persetujuan) — tool tulis/eksekusi tetap tunduk pada policy |
-| Repo asing / perintah belum dipahami | `--ask` (`BUILD` + `ASK`), jawab `always` hanya untuk pasangan tool+args yang sudah dinilai |
+| Repo asing / perintah belum dipahami | `--ask` (atau `--work-mode BUILD --ask` untuk eksekusi berpersetujuan); jawab `always` hanya untuk pasangan tool+args yang sudah dinilai |
 | CI tanpa manusia | `exec --json` + `--budget`/`--max-steps`; `AUTO` menolak `ask_user` deterministik |
 | Otonom penuh di mesin sendiri | `--work-mode BUILD` + `AUTO`; isolasi tambahan `--sandbox docker` (atau OS) + `--budget` |
 | Model mahal tak terkendali | `--budget 0.50` + `--budget-strict` + `pricing sync` |
@@ -147,7 +147,7 @@ Skema, contoh, scope global/lokal, dan lokasi seluruh data ada di [Config — Fi
 
 ## Anti-injeksi flag
 
-`cli/args.ts` (`hasFlag`/`getArg`) berhenti di prompt word pertama: prompt `"review --allow-all"` tidak mengaktifkan flag. `--cwd`/value-flag setelah nama subcommand diparse per-subcommand agar tidak menembus boundary prompt.
+`cli/args.ts` (`hasFlag`/`getArg`) berhenti di prompt word pertama: prompt `"review --allow-all"` tidak mengaktifkan flag. `--cwd`/value-flag setelah nama subcommand diparse per-subcommand agar tidak menembus boundary prompt. Flag tak dikenal atau flag ber-nilai yang kehilangan argumennya sebelum prompt (atau tanpa `--`) ditolak fail-closed dengan exit `2` (gunakan `--` bila prompt diawali `--`).
 
 ## Exit codes
 
@@ -155,6 +155,6 @@ Skema, contoh, scope global/lokal, dan lokasi seluruh data ada di [Config — Fi
 |---|---|
 | `0` | Sukses, atau help yang memang diminta |
 | `1` | Gagal runtime: provider error, budget lewat, turn gagal, setup gagal |
-| `2` | Salah pakai: argumen hilang/malformed, subcommand bersarang asing (token top-level asing malah jadi prompt one-shot) |
+| `2` | Salah pakai: argumen/nilai flag hilang atau malformed, flag tak dikenal sebelum prompt, subcommand bersarang asing |
 
 Lookup yang gagal (provider/skill/sesi tak dikenal) = `1`: itu kegagalan operasi, bukan pemakaian. Skrip cukup cek `!= 0` untuk gagal; cek `== 2` untuk spesifik salah pakai.

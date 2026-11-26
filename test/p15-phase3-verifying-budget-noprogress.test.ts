@@ -752,6 +752,17 @@ describe("LOOP-G19 & LOOP-G27 — detektor deterministik No-Progress & Oscillati
     expect(String(activeToolMsgs[2]!.content)).toContain(
       "[LOOP_GUARD kind=NO_PROGRESS reason=READ_ONLY_THRASHING count=2]",
     )
+
+    // Default baru (30): investigasi multi-file (mis. 20 read berturut-turut)
+    // di mode aktif tak lagi terblokir terlalu dini di angka 15.
+    const defaultDet = createNoProgressDetector({ getPosture: () => "active" })
+    for (let i = 0; i < 20; i++) {
+      expect(
+        defaultDet.evaluateBeforeCall({ name: "read_file", args: { path: `src/f${i}.ts` } })
+          .allowed,
+      ).toBe(true)
+    }
+    expect(defaultDet.snapshot().consecutiveReadCalls).toBe(20)
   })
 
   test("Audit P2: web_search & failed bash tidak me-reset READ_ONLY_THRASHING; bash file oscillation terlacak", async () => {

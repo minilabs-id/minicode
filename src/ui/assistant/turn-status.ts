@@ -1,7 +1,8 @@
 import type { UiBus } from "../contract.ts"
 import { sanitizeAnsiLine } from "../render/sanitize.ts"
-import { c, glyphs } from "../render/theme.ts"
+import { cErr, glyphs } from "../render/theme.ts"
 import { displayWidth, truncateToWidth } from "../render/width.ts"
+import { motionReduced } from "../runtime/motion.ts"
 import { acquireTransientPaint, paintWrite, registerStatusLine } from "../runtime/statusline.ts"
 
 // Turn status line — satu baris transient di stderr, hidup hanya pada fase
@@ -77,6 +78,8 @@ export function attachTurnStatus(
   } = {},
 ): TurnStatusHandle {
   if (!process.stderr.isTTY) return { detach: () => {}, endTurn: () => {} }
+  if ((process.env.TERM ?? "").toLowerCase() === "dumb")
+    return { detach: () => {}, endTurn: () => {} }
   const isWinLegacy =
     process.platform === "win32" &&
     !(
@@ -140,13 +143,13 @@ export function attachTurnStatus(
     if (label !== "Thinking" && toolStartMs !== null) {
       const elapsed = Date.now() - toolStartMs
       if (elapsed >= 2000) {
-        elapsedText = ` ${c.faint(`(${formatElapsed(elapsed)})`)}`
+        elapsedText = ` ${cErr.faint(`(${formatElapsed(elapsed)})`)}`
       }
     }
     const body =
       label === "Thinking"
         ? `${dots}`
-        : `${c.info(glyphs.spinnerFrames[fi % glyphs.spinnerFrames.length]!)} ${label}  ${dots}${elapsedText}`
+        : `${cErr.info(glyphs.spinnerFrames[fi % glyphs.spinnerFrames.length]!)} ${label}  ${dots}${elapsedText}`
     const full = body + extra
     // Terminal sangat sempit: potongan label bisa tinggal 1 huruf ("t") —
     // dalam kasus itu tampilkan titiknya saja daripada label rusak.
@@ -192,9 +195,19 @@ export function attachTurnStatus(
     if (!intervalId) {
       fi = 0
       // Repaint segera setelah tulis asing dikomit (lihat statusline.ts).
-      owned = acquireTransientPaint("turn", () => {
-        if (shouldPaint()) startPaint(label)
-      })
+      owned = acquireTransientPaint(
+        "turn",
+        () => {
+          if (shouldPaint()) startPaint(label)
+        },
+        () => {
+          if (intervalId) {
+            clearInterval(intervalId)
+            intervalId = undefined
+          }
+          owned = null
+        },
+      )
       // Sembunyikan kursor selama melukis agar tak terbaca sebagai bagian
       // indikator ("✦···|"); dikembalikan di stopPaint.
       installExitHook()
@@ -202,10 +215,13 @@ export function attachTurnStatus(
         paintWrite("\x1b[?25l")
       } catch {}
       paint()
-      intervalId = setInterval(paint, intervalMs)
-      try {
-        ;(intervalId as unknown as { unref?: () => void }).unref?.()
-      } catch {}
+      if (!motionReduced()) {
+        intervalId = setInterval(paint, intervalMs)
+        // Jangan tahan proses tetap hidup kalau host lupa `detach()`.
+        try {
+          ;(intervalId as unknown as { unref?: () => void }).unref?.()
+        } catch {}
+      }
     } else paint()
   }
   const resetTurn = () => {

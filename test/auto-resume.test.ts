@@ -11,6 +11,7 @@ import { ProviderError } from "#minicore"
 import {
   cappedRecovery,
   createRecoveryLedger,
+  createSessionRecoveryPolicy,
   RATE_LIMIT_RETRY_ATTEMPTS,
 } from "../src/app/session.ts"
 import { decideAutoResume } from "../src/policy/auto-resume.ts"
@@ -295,6 +296,30 @@ describe("retry provider (cappedRecovery) memakai anggaran yang sama", () => {
   test("konteks kehabisan tetap lewat jalur compaction", () => {
     const action = cappedRecovery.onError(new ProviderError("context_length_exceeded", "full"), 1)
     expect(action.type).toBe("force_compact_and_retry")
+  })
+
+  test("session recovery policy berbagi kuota & jam 45 dtk dengan RecoveryLedger luar", () => {
+    let clock = 1_000
+    const ledger = createRecoveryLedger(() => clock)
+    const policy = createSessionRecoveryPolicy(() => ledger)
+
+    // 3 percobaan retry provider mengonsumsi kuota ledger yang sama.
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const a = policy.onError(new ProviderError("server", "503"), attempt)
+      expect(a.type).toBe("retry")
+    }
+    expect(ledger.attemptsUsed()).toBe(3)
+
+    // Lewati anggaran waktu 45 dtk -> retry berikutnya dan decideAutoResume/ledger
+    // langsung berhenti (tidak ada retry wave kedua).
+    clock += RECOVERY_BUDGET_MS + 1
+    expect(policy.onError(new ProviderError("server", "503"), 4).type).toBe("throw")
+    expect(ledger.nextDelay({ category: "server" })).toBeNull()
+
+    // Non-recoverable (context_length_exceeded) tetap dialihkan ke compaction.
+    expect(policy.onError(new ProviderError("context_length_exceeded", "full"), 1).type).toBe(
+      "force_compact_and_retry",
+    )
   })
 })
 
