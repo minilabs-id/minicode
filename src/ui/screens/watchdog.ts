@@ -8,20 +8,34 @@
 // yang berisiko melenceng per permukaan — kelas OAP-001).
 import { t } from "../i18n/locale.ts"
 
-export function withTimeout<T>(fn: () => Promise<T> | T, ms: number): Promise<T> {
+export function withTimeout<T>(
+  fn: () => Promise<T> | T,
+  ms: number,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (signal?.aborted) return Promise.reject(new DOMException("aborted", "AbortError"))
   let timer: ReturnType<typeof setTimeout> | undefined
   const pending = Promise.resolve().then(fn)
   // Rejection telat TANPA handler = unhandledRejection (Bun: crash proses).
   pending.catch(() => {})
-  return Promise.race([
-    pending,
-    new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(t("ntc.timeout"))), ms)
-      try {
-        ;(timer as unknown as { unref?: () => void }).unref?.()
-      } catch {}
-    }),
-  ]).finally(() => {
-    if (timer) clearTimeout(timer)
+  return new Promise<T>((resolve, reject) => {
+    const finish = (cb: () => void) => {
+      if (timer) {
+        clearTimeout(timer)
+        timer = undefined
+      }
+      signal?.removeEventListener("abort", onAbort)
+      cb()
+    }
+    const onAbort = () => finish(() => reject(new DOMException("aborted", "AbortError")))
+    signal?.addEventListener("abort", onAbort, { once: true })
+    timer = setTimeout(() => finish(() => reject(new Error(t("ntc.timeout")))), ms)
+    try {
+      ;(timer as unknown as { unref?: () => void }).unref?.()
+    } catch {}
+    pending.then(
+      (v) => finish(() => resolve(v)),
+      (err) => finish(() => reject(err)),
+    )
   })
 }

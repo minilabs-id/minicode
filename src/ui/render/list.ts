@@ -22,7 +22,8 @@ export function highlightMatch(
 ): string {
   if (!query) return listRow(`${label}${suffix}`, selected)
   const paintBase = (s: string): string => (selected ? c.accent(c.bold(s)) : c.dim(s))
-  const paintHit = (s: string): string => (selected ? c.brightCyan(c.bold(s)) : c.dim(c.info(s)))
+  // Hindari menumpuk dim pada hit pencarian agar kecocokan kueri tetap menonjol di baris tak terpilih.
+  const paintHit = (s: string): string => (selected ? c.brightCyan(c.bold(s)) : c.info(s))
   const prefix = selected ? `  ${c.accent(glyphs.arrow)} ` : "    "
   const qLower = query.toLowerCase()
   const graphemes = segmentGraphemes(label)

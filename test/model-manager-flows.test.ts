@@ -690,4 +690,24 @@ describe("model-manager view: Enter gagal tidak menutup manager", () => {
     await tty.send(KEY.esc, 80)
     await p
   }, 8000)
+
+  test("Ctrl+U di mode cari keluar ke filter=null sehingga hint Del kembali muncul", async () => {
+    const { runModelManagerView } = await import("../src/ui/screens/model-manager.ts")
+    tty = installFakeTty({ columns: 100, rows: 16 })
+    const p = runModelManagerView({
+      initialRows: [{ id: "prov::m1", active: true }],
+      getEfforts: () => ["default"],
+      onSelect: () => {},
+      loadRows: async () => [{ id: "prov::m1", active: true }],
+      onDelete: async () => [{ id: "prov::m1", active: true }],
+    })
+    await tty.ready()
+    await tty.send("m1")
+    await tty.waitForScreen((f) => f.some((l) => l.includes("> m1")))
+    // Ctrl+U = \x15: kembali ke mode non-filter (`Del` delete muncul lagi).
+    await tty.send("\x15")
+    await tty.waitForScreen((f) => f.join("\n").includes("Del delete"))
+    await tty.send(KEY.esc, 80)
+    await p
+  }, 8000)
 })

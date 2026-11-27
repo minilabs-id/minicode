@@ -95,16 +95,28 @@ export interface HumanToolActivity {
   target?: string
 }
 
-/** Nama internal → label manusiawi locale OS. `delegate_task` menyisipkan
- * identitas child (label → summary → target). Sanitasi + potong 40 kolom. */
+const DELEGATE_PREFIX_RE =
+  /^(?:delegat(?:e|ing)(?:\s+task)?|delegasi(?:\s+tugas)?|sub[\s-]*agents?|agen\s+sub)\s*(?:[:·\-–—]\s*|\s+)/i
+
+/** Rapikan label peran delegasi agar awalan berulang ("Delegasi tugas"/"Subagent") tak memakan kolom. */
+function cleanDelegateRole(raw: string): string {
+  const clean = sanitizeAnsiLine(raw).replace(/\s+/g, " ").trim()
+  if (!clean) return ""
+  const stripped = clean.replace(DELEGATE_PREFIX_RE, "").trim()
+  return stripped || clean
+}
+
+/** Nama internal → label manusiawi locale OS. `delegate_task` langsung memakai
+ *  label peran (intent → label → summary → target) tanpa awalan "sub agent · ". */
 export function humanToolLabel(rawName: string, activity?: HumanToolActivity): string {
   const key = TOOL_LABEL_KEYS[rawName]
   const dict = systemLocale() === "id" ? id : en
-  let label: string = key ? (dict[key] ?? rawName) : rawName
   if (rawName === "delegate_task") {
     const extra = activity?.intent ?? activity?.label ?? activity?.summary ?? activity?.target
-    if (extra) label = `${label} · ${extra}`
+    const role = extra ? cleanDelegateRole(extra) : ""
+    if (role) return truncateToWidth(role, 40, "…")
   }
+  const label: string = key ? (dict[key] ?? rawName) : rawName
   return truncateToWidth(sanitizeAnsiLine(label), 40, "…")
 }
 
@@ -160,9 +172,11 @@ export function formatActivityLabel(
   opts: { maxCols?: number } = {},
 ): { text: string; autoText: string; isIntent: boolean } {
   const maxCols = opts.maxCols ?? 72
-  const cleanIntent = activity?.intent ? sanitizeAnsiLine(activity.intent).trim() : ""
+  const rawIntent = activity?.intent ? sanitizeAnsiLine(activity.intent).trim() : ""
+  const cleanIntent =
+    rawName === "delegate_task" && rawIntent ? cleanDelegateRole(rawIntent) : rawIntent
   const baseLabel = humanToolLabel(rawName, activity)
-  // `delegate_task` sudah menyertakan extra (label/summary/target) di `humanToolLabel`.
+  // `delegate_task` langsung memakai label peran tanpa menyisipkan prefiks/target ulang.
   const cleanTarget = rawName === "delegate_task" ? "" : cleanAutoTarget(rawName, activity?.target)
   const autoRaw = cleanTarget
     ? rawName === "bash" || rawName === "code_run"

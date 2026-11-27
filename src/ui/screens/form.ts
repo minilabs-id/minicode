@@ -302,7 +302,8 @@ export async function runForm(spec: FormSpec, screen: AltScreen): Promise<FormRe
           }
         }
         if (active) {
-          const rowsAvail = Math.max(1, windowMaxHeight(screen.rows || 24) - 4)
+          // 6 baris chrome dialog form: border atas/bawah + judul + jeda + footer (+ indikator clip).
+          const rowsAvail = Math.max(1, windowMaxHeight(screen.rows || 24) - 6)
           const errEnd = body.length - 1
           focusAnchor =
             st.error && activeRow >= 0 && errEnd - activeRow < rowsAvail ? errEnd : activeRow
@@ -332,16 +333,19 @@ export async function runForm(spec: FormSpec, screen: AltScreen): Promise<FormRe
         screen.rows,
       )
       screen.paintRegion(box.lines, box.topRow)
-      // Parkir kursor terminal di posisi ketik field aktif (select/confirm:
-      // sembunyikan kursor agar bar ketik tak berkedip di tepi border).
+      // Parkir kursor terminal di posisi ketik field aktif hanya bila barisnya
+      // benar-benar berada di jendela body (termasuk sesudah clamp bodyTop).
       try {
-        if (activeRow >= 0 && activeCol >= 0) {
-          // bodyStart = offset jendela body yang benar-benar dirender; tanpa
-          // dikurangi, kursor mendarat di baris marker/border saat body dipotong.
-          const li = Math.max(
-            0,
-            Math.min(box.lines.length - 1, box.bodyTop + (activeRow - box.bodyStart)),
-          )
+        const relRow = activeRow - box.bodyStart
+        const li = box.bodyTop + relRow
+        const visibleBodyEnd = Math.min(box.lines.length, box.bodyTop + box.shown)
+        if (
+          activeRow >= 0 &&
+          activeCol >= 0 &&
+          relRow >= 0 &&
+          li >= box.bodyTop &&
+          li < visibleBodyEnd
+        ) {
           const row = box.topRow + li
           const stripped = stripAnsi(box.lines[li] ?? "")
           const leftPad = boxLeftPad(stripped)

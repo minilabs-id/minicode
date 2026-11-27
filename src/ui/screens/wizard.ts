@@ -13,7 +13,7 @@ import { truncateToWidth, wrapByWidth } from "../render/width.ts"
 import { openAltScreen } from "../runtime/screen.ts"
 import { canRenderModal, type DialogSpec, dialogBox } from "./dialog.ts"
 import { IDLE_CANCEL_MS, IDLE_WARN_MS, runForm, validateUrl } from "./form.ts"
-import { createIdleTimer } from "./lifecycle.ts"
+import { attachProgressCancel, createIdleTimer } from "./lifecycle.ts"
 import { withTimeout } from "./watchdog.ts"
 import { windowMaxHeight, windowSpec, windowWidth } from "./window.ts"
 
@@ -192,55 +192,64 @@ function sleepUnref(ms: number): Promise<void> {
 }
 
 /**
- * Pasang listener stdin sementara selama kotak progres jaringan berjalan agar
- * Esc/Ctrl+C/Ctrl+D dapat langsung membatalkan deteksi, dan resize me-repaint.
+ * Tunggu jeda selesai wizard sambil menyerap keystroke di stdin raw-mode
+ * supaya ketikan nyasar saat kotak penutup tidak bocor ke shell/TUI induk (T10).
+ * Esc/Enter/Space langsung menutup jeda lebih cepat tanpa menunggu penuh.
  */
-function attachProgressCancel(ac: AbortController, onResize: () => void): () => void {
-  let detached = false
-  const pump = createKeyStreamPump({
-    state: createDecoderState(),
-    onKeys: (keys) => {
-      for (const d of keys) {
-        if (d.key.type === "esc" || d.key.type === "ctrl-c" || d.key.type === "ctrl-d") {
-          ac.abort()
-          return true
+function waitDonePause(ms: number): Promise<void> {
+  if (!process.stdin.isTTY) return sleepUnref(ms)
+  return new Promise((resolve) => {
+    let settled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const pump = createKeyStreamPump({
+      state: createDecoderState(),
+      onKeys: (keys) => {
+        for (const d of keys) {
+          const t = d.key.type
+          if (
+            t === "esc" ||
+            t === "enter" ||
+            t === "ctrl-c" ||
+            t === "ctrl-d" ||
+            (t === "char" && d.key.ch === " ")
+          ) {
+            finish()
+            return true
+          }
         }
-      }
-      return false
-    },
+        return false
+      },
+    })
+    const onData = (chunk: Buffer) => {
+      try {
+        pump.push(new Uint8Array(chunk))
+      } catch {}
+    }
+    const finish = () => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      try {
+        pump.dispose()
+      } catch {}
+      try {
+        process.stdin.removeListener("data", onData)
+      } catch {}
+      try {
+        process.stdin.setRawMode(false)
+      } catch {}
+      resolve()
+    }
+    try {
+      process.stdin.setRawMode(true)
+      process.stdin.resume()
+      process.stdin.on("data", onData)
+    } catch {}
+    timer = setTimeout(finish, ms)
+    try {
+      ;(timer as unknown as { unref?: () => void }).unref?.()
+    } catch {}
   })
-  const onData = (chunk: Buffer) => {
-    try {
-      pump.push(new Uint8Array(chunk))
-    } catch {}
-  }
-  const handleResize = () => {
-    try {
-      onResize()
-    } catch {}
-  }
-  try {
-    process.stdin.setRawMode(true)
-    process.stdin.resume()
-    process.stdin.on("data", onData)
-    process.stdout.on("resize", handleResize)
-  } catch {}
-  return () => {
-    if (detached) return
-    detached = true
-    try {
-      pump.dispose()
-    } catch {}
-    try {
-      process.stdin.removeListener("data", onData)
-    } catch {}
-    try {
-      process.stdout.removeListener("resize", handleResize)
-    } catch {}
-    try {
-      process.stdin.setRawMode(false)
-    } catch {}
-  }
 }
 
 /**
@@ -291,8 +300,8 @@ export async function runSetupWizardView(opts: SetupWizardViewOptions): Promise<
       draftUrl = targetUrl
 
       // Endpoint lokal (Ollama/LM Studio) tidak butuh API key; kirim placeholder
-      // agar header Authorization tetap terbentuk.
-      const lokal = /^(https?:\/\/)(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/.test(targetUrl)
+      // agar header Authorization tetap terbentuk. Flag /i agar HOST kapital tetap cocok (T10).
+      const lokal = /^(https?:\/\/)(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i.test(targetUrl)
       let apiKey = "ollama"
       if (!lokal) {
         const keyForm = await runForm(
@@ -353,27 +362,11 @@ export async function runSetupWizardView(opts: SetupWizardViewOptions): Promise<
         paintDetecting()
         const detachCancel = attachProgressCancel(ac, paintDetecting)
         try {
-          const submitP = withTimeout(() => opts.onSubmit(targetUrl, apiKey, ac.signal), 60_000)
-          // Redam unhandled rejection bila user menekan Esc sebelum promise selesai.
-          submitP.catch(() => {})
-          const message = await new Promise<string>((resolve, reject) => {
-            const onAbort = () => reject(new DOMException("aborted", "AbortError"))
-            if (ac.signal.aborted) {
-              onAbort()
-              return
-            }
-            ac.signal.addEventListener("abort", onAbort, { once: true })
-            submitP.then(
-              (v) => {
-                ac.signal.removeEventListener("abort", onAbort)
-                resolve(v)
-              },
-              (err) => {
-                ac.signal.removeEventListener("abort", onAbort)
-                reject(err)
-              },
-            )
-          })
+          const message = await withTimeout(
+            () => opts.onSubmit(targetUrl, apiKey, ac.signal),
+            60_000,
+            ac.signal,
+          )
           detachCancel()
           screen.clearRegion()
           const doneBox = dialogBox(
@@ -387,7 +380,7 @@ export async function runSetupWizardView(opts: SetupWizardViewOptions): Promise<
           )
           screen.paintRegion(doneBox.lines, doneBox.topRow)
           screen.setCursorVisible(false)
-          await sleepUnref(1200)
+          await waitDonePause(1200)
           return true
         } catch (e) {
           detachCancel()

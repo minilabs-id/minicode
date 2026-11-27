@@ -626,4 +626,16 @@ export const en = {
   "cli.purgeOrphans": "[purge] removed {n} orphan journals",
   "cli.daemonUnknownSub": "unknown daemon subcommand: {v}",
   "cli.daemonRunFailed": "[daemon] hosted run failed: {msg}",
+  "update.installing": "Installing automatic update…",
+  "update.failedFallback":
+    "Auto-update failed on {reason} — continuing with version {v}. Manual update: npm install -g minicode-ai@{latest}",
+  "update.mismatchRestoring":
+    "Installed version does not match target {latest}; attempting to restore {v}…",
+  "update.restored": "Auto-update aborted; version {v} restored successfully.",
+  "update.restoreFatal":
+    "Auto-update could not verify or restore installation. Exiting; recover with: npm install -g minicode-ai@{v}",
+  "update.restarting": "Restarting into version {latest}…",
+  "ctx.errNoActiveModel": "no active model — pick one with /model",
+  "ctx.errProviderNotFound": "provider {id} not found",
+  "ctx.errInvalidWindow": 'cannot read "{raw}" as a window (try 128k, 1m, 1024x1024, auto)',
 } as const

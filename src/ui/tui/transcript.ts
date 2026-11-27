@@ -16,7 +16,6 @@ import {
   EMPTY_AGENT_PROGRESS,
   formatAgentProgress,
 } from "../render/agent-progress.ts"
-import { chatColumnGeometry, chatWidth as chatWidthFromGeometry } from "../render/chat-column.ts"
 import {
   formatError,
   formatLabeledToolFailure,
@@ -24,7 +23,12 @@ import {
 } from "../render/errors.ts"
 import { highlightCode } from "../render/highlight.ts"
 import { paintLedger, runMarker, statusWord } from "../render/ledger.ts"
-import { parseFence, renderInline } from "../render/markdown.ts"
+import {
+  paintMarkdownBlockquote,
+  paintMarkdownHeading,
+  parseFence,
+  renderInline,
+} from "../render/markdown.ts"
 import { computeAssistantLineLayout, formatAssistantSpacing } from "../render/markdown-layout.ts"
 import { type MarkdownTable, parseMarkdownBlocks } from "../render/markdown-table.ts"
 import { sanitizeAnsi, sanitizeAnsiLine, stripSgr } from "../render/sanitize.ts"
@@ -513,19 +517,6 @@ function clampCodeUnitBoundary(s: string, index: number): number {
   return idx
 }
 
-/**
- * Fallback lebar wrap gema saat pemanggil tak meneruskan lebar chat (jalur CLI
- * lama / test unit). Memakai geometri kolom chat yang SAMA dengan App supaya
- * default tak memakai lebar terminal mentah di kolom ter-centre.
- */
-function userEchoWidth(): number {
-  const cols = Math.max(1, process.stdout.columns || 80)
-  const rows = Math.max(1, process.stdout.rows || 24)
-  // Kurangi margin bingkai simetris 3+3 (FRAME_HORIZONTAL_MARGIN = 6) agar fallback
-  // lebar sama persis dengan contentCols milik TuiApp.
-  return Math.max(10, chatWidthFromGeometry(chatColumnGeometry(rows, cols)) - 6 - 1)
-}
-
 function renderAssistantLine(line: string, fenceState: FenceState): string | null {
   if (fenceState === "boundary") return null
   if (fenceState.startsWith("open:")) {
@@ -538,22 +529,18 @@ function renderAssistantLine(line: string, fenceState: FenceState): string | nul
     const lang = fenceState.startsWith("inside:") ? fenceState.slice(7) : ""
     return lang ? highlightCode(line, lang) : line
   }
-  // v0.33: `__bold__` juga markdown — jangan bocor ke layar bila jadi satu-satunya marker.
-  if (!/(?:\*{1,2}|_{2}|`|^#{1,6}\s|~~|\[[^\]]+\]\()/.test(line)) return line
+  // v0.33: `__bold__` & kutipan `>` juga markdown — jangan bypass fast-path agar kutipan tetap terwarnai.
+  if (!/(?:\*{1,2}|_{2}|`|^#{1,6}\s|^\s*>|~~|\[[^\]]+\]\()/.test(line)) return line
   const heading = /^(#{1,6})\s+(.*)$/.exec(line)
   if (heading) {
-    // Level hierarchy tanpa artefak `#`: #/## paling kuat, ### tebal,
-    // #### ke bawah diredupkan agar sub-bab tak disamakan dengan bab induk.
-    const level = heading[1]!.length
-    const text = renderInline(heading[2] ?? "")
-    if (level <= 2) return c.accentBold(text)
-    if (level === 3) return c.bold(text)
-    return c.gray(text)
+    return paintMarkdownHeading(heading[1]!.length, renderInline(heading[2] ?? ""))
   }
   const listItem = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/.exec(line)
   if (listItem) return `${listItem[1]}${listItem[2]} ${renderInline(listItem[3] ?? "")}`
   const blockquote = /^(\s*(?:>\s*)+)(.*)$/.exec(line)
-  if (blockquote) return `${blockquote[1]}${renderInline(blockquote[2] ?? "")}`
+  if (blockquote) {
+    return paintMarkdownBlockquote(blockquote[1] ?? "", renderInline(blockquote[2] ?? ""))
+  }
   return renderInline(line)
 }
 
@@ -672,8 +659,8 @@ export class Transcript {
    * bukan di-append: `read_file` yang sama 22× = retry anak, bukan 22 langkah.
    */
   /**
-   * Satu baris agregat per `delegate_task` induk; child ditimpa di baris SAMA.
-   * `✦` chat & rekap memakai satu sumber angka.
+   * Satu baris agregat per turn untuk seluruh delegasi `delegate_task` dalam turn
+   * yang sama; child ditimpa di baris SAMA. `✦` chat & rekap memakai satu sumber angka.
    */
   private agentProgress = new Map<
     string,
@@ -1165,27 +1152,18 @@ export class Transcript {
     // v0.43: margin 3 kini milik FRAME, bukan teks. `prefix` tetap dipakai
     // sebagai chrome untuk pemetaan seleksi (displayStart turun 3 → 11).
     const prefix = `minicode ${arrow} `
-    // v0.33 (audit): jangan serahkan wrap ke terminal — baris lanjutan mulai di
-    // kolom 0. Wrap di sini dengan lebar ISI chat (sudah dikurangi margin).
-    const width = availableWidth == null ? userEchoWidth() : Math.max(10, availableWidth - 1)
-    const bodyWidth = Math.max(10, width - displayWidth(prefix))
-    const chunks = wrapByWidth(first ?? "", bodyWidth)
+    // Simpan baris logis utuh tanpa pre-wrap terhadap lebar sesaat supaya resize
+    // terminal dan replayHistory() membungkus ulang gema secara dinamis (U4).
+    void availableWidth
     this.appendWithSource(
-      `${c.accent("minicode")} ${c.muted(arrow)} ${chunks[0] ?? ""}`,
+      `${c.accent("minicode")} ${c.muted(arrow)} ${first ?? ""}`,
       { kind: "user" },
-      chunks[0] ?? "",
+      first ?? "",
       prefix,
     )
-    for (let i = 1; i < chunks.length; i++) {
-      this.appendWithSource(`${chunks[i]}`, { kind: "user" }, chunks[i]!, "")
-    }
+    const indent = " ".repeat(arrow.length + 1)
     for (const r of rest) {
-      const restChunks = wrapByWidth(r, Math.max(10, width - 2))
-      restChunks.forEach((chunk, i) => {
-        // Indentasi baris lanjutan prompt multi-baris tetap jadi chrome seleksi.
-        const indent = i === 0 ? " ".repeat(arrow.length + 1) : ""
-        this.appendWithSource(`${indent}${chunk}`, { kind: "user" }, chunk, indent)
-      })
+      this.appendWithSource(`${indent}${r}`, { kind: "user" }, r, indent)
     }
     // Ritme flat: SATU baris kosong setelah prompt sebelum jawaban model.
     // Bersama jeda sebelum prompt di atas, tiap blok (turn) dipisah rapi.
@@ -1484,10 +1462,32 @@ export class Transcript {
         }
       }
       const rendered = renderedBody === "" ? "" : `${firstLead}${renderedBody}`
-      const renderedRows =
+      let renderedRows =
         rendered === ""
           ? [""]
           : wrapByWidth(rendered, w, hangingIndent ? { hangingIndent } : undefined)
+      // Bila chrome prefix user (`minicode › `) ditinggal sendirian di baris 0
+      // karena token pertama lebih panjang dari `w`, tempelkan awalan token itu
+      // ke baris 0 supaya tidak ada baris prefix yatim (menjaga U4 + kontrak wrap).
+      if (
+        !markdown &&
+        sourcePrefix !== "" &&
+        renderedRows.length > 1 &&
+        source.length > 0 &&
+        rendered.endsWith(source) &&
+        stripSgr(sanitizeAnsi(renderedRows[0] ?? "")).trimEnd() === sourcePrefix.trimEnd()
+      ) {
+        const prefixCols = displayWidth(sourcePrefix)
+        const firstWord = /^(\S+)/.exec(source)?.[1] ?? ""
+        if (displayWidth(firstWord) > w && w > prefixCols + 4) {
+          const styledPrefix = rendered.slice(0, rendered.length - source.length)
+          const head = truncateToWidth(firstWord, w - prefixCols, "")
+          if (head.length > 0) {
+            const tail = source.slice(head.length)
+            renderedRows = [`${styledPrefix}${head}`, ...(tail ? wrapByWidth(tail, w) : [])]
+          }
+        }
+      }
       const effectiveHangCols = displayWidth(hangingIndent)
       const effectiveHang = effectiveHangCols > 0 && effectiveHangCols < w ? hangingIndent : ""
       const plainRenderedFull = stripSgr(sanitizeAnsi(rendered))
@@ -1962,7 +1962,7 @@ export class Transcript {
     out.push(...this.thinkingRows(w))
     // Tool yang SEDANG berjalan — panel hanya memuat tool terminal, jadi running
     // tetap punya baris sendiri (tak ada duplikasi).
-    for (const row of this.runningRows(maxLiveRows)) {
+    for (const row of this.runningRows(maxLiveRows, w)) {
       out.push({
         text: row,
         sourceId: -1,
@@ -2894,23 +2894,34 @@ export class Transcript {
   }
 
   /**
-   * Satu baris agregat per delegasi — menggantikan puluhan baris `↳`.
+   * Satu baris agregat `✦` per turn — menggabungkan seluruh delegasi sub-agent
+   * dalam turn yang sama agar eksekusi paralel tidak menumpuk N baris `1 sub agent`.
    * Angka dihitung dari id unik supaya retry/replay tak menggandakan.
    */
   private aggregateAgent(event: UiPresentationEvent, activity: UiPresentationActivity): void {
     const parent = activity.parentToolCallId ?? ""
-    let row = this.agentProgress.get(parent)
+    const turnKey = event.turnId !== undefined ? `turn:${event.turnId}` : "turn:current"
+    let row = this.agentProgress.get(turnKey)
     if (!row) {
-      const existing = this.delegateRowIds.get(parent)
+      const existing = parent ? this.delegateRowIds.get(parent) : undefined
       row = {
         id: existing ?? -1,
         agents: new Set(),
         tools: new Set(),
         failures: new Map(),
       }
-      this.agentProgress.set(parent, row)
+      this.agentProgress.set(turnKey, row)
+    } else if (row.id < 0 && parent) {
+      const existing = this.delegateRowIds.get(parent)
+      if (existing !== undefined) row.id = existing
     }
-    row.agents.add(activity.childSessionId ?? activity.runId ?? activity.toolCallId ?? "")
+    row.agents.add(
+      activity.childSessionId ??
+        activity.runId ??
+        activity.parentToolCallId ??
+        activity.toolCallId ??
+        "",
+    )
     row.tools.add(event.toolCallId ?? `${activity.name}:${activity.target ?? ""}`)
     const status = activity.status ?? event.status ?? "completed"
     const rawReason = String(event.message ?? (event as { reason?: unknown }).reason ?? "")
@@ -3255,16 +3266,13 @@ export class Transcript {
 
   /** Satu baris live untuk activity running — memakai label niat / auto-label
    *  manusiawi, dengan jeda anti-kedip 120 ms & reveal per kata saat `animateLive`. */
-  private runningLine(activity: UiPresentationActivity, child: boolean, marker: string): string {
+  private runningLine(
+    activity: UiPresentationActivity,
+    child: boolean,
+    marker: string,
+    width?: number,
+  ): string {
     const rawName = sanitizeAnsiLine(activity.name)
-    const {
-      text: titleLabel,
-      autoText,
-      isIntent,
-    } = formatActivityLabel(rawName, activity, {
-      maxCols: 72,
-    })
-    const bodyTitle = isIntent ? titleLabel : autoText
     const now = this.nowFn()
     const elapsed = now - activity.tsStart
     const showElapsed = this.policy
@@ -3275,6 +3283,27 @@ export class Transcript {
     const markerText = marker ? `${marker} ` : ""
     // v0.43: margin 3 milik FRAME. Indent 2 kolom anak tetap jadi hierarki.
     const prefix = child ? `  ↳ ` : `${glyphs.arrow} `
+    const suffix = ` … ${t("ts.statusRunning")}${elapsedText}${retry}`
+    // Anggaran label proporsional terhadap lebar kolom chat agar suffix status
+    // & timer tetap terbaca tanpa bungkus di lebar ter-centre (U3).
+    const maxLabelCols =
+      width !== undefined
+        ? Math.min(
+            72,
+            Math.max(
+              12,
+              width - displayWidth(prefix) - displayWidth(markerText) - displayWidth(suffix),
+            ),
+          )
+        : 72
+    const {
+      text: titleLabel,
+      autoText,
+      isIntent,
+    } = formatActivityLabel(rawName, activity, {
+      maxCols: maxLabelCols,
+    })
+    const bodyTitle = isIntent ? titleLabel : autoText
     if (this.animateLive) {
       const key = activity.toolCallId || `${rawName}:${activity.tsStart}`
       let startTs = this.liveRevealStart.get(key)
@@ -3293,12 +3322,14 @@ export class Transcript {
       const { shown, complete } = revealWords(bodyTitle, wordsToShow, fallbackCols)
       if (!complete) {
         this.liveAnimating = true
-        return c.info(`${prefix}${markerText}${shown} …`)
+        const partial = `${prefix}${markerText}${shown} …`
+        return c.info(
+          width !== undefined ? truncateToWidth(partial, width, glyphs.ellipsis) : partial,
+        )
       }
     }
-    return c.info(
-      `${prefix}${markerText}${bodyTitle} … ${t("ts.statusRunning")}${elapsedText}${retry}`,
-    )
+    const line = `${prefix}${markerText}${bodyTitle}${suffix}`
+    return c.info(width !== undefined ? truncateToWidth(line, width, glyphs.ellipsis) : line)
   }
 
   /** Urutan baris live: root + anaknya, lalu anak yatim (sama seperti dulu). */
@@ -3372,13 +3403,11 @@ export class Transcript {
 
   /** Baris tunggu transien saat turn aktif namun belum ada narasi/tool tampil. */
   private waitingStatusRow(): string | null {
-    if (
-      this.replaying ||
-      !this.turnActive ||
-      this.pending.length > 0 ||
-      this.thinkingTail.length > 0 ||
-      this.thinkingArea.length > 0
-    ) {
+    // Saat FLAT_RENDERER membuang tampilan thinking, thinkingTail/thinkingArea
+    // tidak terlihat di layar sehingga tak boleh menyembunyikan baris tunggu (U1).
+    const hasVisibleThinking =
+      !FLAT_RENDERER && (this.thinkingTail.length > 0 || this.thinkingArea.length > 0)
+    if (this.replaying || !this.turnActive || this.pending.length > 0 || hasVisibleThinking) {
       return null
     }
     if (this.liveRetryState) {
@@ -3403,7 +3432,7 @@ export class Transcript {
   /** Baris live transien untuk tail viewport — TIDAK masuk `lines[]`.
    *  Adaptif hingga ~50% tinggi viewport supaya seluruh aktivitas paralel
    *  tampil pada layar normal tanpa menenggelamkan narasi committed. */
-  private runningRows(maxRows?: number): string[] {
+  private runningRows(maxRows?: number, width?: number): string[] {
     this.liveAnimating = false
     const snapshot = this.presentationSnapshot()
     const ordered = snapshot ? this.orderedRunning(snapshot) : []
@@ -3422,7 +3451,7 @@ export class Transcript {
     }
     const cap = maxRows ?? this.maxLiveTailRows()
     const rows = this.selectRunningForTail(ordered, cap)
-      .map(({ activity, child, marker }) => this.runningLine(activity, child, marker))
+      .map(({ activity, child, marker }) => this.runningLine(activity, child, marker, width))
       .filter((row) => row.length > 0)
     if (rows.length > 0) return rows
     const wait = this.waitingStatusRow()
@@ -3440,7 +3469,7 @@ export class Transcript {
     const snapshot = this.presentationSnapshot()
     if (!snapshot) return []
     return this.orderedRunning(snapshot).map(({ activity, child, marker }) =>
-      padToWidth(truncateToWidth(this.runningLine(activity, child, marker), w, ""), w),
+      padToWidth(truncateToWidth(this.runningLine(activity, child, marker, w), w, ""), w),
     )
   }
 

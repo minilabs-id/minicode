@@ -61,7 +61,7 @@ export async function runProviderManager(opts: {
       }
     },
     loadRows: loadViewState,
-    onAdd: async ({ baseUrl, apiKey, scope }): Promise<ProviderActionResult> => {
+    onAdd: async ({ baseUrl, apiKey, scope }, signal): Promise<ProviderActionResult> => {
       const fallbackModels = baseUrl.includes("anthropic") ? ["claude-sonnet-4"] : ["gpt-4o-mini"]
       try {
         const entry = await detectAndSave(baseUrl, apiKey, undefined, {
@@ -70,12 +70,14 @@ export async function runProviderManager(opts: {
           fallbackModels,
           allowLocal: opts.allowLocalConfig,
           rejectUnreachable: true,
+          signal,
         })
         const warn = await reloadSuffix()
         return {
           ok: `${t("ntc.saved", { id: entry.id, n: entry.models.length, scope })}${warn}`,
         }
       } catch (e) {
+        if (signal?.aborted) return {}
         return { err: t("prov.detectFail", { msg: formatError(e) }) }
       }
     },
@@ -100,7 +102,7 @@ export async function runProviderManager(opts: {
       if (!cur) return null
       return { baseUrl: cur.baseUrl, apiKey: cur.apiKey }
     },
-    onEditSave: async (row, { baseUrl, apiKey }): Promise<ProviderActionResult> => {
+    onEditSave: async (row, { baseUrl, apiKey }, signal): Promise<ProviderActionResult> => {
       const cfg = await loadConfig(opts.cwd, { allowLocal: opts.allowLocalConfig })
       const cur = cfg.providers.find((p) => p.id === row.id)
       if (!cur) return { err: t("ntc.notFound") }
@@ -117,10 +119,13 @@ export async function runProviderManager(opts: {
           cwd: opts.cwd,
           fallbackModels: cur.models,
           allowLocal: opts.allowLocalConfig,
+          signal,
         })
         const warn = await reloadSuffix()
         return { ok: `${t("ntc.updated", { id: entry.id, n: entry.models.length })}${warn}` }
       } catch (e) {
+        // Pulihkan konfigurasi lama terlebih dahulu sebelum melapor batal/gagal
+        // supaya provider sebelumnya tidak hilang saat user menekan Esc.
         await detectAndSave(cur.baseUrl, cur.apiKey, cur.id, {
           global: saveGlobal,
           cwd: opts.cwd,
@@ -128,6 +133,7 @@ export async function runProviderManager(opts: {
           allowLocal: opts.allowLocalConfig,
         }).catch(() => {})
         const warn = await reloadSuffix()
+        if (signal?.aborted) return {}
         return { err: `${t("prov.updateFail", { msg: formatError(e) })}${warn}` }
       }
     },

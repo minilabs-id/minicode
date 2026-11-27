@@ -1,8 +1,35 @@
 import { expect, test } from "bun:test"
 import { highlightCode } from "../src/ui/render/highlight.ts"
-import { decorateMarkdown } from "../src/ui/render/markdown.ts"
+import { highlightMatch } from "../src/ui/render/list.ts"
+import {
+  decorateMarkdown,
+  paintMarkdownBlockquote,
+  paintMarkdownHeading,
+} from "../src/ui/render/markdown.ts"
 import { c, glyphs, section, stripAnsi } from "../src/ui/render/theme.ts"
 import { displayWidth } from "../src/ui/render/width.ts"
+
+function withTruecolorTty<T>(fn: () => T): T {
+  const prevIsTty = process.stdout.isTTY
+  const prevColorterm = process.env.COLORTERM
+  const prevNoColor = process.env.NO_COLOR
+  const prevMinicodeColor = process.env.MINICODE_COLOR
+  process.env.COLORTERM = "truecolor"
+  delete process.env.NO_COLOR
+  delete process.env.MINICODE_COLOR
+  Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
+  try {
+    return fn()
+  } finally {
+    Object.defineProperty(process.stdout, "isTTY", { value: prevIsTty, configurable: true })
+    if (prevColorterm === undefined) delete process.env.COLORTERM
+    else process.env.COLORTERM = prevColorterm
+    if (prevNoColor === undefined) delete process.env.NO_COLOR
+    else process.env.NO_COLOR = prevNoColor
+    if (prevMinicodeColor === undefined) delete process.env.MINICODE_COLOR
+    else process.env.MINICODE_COLOR = prevMinicodeColor
+  }
+}
 
 test("theme: stripAnsi removes escape codes cleanly", () => {
   const colored = c.info(c.bold("hello world"))
@@ -66,4 +93,54 @@ test("markdown: escape model dibuang di hulu (F-04)", () => {
   expect(out).not.toContain("\x1b[2J")
   expect(out).not.toContain("?1049h")
   expect(stripAnsi(out)).toContain("halodunia")
+})
+
+test("markdown: hierarki H1-H4, tautan non-bold, dan kutipan memakai warna berbeda", () => {
+  withTruecolorTty(() => {
+    const h1 = paintMarkdownHeading(1, "Bab")
+    const h2 = paintMarkdownHeading(2, "Sub")
+    const h3 = paintMarkdownHeading(3, "Poin")
+    const h4 = paintMarkdownHeading(4, "Detail")
+    expect(h1).toBe(c.accentBold("Bab"))
+    expect(h2).toBe(c.bold(c.info("Sub")))
+    expect(h3).toBe(c.bold("Poin"))
+    expect(h4).toBe(c.thinking(c.bold("Detail")))
+    expect(new Set([h1, h2, h3, h4]).size).toBe(4)
+
+    const mdLink = decorateMarkdown("Baca [docs](https://example.com) dulu")
+    expect(mdLink).toContain(c.accent("docs"))
+    expect(mdLink).not.toContain("\x1b[1;")
+    expect(stripAnsi(mdLink)).toBe("   Baca docs dulu")
+
+    const quote = paintMarkdownBlockquote("> ", "catatan")
+    expect(quote).toBe(`${c.accent("> ")}${c.thinking("catatan")}`)
+    const mdQuote = decorateMarkdown("> catatan")
+    expect(mdQuote).toContain(quote)
+    expect(stripAnsi(mdQuote)).toBe("   > catatan")
+  })
+})
+
+test("highlightCode: JSON bool/null terpisah dari angka dan flag shell memakai info", () => {
+  withTruecolorTty(() => {
+    const json = '{"ok": true, "n": 42}'
+    const hlJson = highlightCode(json, "json")
+    expect(hlJson).toContain(c.brightMagenta("true"))
+    expect(hlJson).toContain(c.brightYellow("42"))
+    expect(stripAnsi(hlJson)).toBe(json)
+
+    const sh = "bun test --watch"
+    const hlSh = highlightCode(sh, "sh")
+    expect(hlSh).toContain(c.info("--watch"))
+    expect(hlSh).not.toContain(c.yellow("--watch"))
+    expect(stripAnsi(hlSh)).toBe(sh)
+  })
+})
+
+test("list highlightMatch: kecocokan baris tak terpilih tetap terbaca tanpa c.dim", () => {
+  withTruecolorTty(() => {
+    const row = highlightMatch("theme-dark", "dark", false)
+    expect(row).toContain(c.info("dark"))
+    expect(row).not.toContain(c.dim(c.info("dark")))
+    expect(stripAnsi(row).trim()).toBe("theme-dark")
+  })
 })

@@ -82,6 +82,8 @@ export interface DialogBox {
    * karena `focusRow`). Kursor = `bodyTop + (activeRow - bodyStart)`.
    */
   bodyStart: number
+  /** Jumlah baris body yang benar-benar dirender (`bodyStart + shown - 1` = baris terakhir). */
+  shown: number
 }
 
 /**
@@ -197,5 +199,5 @@ export function dialogBox(spec: DialogSpec, cols: number, rows: number): DialogB
     const left = Math.max(0, Math.floor((c0 - displayWidth(ln)) / 2))
     return `${" ".repeat(left)}${ln}`
   })
-  return { lines, topRow, height: boxed.length, bodyTop: 1 + (hasTopBar ? 1 : 0), bodyStart }
+  return { lines, topRow, height: boxed.length, bodyTop: 1 + (hasTopBar ? 1 : 0), bodyStart, shown }
 }

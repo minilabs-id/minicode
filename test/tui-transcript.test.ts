@@ -1074,4 +1074,114 @@ describe("v0.40 — baris live tool tetap tail transien (bukan commit-in-place)"
       t.view(w, 20, 0).filter((row) => row.includes(`${humanToolLabel("grep")} src/`)),
     ).toHaveLength(0)
   })
+
+  test("U1 waitingStatusRow tetap tampil saat FLAT_RENDERER menyembunyikan thinkingTail", () => {
+    let now = 1000
+    const bus = createFakeBus()
+    const t = new Transcript(bus as never, { now: () => now })
+    bus.emit("turn:started", {})
+    bus.emit("provider:extension", { kind: "reasoning", data: { text: "menganalisis kode..." } })
+    now = 3000
+    const view = t.view(60, 6, 0).join("\n")
+    expect(view).toContain("Preparing")
+    expect(view).not.toContain("menganalisis kode")
+  })
+
+  test("U3 runningLine mengatur budget label proporsional sehingga status+timer utuh pada lebar sempit", () => {
+    const bus = createFakeBus()
+    const now = 6000
+    const t = new Transcript(bus as never, {
+      now: () => now,
+      getSnapshot: () => ({
+        activities: [
+          activity({
+            toolCallId: "long-1",
+            name: "read_file",
+            target: "src/very/deep/nested/directory/structure/filename-panjang-sekali.ts",
+            status: "running",
+            tsStart: 1000,
+          }),
+        ],
+        turns: [],
+      }),
+    })
+    const rows = t.view(54, 4, 0)
+    const live = rows.find((r) => r.includes("running"))
+    expect(live).toBeDefined()
+    expect(live).toContain("(5s)")
+    expect(displayWidth(stripAnsi(live!))).toBeLessThanOrEqual(54)
+  })
+
+  test("U4 pushUser menyimpan baris logis utuh sehingga resize dan replayHistory merapikan wrap", () => {
+    const { t } = setup()
+    const prompt = "kata ".repeat(20).trim()
+    t.pushUser(prompt, 50)
+    expect(t.view(50, 10, 0).filter((l) => l.includes("kata")).length).toBeGreaterThan(1)
+    expect(t.view(120, 10, 0).filter((l) => l.includes("kata"))).toHaveLength(1)
+
+    const { t: replayed } = setup()
+    replayed.replayHistory([{ seq: 1, turnId: 1, type: "user.message", text: prompt }])
+    expect(replayed.view(50, 10, 0).filter((l) => l.includes("kata")).length).toBeGreaterThan(1)
+    expect(replayed.view(120, 10, 0).filter((l) => l.includes("kata"))).toHaveLength(1)
+  })
+
+  test("paintLedger non-terminal memakai gray dan transkrip mewarisi hierarki heading/kutipan", () => {
+    const prevIsTty = process.stdout.isTTY
+    const prevColorterm = process.env.COLORTERM
+    const prevNoColor = process.env.NO_COLOR
+    const prevMinicodeColor = process.env.MINICODE_COLOR
+    process.env.COLORTERM = "truecolor"
+    delete process.env.NO_COLOR
+    delete process.env.MINICODE_COLOR
+    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
+    try {
+      const ledger = paintLedger("cancelled", "read_file · batal")
+      expect(ledger).toContain(c.gray("read_file · batal"))
+      expect(ledger).not.toContain("\x1b[2m")
+
+      const { bus, t } = setup()
+      bus.emit("provider:text", {
+        text: "# Bab 1\n## Sub 1\n### Rinci\n#### Catatan\n> kutipan",
+      })
+      bus.emit("turn:completed", {})
+      const rows = t.view(80, 14, 0)
+      expect(rows.some((r) => r.includes(c.accentBold("Bab 1")))).toBe(true)
+      expect(rows.some((r) => r.includes(c.bold(c.info("Sub 1"))))).toBe(true)
+      expect(rows.some((r) => r.includes(c.bold("Rinci")))).toBe(true)
+      expect(rows.some((r) => r.includes(c.thinking(c.bold("Catatan"))))).toBe(true)
+      expect(rows.some((r) => r.includes(`${c.accent("> ")}${c.thinking("kutipan")}`))).toBe(true)
+    } finally {
+      Object.defineProperty(process.stdout, "isTTY", { value: prevIsTty, configurable: true })
+      if (prevColorterm === undefined) delete process.env.COLORTERM
+      else process.env.COLORTERM = prevColorterm
+      if (prevNoColor === undefined) delete process.env.NO_COLOR
+      else process.env.NO_COLOR = prevNoColor
+      if (prevMinicodeColor === undefined) delete process.env.MINICODE_COLOR
+      else process.env.MINICODE_COLOR = prevMinicodeColor
+    }
+  })
+
+  test("delegate_task live langsung menampilkan nama peran tanpa awalan delegasi/sub-agent", () => {
+    const running = [
+      activity({
+        toolCallId: "d1",
+        name: "delegate_task",
+        intent: "Delegasi tugas Auditor UI",
+        status: "running",
+      }),
+      activity({
+        toolCallId: "d2",
+        name: "delegate_task",
+        label: "audit·backend",
+        status: "running",
+      }),
+    ]
+    const { t } = setupPresentation({ activities: running, turns: [] })
+    const live = t.liveRows(80).map(stripAnsi).join("\n")
+    expect(live).toContain("Auditor UI")
+    expect(live).toContain("audit·backend")
+    expect(live).not.toContain("Delegasi tugas")
+    expect(live).not.toContain("sub agent ·")
+    expect(live).not.toContain("agen sub ·")
+  })
 })

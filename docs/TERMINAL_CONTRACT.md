@@ -22,6 +22,24 @@
 >
 > **Pointer per versi** (rincian di entri `## Perubahan v…` di bawah):
 >
+> - **v0.52.1 (perbaikan UI/UX & keterbacaan warna tema — amandemen atas v0.51)** — (1) baris
+>   tunggu transien `waitingStatusRow()` tidak lagi tertahan oleh buffer
+>   `thinkingTail`/`thinkingArea` saat `FLAT_RENDERER` menekan baris thinking;
+>   (2) ratchet `turnScrollFloor` ikut direbase turun ketika evict memangkas
+>   kepala transkrip (`onEviction`); (3) baris live `runningLine()` memakai
+>   anggaran label proporsional terhadap `chatCols` agar suffix status & timer
+>   tidak terpotong/membungkus di kolom sempit, dan fallback sempit
+>   `renderFooter()` memprioritaskan badge operasional (`retry`, `+running`,
+>   `queued`, `new·PgDn`) di atas metrik angka; (4) `pushUser()` menyimpan
+>   baris logis utuh tanpa pre-wrap statis sehingga resize dan
+>   `replayHistory()` membungkus ulang gema prompt secara dinamis ke `chatCols`;
+>   (5) tutup bold dengan `\x1b[22;39m`, kalibrasi kontras truecolor
+>   `gray`/`faint`/`accentAlt`/`magenta`, segmen pasif timer & ledger non-terminal
+>   memakai `c.gray`, hit list tak terpilih `c.info` tanpa `c.dim`, serta
+>   hierarki heading H1–H4+/tautan/kutipan `>` terpusat di `markdown.ts` +
+>   `transcript.ts`; serta (6) agregat `✦` sub-agent digabung menjadi 1 baris
+>   per turn dan `delegate_task` langsung memakai label peran tanpa awalan
+>   berulang (bingkai `#36383E`, palet gelap tunggal, & geometri frame tetap).
 > - **v0.51 (amandemen atas v0.43)** — menyempurnakan tampilan tool live & error:
 >   (1) parameter opsional `label` hanya disuntikkan ke tool ber-intent terbuka
 >   (`bash`, `code_run`, `web_search`, `web_fetch`, dan MCP via `withMcpTools`;
@@ -112,6 +130,17 @@
 >   locale OS, narasi/model tetap memakai `/lang`.
 > - **v0.34** — sidebar kanan dihapus; chat kolom tengah (`cols ≥ 120 && rows ≥
 >   20` → `floor(cols/2)`, maks 50%); shortcut pane dihapus; I1 tidak berubah.
+
+## Perubahan v0.52.1 (perbaikan UI/UX & keterbacaan warna tema — amandemen atas v0.51)
+
+Entri ini menjaga seluruh geometri frame v0.43/v0.51 (termasuk bingkai `#36383E` dan palet gelap tunggal) tetap utuh dan menambal lima butir perilaku/visual pada runtime TUI & renderer:
+
+1. **Waiting indicator tetap tampil di renderer flat (`U1`).** Saat `FLAT_RENDERER` aktif, buffer `thinkingTail`/`thinkingArea` tidak pernah dirender (`thinkingRows()` mengembalikan `[]`), sehingga `waitingStatusRow()` hanya menahan status tunggu bila thinking benar-benar dirender (`!FLAT_RENDERER`).
+2. **Ratchet `turnScrollFloor` ikut bergeser saat evict (`U2`).** Di `TuiApp` (`onEviction`), selain `scrollBack = max(0, scrollBack - n)`, `turnScrollFloor = max(0, turnScrollFloor - n)` mencegah ratchet lama menahan viewport melewati tinggi transkrip baru sesudah pangkas kepala (`TRANSCRIPT_CAP`).
+3. **Budget label live & prioritas badge footer sempit (`U3`).** `Transcript.runningLine()` menerima lebar `chatCols` dari `tailRows()`/`liveRows()` untuk menghitung anggaran label proporsional (`max(12, min(72, width - overhead))`), menjaga suffix status `… berjalan (Ns)` pada satu baris di kolom ter-centre; fallback sempit `renderFooter()` memprioritaskan badge operasional (`retryBadge`, `+running`, `queued`, `new · PgDn`) sebelum memotong/membuang metrik angka.
+4. **Gema prompt user adaptif terhadap resize & replay (`U4`).** `Transcript.pushUser()` menyimpan baris logis utuh tanpa pre-wrap statis terhadap lebar sesaat, sehingga `projectText` selalu membungkus ulang baris `kind: "user"` secara dinamis mengikuti lebar `chatCols` aktif maupun sesudah `replayHistory()`.
+5. **Keterbacaan warna tema, penutup SGR bold, & hierarki markdown (`C1`–`C5`).** `paintTokenBoldFor` menutup bold eksplisit dengan `\x1b[22;39m`; truecolor `gray` (`38;2;142;148;158`) dan `faint` (`38;2;104;110;122`) dikalibrasi sementara `accentAlt`/`magenta` diselaraskan ke ungu `38;2;180;142;242`; segmen pasif timer aktif dan ledger non-terminal memakai `c.gray`; hit pencarian `highlightMatch` pada baris tak terpilih memakai `c.info` tanpa `c.dim`; boolean/`null` JSON memakai `brightMagenta` & flag shell memakai `info`; serta `markdown.ts` + `Transcript.renderAssistantLine` berbagi `paintMarkdownHeading`/`paintMarkdownBlockquote`, tautan non-bold `c.accent`, dan fast-path `^\s*>` untuk baris kutipan.
+6. **Agregat sub-agent 1 baris per turn & label peran langsung.** `Transcript.aggregateAgent()` menggabungkan seluruh `delegate_task` dalam satu turn menjadi satu baris `✦ N sub agent · …` alih-alih N baris `✦ 1 sub agent` bertumpuk; `humanToolLabel()`/`formatActivityLabel()` menampilkan label peran (`intent`/`label`/`summary`/`target`) secara langsung tanpa awalan `sub agent · `/`agen sub · ` maupun prefiks `Delegasi tugas`/`Subagent`, serta `activity.label` ikut memperbarui baris induk `delegate_task`.
 
 ## Perubahan v0.43 (baris live tool transien tail ≤3, ratchet `scrollBack` naik-saja — amandemen v0.42)
 

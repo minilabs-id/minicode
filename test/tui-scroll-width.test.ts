@@ -78,5 +78,5 @@ test("source-scan: tidak ada wrappedLength(process.stdout.columns)", () => {
   // Comment pun tak boleh menyisakan pola lama (raw source scan).
   expect(src).not.toContain("wrappedLength(process.stdout.columns)")
   expect(src).not.toMatch(/wrappedLength\(cols\)/)
-  expect(src).toContain("wrappedLength(this.chatWidth())")
+  expect(src).toMatch(/wrappedLength\(this\.chatWidth\(/)
 })

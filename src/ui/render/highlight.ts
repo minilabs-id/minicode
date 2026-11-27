@@ -155,8 +155,14 @@ function findCommentIndex(line: string, marker: string): number {
   while (i < line.length) {
     const ch = line[i]!
     if (quote !== null) {
-      if (ch === "\\") i += 2
-      else if (ch === quote) quote = null
+      if (ch === "\\") {
+        // Lewati backslash + karakter yang di-escape (2 karakter sekaligus) supaya
+        // kutip ter-escape (\") tidak dikira penutup string, sedangkan kondisi `else`
+        // tetap maju 1 langkah.
+        i += 2
+        continue
+      }
+      if (ch === quote) quote = null
       i++
       continue
     }
@@ -271,7 +277,8 @@ function highlightJsonLine(line: string): string {
         if (colon) return c.brightCyan(str) + colon
         return c.string(str)
       }
-      if (bool) return c.yellow(bool)
+      // Pisahkan boolean/null dari angka & warning supaya pemindaian JSON lebih cepat.
+      if (bool) return c.brightMagenta(bool)
       if (num) return c.brightYellow(num)
       return match
     }),
@@ -298,7 +305,8 @@ function highlightShellTokens(text: string): string {
       if (token.startsWith('"') || token.startsWith("'")) return c.string(token)
       if (token.startsWith("$")) return c.brightCyan(token)
       if (SH_KEYWORDS.has(token)) return c.brightMagenta(c.bold(token))
-      if (token.startsWith("-")) return c.yellow(token)
+      // Flag CLI memakai info agar tak tertukar dengan warna warning (`yellow`).
+      if (token.startsWith("-")) return c.info(token)
       return token
     }),
   )

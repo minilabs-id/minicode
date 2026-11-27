@@ -119,6 +119,16 @@ describe("highlight: TypeScript", () => {
     const line = "const x = 1"
     expect(highlightCode(line, "rust")).toBe(highlightCode(line, ""))
   })
+
+  test('escape backslash sebelum kutip (\\\\") tidak menjebak komentar inline', () => {
+    const line = 'const p = "C:\\\\"; // komentar ujung'
+    const out = highlightCode(line, "ts")
+    expect(stripAnsi(out)).toBe(line)
+    // `// komentar ujung` wajib dikenali sebagai komentar sesudah string ditutup.
+    const idxComment = out.lastIndexOf("// komentar ujung")
+    expect(idxComment).toBeGreaterThan(0)
+    expect(out.slice(0, idxComment)).toContain(ESC)
+  })
 })
 
 describe("highlight: Python", () => {

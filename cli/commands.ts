@@ -29,7 +29,7 @@ import { formatError } from "../src/ui/render/errors.ts"
 import { formatUsd } from "../src/ui/render/money.ts"
 import { sanitizeAnsiLine } from "../src/ui/render/sanitize.ts"
 import { c } from "../src/ui/render/theme.ts"
-import { padToWidth } from "../src/ui/render/width.ts"
+import { padToWidth, truncateToWidth } from "../src/ui/render/width.ts"
 import { buildSessionStamp } from "../src/ui/tui/session-summary.ts"
 
 // SEMUA output = PLAIN TEXT tanpa ANSI.
@@ -562,7 +562,7 @@ function encodeEnvText(text: string): string {
 
 function oneLine(text: string, max = 88): string {
   const flat = sanitizeAnsiLine(text).replace(/\s+/g, " ").trim()
-  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat
+  return truncateToWidth(flat, max, "…")
 }
 
 /**

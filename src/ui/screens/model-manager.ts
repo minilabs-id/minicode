@@ -465,10 +465,9 @@ export async function runModelManagerView(opts: ModelManagerViewOptions): Promis
               continue
             }
             if (item.key.type === "ctrl-u") {
-              // Ctrl+U = kosongkan query tapi TETAP di mode saring (paritas
-              // readline kill-line + picker). Dulu null (keluar mode) — beda
-              // dari picker yang tetap di mode filter setelah Ctrl+U.
-              filter = ""
+              // Ctrl+U = kosongkan query & keluar dari mode saring (konsisten
+              // dengan Backspace/Del saat query habis agar hint Del kembali aktif).
+              filter = null
               sel = 0
               scroll = 0
               continue
@@ -520,10 +519,41 @@ export async function runModelManagerView(opts: ModelManagerViewOptions): Promis
             }
           } else if (item.key.type === "enter") {
             const row = viewRows()[sel]
-            if (!row) return true // daftar kosong: jangan tutup (footer bilang select)
+            if (!row) {
+              // Hapus notice basi bila user menekan Enter pada daftar kosong.
+              render()
+              return true // daftar kosong: jangan tutup (footer bilang select)
+            }
             if (busy) return true
             busy = true
             suspend()
+            // Gambar modal progres selama simpan/verifikasi model agar layar
+            // tidak kosong membisu bila operasi asinkron memakan waktu (T3).
+            const paintSelectProgress = () => {
+              const cols = screen.cols || 80
+              const rows = screen.rows || 24
+              if (!canRenderModal(cols, rows)) {
+                screen.paintRegion(
+                  [c.warning(truncateToWidth(tSystem("msg.tooSmall"), Math.max(1, cols - 2)))],
+                  Math.max(1, Math.floor(rows / 2)),
+                )
+              } else {
+                const box = dialogBox(
+                  windowSpec({
+                    role: "progress",
+                    title: t("out.titleModels"),
+                    body: [dim(`  ${sanitizeAnsiLine(row.id)}`)],
+                    cols,
+                    rows,
+                  }),
+                  cols,
+                  rows,
+                )
+                screen.paintRegion(box.lines, box.topRow)
+              }
+              screen.setCursorVisible(false)
+            }
+            paintSelectProgress()
             // B4 (audit UI/UX): Enter = SATU langkah — pilih & simpan model
             // langsung. Picker effort tidak lagi langkah wajib tiap Enter
             // (dulu: Esc di effort = batal total, dua tekan untuk ganti model).
@@ -549,7 +579,12 @@ export async function runModelManagerView(opts: ModelManagerViewOptions): Promis
             // eksplisit (bukan langkah wajib), Esc pada picker = batal dan
             // kembali ke daftar — manajer tidak pernah menutup diri di sini.
             const row = viewRows()[sel]
-            if (!row || busy || !opts.onSetEffort) return true
+            if (!row) {
+              // Hapus notice basi bila user menekan Tab pada daftar kosong.
+              render()
+              return true
+            }
+            if (busy || !opts.onSetEffort) return true
             if (!canRenderModal(screen.cols || 80, screen.rows || 24)) {
               // Sub-picker butuh ukuran modal minimum; tanpa garda ini error
               // terminal sempit tertelan captureConsole dan tampak membisu.

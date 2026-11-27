@@ -99,9 +99,12 @@ async function rowsFor(ctx: CommandContext): Promise<string[]> {
 async function save(ctx: CommandContext, input: string): Promise<string[]> {
   const cfg = await loadConfig(ctx.cwd, { allowLocal: ctx.allowLocalConfig })
   const active = activeRef(ctx, cfg)
-  if (!active) return [`${t("ctx.saveFailed", { msg: "no active model — pick one with /model" })}`]
+  if (!active) return [`${t("ctx.saveFailed", { msg: t("ctx.errNoActiveModel") })}`]
   const provider = cfg.providers.find((p) => p.id === active.provider)
-  if (!provider) return [`${t("ctx.saveFailed", { msg: `provider ${active.provider} not found` })}`]
+  if (!provider)
+    return [
+      `${t("ctx.saveFailed", { msg: t("ctx.errProviderNotFound", { id: active.provider }) })}`,
+    ]
 
   const outcome = assignContextWindow(provider as ProviderEntry, active.model, input)
   if (!outcome.ok) return [`${t("ctx.saveFailed", { msg: outcome.error })}`]
@@ -131,14 +134,7 @@ async function save(ctx: CommandContext, input: string): Promise<string[]> {
   } catch (e) {
     return [t("ctx.saveFailed", { msg: sanitizeAnsiLine(String((e as Error)?.message ?? e)) })]
   }
-  return [
-    sanitizeAnsiLine(
-      contextWindowSavedNotice(outcome.tokens, describeContextWindow).replace(
-        "{model}",
-        `${active.provider}::${active.model}`,
-      ),
-    ),
-  ]
+  return [sanitizeAnsiLine(contextWindowSavedNotice(outcome.tokens, describeContextWindow))]
 }
 
 /** Baris yang dicetak sebagai satu blok — dirakit di sini, bukan di
@@ -165,7 +161,7 @@ export async function applyContextWindowArg(args: string, ctx: CommandContext): 
   if (raw.toLowerCase() !== CONTEXT_WINDOW_AUTO && parseContextWindowInput(raw) === undefined)
     return [
       t("ctx.saveFailed", {
-        msg: `cannot read "${sanitizeAnsiLine(raw)}" as a window (try 128k, 1m, 1024x1024, auto)`,
+        msg: t("ctx.errInvalidWindow", { raw: sanitizeAnsiLine(raw) }),
       }),
     ]
   return save(ctx, raw)

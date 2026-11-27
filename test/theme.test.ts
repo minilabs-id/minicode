@@ -139,3 +139,17 @@ test("cErr mengikuti TTY stderr, tidak bocorkan ANSI saat stderr piped", () => {
   expect(cErr.error("boom")).toContain(ESC)
   expect(stripAnsi(cErr.warning("warn"))).toBe("warn")
 })
+
+test("paintTokenBoldFor menutup bold (SGR 22) agar tidak bocor ke teks berikutnya", () => {
+  const styled = c.accentBold("Judul")
+  expect(styled).toContain("\x1b[1;")
+  expect(styled.endsWith("\x1b[22;39m")).toBe(true)
+  expect(stripAnsi(`${styled} isi normal`)).toBe("Judul isi normal")
+})
+
+test("palet truecolor gray, accentAlt, magenta, dan faint selaras kontras & identitas", () => {
+  expect(c.gray("abu")).toContain("38;2;142;148;158")
+  expect(c.faint("garis")).toContain("38;2;104;110;122")
+  expect(c.accentAlt("ungu")).toContain("38;2;180;142;242")
+  expect(c.magenta("ungu")).toContain("38;2;180;142;242")
+})

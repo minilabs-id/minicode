@@ -26,8 +26,8 @@ export function renderInline(text: string): string {
     codes.push(code)
     return CODE_PLACEHOLDER
   })
-  // [text](url) -> accent bold text (url hidden, no underline - terminal can't click)
-  t = t.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, label: string) => c.accent(c.bold(label)))
+  // [text](url) -> warna accent tanpa bold/underline agar tak tertukar dengan heading.
+  t = t.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, label: string) => c.accent(label))
   // **bold**
   t = t.replace(/\*\*([^*]+)\*\*/g, (_m, bold: string) => c.bold(bold))
   // *italic*
@@ -124,13 +124,15 @@ export function decorateMarkdown(text: string): string {
     // v0.33: heading mengikuti TUI — tanda `#` DIBUANG dan isi memakai
     // renderInline, supaya tidak ada artefak markdown mentah di jawaban.
     // Dua baris kosong sebelum bab juga disamakan dengan formatAssistantSpacing.
-    if (/^#{1,6}\s/.test(line)) {
-      if (/^#{1,3}\s/.test(line) && out.length > 0) {
+    const heading = /^(#{1,6})\s+(.*)$/.exec(line)
+    if (heading) {
+      const level = heading[1]!.length
+      if (level <= 3 && out.length > 0) {
         let blanks = 0
         for (let i = out.length - 1; i >= 0 && out[i] === ""; i--) blanks++
         for (let i = blanks; i < 2; i++) out.push("")
       }
-      out.push(`${margin}${c.bold(renderInline(line.replace(/^#{1,6}\s+/, "")))}`)
+      out.push(`${margin}${paintMarkdownHeading(level, renderInline(heading[2] ?? ""))}`)
       continue
     }
 
@@ -147,11 +149,28 @@ export function decorateMarkdown(text: string): string {
     // Kutipan (`> `) atau paragraf biasa / berindentasi multi-tingkat.
     const blockquote = /^(\s*(?:>\s*)+)(.*)$/.exec(line)
     if (blockquote) {
-      out.push(`${margin}${blockquote[1]}${renderInline(blockquote[2] ?? "")}`)
+      out.push(
+        `${margin}${paintMarkdownBlockquote(blockquote[1] ?? "", renderInline(blockquote[2] ?? ""))}`,
+      )
       continue
     }
 
     out.push(`${margin}${renderInline(line)}`)
   }
   return out.join("\n")
+}
+
+/** Pewarnaan heading markdown terpusat tanpa artefak `#` agar hierarki TUI & non-TUI seragam. */
+export function paintMarkdownHeading(level: number, renderedText: string): string {
+  // # = accent bold, ## = info bold (terang), ### = bold polos, ####+ = thinking bold agar sub-bab tetap jelas terbaca.
+  if (level <= 1) return c.accentBold(renderedText)
+  if (level === 2) return c.bold(c.info(renderedText))
+  if (level === 3) return c.bold(renderedText)
+  return c.thinking(c.bold(renderedText))
+}
+
+/** Pewarnaan kutipan markdown agar prefix `>` beraksen dan isi kutipan bernuansa redup lembut. */
+export function paintMarkdownBlockquote(prefix: string, renderedBody: string): string {
+  if (!prefix && !renderedBody) return ""
+  return `${c.accent(prefix)}${renderedBody ? c.thinking(renderedBody) : ""}`
 }

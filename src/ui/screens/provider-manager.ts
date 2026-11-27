@@ -20,7 +20,7 @@ import { displayWidth, truncateToWidth, wrapByWidth } from "../render/width.ts"
 import { type AltScreen, openAltScreen } from "../runtime/screen.ts"
 import { canRenderModal, dialogBox } from "./dialog.ts"
 import { IDLE_CANCEL_MS, IDLE_WARN_MS, runForm, validateRequired, validateUrl } from "./form.ts"
-import { createIdleTimer } from "./lifecycle.ts"
+import { attachProgressCancel, createIdleTimer } from "./lifecycle.ts"
 import { withTimeout } from "./watchdog.ts"
 import { windowMaxHeight, windowSpec, windowWidth } from "./window.ts"
 
@@ -60,17 +60,21 @@ export interface ProviderManagerViewOptions {
   onSelect(row: ProviderRow): void
   /** Ambil baris terbaru dari controller setelah tiap aksi. */
   loadRows(): Promise<ProviderRow[]>
-  onAdd(input: {
-    preset?: ProviderPresetView
-    baseUrl: string
-    apiKey: string
-    scope: "global" | "local"
-  }): Promise<ProviderActionResult>
+  onAdd(
+    input: {
+      preset?: ProviderPresetView
+      baseUrl: string
+      apiKey: string
+      scope: "global" | "local"
+    },
+    signal?: AbortSignal,
+  ): Promise<ProviderActionResult>
   onDelete(row: ProviderRow): Promise<ProviderActionResult>
   onEditDefaults(row: ProviderRow): Promise<{ baseUrl: string; apiKey: string } | null>
   onEditSave(
     row: ProviderRow,
     input: { baseUrl: string; apiKey: string },
+    signal?: AbortSignal,
   ): Promise<ProviderActionResult>
   /**
    * Batas waktu aksi jaringan (ms) — DI untuk test (default 60 dtk).
@@ -353,76 +357,115 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
      * pulih; aksi telat yang akhirnya selesai diabaikan hasilnya. Tunggu
      * interaksi user (form/picker) TIDAK dibatasi — hanya await jaringan.
      */
-    const withWatchdog = <T>(fn: () => Promise<T> | T): Promise<T> =>
-      withTimeout(fn, opts.actionTimeoutMs ?? 60_000)
+    const withWatchdog = <T>(fn: () => Promise<T> | T, signal?: AbortSignal): Promise<T> =>
+      withTimeout(fn, opts.actionTimeoutMs ?? 60_000, signal)
+
+    // Render kotak progres dengan tombol batal Esc selama deteksi jaringan
+    // berjalan (paritas wizard.ts + attachProgressCancel bersama, T3).
+    const runDetectWithCancel = async <T>(
+      fn: (signal: AbortSignal) => Promise<T>,
+    ): Promise<{ res?: T; canceled: boolean }> => {
+      const ac = new AbortController()
+      const paintDetecting = () => {
+        const cols = screen.cols || 80
+        const rows = screen.rows || 24
+        if (!canRenderModal(cols, rows)) {
+          screen.paintRegion(
+            [c.warning(truncateToWidth(tSystem("msg.tooSmall"), Math.max(1, cols - 2)))],
+            Math.max(1, Math.floor(rows / 2)),
+          )
+        } else {
+          const box = dialogBox(
+            windowSpec({
+              role: "progress",
+              title: t("ntc.detecting"),
+              body: [dim(`  ${t("ntc.detecting")}`)],
+              cols,
+              rows,
+              escHint: true,
+            }),
+            cols,
+            rows,
+          )
+          screen.paintRegion(box.lines, box.topRow)
+        }
+        screen.setCursorVisible(false)
+      }
+      paintDetecting()
+      const detachCancel = attachProgressCancel(ac, paintDetecting)
+      try {
+        const res = await withWatchdog(() => fn(ac.signal), ac.signal)
+        return { res, canceled: false }
+      } catch (e) {
+        if (ac.signal.aborted) return { canceled: true }
+        throw e
+      } finally {
+        detachCancel()
+        try {
+          screen.clearRegion()
+        } catch {}
+      }
+    }
+
+    const applyActionResult = (res: ProviderActionResult) => {
+      if (res.ok) {
+        notice = res.ok
+        noticeKind = "success"
+      } else if (res.err) {
+        notice = formatError(res.err)
+        noticeKind = "error"
+      }
+    }
 
     const doAdd = () => {
       if (busy) return
-      busy = true
-      suspend()
-      ;(async () => {
-        try {
-          // Langsung tampilkan form (Base URL + API key + scope opsional) tanpa
-          // memilih provider terdaftar terlebih dahulu.
-          const fields = [
-            {
-              id: "url",
-              label: t("prov.urlLabel"),
-              kind: "text" as const,
-              initial: "",
-              validate: validateUrl,
-            },
-            {
-              id: "key",
-              label: t("prov.keyLabel"),
-              kind: "secret" as const,
-              validate: validateRequired,
-            },
-            ...(opts.askScope
-              ? [
-                  {
-                    id: "scope",
-                    label: t("prov.scopeLabel"),
-                    kind: "select" as const,
-                    options: ["global", "local"],
-                  },
-                ]
-              : []),
-          ]
-          const form = await runForm({ title: t("prov.addTitle"), fields }, screen)
-          if (form.cancelled || !form.values) {
-            notice = t("common.canceled")
-            noticeKind = "info"
-            return
-          }
-          const baseUrl = (form.values.url ?? "").trim()
-          const apiKey = form.values.key ?? ""
-          const scope = form.values.scope === "local" ? "local" : "global"
-          // Progres terlihat: render notice DULU (masih suspend = tanpa
-          // listener ganda), baru await jaringan.
-          notice = t("ntc.detecting")
+      return runAction(async () => {
+        // Langsung tampilkan form (Base URL + API key + scope opsional) tanpa
+        // memilih provider terdaftar terlebih dahulu.
+        const fields = [
+          {
+            id: "url",
+            label: t("prov.urlLabel"),
+            kind: "text" as const,
+            initial: "",
+            validate: validateUrl,
+          },
+          {
+            id: "key",
+            label: t("prov.keyLabel"),
+            kind: "secret" as const,
+            validate: validateRequired,
+          },
+          ...(opts.askScope
+            ? [
+                {
+                  id: "scope",
+                  label: t("prov.scopeLabel"),
+                  kind: "select" as const,
+                  options: ["global", "local"],
+                },
+              ]
+            : []),
+        ]
+        const form = await runForm({ title: t("prov.addTitle"), fields }, screen)
+        if (form.cancelled || !form.values) {
+          notice = t("common.canceled")
           noticeKind = "info"
-          render()
-          const res = await withWatchdog(() => opts.onAdd({ baseUrl, apiKey, scope }))
-          // Hasil dari jaringan/config — formatter kanonik (redaksi + sanitasi).
-          if (res.ok) {
-            notice = res.ok
-            noticeKind = "success"
-          } else if (res.err) {
-            notice = formatError(res.err)
-            noticeKind = "error"
-          }
-        } catch (e) {
-          // Body provider bisa menyuntik `ESC[2J`; formatError menyanitasi +
-          // meredaksi credential sebelum dirender.
-          notice = formatError(e)
-          noticeKind = "error"
-        } finally {
-          busy = false
-          await reload().catch(() => {})
-          resume()
+          return
         }
-      })()
+        const baseUrl = (form.values.url ?? "").trim()
+        const apiKey = form.values.key ?? ""
+        const scope = form.values.scope === "local" ? "local" : "global"
+        const detected = await runDetectWithCancel((sig) =>
+          opts.onAdd({ baseUrl, apiKey, scope }, sig),
+        )
+        if (detected.canceled) {
+          notice = t("common.canceled")
+          noticeKind = "info"
+          return
+        }
+        if (detected.res) applyActionResult(detected.res)
+      })
     }
 
     const doDelete = () => {
@@ -431,9 +474,10 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
       if (!target) return
       return runAction(async () => {
         // Konfirmasi menyebut DAMPAK, bukan hanya nama: berapa model ikut hilang,
-        // dan apakah provider ini yang sedang dipakai. Form confirm dalam popup
-        // (konteks terlihat saat menjawab).
-        const active = opts.currentModel?.startsWith(`${target.id}::`)
+        // dan apakah provider ini yang sedang dipakai. Pakai getCurrentModel live
+        // agar perubahan aktif via Enter ikut tercermin (T3).
+        const curModel = (opts.getCurrentModel ? opts.getCurrentModel() : opts.currentModel) ?? ""
+        const active = curModel.startsWith(`${target.id}::`)
         const form = await runForm(
           {
             title: t("prov.deleteTitle"),
@@ -442,7 +486,7 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
                 id: "ok",
                 label:
                   t("prov.deleteLabel", { id: target.id, n: target.models }) +
-                  (active ? t("prov.deleteActive", { model: opts.currentModel ?? "" }) : "") +
+                  (active ? t("prov.deleteActive", { model: curModel }) : "") +
                   t("prov.deleteAsk"),
                 kind: "confirm",
               },
@@ -459,14 +503,7 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
           noticeKind = "info"
           return
         }
-        const res = await withWatchdog(() => opts.onDelete(target))
-        if (res.ok) {
-          notice = res.ok
-          noticeKind = "success"
-        } else if (res.err) {
-          notice = formatError(res.err)
-          noticeKind = "error"
-        }
+        applyActionResult(await withWatchdog(() => opts.onDelete(target)))
       })
     }
 
@@ -490,7 +527,7 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
               {
                 id: "url",
                 label: t("prov.urlLabel"),
-                kind: "text",
+                kind: "text" as const,
                 initial: defaults.baseUrl,
                 validate: validateUrl,
               },
@@ -511,19 +548,17 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
         if (baseUrl === defaults.baseUrl && apiKey === defaults.apiKey) {
           notice = t("ntc.noChange")
           noticeKind = "info"
-        } else {
-          notice = t("ntc.detecting")
-          noticeKind = "info"
-          render()
-          const res = await withWatchdog(() => opts.onEditSave(target, { baseUrl, apiKey }))
-          if (res.ok) {
-            notice = res.ok
-            noticeKind = "success"
-          } else if (res.err) {
-            notice = formatError(res.err)
-            noticeKind = "error"
-          }
+          return
         }
+        const detected = await runDetectWithCancel((sig) =>
+          opts.onEditSave(target, { baseUrl, apiKey }, sig),
+        )
+        if (detected.canceled) {
+          notice = t("common.canceled")
+          noticeKind = "info"
+          return
+        }
+        if (detected.res) applyActionResult(detected.res)
       })
     }
 
@@ -623,7 +658,14 @@ export async function runProviderManagerView(opts: ProviderManagerViewOptions): 
               }
               try {
                 opts.onSelect(p)
-              } catch {}
+              } catch (e) {
+                // Error dari onSelect (mis. simpan konfigurasi gagal) harus
+                // terlihat sebagai notice di dalam popup, bukan tertelan bisu.
+                notice = formatError(e)
+                noticeKind = "error"
+                render()
+                return true
+              }
               cleanup()
               resolve()
               return true

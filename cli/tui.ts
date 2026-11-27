@@ -796,9 +796,10 @@ async function writeSessionSummary(
       )
       const byCategory = new Map<string, number>()
       const childIds = new Set<string>()
+      let journalOther = 0
       for (const r of records) {
         const cat = summaryToolCategory(r.tool)
-        if (cat === "other") other++
+        if (cat === "other") journalOther++
         byCategory.set(cat, (byCategory.get(cat) ?? 0) + 1)
         if (r.childSessionId) childIds.add(r.childSessionId)
       }
@@ -809,6 +810,9 @@ async function writeSessionSummary(
         .map(([cat, n]) => `${n} ${cat}`)
         .join(" · ")
       tools = Math.max(tools, records.length)
+      // Jurnal adalah sumber kanonik saat tersedia: jangan menjumlahkan
+      // ulang kategori `other` di atas hasil snapshot in-memory (T8).
+      if (records.length > 0) other = journalOther
     }
   } catch {}
   try {
@@ -1022,6 +1026,9 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
   // meninggalkan prompt nyangkut di queuedPrompts.
   let turnLoopActive = false
   let turnGen = 0
+  // Hitung ekspansi @mention asinkron yang belum mendarat di steer/runTurn agar
+  // job background yang selesai di celah await tidak membuka turn paralel (T2).
+  let pendingMentionSteers = 0
   // Abort membatalkan NIAT: sampai user benar-benar mengirim prompt BARU,
   // jalur antrean (steering fallback) harus menolak baris. Tanpa ini, Enter
   // yang masuk di celah antara unwind abort dan submit berikutnya mengisi
@@ -1219,7 +1226,9 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
         }
       : {}),
     get currentModel() {
-      if (modelRef.current) return modelRef.current
+      // Hanya fallback ke provider[0] bila override belum diset (undefined);
+      // string "" = tidak ada model aktif setelah semua provider dihapus (T7).
+      if (modelRef.current !== undefined) return modelRef.current || undefined
       const first = cfg.providers[0]
       const m = first?.models[0]
       return first && m ? `${first.id}::${m}` : m
@@ -2333,7 +2342,10 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
           // P12 S2.2 Slice 5 - WorkMode LIVE (bukan snapshot boot): footer
           // mencerminkan mode aktif saat frame digambar.
           workMode: workModeControl?.getWorkMode() ?? "DISCUSS",
-          model: modelRef.current ?? cfg.providers[0]?.models[0] ?? t("tui.noModel"),
+          model:
+            modelRef.current !== undefined
+              ? modelRef.current || t("tui.noModel")
+              : (cfg.providers[0]?.models[0] ?? t("tui.noModel")),
           cwd: cwd ?? process.cwd(),
           context: fmtCtx(ctxTokens),
           metrics: fmtUsageMetrics(ctx, ctxTokens),
@@ -2417,21 +2429,33 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
         // Ekspansi `@mention` asinkron sebelum menyuntik steer (atau antre bila
         // turn berakhir lebih dulu), lalu gema placeholder ke transkrip.
         const gen = turnGen
+        pendingMentionSteers++
         void expandMentions(line, cwd ?? process.cwd())
-          .then((expanded) => {
+          .then(
+            (expanded) => ({ ok: true as const, expanded }),
+            (err) => ({ ok: false as const, err }),
+          )
+          .then((res) => {
+            pendingMentionSteers = Math.max(0, pendingMentionSteers - 1)
             // Buang bila turn dibatalkan atau sudah berpindah ke generasi baru.
             if (turnState.abortRequested || gen !== turnGen) return
-            if (expanded.notes.length) {
-              transcript.pushInfo(expanded.notes.map((n) => c.muted(`  [@mention] ${n}`)))
+            const promptToSend = res.ok ? res.expanded.prompt : line
+            if (!res.ok) {
+              const msg = res.err instanceof Error ? res.err.message : String(res.err)
+              transcript.pushError(sanitizeAnsiLine(msg))
+              app.repaint()
+            } else if (res.expanded.notes.length) {
+              transcript.pushInfo(res.expanded.notes.map((n) => c.muted(`  [@mention] ${n}`)))
             }
-            if (abort !== null && ctx.session.steer?.(expanded.prompt)) {
+            if (abort !== null && ctx.session.steer?.(promptToSend)) {
               transcript.pushUser(echo, chatW)
               if (steeredEchoes.length < 8) steeredEchoes.push(echo)
+              app.showToast(t("tui.steered"))
               app.repaint()
               return
             }
             if (turnLoopActive || abort !== null) {
-              queuedPrompts.push({ text: expanded.prompt, echoText: echo, needsEcho: true })
+              queuedPrompts.push({ text: promptToSend, echoText: echo, needsEcho: true })
               app.showToast(t("tui.queued", { n: String(queuedPrompts.length) }))
               return
             }
@@ -2441,9 +2465,9 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
               disarmAbortQuitIfAvailable(app)
               transcript.pushUser(echo, app.getChatWidth())
               app.repaint()
-              void runTurn(expanded.prompt)
-                .then((res) => {
-                  if (res?.quit) app.requestQuit()
+              void runTurn(promptToSend)
+                .then((turnRes) => {
+                  if (turnRes?.quit) app.requestQuit()
                 })
                 .catch((err) => {
                   const msg = err instanceof Error ? err.message : String(err)
@@ -2452,11 +2476,9 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
                 })
               return
             }
-            queuedPrompts.push({ text: expanded.prompt, echoText: echo, needsEcho: true })
+            queuedPrompts.push({ text: promptToSend, echoText: echo, needsEcho: true })
             app.showToast(t("tui.queued", { n: String(queuedPrompts.length) }))
           })
-          .catch(() => {})
-        app.showToast(t("tui.steered"))
         return true
       }
       // `?.` menjaga fixture/komposisi lama yang belum punya seam ini (fail-safe:
@@ -2549,7 +2571,7 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
       // resume. `abort` non-null sampai seluruh runTurnOnce selesai, `turnLoopActive`
       // menutup kuras queuedCommands, dan `app.busy` menutup jendela @-mention.
       const idle = isTurnIdleForBackground({
-        abortActive: abort !== null || turnLoopActive,
+        abortActive: abort !== null || turnLoopActive || pendingMentionSteers > 0,
         suspended: app.isSuspended(),
         busy: isAppBusy(app),
       })

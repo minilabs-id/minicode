@@ -12,7 +12,11 @@ import { dbPath, openSessionDb, setSessionDdlFaultForTest } from "../src/session
 import { TriggerCoordinator } from "../src/task/trigger.ts"
 import { isReDosPronePattern } from "../src/tools/grep.ts"
 import { promptAsk } from "../src/ui/approval/prompt.ts"
-import { createDecoderState, decodeKeysStream } from "../src/ui/input/prompt-engine.ts"
+import {
+  createDecoderState,
+  createKeyStreamPump,
+  decodeKeysStream,
+} from "../src/ui/input/prompt-engine.ts"
 import { parseCells } from "../src/ui/render/cells.ts"
 import { truncateToWidth } from "../src/ui/render/width.ts"
 import { resetAltScreenDepth } from "../src/ui/runtime/screen.ts"
@@ -114,6 +118,35 @@ describe("P0-2: bracketed paste overflow tidak pernah mengunci decoder", () => {
     const after = decodeKeysStream(Buffer.from("q", "utf8"), state)
     expect(state.pasteOverflow).toBe(false)
     expect(after.some((k) => k.key.type === "char" && k.key.ch === "q")).toBe(true)
+  })
+
+  test("ESC sebelum [201~ dengan jeda >50ms saat pasteOverflow tidak di-flush sebagai Esc tunggal", async () => {
+    const state = createDecoderState()
+    const seen: string[] = []
+    const pump = createKeyStreamPump({
+      state,
+      escMs: 25,
+      onKeys: (keys) => {
+        for (const k of keys) seen.push(k.key.type)
+        return false
+      },
+    })
+    try {
+      pump.push(Buffer.from("\x1b[200~", "utf8"))
+      pump.push(Buffer.alloc(2 * 1024 * 1024 + 32, 0x61))
+      // Chunk terbelah tepat pada ESC pembuka terminator ESC[201~.
+      pump.push(Buffer.from("\x1b", "utf8"))
+      expect(state.pasteOverflow).toBe(true)
+      await new Promise((r) => setTimeout(r, 45))
+      expect(seen).not.toContain("esc")
+
+      pump.push(Buffer.from("[201~", "utf8"))
+      expect(state.pasteOverflow).toBe(false)
+      pump.push(Buffer.from("\r", "utf8"))
+      expect(seen.at(-1)).toBe("enter")
+    } finally {
+      pump.dispose()
+    }
   })
 })
 

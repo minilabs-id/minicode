@@ -169,15 +169,19 @@ describe.serial("provider-manager: add (a)", () => {
 
   test("global scope (default) saves to ~/.minicode", async () => {
     tty = installFakeTty({ rows: 24 })
+    const t = tty
     const mgr = await openManager()
     await addFlow({ key: "sk-1" })
     await tty.send(KEY.enter)
     await waitFor(async () => (await readConfig(globalPath)).providers.length === 1)
+    // Tunggu layar daftar dirender ulang (detachCancel + resume selesai) sebelum close().
+    await waitFor(() => /saved|tersimpan/i.test(visible(t)))
     await mgr.close()
   })
 
   test("URL kustom dipakai apa adanya tanpa picker preset", async () => {
     tty = installFakeTty({ rows: 24 })
+    const t = tty
     const mgr = await openManager()
     await tty.send("a")
     await tty.waitForOutput((o) => o.includes("Base URL"))
@@ -191,6 +195,7 @@ describe.serial("provider-manager: add (a)", () => {
     await tty.send(KEY.enter)
     // URL kustom juga menjalani detect async sebelum save.
     await waitFor(() => existsSync(localConfigPath()))
+    await waitFor(() => /saved|tersimpan/i.test(visible(t)))
     const cfg = JSON.parse(await readFile(localConfigPath(), "utf8")) as {
       providers: { baseUrl: string }[]
     }
@@ -319,10 +324,12 @@ describe.serial("provider-manager: add (a)", () => {
       "utf8",
     )
     tty = installFakeTty({ rows: 24 })
+    const t = tty
     const mgr = await openManager()
     await addFlow({ key: "k-baru" })
     await tty.send(KEY.enter)
     await waitFor(async () => (await readConfig(globalPath)).providers.length === 2)
+    await waitFor(() => /saved|tersimpan/i.test(visible(t)))
     const cfg = JSON.parse(await readFile(globalPath, "utf8")) as {
       providers: { id: string; apiKey: string }[]
     }
@@ -409,6 +416,7 @@ describe.serial("provider-manager: delete (d)", () => {
   test("deleting active provider shows explicit warning", async () => {
     await writeLocalProviders(oneProvider)
     tty = installFakeTty({ rows: 24 })
+    const t = tty
     const mgr = await openManager({ currentModel: "gw::m1" })
     // List marks active provider before user presses d.
     expect(visible(tty)).toContain("(active)")
@@ -419,6 +427,7 @@ describe.serial("provider-manager: delete (d)", () => {
     expect(out).toContain("gw::m1")
     await tty.send("y")
     await tty.send(KEY.enter)
+    await waitFor(() => /deleted|dihapus/i.test(visible(t)))
     await mgr.close()
   }, 5000)
 
@@ -689,6 +698,60 @@ describe("provider-manager view: aksi gantung → watchdog pulih", () => {
     await tty.send(KEY.esc, 30)
     await p
     resolveHung()
+  }, 8000)
+
+  test("T3: Esc saat Detecting models membatalkan request, plus onSelect throw tidak tertelan", async () => {
+    const { runProviderManagerView } = await import("../src/ui/screens/provider-manager.ts")
+    tty = installFakeTty({ rows: 24 })
+    let sawAbort = false
+    const cur = ""
+    const p = runProviderManagerView({
+      initialRows: [{ id: "gw", baseUrl: "https://gw.example/v1", models: 1, firstModel: "m1" }],
+      presets: [],
+      getCurrentModel: () => cur,
+      askScope: false,
+      onSelect: () => {
+        throw new Error("save failed")
+      },
+      loadRows: async () => [
+        { id: "gw", baseUrl: "https://gw.example/v1", models: 1, firstModel: "m1" },
+      ],
+      onAdd: (_input, signal) =>
+        new Promise((_resolve, reject) => {
+          signal?.addEventListener(
+            "abort",
+            () => {
+              sawAbort = true
+              reject(new DOMException("aborted", "AbortError"))
+            },
+            { once: true },
+          )
+        }),
+      onDelete: async () => ({}),
+      onEditDefaults: async () => null,
+      onEditSave: async () => ({}),
+      actionTimeoutMs: 5000,
+    })
+    await tty.ready()
+    await tty.send("a")
+    await tty.waitForOutput((o) => o.includes("Base URL"), 2000)
+    await tty.send("https://api.example.com/v1")
+    await tty.send(KEY.tab)
+    await tty.send("sk-test")
+    await tty.send(KEY.enter)
+    await tty.waitForOutput((o) => o.includes("Detecting models"), 2000)
+    await tty.send(KEY.esc, 60)
+    await tty.waitForOutput(() => visible(tty!).includes("Cancelled"), 2000)
+    expect(sawAbort).toBe(true)
+    await tty.waitForListener(2000)
+    // Enter pada onSelect yang melempar: popup tetap terbuka dan notice error tampil.
+    await tty.send(KEY.enter, 60)
+    await tty.waitForOutput(
+      () => visible(tty!).includes("save failed") || visible(tty!).includes("unexpected"),
+      2000,
+    )
+    await tty.send(KEY.esc, 30)
+    await p
   }, 8000)
 })
 

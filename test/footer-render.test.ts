@@ -429,4 +429,59 @@ describe("footer render", () => {
       expect(fScroll).not.toBe(f0)
     })
   })
+
+  test("U3 terminal sempit: memprioritaskan badge operasional daripada metrik angka", () => {
+    withMono(() => {
+      tty = installFakeTty({ columns: 48 })
+      const [status] = renderFooter(
+        {
+          mode: "ask",
+          workMode: "DISCUSS",
+          model: "very-long-provider::very-long-model-name",
+          cwd: "D:\\Github\\minicode\\deep\\path",
+          context: "42% · 84k",
+          metrics: "$0.12",
+          scrollBadge: "↓ 3 new · PgDn",
+        },
+        48,
+      )
+      const plain = stripAnsi(status!)
+      expect(plain).toContain("↓ 3 new · PgDn")
+      expect(displayWidth(plain)).toBeLessThanOrEqual(47)
+    })
+  })
+
+  test("timer aktif memakai gray untuk segmen pasif agar kontras setara timer diam", () => {
+    const prevColorterm = process.env.COLORTERM
+    const prevNoColor = process.env.NO_COLOR
+    const prevMinicodeColor = process.env.MINICODE_COLOR
+    process.env.COLORTERM = "truecolor"
+    delete process.env.NO_COLOR
+    delete process.env.MINICODE_COLOR
+    try {
+      tty = installFakeTty({ columns: 100 })
+      const [status] = renderFooter(
+        {
+          mode: "auto",
+          workMode: "DISCUSS",
+          model: "test-model",
+          cwd: "/workspace",
+          timer: "00.00.12",
+          timerActive: true,
+          timerHighlight: "seconds",
+        },
+        100,
+      )
+      expect(status).toContain(
+        `${c.gray("00")}${c.gray(".")}${c.gray("00")}${c.gray(".")}${c.white("12")}`,
+      )
+    } finally {
+      if (prevColorterm === undefined) delete process.env.COLORTERM
+      else process.env.COLORTERM = prevColorterm
+      if (prevNoColor === undefined) delete process.env.NO_COLOR
+      else process.env.NO_COLOR = prevNoColor
+      if (prevMinicodeColor === undefined) delete process.env.MINICODE_COLOR
+      else process.env.MINICODE_COLOR = prevMinicodeColor
+    }
+  })
 })

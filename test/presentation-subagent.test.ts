@@ -352,7 +352,9 @@ test("minicode:child-label → activity.label menimpa label activity anak (tanpa
   const diag = createReducerDiagnostics()
   for (const e of events) state = reduce(state, e, diag)
   const child = [...state.activities.values()].find((x) => x.toolCallId === "k_read")
+  const parent = [...state.activities.values()].find((x) => x.toolCallId === "dt_1")
   expect(child?.label).toBe("audit·allowlist")
+  expect(parent?.label).toBe("audit·allowlist")
   expect(child?.parentToolCallId).toBe("dt_1")
   // Durable: seq ikut naik supaya cache snapshot UI ter-invalidasi.
   expect(state.seq).toBeGreaterThanOrEqual(label!.eventSeq)

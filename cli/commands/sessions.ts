@@ -44,7 +44,8 @@ export async function handleSessions(
     const usesLocal =
       existsSync(resolve(base, ".minicode", "sessions.db")) ||
       existsSync(resolve(base, ".minicode"))
-    if (!usesLocal) out(c.dim(`(global scope — no local .minicode/sessions.db in ${base})`))
+    if (!usesLocal)
+      out(c.dim(`(global scope — no local .minicode/sessions.db in ${sanitizeAnsiLine(base)})`))
     if (rows.length === 0) out(c.dim("(no recorded sessions yet)"))
     else {
       const tableData = rows.map((r) => ({

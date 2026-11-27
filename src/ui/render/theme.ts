@@ -145,7 +145,8 @@ function paintTokenFor(token: ColorToken, level: number): Paint {
 function paintTokenBoldFor(token: ColorToken, level: number): Paint {
   if (level === 0) return identity
   const code = level === 1 ? token.c16 : level === 2 ? token.c256 : token.rgb
-  return (s: string) => `\x1b[1;${code}m${s}\x1b[39m`
+  // Tutup bold (`22`) sekaligus foreground (`39`) supaya teks berikutnya pada baris sama tak ikut menebal.
+  return (s: string) => `\x1b[1;${code}m${s}\x1b[22;39m`
 }
 
 // ── Token palet tunggal (VS Code Dark+ inspired) ──
@@ -180,12 +181,14 @@ const TOKENS = {
   // Faint: abu gelap untuk garis footer — lebih redup dari `gray` (bright-black)
   // dan dari `muted` (dim). Dipakai elemen yang harus ada tapi hampir tak
   // terlihat, seperti separator baris dasar.
-  faint: { c16: "90", c256: "38;5;238", rgb: "38;2;72;72;72" },
+  faint: { c16: "90", c256: "38;5;242", rgb: "38;2;104;110;122" },
 } satisfies Record<string, ColorToken>
 
-const GRAY_TOKEN: ColorToken = { c16: "90", c256: "38;5;245", rgb: "90" }
-const ACCENT_ALT_TOKEN: ColorToken = { c16: "95", c256: "38;5;141", rgb: TOKENS.info.rgb }
-const MAGENTA_TOKEN: ColorToken = { c16: "35", c256: "38;5;141", rgb: "35" }
+// Truecolor abu diangkat ke tingkat c256 (245) agar memenuhi kontras AA (~5.2:1) di terminal gelap.
+const GRAY_TOKEN: ColorToken = { c16: "90", c256: "38;5;245", rgb: "38;2;142;148;158" }
+// Ungu lavender konsisten dengan 38;5;141 agar tak runtuh ke cyan (info) maupun ungu SGR 35 gelap.
+const ACCENT_ALT_TOKEN: ColorToken = { c16: "95", c256: "38;5;141", rgb: "38;2;180;142;242" }
+const MAGENTA_TOKEN: ColorToken = { c16: "35", c256: "38;5;141", rgb: "38;2;180;142;242" }
 const WHITE_TOKEN: ColorToken = { c16: "37", c256: "37", rgb: "37" }
 const BRIGHT_YELLOW_TOKEN: ColorToken = {
   c16: "93",

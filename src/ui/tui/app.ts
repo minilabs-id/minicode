@@ -592,7 +592,12 @@ export class TuiApp {
     transcript.onEviction = (removed) => {
       rootOnEviction?.(removed)
       const n = removed.get(this.chatWidth()) ?? 0
-      if (n > 0) this.scrollBack = Math.max(0, this.scrollBack - n)
+      if (n > 0) {
+        this.scrollBack = Math.max(0, this.scrollBack - n)
+        // Ratchet ikut bergeser saat eviction memangkas kepala transkrip
+        // supaya floor lama tidak mendorong viewport keluar batas baru (U2).
+        this.turnScrollFloor = Math.max(0, this.turnScrollFloor - n)
+      }
     }
   }
 
@@ -1010,6 +1015,26 @@ export class TuiApp {
     this.state = { ...this.state, menuOpen: false, sel: -1 }
   }
 
+  /**
+   * Hitung status dropdown composer (`menuOpen` + `sel`) dari baris/kursor
+   * terkini. Saat turn sibuk dropdown tidak dirender, jadi `menuOpen` wajib
+   * false agar Enter/Tab tidak memakai kandidat tersembunyi (T1).
+   */
+  private computeMenuState(
+    line: string,
+    cursor: number,
+    prevSel: number,
+    busy = this.isBusy(),
+  ): { menuOpen: boolean; sel: number } {
+    if (busy) return { menuOpen: false, sel: -1 }
+    const items = this.activeSuggestions(line, cursor).items
+    if (!items.length) return { menuOpen: false, sel: -1 }
+    return {
+      menuOpen: true,
+      sel: Math.min(Math.max(prevSel, -1), items.length - 1),
+    }
+  }
+
   private handleKeys(keys: DecodedKey[]): boolean {
     // Garda suspend: timer flush lone-ESC yang dipersenjatai SEBELUM suspend
     // tetap menembak setelah popup terbuka (listener dilepas, timer tidak).
@@ -1407,13 +1432,11 @@ export class TuiApp {
       )
       if (hit) {
         const nextLine = this.state.line.slice(0, hit.utfStart) + this.state.line.slice(hit.utfEnd)
-        const sug = this.activeSuggestions(nextLine, hit.gStart)
-        const menuOpen = sug.items.length > 0
+        const menu = this.computeMenuState(nextLine, hit.gStart, this.state.sel)
         this.state = {
           line: nextLine,
           cursor: hit.gStart,
-          sel: menuOpen ? Math.min(Math.max(this.state.sel, -1), sug.items.length - 1) : -1,
-          menuOpen,
+          ...menu,
         }
         this.pruneUnusedPasteBlocks()
         this.composerScrollOffset = null
@@ -1438,13 +1461,11 @@ export class TuiApp {
         const units = toGraphemes(this.state.line)
         units.splice(hit.gStart, this.state.cursor - hit.gStart)
         const nextLine = units.join("")
-        const hints = this.activeSuggestions(nextLine, hit.gStart).items
-        const menuOpen = hints.length > 0
+        const menu = this.computeMenuState(nextLine, hit.gStart, this.state.sel)
         this.state = {
           line: nextLine,
           cursor: hit.gStart,
-          sel: menuOpen ? Math.min(Math.max(this.state.sel, -1), hints.length - 1) : -1,
-          menuOpen,
+          ...menu,
         }
         this.pruneUnusedPasteBlocks()
         this.composerScrollOffset = null
@@ -1462,6 +1483,10 @@ export class TuiApp {
   }
 
   private applyEngine(key: PromptKey): void {
+    const busy = this.isBusy()
+    // Saat turn sibuk, dropdown selalu tertutup; pastikan state lama ikut bersih
+    // sebelum applyKey agar Enter tidak mensubstitusi kandidat tersembunyi (T1).
+    if (busy && this.state.menuOpen) this.closeMenu()
     const hadComposerSelection = this.composerSelection !== null
     this.composerSelection = null
     this.composerScrollOffset = null
@@ -1470,10 +1495,12 @@ export class TuiApp {
       this.selection = null
     }
     const hints = (line: string) =>
-      this.activeSuggestions(
-        line,
-        line === this.state.line ? this.state.cursor : toGraphemes(line).length,
-      ).items
+      busy
+        ? []
+        : this.activeSuggestions(
+            line,
+            line === this.state.line ? this.state.cursor : toGraphemes(line).length,
+          ).items
     // Fast path kursor: panah/Home/End hanya memindahkan kursor — isi frame
     // (transkrip, menu, footer) tak berubah satu sel pun. Menyusun ulang frame
     // penuh + diff per sel hanya untuk menggeser kursor membuang kerja O(frame).
@@ -1510,13 +1537,8 @@ export class TuiApp {
       action !== "submit" &&
       !cursorOnly
     ) {
-      const sug = this.activeSuggestions(state.line, state.cursor)
-      const menuOpen = sug.items.length > 0
-      state = {
-        ...state,
-        menuOpen,
-        sel: menuOpen ? Math.min(Math.max(state.sel, -1), sug.items.length - 1) : -1,
-      }
+      const menu = this.computeMenuState(state.line, state.cursor, state.sel, busy)
+      state = { ...state, ...menu }
     }
     const lineUnchanged = state.line === this.state.line
     this.state = state
@@ -2112,7 +2134,7 @@ export class TuiApp {
     const viewH = this.viewportHeight(rows, cols, this.isBusy())
     // P0: lebar CHAT, bukan lebar terminal — kalau tidak, cache proyeksi
     // mis-match terus (chat bisa ter-centre) dan hitungan meleset.
-    const wrapped = this.transcript.wrappedLength(this.chatWidth())
+    const wrapped = this.transcript.wrappedLength(this.chatWidth(), viewH)
     // v7.35: page WAJIB sama dengan viewH (bukan viewH - 1). scrollRows/jumpEdge/
     // followTail memakai `wrapped - viewH`; bila PgDn memakai viewH - 1, satu
     // langkah kurang dari satu viewport penuh sehingga ekor butuh langkah
@@ -2142,7 +2164,7 @@ export class TuiApp {
     const cols = process.stdout.columns || 80
     const rows = process.stdout.rows || 24
     const viewH = this.viewportHeight(rows, cols, this.isBusy())
-    const wrapped = this.transcript.wrappedLength(this.chatWidth())
+    const wrapped = this.transcript.wrappedLength(this.chatWidth(), viewH)
     const maxBack = Math.max(0, wrapped - viewH)
     // v7.28: n > 0 = gulir ke bawah (lebih baru), n < 0 = ke atas.
     if (this.scrollBack === maxBack && n < 0) this.scrollBase = this.transcript.total()
@@ -2165,8 +2187,8 @@ export class TuiApp {
     this.turnScrollFloor = 0
     const rows = process.stdout.rows || 24
     const cols = process.stdout.columns || 80
-    const curWrapped = this.transcript.wrappedLength(this.chatWidth())
     const viewH = this.viewportHeight(rows, cols, this.isBusy())
+    const curWrapped = this.transcript.wrappedLength(this.chatWidth(), viewH)
     const maxBack = Math.max(0, curWrapped - viewH)
     // v7.28: Home = kepala (0), End = ekor (maks).
     if (top) {
@@ -2185,7 +2207,7 @@ export class TuiApp {
   private followTail(): void {
     const cols = process.stdout.columns || 80
     const viewH = this.viewportHeight(process.stdout.rows || 24, cols, this.isBusy())
-    this.scrollBack = Math.max(0, this.transcript.wrappedLength(this.chatWidth()) - viewH)
+    this.scrollBack = Math.max(0, this.transcript.wrappedLength(this.chatWidth(), viewH) - viewH)
     this.scrollBase = this.transcript.total()
     this.pinnedToTail = true
   }
@@ -2762,17 +2784,12 @@ export class TuiApp {
 
   /** Pulihkan menu dropdown bila draft masih memuat `/cmd` atau `@mention` aktif. */
   private syncMenuState(): void {
-    if (!this.state.line) {
+    if (!this.state.line || this.isBusy()) {
       this.closeMenu()
       return
     }
-    const sug = this.activeSuggestions()
-    const menuOpen = sug.items.length > 0
-    this.state = {
-      ...this.state,
-      menuOpen,
-      sel: menuOpen ? Math.min(Math.max(this.state.sel, -1), sug.items.length - 1) : -1,
-    }
+    const menu = this.computeMenuState(this.state.line, this.state.cursor, this.state.sel, false)
+    this.state = { ...this.state, ...menu }
   }
 
   private menuRows(
@@ -3160,13 +3177,11 @@ export class TuiApp {
     const units = toGraphemes(this.state.line)
     units.splice(range.start, range.end - range.start)
     const nextLine = units.join("")
-    const sug = this.activeSuggestions(nextLine, range.start)
-    const menuOpen = sug.items.length > 0
+    const menu = this.computeMenuState(nextLine, range.start, this.state.sel)
     this.state = {
       line: nextLine,
       cursor: range.start,
-      sel: menuOpen ? Math.min(Math.max(this.state.sel, -1), sug.items.length - 1) : -1,
-      menuOpen,
+      ...menu,
     }
     this.composerSelection = null
     this.composerScrollOffset = null
@@ -3272,11 +3287,8 @@ export class TuiApp {
     // v7.28: indikator "baris baru" muncul saat user TIDAK berada di ekor.
     // Ambangnya memakai VIEWH FINAL yang sama dengan frame (bukan hitungan
     // terpisah yang bisa melenceng saat menu/draft berubah).
-    const maxBackForIndicator = Math.max(
-      0,
-      this.transcript.wrappedLength(contentCols, viewH) - viewH,
-    )
-    const awayFromTail = this.scrollBack < maxBackForIndicator
+    const tailMaxBack = Math.max(0, this.transcript.wrappedLength(contentCols, viewH) - viewH)
+    const awayFromTail = this.scrollBack < tailMaxBack
     const newCount = awayFromTail ? this.transcript.total() - this.scrollBase : 0
     const retryBadge =
       busy && this.retryInfo && Date.now() < this.retryToastUntil ? this.retryIndicatorText() : ""
@@ -3311,12 +3323,10 @@ export class TuiApp {
       if (idx >= 0) this.scrollBack = idx
     } else if (this.pinnedToTail && !this.selection) {
       // v0.43 — sticky-tail + ratchet naik-saja. Baris live transien dibatasi
-      // maksimal TIGA baris terakhir di tail transkrip (lihat
-      // `MAX_LIVE_TAIL_ROWS`), jadi narasi committed tak terdorong keluar
-      // viewport. Saat live hilang `total` menyusut tetapi floor menahan
-      // jendela: posisi baris committed di layar tetap, bawah boleh kosong.
-      const maxBack = Math.max(0, this.transcript.wrappedLength(contentCols, viewH) - viewH)
-      this.scrollBack = Math.max(maxBack, this.turnScrollFloor)
+      // maksimal `maxLiveTailRows(viewH)` di tail transkrip, jadi narasi
+      // committed tak terdorong keluar viewport. Saat live hilang `total`
+      // menyusut tetapi floor menahan jendela: posisi baris committed tetap.
+      this.scrollBack = Math.max(tailMaxBack, this.turnScrollFloor)
       this.turnScrollFloor = Math.max(this.turnScrollFloor, this.scrollBack)
     }
     const viewport = this.transcript.viewport(contentCols, viewH, this.scrollBack)
@@ -3589,6 +3599,9 @@ export class TuiApp {
       frame[Math.max(0, mid - (h >= 3 ? 1 : 0))] = c.warning(center(headline))
       if (h >= 3) frame[Math.min(h - 1, mid)] = c.dim(center(sizeHint))
       screen.paint(frame)
+      // Layar "terlalu sempit" tanpa composer: sembunyikan kursor supaya
+      // caret lama tidak mengambang di posisi acak atau berkedip setelah clear.
+      screen.setCursorVisible(false)
       this.frames++
       return
     }

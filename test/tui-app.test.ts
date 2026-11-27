@@ -2786,4 +2786,62 @@ describe("Ctrl+R interactive history search & paste Ctrl+W", () => {
     app.requestQuit()
     await runP
   })
+
+  test("T1 saat turn busy: Enter mengirim /cmd dan @mention literal tanpa substitusi kandidat tersembunyi", async () => {
+    const { app, calls, enqueued, releaseSlow } = setup({
+      listFiles: () => ["README.md"],
+    })
+    const runP = app.run()
+    await tty!.ready()
+    await tty!.send("/slow")
+    await tty!.send(KEY.enter)
+    await waitForCall(calls, "/slow")
+
+    await tty!.send("/he")
+    await tty!.send(KEY.enter)
+    await tty!.send("cek @RE")
+    await tty!.send(KEY.enter)
+    expect(enqueued).toEqual(["/he", "cek @RE"])
+
+    await releaseSlow()
+    await tty!.send(KEY.ctrlD)
+    await runP
+  })
+
+  test("U2 evict transkrip menggeser turun turnScrollFloor sehingga repaint tetap sinkron", async () => {
+    let activities: UiPresentationActivity[] = []
+    const { app, transcript } = setup({
+      columns: 60,
+      rows: 10,
+      getSnapshot: () => ({ activities, turns: [] }),
+    })
+    const runP = app.run()
+    await tty!.ready()
+
+    transcript.pushInfo(Array.from({ length: 4998 }, (_, i) => `row-${i}`))
+    activities = Array.from({ length: 3 }, (_, i) => ({
+      toolCallId: `c-${i}`,
+      name: `LIVE-${i}`,
+      target: "x",
+      status: "running" as const,
+      tsStart: Date.now(),
+    }))
+    app.repaint()
+    const viewH = (app as unknown as { lastLayout: { viewH: number } }).lastLayout.viewH
+    const floorBeforeEvict = (app as unknown as { turnScrollFloor: number }).turnScrollFloor
+    expect(floorBeforeEvict).toBe(transcript.wrappedLength(54, viewH) - viewH)
+
+    // Dorong 10 baris (>5000 cap) → evict memangkas kepala dan langsung menggeser turnScrollFloor turun.
+    transcript.pushInfo(Array.from({ length: 10 }, (_, i) => `extra-${i}`))
+    const floorAfterEvict = (app as unknown as { turnScrollFloor: number }).turnScrollFloor
+    expect(floorAfterEvict).toBeLessThan(floorBeforeEvict)
+
+    activities = []
+    app.repaint()
+    const maxAllowed = Math.max(0, transcript.wrappedLength(54, viewH) - viewH)
+    expect((app as unknown as { scrollBack: number }).scrollBack).toBeLessThanOrEqual(maxAllowed)
+
+    await tty!.send(KEY.ctrlD)
+    await runP
+  })
 })

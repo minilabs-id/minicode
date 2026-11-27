@@ -16,6 +16,7 @@ import {
   UPDATE_GUARD_ENV,
   verifyInstalledVersion,
 } from "../src/policy/update-check.ts"
+import { t } from "../src/ui/i18n/locale.ts"
 import { c } from "../src/ui/render/theme.ts"
 
 /** Tulis satu baris status progres saat alt-screen dilepas (dipakai /update). */
@@ -103,7 +104,7 @@ export async function maybeAutoUpdate(
   } catch {}
   opts?.onPhase?.("install")
   opts?.onNotice?.(`${c.yellow(formatUpdateMessage(version, latest))}\n`)
-  opts?.onNotice?.(c.dim("Menginstall pembaruan otomatis…\n"))
+  opts?.onNotice?.(c.dim(`${t("update.installing")}\n`))
   let ok = false
   let thrown: unknown
   try {
@@ -123,11 +124,7 @@ export async function maybeAutoUpdate(
       } satisfies InstallResult,
     }
     const reason = formatUpdateError(failure.step, failure.result)
-    opts?.onNotice?.(
-      c.yellow(
-        `Auto-update gagal pada ${reason} — lanjut versi ${version}. Update manual: npm install -g minicode-ai@${latest}\n`,
-      ),
-    )
+    opts?.onNotice?.(c.yellow(`${t("update.failedFallback", { reason, v: version, latest })}\n`))
     return
   }
   const installedMatches = (expected: string): boolean => {
@@ -135,11 +132,7 @@ export async function maybeAutoUpdate(
     return verifyInstalledVersion(expected, opts.getInstalledVersion)
   }
   if (!installedMatches(latest)) {
-    opts?.onNotice?.(
-      c.yellow(
-        `Versi terpasang tidak cocok dengan target ${latest}; mencoba memulihkan ${version}…\n`,
-      ),
-    )
+    opts?.onNotice?.(c.yellow(`${t("update.mismatchRestoring", { latest, v: version })}\n`))
     let restored = false
     try {
       restored = installUpdate(version) && installedMatches(version)
@@ -147,22 +140,18 @@ export async function maybeAutoUpdate(
       restored = false
     }
     if (restored) {
-      opts?.onNotice?.(c.yellow(`Auto-update dibatalkan; versi ${version} berhasil dipulihkan.\n`))
+      opts?.onNotice?.(c.yellow(`${t("update.restored", { v: version })}\n`))
       return
     }
     // Gagal tidak dapat dipulihkan: fatal — tetap cetak + keluar (tidak
     // didefer; proses akan mati).
-    process.stderr.write(
-      c.error(
-        `Auto-update tidak dapat memverifikasi atau memulihkan instalasi. Keluar; pulihkan dengan: npm install -g minicode-ai@${version}\n`,
-      ),
-    )
+    process.stderr.write(c.error(`${t("update.restoreFatal", { v: version })}\n`))
     process.exit(1)
   }
   // Restart ke kode baru dengan argv identik; guard env cegah loop bila
   // versi ter-install ternyata masih dilaporkan lebih tua.
   opts?.onPhase?.("restart")
-  opts?.onNotice?.(c.dim(`Restart ke versi ${latest}…\n`))
+  opts?.onNotice?.(c.dim(`${t("update.restarting", { latest })}\n`))
   // Pastikan bar induk mati sebelum anak hidup (idempoten — onLongOp
   // sudah dipanggil sebelum install, tapi install bisa gagal-skip jalur ini
   // bila dipanggil ulang di masa depan).

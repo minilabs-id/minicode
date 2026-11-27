@@ -4,6 +4,8 @@
 // batas lapisan `src/ui/` tak boleh impor grid pemilik.
 
 import { formatUsd } from "../render/money.ts"
+import { sanitizeAnsiLine } from "../render/sanitize.ts"
+import { truncateToWidth } from "../render/width.ts"
 
 /** Data statistik sesi untuk blok penutup. `null` = data memang tak tersedia. */
 export interface SessionSummaryInfo {
@@ -89,10 +91,15 @@ function formatDuration(duration: number | string): string {
  * jangan mengarang `$0.00`.
  */
 export function buildClosingBlock(logoRows: readonly string[], info: SessionSummaryInfo): string[] {
+  const safeBreakdown = info.toolBreakdown
+    ? truncateToWidth(sanitizeAnsiLine(info.toolBreakdown), 120)
+    : ""
+  const safeModel = info.model ? truncateToWidth(sanitizeAnsiLine(info.model), 120) : ""
+  const safeMode = info.mode ? sanitizeAnsiLine(info.mode) : ""
   const cost = info.cost == null ? "$—" : formatUsd(info.cost)
   const toolLine = [
     `${info.turns} turn`,
-    `${info.tools} tool${info.toolBreakdown ? ` (${info.toolBreakdown})` : ""}`,
+    `${info.tools} tool${safeBreakdown ? ` (${safeBreakdown})` : ""}`,
     `${info.files} file`,
     ...(info.agents ? [`${info.agents} agent`] : []),
     `${info.other} other`,
@@ -106,7 +113,7 @@ export function buildClosingBlock(logoRows: readonly string[], info: SessionSumm
     "",
     "Minicode",
     `Session : ${info.stamp}`,
-    ...(info.model ? [`${info.model}${info.mode ? ` · ${info.mode}` : ""}`] : []),
+    ...(safeModel ? [`${safeModel}${safeMode ? ` · ${safeMode}` : ""}`] : []),
     toolLine,
     `${formatTokens(info.tokens)} tok${tokenDetail}   ${cost}   ${formatDuration(info.duration)}`,
     `version ${info.version}`,

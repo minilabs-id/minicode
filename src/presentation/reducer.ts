@@ -552,9 +552,12 @@ export function reduce(
         }
         let updated = false
         for (const entry of state.activities.values()) {
+          // Perbarui label pada tool anak maupun baris induk `delegate_task` agar
+          // judul peran tampil seragam baik saat berjalan maupun di ledger.
           if (
-            entry.childSessionId === event.sessionId &&
-            entry.parentToolCallId === event.toolCallId &&
+            ((entry.childSessionId === event.sessionId &&
+              entry.parentToolCallId === event.toolCallId) ||
+              (!entry.parentToolCallId && entry.toolCallId === event.toolCallId)) &&
             entry.label !== event.label
           ) {
             entry.label = event.label

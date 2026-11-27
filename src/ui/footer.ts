@@ -149,9 +149,10 @@ function paintTimer(text: string, active: boolean, highlight: TimerHighlight = "
   if (parts.length !== 3) return c.white(text)
   const rank: Record<TimerHighlight, number> = { seconds: 1, minutes: 2, hours: 3 }
   const level = rank[highlight]
+  // Pakai gray (bukan faint) agar segmen pasif & pemisah tetap terbaca setara dengan timer diam.
   const part = (value: string, required: number): string =>
-    level >= required ? c.white(value) : c.faint(value)
-  return `${part(parts[0]!, 3)}${c.faint(".")}${part(parts[1]!, 2)}${c.faint(".")}${part(parts[2]!, 1)}`
+    level >= required ? c.white(value) : c.gray(value)
+  return `${part(parts[0]!, 3)}${c.gray(".")}${part(parts[1]!, 2)}${c.gray(".")}${part(parts[2]!, 1)}`
 }
 
 /**
@@ -325,20 +326,43 @@ function buildFooterLine(s: FooterStatus, cols: number): string {
   }
 
   // Terminal sangat sempit: pertahankan spark dan dua nilai mode, hilangkan
-  // timer/model/CWD/label sebelum konteks; potong konteks lebih dahulu.
+  // timer/model/CWD/label sebelum status operasional & konteks (U3).
   const workValue = paintWorkMode(s.workMode, "value")
   const permissionValue = paintPermissionMode(s.mode, "value")
   const strictValue = paintBashStrict(s.strictBash, s.mode === "unrestricted")
   const shortWorkValue = workValue.trimEnd()
-  const modeOnly = `${spark} ${shortWorkValue} ${[permissionValue, strictValue].filter(Boolean).join(" ")}`
-  if (ctx || metrics) {
-    const context = [ctx, metrics].filter(Boolean).join("  ")
-    const baseWidth = displayWidth(modeOnly)
-    const contextBudget = target - baseWidth - 2
-    if (contextBudget > 0) {
-      const shortenedContext = truncateToWidth(context, contextBudget, glyphs.ellipsis)
-      const withContext = `${spark} ${shortWorkValue} ${c.gray(shortenedContext)} ${[permissionValue, strictValue].filter(Boolean).join(" ")}`
-      if (displayWidth(withContext) <= target) return withContext
+  const rightTail = [permissionValue, strictValue].filter(Boolean).join(" ")
+  const modeOnly = rightTail
+    ? `${spark} ${shortWorkValue} ${rightTail}`
+    : `${spark} ${shortWorkValue}`
+  if (extraParts.length > 0 || ctx || metrics) {
+    const budget =
+      target -
+      displayWidth(`${spark} ${shortWorkValue} `) -
+      (rightTail ? displayWidth(rightTail) + 1 : 0)
+    if (budget > 0) {
+      // Prioritaskan badge operasional (retry, +running, queued, new·PgDn) di
+      // atas metrik angka agar peringatan gangguan/gulir tetap terbaca di lebar sempit.
+      const picked: string[] = []
+      let used = 0
+      for (const part of extraParts) {
+        const need = displayWidth(part) + (picked.length > 0 ? 1 : 0)
+        if (used + need <= budget) {
+          picked.push(part)
+          used += need
+        }
+      }
+      const rem = budget - used - (picked.length > 0 ? 1 : 0)
+      if (rem > 0 && (ctx || metrics)) {
+        const rawMetrics = [ctx, metrics].filter(Boolean).join("  ")
+        const fitMetrics = truncateToWidth(rawMetrics, rem, glyphs.ellipsis)
+        if (fitMetrics) picked.push(c.gray(fitMetrics))
+      }
+      if (picked.length > 0) {
+        const mid = picked.join(" ")
+        const withMid = `${spark} ${shortWorkValue} ${mid}${rightTail ? ` ${rightTail}` : ""}`
+        if (displayWidth(withMid) <= target) return withMid
+      }
     }
   }
   if (displayWidth(modeOnly) <= target) return modeOnly

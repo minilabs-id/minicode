@@ -672,7 +672,7 @@ export const delegateTaskTool: Tool = {
       name: {
         type: "string",
         description:
-          "optional human-readable label shown on screen (e.g. 'explore-auth'). Auto-generated as <mode>-<n> when omitted.",
+          "concise role label shown directly on screen (e.g. 'Auth Explorer', 'UI Auditor' — write only the role, never prefix with 'Subagent' or 'Delegate task'). Auto-generated when omitted.",
       },
     },
     required: ["prompt"],

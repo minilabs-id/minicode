@@ -1,5 +1,5 @@
-// Lifecycle popup bersama — satu sumber untuk idle-timer jendela interaktif
-// (picker, form, model/provider manager, wizard).
+// Lifecycle popup bersama — satu sumber untuk idle-timer & pembatalan progres
+// jendela interaktif (picker, form, model/provider manager, wizard).
 //
 // Masalah yang dipecahkan (audit D1): keempat layar menulis ulang pola idle
 // yang sama dengan nuansa kecil berbeda — raw-mode digenggam tanpa input saat
@@ -14,6 +14,8 @@
 //   2. Dua tahap (form, audit TUI-004): warnMs → peringatan (draft DIPERTAHAN-
 //      kan, render footer merah); cancelMs lagi tanpa keypress → batal.
 //      TOTAL tetap warnMs + cancelMs.
+
+import { createDecoderState, createKeyStreamPump } from "../input/prompt-engine.ts"
 
 export interface IdleTimerOptions {
   /** Fase 1 (opsional): jeda diam → peringatan. Tanpa ini = langsung batal. */
@@ -77,4 +79,57 @@ export function createIdleTimer(opts: IdleTimerOptions): IdleTimer {
     clear()
   }
   return { reset, clear, dispose }
+}
+
+/**
+ * Pasang listener stdin sementara selama dialog progres jaringan berjalan agar
+ * Esc/Ctrl+C/Ctrl+D membatalkan `ac` seketika, dan resize me-repaint kotak.
+ * Dipakai bersama oleh wizard setup & provider manager (anti-duplikasi).
+ */
+export function attachProgressCancel(ac: AbortController, onResize: () => void): () => void {
+  let detached = false
+  const pump = createKeyStreamPump({
+    state: createDecoderState(),
+    onKeys: (keys) => {
+      for (const d of keys) {
+        if (d.key.type === "esc" || d.key.type === "ctrl-c" || d.key.type === "ctrl-d") {
+          ac.abort()
+          return true
+        }
+      }
+      return false
+    },
+  })
+  const onData = (chunk: Buffer) => {
+    try {
+      pump.push(new Uint8Array(chunk))
+    } catch {}
+  }
+  const handleResize = () => {
+    try {
+      onResize()
+    } catch {}
+  }
+  try {
+    process.stdin.setRawMode(true)
+    process.stdin.resume()
+    process.stdin.on("data", onData)
+    process.stdout.on("resize", handleResize)
+  } catch {}
+  return () => {
+    if (detached) return
+    detached = true
+    try {
+      pump.dispose()
+    } catch {}
+    try {
+      process.stdin.removeListener("data", onData)
+    } catch {}
+    try {
+      process.stdout.removeListener("resize", handleResize)
+    } catch {}
+    try {
+      process.stdin.setRawMode(false)
+    } catch {}
+  }
 }

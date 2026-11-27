@@ -85,7 +85,7 @@ interface ModalRenderState {
 
 type ModalCursor =
   | { kind: "choice"; selected: number }
-  | { kind: "line"; typed: string; cursor: number }
+  | { kind: "line"; typed: string; cursor: number; selectedRow?: number }
 
 /**
  * Potong jendela teks 1-baris mengikuti posisi kursor agar teks ketik panjang
@@ -295,10 +295,18 @@ function readModalInput<T extends "line" | "choice">(
       }
       signal.addEventListener("abort", onAbort, { once: true })
     }
-    onData = (chunk: Buffer) => pump.push(new Uint8Array(chunk))
+    onData = (chunk: Buffer) => {
+      try {
+        pump.push(new Uint8Array(chunk))
+      } catch {
+        // Error decoder pada byte rusak: tutup fail-closed daripada Promise gantung.
+        finish(null as R)
+      }
+    }
     onResize = () => redraw()
     try {
       process.stdin.setRawMode(true)
+      process.stdin.resume()
     } catch {}
     process.stdin.on("data", onData)
     process.stdout.on("resize", onResize)
@@ -340,7 +348,7 @@ function paintModal(
     cursor?.kind === "choice"
       ? spec.body.length + 1 + cursor.selected
       : cursor?.kind === "line"
-        ? spec.body.length + 1
+        ? (cursor.selectedRow ?? spec.body.length + 1)
         : undefined
   const frame = windowSpec({
     title: spec.title,
@@ -357,7 +365,9 @@ function paintModal(
   if (!cursor) return
   const focus = cursor.kind === "choice" ? focusRow! : spec.body.length + 1
   const visible = focus - box.bodyStart
-  if (visible < 0 || box.bodyTop + visible >= box.lines.length) return
+  if (visible < 0 || visible >= box.shown || box.bodyTop + visible >= box.lines.length) {
+    return
+  }
   const row = box.topRow + box.bodyTop + visible
   const stripped = stripAnsi(box.lines[box.bodyTop + visible] ?? "")
   const leftPad = boxLeftPad(stripped)
@@ -600,18 +610,28 @@ export async function promptAskText(
       try {
         ans = await readModalInput(
           "line",
-          ({ sel, typed, cursor, warned }) =>
-            paintModal(
+          ({ sel, typed, cursor, warned }) => {
+            const modalW = Math.max(10, windowWidth(process.stdout.columns || 80) - 6)
+            const qLines = wrapByWidth(q, modalW).map((l) => `  ${l}`)
+            const selectedRow =
+              options?.length && typed.length === 0 && sel >= 0 ? qLines.length + sel : undefined
+            return paintModal(
               sink,
               {
                 title: t("appr.askTitle"),
-                body: [`  ${q}`, ...formatOptionLines(sel)],
+                body: [...qLines, ...formatOptionLines(sel)],
                 footer: warned ? idleHint : lineHint,
                 escHint: true,
               },
               [],
-              { kind: "line", typed, cursor },
-            ),
+              {
+                kind: "line",
+                typed,
+                cursor,
+                ...(selectedRow !== undefined ? { selectedRow } : {}),
+              },
+            )
+          },
           options?.length ? { options } : {},
           signal,
         )

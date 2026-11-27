@@ -326,7 +326,7 @@ export async function buildSystemPrompt(
       "Act as a manager when the work is large or parallel; for small or direct tasks, just do them yourself — don't delegate for its own sake.",
       "If a tool or web/browser source keeps failing, don't retry blindly — change approach and state briefly what you switched and why.",
       // UI punya panel aktivitas terpisah; jangan ulang rekap status di narasi.
-      'The UI renders tool status and activity separately. When running `bash`, `code_run`, `web_search`, or `web_fetch`, pass a concise human-readable `label` in the user\'s language (e.g. "Pengetesan gate sebagian"); for `delegate_task`, pass a human-readable `name` (e.g. "Subagent mencari bug UI"). Simple file/git tools are labelled automatically. Your visible text is only narration and the final answer — do not print tool-status tables, aggregates, or per-tool logs in chat.',
+      'The UI renders tool status and activity separately. When running `bash`, `code_run`, `web_search`, or `web_fetch`, pass a concise human-readable `label` in the user\'s language (e.g. "Pengetesan gate sebagian"); for `delegate_task`, pass ONLY a concise role `name` (e.g. "Pencari bug UI" — never prefix with "Subagent" or "Delegate task"). Simple file/git tools are labelled automatically. Your visible text is only narration and the final answer — do not print tool-status tables, aggregates, or per-tool logs in chat.',
       'When done, state what changed and verified plus caveats or follow-ups ("done, but ...").',
       "Ask permission only when blocked on a real decision, not for ordinary steps.",
       // Anchor terakhir di blok inti (selamat dari pemotongan ekor data).

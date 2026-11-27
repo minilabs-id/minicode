@@ -203,6 +203,24 @@ describe("wizard: input langsung Base URL + API key", () => {
     await tty.send(KEY.ctrlD, 60)
     expect(await p).toBe(false)
   })
+
+  test("URL localhost berhuruf kapital tetap dilewati tanpa form API key", async () => {
+    tty = installFakeTty({ columns: 80, rows: 24 })
+    const submitted: Array<{ url: string; key: string }> = []
+    const p = runSetupWizardView({
+      onSubmit: async (url, key) => {
+        submitted.push({ url, key })
+        return "Saved localhost provider"
+      },
+    })
+    await tty.ready(3000)
+    await tty.send("HTTP://LOCALHOST:11434/v1")
+    await tty.send(KEY.enter)
+    await tty.waitForScreen((f) => f.some((l) => l.includes("Saved localhost provider")), 3000)
+    await tty.send(KEY.enter)
+    expect(await p).toBe(true)
+    expect(submitted).toEqual([{ url: "HTTP://LOCALHOST:11434/v1", key: "ollama" }])
+  })
 })
 
 describe("wizard: preset kosong", () => {

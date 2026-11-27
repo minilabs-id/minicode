@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.52.1] - 2026-11-27
+
+### Fixed & Improved — stabilitas UI/UX (`T1`–`T12`, `U1`–`U4`) & keterbacaan tema (`C1`–`C5`)
+
+- **Komposer, antrean steer, & ketahanan input:**
+  - Tutup state dropdown composer saat turn sibuk lewat `computeMenuState` tunggal (`src/ui/tui/app.ts`) agar `Up`/`Down`/`Enter` tidak membajak kursor atau menimpa ketikan dengan kandidat tersembunyi (`T1`).
+  - Tangani penolakan `expandMentions` saat busy + hitung `pendingMentionSteers` pada `isTurnIdleForBackground` (`cli/tui.ts`) agar steer `@mention` tak hilang atau balapan dengan auto-resume (`T2`).
+  - Lindungi `hasPendingLoneEsc` saat `state.pasteOverflow` aktif (`src/ui/input/prompt-engine.ts`) agar byte `ESC` di ujung chunk sebelum `[201~` tidak diflush sebagai `esc` tunggal dan mengunci input.
+- **Modal, manager, ringkasan, renderer, & lokalisasi CLI (`T3`–`T12`):**
+  - Tambah dialog progres dengan batal `Esc`/`Ctrl+C` + resize bersama (`attachProgressCancel` di `src/ui/screens/lifecycle.ts`) untuk `/provider` Add/Edit serta modal progres pilih model di `model-manager.ts`, konfirmasi hapus provider memakai `getCurrentModel()`, error `onSelect` tampil di notice, `Ctrl+U` `/model` kembali ke `filter = null`, & hapus sisa notice pada daftar kosong (`T3`, `T6`).
+  - Tambah guard exception listener `stdin` + `resume()`, wrap pertanyaan panjang & ikuti `focusRow` opsi di `src/ui/approval/prompt.ts` (`T4`), perbaiki anggaran `focusAnchor` & guard batas body `form.ts` (`T5`), case-insensitive `localhost` & konsumen ketikan jeda selesai `waitDonePause` di `wizard.ts` (`T10`).
+  - Tampilkan `tui.noModel` di footer/status saat semua model terhapus (`T7`), hindari penghitungan ganda `"other"` + sanitasi `model`/`toolBreakdown` di `session-summary.ts` (`T8`), sembunyikan kursor pada layar `tooSmall` & satukan `wrappedLength(..., viewH)` per frame (`T9`), perbaiki skip-3 backslash `highlight.ts`, wrap ringkasan `diff.ts`, batas naik `askLine`, dan lokalisasi pesan `auto-update`/`/context` + `truncateToWidth` `oneLine` + sanitasi `cwd` `sessions.ts` (`T11`, `T12`).
+- **Perbaikan UI/UX terarah (`U1`–`U4`, `docs/TERMINAL_CONTRACT.md` v0.52.1):**
+  - Tampilkan `waitingStatusRow()` pada `FLAT_RENDERER` (`U1`), ikut rebase `turnScrollFloor` saat eviction transkrip (`U2`), anggaran label proporsional `runningLine()` + prioritas badge operasional di `renderFooter()` sempit (`U3`), dan proyeksi wrap dinamis pada gema prompt `pushUser()` saat resize/`replayHistory()` (`U4`).
+- **Keterbacaan warna tema, SGR, & hierarki markdown (`C1`–`C5`):**
+  - Tutup bold dengan `\x1b[22;39m` di `paintTokenBoldFor`, tingkatkan kontras truecolor `gray` (`38;2;142;148;158`), `faint` (`38;2;104;110;122`), & samakan ungu `accentAlt`/`magenta` (`38;2;180;142;242`) di `src/ui/render/theme.ts`.
+  - Pakai `c.gray` pada segmen timer aktif pasif (`footer.ts`), hapus `c.dim` ganda pada hit pencarian tak terpilih (`list.ts`), pakai `c.gray` untuk ledger non-terminal (`ledger.ts`), bedakan boolean/`null` JSON (`brightMagenta`) & flag shell (`info`) di `highlight.ts`, serta satukan pewarnaan heading H1–H4+, tautan non-bold, kutipan, & fast-path `^\s*>` di `markdown.ts` + `transcript.ts`.
+- **Agregat sub-agent per turn, label peran langsung, & M15:**
+  - Gabungkan seluruh `delegate_task` dalam satu turn menjadi 1 baris agregat `✦ N sub agent · …` di `Transcript.aggregateAgent()` alih-alih menumpuk N baris `✦ 1 sub agent`.
+  - Tampilkan label peran `delegate_task` secara langsung pada live/ledger/linear tanpa awalan `"sub agent · "`/`"agen sub · "` maupun prefiks `"Delegasi tugas"`/`"Subagent"`, serta perbarui label baris induk pada event `activity.label` (`reducer.ts`).
+  - Daftarkan `src/lib/clipboard.ts` ke inventaris efek samping produksi M15 (`test/execution-path-inventory.test.ts`).
+
 ## [0.52.0] - 2026-11-26
 
 ### Added & Fixed — audit stabilitas/anti-hang/performa hot-path, penyempurnaan popup, & hardening UI/provider

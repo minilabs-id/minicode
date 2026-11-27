@@ -170,3 +170,39 @@ test("kegagalan dikelompokkan per alasan di satu baris", () => {
   expect(out).toContain("1 abort")
   expect(out).toContain("1 timeout")
 })
+
+test("empat delegate_task paralel dalam 1 turn diringkas menjadi 1 baris agregat ✦", () => {
+  setSessionLocale("en")
+  const { setSnapshot, emit, screen } = setup()
+  const counts = [22, 26, 15, 34]
+  const kids: UiPresentationActivity[] = []
+  counts.forEach((n, agentIdx) => {
+    for (let i = 0; i < n; i++) {
+      kids.push({
+        toolCallId: `a${agentIdx}-t${i}`,
+        name: "read_file",
+        target: "x.ts",
+        status: "completed",
+        tsStart: Date.now(),
+        parentToolCallId: `parent-${agentIdx}`,
+        childSessionId: `sub_agent_${agentIdx}`,
+        runId: `run_agent_${agentIdx}`,
+        label: `role-${agentIdx}`,
+      })
+    }
+  })
+  setSnapshot({ activities: kids, turns: [] })
+  for (const [seq, k] of kids.entries()) {
+    emit({
+      type: "tool.completed",
+      seq: seq + 1,
+      turnId: 1,
+      toolCallId: k.toolCallId,
+      status: "completed",
+    })
+  }
+  const out = screen()
+  const sparkleLines = out.split("\n").filter((l) => l.includes(glyphs.sparkle))
+  expect(sparkleLines).toHaveLength(1)
+  expect(sparkleLines[0]).toContain(`${glyphs.sparkle} 4 sub agent · 97 tool · 0 failed`)
+})

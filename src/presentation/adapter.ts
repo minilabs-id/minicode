@@ -202,12 +202,15 @@ function extractTarget(args: unknown): string | undefined {
 function extractIntent(args: unknown, toolName?: string): string | undefined {
   if (typeof args !== "object" || args === null) return undefined
   const a = args as Record<string, unknown>
-  const raw =
-    typeof a.label === "string" && a.label.trim()
-      ? a.label
-      : toolName === "delegate_task" && typeof a.name === "string" && a.name.trim()
+  const delegateName =
+    toolName === "delegate_task"
+      ? typeof a.name === "string" && a.name.trim()
         ? a.name
-        : undefined
+        : typeof a.role === "string" && a.role.trim()
+          ? a.role
+          : undefined
+      : undefined
+  const raw = typeof a.label === "string" && a.label.trim() ? a.label : delegateName
   if (!raw) return undefined
   let clean = ""
   for (const ch of raw) {

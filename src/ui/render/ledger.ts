@@ -36,7 +36,7 @@ export function paintLedger(status: UiToolStatus, line: string): string {
         ? c.warning(line)
         : status === "completed"
           ? c.success(line)
-          : c.muted(line)
+          : c.gray(line)
   return process.env.MINICODE_COLOR === "0" || process.env.NO_COLOR ? painted : `\x1b[0m${painted}`
 }
 

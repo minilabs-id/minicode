@@ -282,6 +282,13 @@ export const EXECUTION_PATHS: Readonly<Record<string, RegisteredPath>> = {
     proof: "spawnSync",
     note: "Penghentian subtree proses di Windows untuk bash dan hooks.",
   },
+  "src/lib/clipboard.ts": {
+    cls: "external-integration",
+    entry:
+      "writeNativeClipboard → defaultSpawn (spawnSync powershell/clip/pbcopy/wl-copy/xclip/xsel)",
+    proof: "spawnSync(",
+    note: "Clipboard OS native operator (/copy, drag-copy); dilewati di non-TTY/fake-TTY & SSH (fallback OSC-52). Bukan tool model.",
+  },
   "src/lib/trusted-exec.ts": {
     cls: "external-integration",
     entry: "resolveTrustedExecutable",

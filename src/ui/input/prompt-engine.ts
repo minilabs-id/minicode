@@ -950,7 +950,9 @@ export function decodeKeysStream(chunk: Uint8Array, state: DecoderState): Decode
  * dan tak boleh dipaksa jadi esc.
  */
 export function hasPendingLoneEsc(state: DecoderState): boolean {
-  return state.pending.length === 1 && state.pending[0] === 0x1b
+  // Saat pasteOverflow aktif, byte 0x1b di ujung chunk bisa menjadi awal terminator `ESC[201~`;
+  // jangan flush sebagai Esc tunggal atau mode overflow takkan pernah tertutup.
+  return !state.pasteOverflow && state.pending.length === 1 && state.pending[0] === 0x1b
 }
 
 /**

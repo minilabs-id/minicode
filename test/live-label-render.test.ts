@@ -369,8 +369,9 @@ describe("v0.51 live human-readable tool labels & render", () => {
     })
     // viewH=8 -> kap adaptif = max(3, floor(8*0.5)) = 4 baris dari 6 item
     const view = stripAnsi(t.view(80, 8, 0).join("\n"))
-    expect(view).toContain("Subagent audit footer")
-    expect(view).toContain("Subagent audit transcript")
+    expect(view).toContain("audit footer")
+    expect(view).toContain("audit transcript")
+    expect(view).not.toContain("Subagent audit")
     expect(t.runningExtraCount(8)).toBe(2)
   })
 })

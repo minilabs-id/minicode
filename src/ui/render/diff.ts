@@ -227,7 +227,7 @@ export function renderDiffCard(
     if (count >= max) {
       const added = changes.filter((d) => d.type === "add").length
       const removed = changes.filter((d) => d.type === "delete").length
-      lines.push(c.muted(`    ... (+${added} \u2212${removed})`))
+      lines.push(c.muted(cut(`    ... (+${added} \u2212${removed})`)))
       break
     }
     const d = diff[i]!
@@ -245,7 +245,7 @@ export function renderDiffCard(
   // Pemotongan input WAJIB terlihat: user harus tahu diff yang tampil bukan
   // keseluruhan perubahan (OUTPUT_UX_RULES: truncate selalu dengan marker).
   if (cappedOld.truncated || cappedNew.truncated) {
-    lines.push(c.muted(`    ${t("diff.truncated")}`))
+    lines.push(c.muted(cut(`    ${t("diff.truncated")}`)))
   }
   return lines.join("\n")
 }

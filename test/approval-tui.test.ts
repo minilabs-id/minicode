@@ -507,4 +507,29 @@ describe("M1: idle guard approval di-reset tiap keypress", () => {
     await tty.send(KEY.enter)
     expect(await p2).toBe("ungu")
   })
+
+  test("ask_user panjang di-wrap rapi tanpa menggeser input box keluar dialog", async () => {
+    tty = installFakeTty({ columns: 50, rows: 16 })
+    const paints: string[] = []
+    let lastCursor: { row: number; col: number } | null = null
+    setApprovalSink({
+      pushBlock: () => {},
+      repaint: () => {},
+      suspend: () => {},
+      resume: () => {},
+      paintRegion: (lines) => paints.push(stripAnsi(lines.join("\n"))),
+      clearRegion: () => {},
+      moveCursor: (row, col) => {
+        lastCursor = { row, col }
+      },
+    })
+    const q = "Apakah Anda yakin ingin melanjutkan migrasi konfigurasi produksi sekarang?"
+    const p = promptAskText(q)
+    await tty.ready()
+    await tty.send("ya")
+    expect(paints.at(-1)).toContain("> ya")
+    expect(lastCursor).not.toBeNull()
+    await tty.send(KEY.enter)
+    expect(await p).toBe("ya")
+  })
 })

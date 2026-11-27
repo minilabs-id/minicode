@@ -467,21 +467,22 @@ export async function askLine(opts: AskLineOptions = {}): Promise<string | null>
         process.stdout.write("\r\n")
         process.stdout.write(CLEAR + rule)
         // Kembali ke anchor (melewati dropdown + bingkai + baris input lanjutan).
-        process.stdout.write(`\x1b[${ddRows + (nIn - 1)}A`)
+        const backUp = Math.max(0, ddRows + (nIn - 1))
+        if (backUp > 0) process.stdout.write(`\x1b[${backUp}A`)
         // Gambar ulang blok input (pastikan bersih setelah naik).
         process.stdout.write(`\r${CLEAR}${view.texts[0]}`)
         for (let k = 1; k < nIn; k++) process.stdout.write(`\r\n${CLEAR}${view.texts[k]!}`)
       }
 
       // Naik dari baris input terakhir ke baris kursor, lalu ke kolom logis.
-      const upToCursor = nIn - 1 - view.cursorRow
+      const upToCursor = Math.max(0, Math.min(nIn - 1, nIn - 1 - view.cursorRow))
       if (upToCursor > 0) process.stdout.write(`\x1b[${upToCursor}A`)
       // Kursor sungguhan di posisi logis — bukan selalu di ujung baris.
       placeCursor(view.cursorCol)
       process.stdout.write(SYNC_END)
       prevRows = ddRows
       prevInputRows = nIn
-      prevCursorRow = view.cursorRow
+      prevCursorRow = Math.max(0, Math.min(nIn - 1, view.cursorRow))
     }
 
     // ── render inline (legacy console, tanpa ANSI) ──

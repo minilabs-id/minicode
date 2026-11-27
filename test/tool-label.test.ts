@@ -3,7 +3,7 @@
 // Kontrak yang diuji:
 // - bahasa mengikuti SISTEM/OS (`systemLocale()`), BUKAN sesi /lang;
 // - peta ~12 tool umum → kunci `activity.tool.*` di en.ts DAN id.ts;
-// - delegate_task menyisipkan identitas child (label → summary → target);
+// - delegate_task langsung menampilkan label peran (intent/label/summary/target) tanpa awalan;
 // - fallback nama asli untuk tool tak dikenal;
 // - sanitasi + potong 40 kolom; tanpa I/O.
 import { afterEach, describe, expect, test } from "bun:test"
@@ -110,15 +110,17 @@ describe("humanToolLabel()", () => {
     expect(humanToolLabel("ev\x1b[2Il")).not.toContain("\x1b[2J")
   })
 
-  test("delegate_task menyisipkan label → summary → target", () => {
-    const base = dict()["activity.tool.delegate"]
-    expect(humanToolLabel("delegate_task", { label: "audit-fns" })).toBe(`${base} · audit-fns`)
-    expect(humanToolLabel("delegate_task", { summary: "selesai" })).toBe(`${base} · selesai`)
-    expect(humanToolLabel("delegate_task", { target: "src/app.ts" })).toBe(`${base} · src/app.ts`)
-    // Prioritas: label > summary > target.
-    expect(humanToolLabel("delegate_task", { label: "L", summary: "S", target: "T" })).toBe(
-      `${base} · L`,
+  test("delegate_task langsung menampilkan peran (intent/label/summary/target) tanpa awalan", () => {
+    expect(humanToolLabel("delegate_task", { label: "audit-fns" })).toBe("audit-fns")
+    expect(humanToolLabel("delegate_task", { summary: "selesai" })).toBe("selesai")
+    expect(humanToolLabel("delegate_task", { target: "src/app.ts" })).toBe("src/app.ts")
+    // Prioritas: intent > label > summary > target.
+    expect(humanToolLabel("delegate_task", { label: "L", summary: "S", target: "T" })).toBe("L")
+    // Awalan berulang "Delegasi tugas"/"Subagent" ikut dipangkas agar kolom hemat.
+    expect(humanToolLabel("delegate_task", { intent: "Delegasi tugas Auditor UI" })).toBe(
+      "Auditor UI",
     )
+    expect(humanToolLabel("delegate_task", { intent: "Subagent Pencari bug" })).toBe("Pencari bug")
   })
 
   test("identitas child tak terpercaya disanitasi sebelum disisipkan", () => {
