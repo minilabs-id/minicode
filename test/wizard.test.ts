@@ -16,6 +16,7 @@ let tty: FakeTty | undefined
 let home: string | undefined
 const origHome = process.env.HOME
 const origUserProfile = process.env.USERPROFILE
+const origMinicodeHome = process.env.MINICODE_HOME
 
 afterEach(() => {
   tty?.restore()
@@ -24,6 +25,8 @@ afterEach(() => {
   else process.env.HOME = origHome
   if (origUserProfile == null) delete process.env.USERPROFILE
   else process.env.USERPROFILE = origUserProfile
+  if (origMinicodeHome == null) delete process.env.MINICODE_HOME
+  else process.env.MINICODE_HOME = origMinicodeHome
   if (home) {
     try {
       rmSync(home, { recursive: true, force: true })
@@ -32,11 +35,12 @@ afterEach(() => {
   }
 })
 
-/** HOME sementara supaya wizard tidak menulis ke config asli mesin. */
+/** HOME sementara supaya wizard tidak menulis ke config asli mesin (termasuk MINICODE_HOME untuk POSIX). */
 function isolateHome() {
   home = mkdtempSync(join(tmpdir(), "minicode-wizard-"))
   process.env.HOME = home
   process.env.USERPROFILE = home
+  process.env.MINICODE_HOME = home
 }
 
 const visible = (t: FakeTty) => stripAnsi(t.all())

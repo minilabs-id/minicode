@@ -80,17 +80,21 @@ describe("buildProviderListAsync: OAuth", () => {
   let home: string
   const origHome = process.env.HOME
   const origUserProfile = process.env.USERPROFILE
+  const origMinicodeHome = process.env.MINICODE_HOME
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "minicode-auth-"))
     process.env.HOME = home
     process.env.USERPROFILE = home
+    process.env.MINICODE_HOME = home
   })
   afterEach(() => {
     if (origHome == null) delete process.env.HOME
     else process.env.HOME = origHome
     if (origUserProfile == null) delete process.env.USERPROFILE
     else process.env.USERPROFILE = origUserProfile
+    if (origMinicodeHome == null) delete process.env.MINICODE_HOME
+    else process.env.MINICODE_HOME = origMinicodeHome
     try {
       rmSync(home, { recursive: true, force: true })
     } catch {}

@@ -23,6 +23,7 @@ let tty: ReturnType<typeof installFakeTty> | null = null
 let home: string | undefined
 const origHome = process.env.HOME
 const origUserProfile = process.env.USERPROFILE
+const origMinicodeHome = process.env.MINICODE_HOME
 
 beforeEach(() => setSessionLocale("en"))
 afterEach(() => {
@@ -34,6 +35,8 @@ afterEach(() => {
   else process.env.HOME = origHome
   if (origUserProfile == null) delete process.env.USERPROFILE
   else process.env.USERPROFILE = origUserProfile
+  if (origMinicodeHome == null) delete process.env.MINICODE_HOME
+  else process.env.MINICODE_HOME = origMinicodeHome
   if (home) {
     try {
       rmSync(home, { recursive: true, force: true })
@@ -65,6 +68,7 @@ function isolateHome() {
   home = mkdtempSync(join(tmpdir(), "minicode-geo-"))
   process.env.HOME = home
   process.env.USERPROFILE = home
+  process.env.MINICODE_HOME = home
 }
 
 describe("geometri popup beku per mount", () => {
