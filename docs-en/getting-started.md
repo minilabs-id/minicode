@@ -2,19 +2,17 @@
 
 From zero to a verified first prompt: install, set up a provider, run it, verify.
 
-Single prerequisite: **`bun >= 1.1.13`** — the MiniCode runtime, not Node.js. `npm` is only used for distribution, not for running. (Version floor: the code uses `AbortSignal.any()`, which is absent from Bun 1.0.x; `minicode` fails fast with a clear message on older versions.)
+Single prerequisite: **`bun >= 1.1.13`** — the runtime and package manager for MiniCode, not Node.js. (Version floor: the code uses `AbortSignal.any()`, which is absent from Bun 1.0.x; `minicode` fails fast with a clear message on older versions.)
 
 > The MiniCore kernel ships inside this repository under `vendor/minicore`, so **no extra clone is needed**. A sibling `../minicore` clone is only required when you want to re-sync the kernel via `bun run vendor:minicore`.
 
-## Install (for newcomers — even without Node or Bun)
+## Install (for newcomers)
 
 **Step 1 — Install Bun** (once; close and reopen your terminal afterwards):
 
 ```powershell
 # Windows PowerShell
 powershell -c "irm bun.sh/install.ps1 | iex"
-# if ExecutionPolicy blocks it, try:
-npm install -g bun
 ```
 
 ```bash
@@ -32,13 +30,7 @@ bun add -g minicode-ai
 minicode --version  # confirm the latest version is installed
 ```
 
-MiniCode is a Bun package — installing it with `bun add -g` uses the same runtime that executes it, with no Node intermediary. Without Bun on PATH, `minicode` fails with `'bun' is not recognized`.
-
-Still using npm? It is supported and produces the same binary:
-
-```bash
-npm install -g minicode-ai
-```
+MiniCode is installed and updated exclusively via Bun (`bun add -g minicode-ai`), with no Node/npm intermediary. Without Bun on PATH, `minicode` fails with `'bun' is not recognized`.
 
 For contributors (working from source):
 
@@ -126,43 +118,35 @@ Docker is **not** used automatically even when available — pulling an image un
 ## Update & uninstall
 
 Opening interactive `minicode` (TTY) always checks the registry for a newer
-version: the exact SemVer version found is verified first via a temporary
-install and `npm audit signatures` (registry signature + provenance). Package
-install scripts are disabled; only a dependency-free runtime graph is accepted.
-Then the same version is installed from the official registry, the version in
-the installed package is re-read, and minicode restarts itself. A mismatch
-attempts to restore the previous version; if restoration fails, the process
-stops so it never runs a mixed installation. This only applies to an installed
-copy (source checkouts are untouched).
+version: when found, MiniCode updates the global installation via **Bun**
+(`bun update -g minicode-ai --latest --ignore-scripts`, falling back to
+`bun add -g minicode-ai@latest --ignore-scripts` if `minicode-ai` is not yet in
+global `bun.lock`), re-reads the installed version via `bun pm ls -g`, and
+restarts itself (`MINICODE_AUTO_UPDATE_DONE=1`). On a version mismatch, it
+attempts rollback via `bun add -g minicode-ai@<version> --ignore-scripts --exact`;
+if restoration fails, the process stops so it never runs a mixed installation.
+This only applies to an installed copy (source checkouts / `bun link` are untouched).
 
-Since v0.41 a failed install no longer prints a generic message: it reports the
-**step and redacted reason** (ANSI sequences, tokens/credentials, and URLs
-carrying credentials are stripped; one line of at most 300 characters). The
-**redaction boundary is only those three categories plus the length/line limit**
-— not a general secret scrubber. On Windows the npm runner picks `npm_execpath` /
-`npm.cmd` with a 60-second timeout; the signature-verification order stays
-fail-closed. Old npm, packages without signature/provenance evidence, or offline
-mode still block auto-update.
+Since v0.41 a failed install reports the **step and redacted reason** (ANSI
+sequences, tokens/credentials, and URLs carrying credentials are stripped; one
+line of at most 300 characters). The **redaction boundary is only those three
+categories plus the length/line limit** — not a general secret scrubber. The
+runner executes the `bun` binary directly without a shell and with a 60-second
+timeout, never invoking `npm`.
 
-In the interactive TUI, the `/update` slash command performs the update through
-a safe terminal handoff: release the alt-screen → install → spawn a restart with
-`MINICODE_AUTO_UPDATE_DONE=1` → exit. If it is already latest, opted out, or the
-update fails, the terminal is re-acquired and the result is shown. The command
-exists **only in the TUI**; one-shot, `exec`, pipe, and ACP are fail-closed — they
-answer "not available" and never spawn npm from a pipe/CI.
+In the interactive TUI, the `/update` slash command runs the same update through
+a safe terminal handoff: release the alt-screen → update via `bun` → spawn a
+restart with `MINICODE_AUTO_UPDATE_DONE=1` → exit. If already latest, opted out,
+or failed, the terminal is re-acquired and the result is shown. The command exists
+**only in the TUI**; one-shot, `exec`, pipe, and ACP are fail-closed — they
+answer "not available" and never spawn any updater from a pipe/CI.
 
-> Verification uses npm's capability, not the bundled Sigstore verifier.
-> Verification failure always stops auto-update. Owners can still disable this
-> path (`MINICODE_AUTO_UPDATE=0`) and manage updates manually per their
-> organisation's policy.
-
-The manual instruction uses an **exact verified version** — use
-`npm install -g minicode-ai@<version>`, **not** `npm update -g minicode-ai`
-(`npm update` bypasses signature verification):
+Manual update (always pass `--latest` or `@latest`, because `^0.x.y` in global
+`package.json` holds back `0.x` minor bumps):
 
 ```bash
-npm install -g minicode-ai@<version>   # manual; npm update is not used
-# Bun equivalent: bun add -g minicode-ai@<version>
+bun update -g minicode-ai --latest   # or: bun update -g minicode-ai@latest
+# if not yet in global bun.lock: bun add -g minicode-ai@latest
 minicode sync          # refresh new models from all providers
 minicode pricing sync  # refresh the price cache from models.dev
 ```
@@ -173,7 +157,7 @@ an update so it does not trigger another check/install.
 
 Contributor clone: `cd minicode && git pull && bun install`.
 
-Uninstall = `npm uninstall -g minicode-ai` (or delete the clone + `bun unlink` if you used a link). Global config stays in `~/.minicode/` until you delete it manually; local config lives in `.minicode/` per repository. Uninstalling never removes state, sessions, memory, or your project files.
+Uninstall = `bun remove -g minicode-ai` (or delete the clone + `bun unlink` if you used a link). Global config stays in `~/.minicode/` until you delete it manually; local config lives in `.minicode/` per repository. Uninstalling never removes state, sessions, memory, or your project files.
 
 ## Data locations
 

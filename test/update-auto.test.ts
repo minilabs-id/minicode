@@ -3,7 +3,7 @@
 // mode machine/CI). Install runner di-inject agar tanpa efek samping.
 
 import { describe, expect, test } from "bun:test"
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
@@ -140,129 +140,95 @@ describe("classifyInstallSource & dukungan package manager", () => {
     ).toBe("source-checkout")
   })
 
-  test("shouldAutoUpdate fail-closed untuk bun-global agar tidak kena prefix npm salah", () => {
-    const d = shouldAutoUpdate([], { stdinTTY: true, env: env(), installSource: "bun-global" })
-    expect(d).toEqual({ run: false, reason: "unsupported-package-manager" })
+  test("shouldAutoUpdate mengizinkan bun-global dan npm-global untuk update via Bun", () => {
+    expect(
+      shouldAutoUpdate([], { stdinTTY: true, env: env(), installSource: "bun-global" }),
+    ).toEqual({ run: true })
+    expect(
+      shouldAutoUpdate([], { stdinTTY: true, env: env(), installSource: "npm-global" }),
+    ).toEqual({ run: true })
   })
 
-  test("formatUpdateMessage menyesuaikan perintah upgrade dengan install source", () => {
+  test("formatUpdateMessage selalu menyarankan bun update -g minicode-ai --latest", () => {
     expect(formatUpdateMessage("0.50.0", "0.51.0", "npm-global")).toContain(
-      "npm install -g minicode-ai@0.51.0",
+      "bun update -g minicode-ai --latest",
     )
     expect(formatUpdateMessage("0.50.0", "0.51.0", "bun-global")).toContain(
-      "bun add -g minicode-ai@0.51.0",
+      "bun update -g minicode-ai --latest",
     )
   })
 })
 
 describe("installUpdate", () => {
-  test("verifikasi signature/provenance dahulu, lalu memasang versi tepat", () => {
-    const seen: { args: string[]; cwd?: string }[] = []
+  test("menjalankan bun update -g minicode-ai --latest --ignore-scripts", () => {
+    const seen: { cmd: string; args: string[]; hasCwd: boolean }[] = []
     const ok = installUpdate("1.2.3", (cmd, args, opts) => {
-      expect(cmd).toBe("npm")
-      seen.push({ args, ...(opts?.cwd ? { cwd: opts.cwd } : {}) })
-      if (args[0] === "install" && opts?.cwd) {
-        writeFileSync(
-          join(opts.cwd, "package-lock.json"),
-          JSON.stringify({ packages: { "": {}, "node_modules/minicode-ai": {} } }),
-        )
+      seen.push({ cmd, args, hasCwd: !!opts?.cwd })
+      return { status: 0 }
+    })
+    expect(ok).toBe(true)
+    expect(seen).toEqual([
+      {
+        cmd: "bun",
+        args: ["update", "-g", "minicode-ai", "--latest", "--ignore-scripts"],
+        hasCwd: false,
+      },
+    ])
+  })
+
+  test("fallback ke bun add -g minicode-ai@latest bila paket belum ada di bun.lock", () => {
+    const calls: string[][] = []
+    const ok = installUpdate("1.2.3", (cmd, args) => {
+      expect(cmd).toBe("bun")
+      calls.push(args)
+      if (calls.length === 1) {
+        return { status: 1, stderr: 'error: "minicode-ai" is not in bun.lock' }
       }
       return { status: 0 }
     })
     expect(ok).toBe(true)
-    expect(seen).toHaveLength(3)
-    expect(seen[0]?.args).toContain("minicode-ai@1.2.3")
-    expect(seen[0]?.args).toContain("--ignore-scripts")
-    // v0.43.2: revalidasi packument — if check() melihat versi baru via HTTP
-    // langsung, npm install harus memakai metadata segar, bukan cache basi
-    // (ETARGET "No matching version found" padahal versi sudah terbit).
-    expect(seen[0]?.args).toContain("--prefer-online")
-    expect(seen[1]?.args.slice(0, 2)).toEqual(["audit", "signatures"])
-    expect(seen[2]?.args).toContain("-g")
-    expect(seen[2]?.args).toContain("minicode-ai@1.2.3")
-    expect(seen[2]?.args).toContain("--prefer-online")
-    expect(seen[0]?.cwd).toBeDefined()
-    expect(seen[1]?.cwd).toBe(seen[0]?.cwd)
-    expect(seen[0]?.cwd && existsSync(seen[0].cwd)).toBe(false)
+    expect(calls).toEqual([
+      ["update", "-g", "minicode-ai", "--latest", "--ignore-scripts"],
+      ["add", "-g", "minicode-ai@latest", "--ignore-scripts"],
+    ])
   })
 
-  test("signature failure blocks global install; temp verification root is cleaned", () => {
-    const seen: { args: string[]; cwd?: string }[] = []
-    let calls = 0
-    expect(
-      installUpdate("1.2.3", (cmd, args, opts) => {
-        expect(cmd).toBe("npm")
-        seen.push({ args, ...(opts?.cwd ? { cwd: opts.cwd } : {}) })
-        calls++
-        if (args[0] === "install" && opts?.cwd) {
-          writeFileSync(
-            join(opts.cwd, "package-lock.json"),
-            JSON.stringify({ packages: { "": {}, "node_modules/minicode-ai": {} } }),
-          )
-        }
-        return { status: calls === 2 ? 1 : 0 }
-      }),
-    ).toBe(false)
-    expect(seen).toHaveLength(2)
-    expect(seen[0]?.cwd).toBeDefined()
-    expect(seen[1]?.cwd).toBe(seen[0]?.cwd)
-    expect(seen[1]?.args.slice(0, 2)).toEqual(["audit", "signatures"])
-    expect(seen[0]?.cwd && existsSync(seen[0].cwd)).toBe(false)
+  test("kegagalan update selain not-in-bun.lock tidak fallback ke bun add -g", () => {
+    const calls: string[][] = []
+    const ok = installUpdate("1.2.3", (_cmd, args) => {
+      calls.push(args)
+      return { status: 1, stderr: "error: E401 Unauthorized" }
+    })
+    expect(ok).toBe(false)
+    expect(calls).toHaveLength(1)
+    expect(getLastUpdateFailure()?.step).toBe("bun update -g")
   })
 
-  test("unexpected runtime dependency graph blocks global install", () => {
-    let calls = 0
-    const roots: string[] = []
-    expect(
-      installUpdate("1.2.3", (_cmd, _args, opts) => {
-        calls++
-        if (opts?.cwd) {
-          roots.push(opts.cwd)
-          writeFileSync(
-            join(opts.cwd, "package-lock.json"),
-            JSON.stringify({
-              packages: {
-                "": {},
-                "node_modules/minicode-ai": {},
-                "node_modules/new-runtime-dependency": {},
-              },
-            }),
-          )
-        }
+  test("mode rollback { exact: true } mem-pin versi target via bun add -g --exact", () => {
+    const calls: string[][] = []
+    const ok = installUpdate(
+      "1.2.2",
+      (cmd, args) => {
+        expect(cmd).toBe("bun")
+        calls.push(args)
         return { status: 0 }
-      }),
-    ).toBe(false)
-    expect(calls).toBe(1)
-    expect(roots[0] && existsSync(roots[0])).toBe(false)
+      },
+      { exact: true },
+    )
+    expect(ok).toBe(true)
+    expect(calls).toEqual([["add", "-g", "minicode-ai@1.2.2", "--ignore-scripts", "--exact"]])
   })
 
   test("install exit failure or runner error returns false", () => {
     expect(installUpdate("1.2.3", () => ({ status: 1 }))).toBe(false)
     expect(
       installUpdate("1.2.3", () => {
-        throw new Error("npm hilang")
+        throw new Error("bun hilang")
       }),
     ).toBe(false)
   })
 
-  test("global install failure is reported after successful signature verification", () => {
-    let calls = 0
-    expect(
-      installUpdate("1.2.3", (_cmd, args, opts) => {
-        calls++
-        if (args[0] === "install" && opts?.cwd) {
-          writeFileSync(
-            join(opts.cwd, "package-lock.json"),
-            JSON.stringify({ packages: { "": {}, "node_modules/minicode-ai": {} } }),
-          )
-        }
-        return { status: calls < 3 ? 0 : 1 }
-      }),
-    ).toBe(false)
-    expect(calls).toBe(3)
-  })
-
-  test("menolak target non-SemVer sebelum menjalankan npm", () => {
+  test("menolak target non-SemVer sebelum menjalankan bun", () => {
     let called = false
     expect(
       installUpdate("latest; whoami", () => {
@@ -287,18 +253,24 @@ describe("verifyInstalledVersion", () => {
 })
 
 describe("readGlobalInstalledVersion", () => {
-  test("membaca versi dari prefix npm global (bukan modul yang sedang jalan)", () => {
+  test("membaca versi dari direktori global Bun maupun stdout bun pm ls -g", () => {
     const root = mkdtempSync(join(tmpdir(), "mc-global-ver-"))
     try {
-      const pkgDir = join(root, "minicode-ai")
+      const pkgDir = join(root, "node_modules", "minicode-ai")
       mkdirSync(pkgDir, { recursive: true })
       writeFileSync(join(pkgDir, "package.json"), JSON.stringify({ version: "9.8.7" }))
       const v = readGlobalInstalledVersion((cmd, args) => {
-        expect(cmd).toBe("npm")
-        expect(args).toEqual(["root", "-g"])
-        return { status: 0, stdout: `${root}\r\n` }
+        expect(cmd).toBe("bun")
+        expect(args).toEqual(["pm", "ls", "-g"])
+        return { status: 0, stdout: `${root} node_modules (3 installed)\n└── minicode-ai@9.8.7\n` }
       })
       expect(v).toBe("9.8.7")
+
+      const fromStdout = readGlobalInstalledVersion(() => ({
+        status: 0,
+        stdout: "/nonexistent/bun/global node_modules (2 installed)\n├── minicode-ai@2.4.1\n",
+      }))
+      expect(fromStdout).toBe("2.4.1")
       expect(readGlobalInstalledVersion(() => ({ status: 1 }))).toBe("0.0.0")
     } finally {
       rmSync(root, { recursive: true, force: true })
@@ -308,7 +280,7 @@ describe("readGlobalInstalledVersion", () => {
 
 describe("formatUpdateError", () => {
   test("ANSI, token, URL kredensial, dan newline diredaksi jadi satu baris", () => {
-    const msg = formatUpdateError("npm audit signatures", {
+    const msg = formatUpdateError("bun update -g", {
       status: 1,
       stderr:
         "\u001b[31mE401\u001b[0m token npm_abcdefgh12345678\n" +
@@ -317,7 +289,7 @@ describe("formatUpdateError", () => {
         "Authorization: Bearer sk_live_abcdefghij\n" +
         "password=hunter2\n",
     })
-    expect(msg).toContain("npm audit signatures (exit 1)")
+    expect(msg).toContain("bun update -g (exit 1)")
     expect(msg).toContain("E401")
     for (const secret of [
       "npm_abcdefgh12345678",
@@ -336,75 +308,59 @@ describe("formatUpdateError", () => {
   })
 
   test("timeout dan error.message ikut jadi alasan", () => {
-    const timed = formatUpdateError("npm install -g", {
+    const timed = formatUpdateError("bun update -g", {
       status: null,
       timedOut: true,
-      error: "spawn npm ETIMEDOUT",
+      error: "spawn bun ETIMEDOUT",
     })
-    expect(timed).toContain("npm install -g (timeout)")
+    expect(timed).toContain("bun update -g (timeout)")
     expect(timed).toContain("ETIMEDOUT")
-    expect(formatUpdateError("npm install", { status: 1 })).toContain("npm tidak memberi detail")
-    expect(formatUpdateError("npm root -g", { status: null, timedOut: true })).toContain(
+    expect(formatUpdateError("bun update -g", { status: 1 })).toContain("bun tidak memberi detail")
+    expect(formatUpdateError("bun pm ls -g", { status: null, timedOut: true })).toContain(
       "melewati batas waktu",
     )
   })
 
   test("stderr panjang dipangkas ≤300 char (tidak mengembalikan stderr mentah)", () => {
-    const msg = formatUpdateError("npm install", { status: 1, stderr: "x".repeat(2000) })
+    const msg = formatUpdateError("bun update -g", { status: 1, stderr: "x".repeat(2000) })
     expect(msg.length).toBeLessThanOrEqual(300)
     expect(msg).not.toBe("x".repeat(2000))
-    expect(msg).toContain("npm install (exit 1)")
+    expect(msg).toContain("bun update -g (exit 1)")
   })
 })
 
-describe("diagnostik runner npm", () => {
-  const writeLock = (cwd: string) =>
-    writeFileSync(
-      join(cwd, "package-lock.json"),
-      JSON.stringify({ packages: { "": {}, "node_modules/minicode-ai": {} } }),
-    )
-
-  test("stderr dari audit signatures masuk ke lastFailure (sudah diredaksi)", () => {
+describe("diagnostik runner bun", () => {
+  test("stderr dari bun update -g masuk ke lastFailure (sudah diredaksi)", () => {
     expect(
-      installUpdate("1.2.3", (_cmd, args, opts) => {
-        if (args[0] === "install" && opts?.cwd) writeLock(opts.cwd)
-        if (args[0] === "audit")
-          return { status: 1, stderr: "\u001b[31mE401 token npm_secrettoken123456\u001b[0m" }
-        return { status: 0 }
-      }),
+      installUpdate("1.2.3", () => ({
+        status: 1,
+        stderr: "\u001b[31mE401 token npm_secrettoken123456\u001b[0m",
+      })),
     ).toBe(false)
     const failure = getLastUpdateFailure()
-    expect(failure?.step).toBe("npm audit signatures")
+    expect(failure?.step).toBe("bun update -g")
     const text = formatUpdateError(failure!.step, failure!.result)
     expect(text).toContain("E401")
     expect(text).not.toContain("npm_secrettoken123456")
   })
 
-  test("timedOut pada install -g tercatat, bukan sekadar status null", () => {
+  test("timedOut pada fallback bun add -g tercatat, bukan sekadar status null", () => {
+    let calls = 0
     expect(
-      installUpdate("1.2.3", (_cmd, args, opts) => {
-        if (args[0] === "install" && opts?.cwd) {
-          writeLock(opts.cwd)
-          return { status: 0 }
-        }
-        if (args[0] === "audit") return { status: 0 }
-        return { status: null, timedOut: true, error: "spawn npm ETIMEDOUT" }
+      installUpdate("1.2.3", () => {
+        calls++
+        if (calls === 1) return { status: 1, stderr: '"minicode-ai" is not in bun.lock' }
+        return { status: null, timedOut: true, error: "spawn bun ETIMEDOUT" }
       }),
     ).toBe(false)
     const failure = getLastUpdateFailure()
-    expect(failure?.step).toBe("npm install -g")
+    expect(failure?.step).toBe("bun add -g")
     expect(failure?.result.timedOut).toBe(true)
     expect(formatUpdateError(failure!.step, failure!.result)).toContain("timeout")
   })
 
   test("error.message runner diteruskan ke detail kegagalan", () => {
-    expect(
-      installUpdate("1.2.3", (_cmd, args, opts) => {
-        if (args[0] === "install" && opts?.cwd) writeLock(opts.cwd)
-        if (args[0] === "install" && !opts?.cwd) return { status: null, error: "spawn EACCES" }
-        return { status: 0 }
-      }),
-    ).toBe(false)
+    expect(installUpdate("1.2.3", () => ({ status: null, error: "spawn EACCES" }))).toBe(false)
     expect(getLastUpdateFailure()?.result.error).toBe("spawn EACCES")
   })
 })
@@ -499,8 +455,8 @@ describe("runManualUpdate", () => {
         install: () => false,
       })
       expect(result.ok).toBe(false)
-      expect(result.step).toBe("npm install")
-      expect(result.reason).toContain("npm install")
+      expect(result.step).toBe("bun update -g")
+      expect(result.reason).toContain("bun update -g")
       expect(result.reason!.length).toBeGreaterThan(0)
       expect(result.reason!.length).toBeLessThanOrEqual(300)
     })
@@ -548,7 +504,7 @@ describe("runManualUpdate", () => {
     })
   })
 
-  test("preflight bun-global cek versi saja lalu beri perintah bun add -g", async () => {
+  test("bun-global menjalankan alur penuh check → install → verify tanpa blok preflight", async () => {
     await withEnv(clean, async () => {
       let installCalled = false
       const resNew = await runManualUpdate({
@@ -558,11 +514,10 @@ describe("runManualUpdate", () => {
           installCalled = true
           return true
         },
+        getInstalled: () => "2.1.0",
       })
-      expect(installCalled).toBe(false)
-      expect(resNew.ok).toBe(false)
-      expect(resNew.step).toBe("preflight")
-      expect(resNew.reason).toContain("bun add -g minicode-ai@2.1.0")
+      expect(installCalled).toBe(true)
+      expect(resNew).toEqual({ ok: true, latest: "2.1.0" })
 
       const resLatest = await runManualUpdate({
         installSource: "bun-global",

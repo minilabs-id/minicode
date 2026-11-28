@@ -12,6 +12,7 @@ import {
   getLastUpdateFailure,
   type InstallResult,
   installUpdate,
+  resolveUpdatedEntry,
   shouldAutoUpdate,
   UPDATE_GUARD_ENV,
   verifyInstalledVersion,
@@ -96,9 +97,9 @@ export async function maybeAutoUpdate(
   if (signal?.aborted) return
   if (!latest) return
   // Fase panjang dimulai (install + restart): minta pemanggil menghentikan
-  // bar transient-nya DULU. Output anak (npm/respawn) kini dipipe dan
+  // bar transient-nya DULU. Output anak (bun/respawn) kini dipipe dan
   // disembunyikan (stdio: "pipe") sehingga tidak mengotori bar — pewarisan
-  // `inherit` lama membuat output npm mentah menimpa spinner/bar.
+  // `inherit` lama membuat output bun mentah menimpa spinner/bar.
   try {
     opts?.onLongOp?.()
   } catch {}
@@ -117,7 +118,7 @@ export async function maybeAutoUpdate(
     // installUpdate mencatat langkah + detail yang sudah diredaksi. Pakai itu,
     // bukan stderr mentah — user butuh tahu apakah E401, EACCES, atau timeout.
     const failure = getLastUpdateFailure() ?? {
-      step: "npm install",
+      step: "bun update -g",
       result: {
         status: null,
         error: thrown ? errorMessage(thrown) : "instalasi gagal tanpa detail",
@@ -135,7 +136,7 @@ export async function maybeAutoUpdate(
     opts?.onNotice?.(c.yellow(`${t("update.mismatchRestoring", { latest, v: version })}\n`))
     let restored = false
     try {
-      restored = installUpdate(version) && installedMatches(version)
+      restored = installUpdate(version, undefined, { exact: true }) && installedMatches(version)
     } catch {
       restored = false
     }
@@ -161,7 +162,7 @@ export async function maybeAutoUpdate(
   try {
     await opts?.onBeforeRespawn?.()
   } catch {}
-  const entry = process.argv[1] ?? ""
+  const entry = resolveUpdatedEntry()
   const child = spawn(process.execPath, [entry, ...process.argv.slice(2)], {
     stdio: "inherit",
     env: { ...process.env, [UPDATE_GUARD_ENV]: "1" },

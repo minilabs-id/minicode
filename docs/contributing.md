@@ -22,7 +22,7 @@ Catatan instalasi dev:
 - `@lydell/node-pty` DIPIN EKSAK di `bun.lock` (bukan caret): modul native
   berprebuild per platform, khusus test PTY; upgrade beta berikutnya wajib
   validasi probe PTY ulang di Linux + Windows. Sengaja devDependency agar
-  instalasi user `npm install -g` tidak ikut mengunduh biner native test-only.
+  instalasi user `bun add -g` tidak ikut mengunduh biner native test-only.
 - PTY tidak tersedia di sebagian mesin Windows (ConPTY) — test PTY di-SKIP
   nyata via `test.skipIf` (bukan pass palsu, lihat F1 di CHANGELOG); CI Linux
   justru GAGAL bila PTY tersedia-di-harapkan tapi tak bisa dibuka.
@@ -71,10 +71,10 @@ bun run vendor:check   # provenance MiniCore (soft; vendor host-editable sejak v
 
 ## Auto-update (v0.41) — batas untuk contributor
 
-- Jalur update hanya untuk salinan ter-install; checkout source tidak disentuh.
+- Jalur update hanya untuk salinan ter-install; checkout source (`bun link`) tidak disentuh.
 - Injeksi `withUpdate` **HANYA** di composition root (`cli/index.ts`, `cli/setup.ts`)
   dan hanya untuk TUI interaktif. Jalur non-TTY/one-shot/`exec`/ACP wajib tetap
-  fail-closed: tanpa injeksi → pesan "not available", tak ada spawn npm dari
+  fail-closed: tanpa injeksi → pesan "not available", tak ada spawn updater dari
   pipe/CI.
 - Handoff terminal (`releaseTerminal`/`reacquireTerminal`) adalah operasi **di luar
   frame `paint()`** — I1 (satu `stdout.write` per frame) tidak boleh dilanggar.
@@ -82,9 +82,7 @@ bun run vendor:check   # provenance MiniCore (soft; vendor host-editable sejak v
 - Redaksi diagnostik hanya tiga kategori (ANSI, token/kredensial, URL berkredensial)
   plus satu baris ≤300 char — jangan dipakai sebagai pembersih rahasia umum atau
   jalur teks masuk ke prompt/model.
-- Urutan verifikasi signature tetap fail-closed. Instruksi manual: lihat
-  [instalasi manual](getting-started.md). Windows: runner
-  `npm_execpath`/`npm.cmd`, timeout 60 dtk.
+- Instalasi & pembaruan memakai `bun` saja (`bun update -g minicode-ai --latest --ignore-scripts`, fallback `bun add -g minicode-ai@latest --ignore-scripts`; `npm` tak pernah dipakai). Instruksi manual: lihat [instalasi manual](getting-started.md). Eksekusi langsung biner `bun` tanpa shell, timeout 60 dtk.
 - Guard internal `MINICODE_AUTO_UPDATE_DONE=1` mencegah loop restart; jangan diset
   manual di luar jalur update.
 

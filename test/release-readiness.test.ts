@@ -89,18 +89,20 @@ describe("release: satu kontrak instalasi di semua permukaan", () => {
   // `mini-code`); `minicode-cli` milik pihak lain. `minicode-ai` tersedia dan
   // disetujui pemilik. Bin tetap `minicode`; nama scoped lama tidak boleh
   // tersisa di permukaan install mana pun.
-  test("instalasi = `minicode-ai` + Bun-first; nama lama tak boleh tersisa", () => {
-    for (const f of ["README.md", "docs/getting-started.md"]) {
+  test("instalasi = `minicode-ai` + Bun-only; nama lama & npm install tak boleh tersisa", () => {
+    for (const f of ["README.md", "docs/getting-started.md", "docs-en/getting-started.md"]) {
       const src = read(f)
-      expect(src).toContain("npm install -g minicode-ai")
+      expect(src).toContain("bun add -g minicode-ai")
+      expect(src).toContain("bun update -g minicode-ai")
       expect(src).not.toContain("@miniroom/minicode")
-      expect(src).not.toMatch(/npm install -g minicode(?!-ai)/)
+      expect(src).not.toContain("npm install -g minicode-ai")
+      expect(src).not.toMatch(/bun add -g minicode(?!-ai)/)
     }
     const firstIdx = (src: string, needles: string[]): number => {
       const hits = needles.map((n) => src.indexOf(n)).filter((i) => i >= 0)
       return hits.length ? Math.min(...hits) : -1
     }
-    for (const f of ["README.md", "docs/getting-started.md"]) {
+    for (const f of ["README.md", "docs/getting-started.md", "docs-en/getting-started.md"]) {
       const src = read(f)
       // Case-insensitive + bebas angka: yang diwajibkan ADALAH lantai versi
       // bun sebelum perintah install, bukan angka persis — angka memang bergerak
@@ -108,13 +110,16 @@ describe("release: satu kontrak instalasi di semua permukaan", () => {
       // permukaan yang jujur versinya justru gagal kontrak (audit 2026-09-23).
       const bunIdx = firstIdx(src.toLowerCase(), ["bun >=", "bun ≥"])
       expect(bunIdx).toBeGreaterThanOrEqual(0)
-      expect(bunIdx).toBeLessThan(src.indexOf("npm install -g minicode-ai"))
+      expect(bunIdx).toBeLessThan(src.indexOf("bun add -g minicode-ai"))
     }
   })
 
   test("uninstall/update mendokumentasikan state preservation", () => {
-    const src = read("docs/getting-started.md")
-    expect(src).toContain("npm uninstall -g minicode-ai")
-    expect(src).toMatch(/tidak pernah menghapus state/i)
+    for (const f of ["docs/getting-started.md", "docs-en/getting-started.md"]) {
+      const src = read(f)
+      expect(src).toContain("bun remove -g minicode-ai")
+      expect(src).not.toContain("npm uninstall -g minicode-ai")
+      expect(src).toMatch(/tidak pernah menghapus state|never removes state/i)
+    }
   })
 })

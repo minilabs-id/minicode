@@ -119,25 +119,27 @@ Kepala tabel penuh ada di [Environment Variables](environment.md); yang paling s
 | `MINICODE_SUB_AGENT_TIMEOUT_MS` | Timeout per turn sub-agent (ms, default 3600000); ditimpa `timeoutMs` di `delegate_task` |
 | `NO_UPDATE_CHECK=1` | Lewati pengecekan pembaruan saat startup |
 | `MINICODE_AUTO_UPDATE=0\|false\|off` | Nonaktifkan pengecekan & pemasangan pembaruan otomatis |
-| `CI=1` | Auto-update fail-closed: tanpa pemasangan, tanpa spawn npm |
+| `CI=1` | Auto-update fail-closed: tanpa pemasangan, tanpa spawn updater |
 | `MINICODE_AUTO_UPDATE_DONE=1` | Guard internal pada proses restart hasil `/update` (jangan diset manual) |
 
 ## Auto-update (v0.41)
 
-Auto-update berlaku hanya untuk salinan ter-install (checkout source tidak
-disentuh) dan memverifikasi versi eksak lewat `npm audit signatures` sebelum
-pemasangan; kegagalan verifikasi selalu membatalkan update. Sejak v0.41
-kegagalan install menyebut **langkah & alasan** yang sudah diredaksi (ANSI,
-token/kredensial, URL berkredensial dibuang; satu baris ≤300 char), bukan pesan
-generik — batas redaksi hanya tiga kategori itu plus panjang/baris, bukan
-pembersih rahasia umum. Di Windows runner npm memilih `npm_execpath` / `npm.cmd`
-dengan timeout 60 dtk; urutan verifikasi signature tetap fail-closed.
+Auto-update berlaku hanya untuk salinan ter-install (checkout source / `bun link`
+tidak disentuh) dan memperbarui paket lewat **`bun update -g minicode-ai --latest --ignore-scripts`**
+(fallback ke `bun add -g minicode-ai@latest --ignore-scripts` bila belum tercatat
+di `bun.lock` global), tanpa menyentuh `npm`. Versi terpasang diverifikasi ulang
+lewat `bun pm ls -g` sebelum restart; kegagalan mencoba rollback ke versi lama.
+Sejak v0.41 kegagalan install menyebut **langkah & alasan** yang sudah diredaksi
+(ANSI, token/kredensial, URL berkredensial dibuang; satu baris ≤300 char), bukan
+pesan generik — batas redaksi hanya tiga kategori itu plus panjang/baris, bukan
+pembersih rahasia umum. Runner mengeksekusi biner `bun` langsung tanpa shell
+dengan timeout 60 dtk.
 
 Slash command `/update` hanya tersedia di TUI interaktif: release alt-screen →
-install → spawn restart dengan `MINICODE_AUTO_UPDATE_DONE=1` → exit; bila sudah
-latest/opt-out/gagal, terminal di-reacquire dan hasil ditampilkan. Jalur
+install via `bun` → spawn restart dengan `MINICODE_AUTO_UPDATE_DONE=1` → exit;
+bila sudah latest/opt-out/gagal, terminal di-reacquire dan hasil ditampilkan. Jalur
 non-TTY/one-shot/`exec`/pipe/ACP **fail-closed** — injeksi `withUpdate` absen,
-perintah menjawab "not available", tak pernah spawn npm dari pipe/CI. Instruksi
+perintah menjawab "not available", tak pernah spawn updater dari pipe/CI. Instruksi
 manual: lihat [instalasi manual](getting-started.md). Lihat
 [Environment](environment.md#auto-update-v041) untuk daftar opt-out.
 

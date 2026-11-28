@@ -642,12 +642,12 @@ export const id: Record<MsgKey, string> = {
   "cli.daemonRunFailed": "[daemon] run ter-host gagal: {msg}",
   "update.installing": "Memasang pembaruan otomatis…",
   "update.failedFallback":
-    "Pembaruan otomatis gagal pada {reason} — lanjut dengan versi {v}. Update manual: npm install -g minicode-ai@{latest}",
+    "Pembaruan otomatis gagal pada {reason} — lanjut dengan versi {v} (terbaru: {latest}). Update manual: bun update -g minicode-ai --latest",
   "update.mismatchRestoring":
     "Versi terpasang tidak cocok dengan target {latest}; mencoba memulihkan {v}…",
   "update.restored": "Pembaruan otomatis dibatalkan; versi {v} berhasil dipulihkan.",
   "update.restoreFatal":
-    "Pembaruan otomatis tidak dapat memverifikasi atau memulihkan instalasi. Keluar; pulihkan dengan: npm install -g minicode-ai@{v}",
+    "Pembaruan otomatis tidak dapat memverifikasi atau memulihkan instalasi. Keluar; pulihkan dengan: bun add -g minicode-ai@{v}",
   "update.restarting": "Memulai ulang ke versi {latest}…",
   "ctx.errNoActiveModel": "belum ada model aktif — pilih lewat /model",
   "ctx.errProviderNotFound": "penyedia {id} tidak ditemukan",

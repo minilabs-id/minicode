@@ -631,12 +631,12 @@ export const en = {
   "cli.daemonRunFailed": "[daemon] hosted run failed: {msg}",
   "update.installing": "Installing automatic update…",
   "update.failedFallback":
-    "Auto-update failed on {reason} — continuing with version {v}. Manual update: npm install -g minicode-ai@{latest}",
+    "Auto-update failed on {reason} — continuing with version {v} (latest: {latest}). Manual update: bun update -g minicode-ai --latest",
   "update.mismatchRestoring":
     "Installed version does not match target {latest}; attempting to restore {v}…",
   "update.restored": "Auto-update aborted; version {v} restored successfully.",
   "update.restoreFatal":
-    "Auto-update could not verify or restore installation. Exiting; recover with: npm install -g minicode-ai@{v}",
+    "Auto-update could not verify or restore installation. Exiting; recover with: bun add -g minicode-ai@{v}",
   "update.restarting": "Restarting into version {latest}…",
   "ctx.errNoActiveModel": "no active model — pick one with /model",
   "ctx.errProviderNotFound": "provider {id} not found",

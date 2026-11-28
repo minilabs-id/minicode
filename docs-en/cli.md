@@ -119,27 +119,29 @@ The full table is in [Environment Variables](environment.md); the most used:
 | `MINICODE_SESSION_SUMMARY=0` | Disable the closing session block (on by default), written to scrollback after the alternate screen is closed |
 | `NO_UPDATE_CHECK=1` | Skip the update check at startup |
 | `MINICODE_AUTO_UPDATE=0\|false\|off` | Disable the automatic update check and install |
-| `CI=1` | Auto-update is fail-closed: no install, no npm spawn |
+| `CI=1` | Auto-update is fail-closed: no install, no updater spawn |
 | `MINICODE_AUTO_UPDATE_DONE=1` | Internal guard on the restart process produced by `/update` (do not set manually) |
 
 ## Auto-update (v0.41)
 
-Auto-update applies only to an installed copy (source checkouts are untouched)
-and verifies the exact version with `npm audit signatures` before installing;
-verification failure always cancels the update. Since v0.41 a failed install
-reports the **step and redacted reason** (ANSI sequences, tokens/credentials,
-and credential-bearing URLs stripped; one line of at most 300 characters), not
-a generic message — the redaction boundary is only those three categories plus
-the length/line limit, not a general secret scrubber. On Windows the npm runner
-picks `npm_execpath` / `npm.cmd` with a 60-second timeout; the
-signature-verification order stays fail-closed.
+Auto-update applies only to an installed copy (source checkouts / `bun link` are
+untouched) and updates globally via **`bun update -g minicode-ai --latest --ignore-scripts`**
+(falling back to `bun add -g minicode-ai@latest --ignore-scripts` if not yet in
+global `bun.lock`), without invoking `npm`. The installed version is verified
+via `bun pm ls -g` before restarting; on mismatch it attempts rollback. Since
+v0.41 a failed install reports the **step and redacted reason** (ANSI sequences,
+tokens/credentials, and credential-bearing URLs stripped; one line of at most
+300 characters), not a generic message — the redaction boundary is only those
+three categories plus the length/line limit, not a general secret scrubber. The
+runner executes the `bun` binary directly without a shell and with a 60-second
+timeout.
 
 The `/update` slash command exists only in the interactive TUI: release the
-alt-screen → install → spawn a restart with `MINICODE_AUTO_UPDATE_DONE=1` → exit;
-if already latest, opted out, or failed, the terminal is re-acquired and the
-result is shown. Non-TTY/one-shot/`exec`/pipe/ACP are **fail-closed** — the
-`withUpdate` injection is absent, the command answers "not available", and npm
-is never spawned from a pipe/CI. Manual instruction: see
+alt-screen → install via `bun` → spawn a restart with `MINICODE_AUTO_UPDATE_DONE=1`
+→ exit; if already latest, opted out, or failed, the terminal is re-acquired and
+the result is shown. Non-TTY/one-shot/`exec`/pipe/ACP are **fail-closed** — the
+`withUpdate` injection is absent, the command answers "not available", and no
+updater is ever spawned from a pipe/CI. Manual instruction: see
 [manual installation](getting-started.md). See
 [Environment](environment.md#auto-update-v041) for the opt-out list.
 

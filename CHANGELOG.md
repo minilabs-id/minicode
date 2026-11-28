@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.53.2] - 2026-11-28
+
+### Fixed
+
+- **Auto-update & `/update` migrasi ke Bun-only** (`bun update -g minicode-ai --latest --ignore-scripts`), fallback ke `bun add -g minicode-ai@latest --ignore-scripts` bila tidak ditemukan di bun.lock. Rollback memakai `bun add -g minicode-ai@<versi> --ignore-scripts --exact`. Instruksi manual (`formatUpdateMessage`) selalu menampilkan `bun update -g minicode-ai --latest`.
+- **`readGlobalInstalledVersion()`** beralih dari `npm root -g` ke `bun pm ls -g` + parser `parseBunGlobalLsVersion()`.
+- **`shouldAutoUpdate()`**: sumber `npm-global` kini juga menjalankan update via Bun (tidak lagi diblokir).
+- **Context prompt cache** (`staticPromptSectionsCache`): hapus TTL 500 ms yang menyebabkan cache basi di mesin cepat (Linux CI) — cache kini hanya koalesens in-flight; `AGENTS.md` selalu dibaca ulang setiap kali promise selesai.
+- Hapus semua sisa impor/logika npm dari `src/policy/update-check.ts` (`mkdtempSync`, `rmSync`, `writeFileSync`, `NPM_REGISTRY`).
+
 ## [0.53.1] - 2026-11-28
 
 ### Cleaned & Synced — pembersihan kode mati, perapian arsip & struktur, serta penyelarasan dokumentasi

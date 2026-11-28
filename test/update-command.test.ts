@@ -220,7 +220,7 @@ test("createTuiUpdateHandler: lepas terminal saat install lalu closeSession() SE
   expect(events).toEqual([
     "run:check",
     "releaseTerminal",
-    "status:Installing minicode-ai@2.5.0 (verifying signatures)…",
+    "status:Updating minicode-ai via bun to v2.5.0…",
     "run:install",
     "closeSession",
     "respawn:2.5.0",
@@ -245,7 +245,7 @@ test("createTuiUpdateHandler: install gagal pasca-release memulihkan terminal ta
     runUpdate: async ({ onPhase }) => {
       await onPhase?.("check")
       await onPhase?.("install", "2.5.0")
-      return { ok: false, step: "npm audit signatures", reason: "invalid signature" }
+      return { ok: false, step: "bun update -g", reason: "network error" }
     },
     respawn: async () => {
       events.push("respawn")
@@ -257,10 +257,10 @@ test("createTuiUpdateHandler: install gagal pasca-release memulihkan terminal ta
     }) as never,
   })
   const res = await handler()
-  expect(res).toEqual({ ok: false, step: "npm audit signatures", reason: "invalid signature" })
+  expect(res).toEqual({ ok: false, step: "bun update -g", reason: "network error" })
   expect(events).toEqual([
     "releaseTerminal",
-    "status:Installing minicode-ai@2.5.0 (verifying signatures)…",
+    "status:Updating minicode-ai via bun to v2.5.0…",
     "resumeStdin",
     "reacquireTerminal",
     "requestQuit",

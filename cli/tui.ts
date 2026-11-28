@@ -932,8 +932,8 @@ export function createTuiUpdateHandler(
             deps.releaseTerminal()
             deps.writeStatusLine(
               latest
-                ? `Installing minicode-ai@${latest} (verifying signatures)…`
-                : "Installing update…",
+                ? `Updating minicode-ai via bun to v${latest}…`
+                : "Updating minicode-ai via bun…",
             )
           }
         },
@@ -1316,12 +1316,12 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
     // /update — cek versi di TUI (modal tetap tampil), baru lepas terminal
     // saat install dimulai, dan tutup sesi sebelum spawn ulang.
     withUpdate: async (signal) => {
-      const { runManualUpdate } = await import("../src/policy/update-check.ts")
+      const { resolveUpdatedEntry, runManualUpdate } = await import("../src/policy/update-check.ts")
       const { waitChildExit, writeUpdateStatusLine } = await import("./auto-update.ts")
       const { spawn } = await import("node:child_process")
       return createTuiUpdateHandler({
         releaseTerminal: () => {
-          // Lepas listener Esc progres sebelum menyerahkan terminal ke proses npm.
+          // Lepas listener Esc progres sebelum menyerahkan terminal ke proses bun.
           detachUpdateCancel?.()
           detachUpdateCancel = null
           app.releaseTerminal()
@@ -1335,7 +1335,9 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
         writeStatusLine: writeUpdateStatusLine,
         runUpdate: runManualUpdate,
         respawn: async () => {
-          const entry = process.argv[1] ?? resolvePath(import.meta.dir, "index.ts")
+          const entry = resolveUpdatedEntry(
+            process.argv[1] ?? resolvePath(import.meta.dir, "index.ts"),
+          )
           const child = spawn(process.execPath, [entry, ...process.argv.slice(2)], {
             stdio: "inherit",
             env: { ...process.env, MINICODE_AUTO_UPDATE_DONE: "1" },

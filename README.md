@@ -13,7 +13,7 @@ bun add -g minicode-ai
 minicode
 ```
 
-`npm install -g minicode-ai` installs the same binary if you prefer npm.
+Update manually with `bun update -g minicode-ai --latest` (or run `/update` inside the TUI).
 
 To run from a clone:
 

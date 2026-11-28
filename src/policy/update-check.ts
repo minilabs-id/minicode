@@ -1,12 +1,12 @@
-// Notifier update — cek versi npm, cache 24 jam, tampil sekali; fire-and-forget 2 dtk.
+// Notifier update — cek versi registry, cache 24 jam, tampil sekali; fire-and-forget 2 dtk.
 // Diam saat offline/gagal fetch; hormati NO_UPDATE_CHECK=1 / CI=1.
-// Runner npm mengumpulkan stderr/error/timedOut per langkah; detail wajib lewat
+// Runner bun mengumpulkan stderr/error/timedOut per langkah; detail wajib lewat
 // formatUpdateError (satu baris, diredaksi) agar E401/EACCES/timeout tidak generik.
 
 import { type SpawnSyncReturns, spawnSync } from "node:child_process"
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, readFileSync, realpathSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { dirname, isAbsolute, join } from "node:path"
+import { basename, dirname, isAbsolute, join } from "node:path"
 import { homeDir } from "../lib/db-path.ts"
 import { resolveTrustedExecutable } from "../lib/trusted-exec.ts"
 import { sanitizeSpawnEnv } from "./scrub.ts"
@@ -18,11 +18,11 @@ function cacheFilePath(): string {
 const TTL_MS = 24 * 60 * 60 * 1000
 const FETCH_TIMEOUT_MS = 2000
 /**
- * Batas mati per perintah npm (root -g, install temp, audit signatures, install -g).
+ * Batas mati per perintah bun (update -g, add -g, pm ls -g).
  * 60 dtk cukup untuk registry lambat/korporat di Windows, jauh di bawah 3×120 dtk
  * yang membekukan TUI; timeout kini DILAPORKAN, bukan dibungkam.
  */
-const NPM_SPAWN_TIMEOUT_MS = 60_000
+const BUN_SPAWN_TIMEOUT_MS = 60_000
 /** Tail stderr yang disimpan runner — cukup untuk E401/EACCES tanpa membocorkan log penuh. */
 const STDERR_TAIL_CHARS = 400
 /** formatUpdateError selalu memotong sampai sepanjang ini (termasuk elipsis). */
@@ -33,7 +33,7 @@ interface Cache {
   latest: string
 }
 
-/** Hasil satu perintah npm. Field baru opsional agar runner lama tetap kompatibel. */
+/** Hasil satu perintah bun. Field baru opsional agar runner lama tetap kompatibel. */
 export interface InstallResult {
   status: number | null
   stdout?: string
@@ -211,19 +211,16 @@ export type InstallSource = "npm-global" | "bun-global" | "source-checkout"
 export function formatUpdateMessage(
   current: string,
   latest: string,
-  source: InstallSource = classifyInstallSource(),
+  _source: InstallSource = classifyInstallSource(),
 ): string {
-  // `npm update` bisa melewati langkah verifikasi signature; selalu pasang
-  // versi eksak yang sudah terverifikasi dari registry yang sama.
-  if (source === "bun-global") {
-    return `Update tersedia ${current} → ${latest} — jalankan: bun add -g ${PKG_NAME}@${latest}`
-  }
-  return `Update tersedia ${current} → ${latest} — jalankan: npm install -g ${PKG_NAME}@${latest}`
+  // Pakai `--latest` agar range caret `^0.x.y` di bun global package.json ikut naik;
+  // npm tidak lagi dipakai di jalur instalasi maupun pembaruan.
+  return `Update tersedia ${current} → ${latest} — jalankan: bun update -g ${PKG_NAME} --latest`
 }
 
 // ── Auto-update interaktif ──
-// REPL TTY dari salinan ter-install: cek versi, install, restart argv yang sama.
-// Satu-satunya mutasi `npm install -g` paket sendiri; gagal = lanjut versi lama + pesan manual.
+// REPL TTY dari salinan ter-install: cek versi, update via bun, restart argv yang sama.
+// Gagal = lanjut versi lama + pesan manual bun update.
 
 /** Guard env anti-loop restart: di-set saat respawn pasca-update. */
 export const UPDATE_GUARD_ENV = "MINICODE_AUTO_UPDATE_DONE"
@@ -319,7 +316,7 @@ export interface AutoUpdateDecision {
 /**
  * Layak auto-update? Syarat SEMUA:
  * - stdin TTY (user membuka REPL, bukan pipe/CI)
- * - salinan ter-install via npm global (checkout source & bun global dilewati fail-closed)
+ * - salinan ter-install via npm global maupun Bun global (checkout source / dev link dilewati fail-closed)
  * - bukan mode machine (`exec`, `--json`) dan bukan `--help`/`--version`
  * - belum habis di-restart (guard env) dan tidak di-opt-out
  *   (`NO_UPDATE_CHECK=1`, `CI=1`, `MINICODE_AUTO_UPDATE=0`).
@@ -345,7 +342,7 @@ export function shouldAutoUpdate(
   } else {
     const source = opts.installSource ?? classifyInstallSource(undefined, { env })
     if (source === "source-checkout") return { run: false, reason: "source-checkout" }
-    if (source === "bun-global") return { run: false, reason: "unsupported-package-manager" }
+    if (source === "bun-global" || source === "npm-global") return { run: true }
   }
   if (argv.includes("--json") || argv.includes("--output-format"))
     return { run: false, reason: "machine-output" }
@@ -383,8 +380,6 @@ function readCurrentVersion(): string {
   }
 }
 
-const NPM_REGISTRY = "https://registry.npmjs.org/"
-
 export function verifyInstalledVersion(expected: string, readVersion: () => string): boolean {
   try {
     return readVersion() === expected
@@ -393,66 +388,23 @@ export function verifyInstalledVersion(expected: string, readVersion: () => stri
   }
 }
 
-// ── Resolusi executable npm (Windows) ──
-// `spawnSync("npm", {shell:true})` rapuh (cmd.exe, spasi di path, npm.cmd).
-// Panggil npm-cli.js lewat node langsung (tanpa shell) — satu-satunya cara aman.
+// ── Resolusi executable Bun ──
+// Jalankan `bun` langsung (tanpa shell) agar update kebal injeksi dan bebas npm.
 
-interface NpmExec {
-  cmd: string
-  prefixArgs: string[]
-  shell: boolean
-}
-
-function quoteShellArg(arg: string): string {
-  // Argumen kita semua konstan SemVer/flag/URL; ini hanya pengaman bila shell
-  // terpaksa dipakai (npm.cmd tanpa npm-cli.js) dan ada spasi di path.
-  if (/^[A-Za-z0-9_@/:=.,+~-]+$/.test(arg)) return arg
-  return `"${arg.replace(/"/g, '\\"')}"`
-}
-
-function resolveNpmExecutable(): NpmExec {
-  const nodeBin = (() => {
-    const resolved = resolveTrustedExecutable("node")
-    return isAbsolute(resolved) ? resolved : process.execPath
-  })()
-  const fromEnv = process.env.npm_execpath?.trim()
-  if (fromEnv && isAbsolute(fromEnv)) {
-    if (/\.[cm]?js$/i.test(fromEnv) && existsSync(fromEnv))
-      return { cmd: nodeBin, prefixArgs: [fromEnv], shell: false }
-    if (/\.(cmd|bat)$/i.test(fromEnv)) {
-      const cli = join(dirname(fromEnv), "npm-cli.js")
-      if (existsSync(cli)) return { cmd: nodeBin, prefixArgs: [cli], shell: false }
-      const nestedCli = join(dirname(fromEnv), "node_modules", "npm", "bin", "npm-cli.js")
-      if (existsSync(nestedCli)) return { cmd: nodeBin, prefixArgs: [nestedCli], shell: false }
-    } else if (existsSync(fromEnv)) {
-      return { cmd: fromEnv, prefixArgs: [], shell: false }
-    }
+function resolveBunExecutable(): string {
+  const base = basename(process.execPath).toLowerCase()
+  if (
+    isAbsolute(process.execPath) &&
+    (base === "bun" || base === "bun.exe") &&
+    existsSync(process.execPath)
+  ) {
+    return process.execPath
   }
-  const trustedNpm = resolveTrustedExecutable("npm")
-  if (process.platform === "win32") {
-    const candidates = [
-      join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js"),
-      ...(isAbsolute(trustedNpm)
-        ? [
-            join(dirname(trustedNpm), "node_modules", "npm", "bin", "npm-cli.js"),
-            join(dirname(trustedNpm), "npm-cli.js"),
-          ]
-        : []),
-    ]
-    for (const cli of candidates) {
-      if (existsSync(cli)) return { cmd: nodeBin, prefixArgs: [cli], shell: false }
-    }
-    // Fail-closed: jangan pernah menjalankan `npm.cmd` telanjang lewat `shell: true`
-    // di cwd yang tak tepercaya (CWD hijacking + BatBadBut).
-    if (!isAbsolute(trustedNpm)) {
-      throw new Error("trusted npm executable not found on PATH")
-    }
-    return { cmd: trustedNpm, prefixArgs: [], shell: false }
+  const trustedBun = resolveTrustedExecutable("bun")
+  if (!isAbsolute(trustedBun)) {
+    throw new Error("trusted bun executable not found on PATH")
   }
-  if (!isAbsolute(trustedNpm)) {
-    throw new Error("trusted npm executable not found on PATH")
-  }
-  return { cmd: trustedNpm, prefixArgs: [], shell: false }
+  return trustedBun
 }
 
 function tailText(s: string, max = STDERR_TAIL_CHARS): string {
@@ -460,33 +412,32 @@ function tailText(s: string, max = STDERR_TAIL_CHARS): string {
   return clean.length > max ? clean.slice(clean.length - max) : clean
 }
 
-function defaultNpmRunner(): InstallRunner {
+function defaultBunRunner(): InstallRunner {
   return (cmd, args, opts) => {
-    let exec: NpmExec
+    let bunBin: string
     try {
-      exec = resolveNpmExecutable()
+      bunBin = cmd === "bun" ? resolveBunExecutable() : resolveTrustedExecutable(cmd)
     } catch (err) {
       return { status: null, error: errorMessage(err), command: [cmd, ...args].join(" ") }
     }
-    // runner yang di-inject menerima "npm" — jangan ubah argumen yang mereka lihat.
-    // Mapping ke executable asli terjadi HANYA di sini.
-    const runCmd = cmd === "npm" ? exec.cmd : resolveTrustedExecutable(cmd)
-    const runArgs = cmd === "npm" ? [...exec.prefixArgs, ...args] : [...args]
-    const command = [runCmd, ...runArgs].join(" ")
-    const spawnArgs = exec.shell && cmd === "npm" ? runArgs.map(quoteShellArg) : runArgs
-    // Isolasi total: jangan pernah pakai cwd repo yang tak tepercaya (agar
-    // `<repo>/.npmrc` dan biner lokal tak pernah dieksekusi), strip secret env,
-    // dan netralkan userconfig npm yang bisa menyusup lewat env.
-    const safeEnv: NodeJS.ProcessEnv = {
-      ...sanitizeSpawnEnv(process.env),
-      npm_config_userconfig: process.platform === "win32" ? "NUL" : "/dev/null",
+    if (!isAbsolute(bunBin)) {
+      return {
+        status: null,
+        error: `trusted ${cmd} executable not found on PATH`,
+        command: [cmd, ...args].join(" "),
+      }
     }
+    const runArgs = [...args]
+    const command = [bunBin, ...runArgs].join(" ")
+    // Isolasi total: jangan pernah pakai cwd repo yang tak tepercaya (agar
+    // `<repo>/bunfig.toml` dan skrip lokal tak memengaruhi proses update global).
+    const safeEnv = sanitizeSpawnEnv(process.env)
     try {
-      const r: SpawnSyncReturns<string> = spawnSync(runCmd, spawnArgs, {
+      const r: SpawnSyncReturns<string> = spawnSync(bunBin, runArgs, {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
-        shell: exec.shell && cmd === "npm",
-        timeout: NPM_SPAWN_TIMEOUT_MS,
+        shell: false,
+        timeout: BUN_SPAWN_TIMEOUT_MS,
         cwd: opts?.cwd ?? tmpdir(),
         env: safeEnv,
       })
@@ -506,7 +457,7 @@ function defaultNpmRunner(): InstallRunner {
 }
 
 // ── Redaksi pesan error ──
-// stderr npm = input tak terpercaya (token .npmrc, URL berkredensial, ANSI).
+// stderr bun = input tak terpercaya (token registry, URL berkredensial, ANSI).
 // formatUpdateError satu-satunya gerbang — jangan pernah tampilkan stderr mentah.
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: strip DCS/APC/PM/SOS & C0/C1 kontrol
@@ -544,7 +495,7 @@ function redactUpdateText(input: string): string {
 
 /**
  * Satu baris, ≤300 char, aman ditampilkan. Contoh:
- *   npm audit signatures (exit 1): E401 token [redacted-token] — periksa .npmrc
+ *   bun update -g (exit 1): E401 token [redacted-token] — periksa konfigurasi
  */
 export function formatUpdateError(step: string, r: InstallResult): string {
   const status = r.timedOut
@@ -554,7 +505,7 @@ export function formatUpdateError(step: string, r: InstallResult): string {
       : "exit ?"
   const parts = [r.error?.trim(), r.stderr?.trim()].filter((s): s is string => !!s)
   let reason = redactUpdateText(parts.join(" — "))
-  if (!reason) reason = r.timedOut ? "perintah melewati batas waktu" : "npm tidak memberi detail"
+  if (!reason) reason = r.timedOut ? "perintah melewati batas waktu" : "bun tidak memberi detail"
   const line = `${step} (${status}): ${reason}`
   return line.length > MAX_ERROR_LINE ? `${line.slice(0, MAX_ERROR_LINE - 1)}…` : line
 }
@@ -564,22 +515,52 @@ function recordFailure(step: string, r: InstallResult): false {
   return false
 }
 
+export function parseBunGlobalLsVersion(stdout: string, pkgName = PKG_NAME): string {
+  for (const line of stdout.split(/\r?\n/)) {
+    const idx = line.lastIndexOf(`${pkgName}@`)
+    if (idx < 0) continue
+    const before = idx === 0 ? "" : line[idx - 1]!
+    if (before && !/[\s─│├└|`-]/.test(before)) continue
+    const ver =
+      line
+        .slice(idx + pkgName.length + 1)
+        .trim()
+        .split(/\s+/)[0] ?? ""
+    if (ver && SEMVER_VERSION_RE.test(ver)) return ver
+  }
+  return "0.0.0"
+}
+
 /**
- * Versi dibaca dari PREFIX GLOBAL npm (`npm root -g`), bukan package.json modul:
- * `import.meta.dir` bisa menunjuk cache/transpilasi sehingga versi lama terbaca.
+ * Versi dibaca dari instalasi global Bun (`bun pm ls -g`), bukan package.json modul:
+ * `import.meta.dir` bisa menunjuk modul proses lama sehingga versi lama terbaca.
  * Fail-closed: gagal baca → "0.0.0" (verifikasi gagal, rollback aman).
  */
 export function readGlobalInstalledVersion(runner?: InstallRunner): string {
   try {
-    const run = runner ?? defaultNpmRunner()
-    const res = run("npm", ["root", "-g"])
+    const run = runner ?? defaultBunRunner()
+    const res = run("bun", ["pm", "ls", "-g"])
     if (res.status !== 0 || !res.stdout) return "0.0.0"
-    const root = res.stdout.trim().split(/\r?\n/).pop() ?? ""
-    if (!root) return "0.0.0"
-    const pkg = JSON.parse(readFileSync(join(root, PKG_NAME, "package.json"), "utf8")) as {
-      version?: string
+    const firstLine =
+      res.stdout
+        .trim()
+        .split(/\r?\n/)
+        .find((l) => l.trim()) ?? ""
+    const globalRoot = firstLine.replace(/\s+node_modules(?:\s+\([^)]*\))?\s*$/, "").trim()
+    if (globalRoot) {
+      const cleanRoot = globalRoot.replace(/[\\/]+$/, "")
+      const pkgPath =
+        cleanRoot.endsWith("/node_modules") || cleanRoot.endsWith("\\node_modules")
+          ? join(cleanRoot, PKG_NAME, "package.json")
+          : join(cleanRoot, "node_modules", PKG_NAME, "package.json")
+      if (existsSync(pkgPath)) {
+        const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { version?: unknown }
+        if (typeof pkg.version === "string" && SEMVER_VERSION_RE.test(pkg.version)) {
+          return pkg.version
+        }
+      }
     }
-    return pkg.version ?? "0.0.0"
+    return parseBunGlobalLsVersion(res.stdout)
   } catch {
     return "0.0.0"
   }
@@ -588,94 +569,51 @@ export function readGlobalInstalledVersion(runner?: InstallRunner): string {
 const SEMVER_VERSION_RE =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/
 
+export interface InstallUpdateOptions {
+  /** Saat rollback versi lama pasca gagal verifikasi, pin versi eksak via `bun add -g pkg@version --exact`. */
+  exact?: boolean
+}
+
 /**
- * Verifikasi registry (signature + provenance) di prefix sementara lalu pasang versi
- * persis secara global; skrip paket tidak dijalankan. Npm lama/tanpa bukti tepercaya
- * = fail-closed. Tiap kegagalan dicatat di `lastFailure` (step + detail teredaksi).
+ * Perbarui atau pasang paket secara global melalui Bun (`--ignore-scripts`).
+ * Jalur normal selalu menjalankan `bun update -g minicode-ai --latest`, dengan
+ * fallback ke `bun add -g minicode-ai@latest` bila paket belum ada di `bun.lock`
+ * global. Tiap kegagalan dicatat di `lastFailure` (step + detail teredaksi).
  */
-export function installUpdate(version: string, runner?: InstallRunner): boolean {
+export function installUpdate(
+  version: string,
+  runner?: InstallRunner,
+  opts?: InstallUpdateOptions,
+): boolean {
   lastFailure = null
   if (version.length > 128 || !SEMVER_VERSION_RE.test(version))
     return recordFailure("validasi versi", { status: null, error: "versi target tidak valid" })
-  let verifyRoot: string | undefined
   try {
-    const run = runner ?? defaultNpmRunner()
-    verifyRoot = mkdtempSync(join(tmpdir(), "minicode-update-verify-"))
-    writeFileSync(
-      join(verifyRoot, "package.json"),
-      JSON.stringify({ name: "minicode-update-verification", version: "1.0.0", private: true }),
-      "utf8",
-    )
-    const verifiedInstall = run(
-      "npm",
-      [
-        "install",
-        "--ignore-scripts",
-        "--no-audit",
-        "--save-exact",
-        "--package-lock=true",
-        // checkForUpdateFresh() membaca packument via HTTP langsung (selalu
-        // fresh), tapi `npm install` memakai packument cache lokal yang bisa
-        // basi — itulah sebabnya versi baru terdeteksi lalu ETARGET saat install.
-        // Paksa npm merevalidasi metadata registry sebelum resolusi versi.
-        "--prefer-online",
-        "--registry",
-        NPM_REGISTRY,
+    const run = runner ?? defaultBunRunner()
+    if (opts?.exact) {
+      const exactRes = run("bun", [
+        "add",
+        "-g",
         `${PKG_NAME}@${version}`,
-      ],
-      { cwd: verifyRoot },
-    )
-    if (verifiedInstall.status !== 0) return recordFailure("npm install", verifiedInstall)
-    let lock: { packages?: Record<string, unknown> }
-    try {
-      lock = JSON.parse(readFileSync(join(verifyRoot, "package-lock.json"), "utf8")) as {
-        packages?: Record<string, unknown>
-      }
-    } catch (err) {
-      return recordFailure("npm install", {
-        status: verifiedInstall.status,
-        error: `package-lock tidak terbaca: ${errorMessage(err)}`,
-      })
+        "--ignore-scripts",
+        "--exact",
+      ])
+      if (exactRes.status !== 0) return recordFailure("bun add -g", exactRes)
+      return true
     }
-    const installedPackages = Object.keys(lock.packages ?? {}).filter((path) =>
-      path.startsWith("node_modules/"),
-    )
-    // Install global tidak memakai lockfile lokal. CLI kini tanpa dependensi runtime;
-    // tolak drift graf dependensi diam-diam sampai updater bisa memasang & memverifikasi semua lock.
-    if (installedPackages.length !== 1 || installedPackages[0] !== `node_modules/${PKG_NAME}`)
-      return recordFailure("npm install", {
-        status: verifiedInstall.status,
-        error: "graf dependensi tak terduga di package-lock",
-      })
-    const signatures = run("npm", ["audit", "signatures", "--registry", NPM_REGISTRY], {
-      cwd: verifyRoot,
-    })
-    if (signatures.status !== 0) return recordFailure("npm audit signatures", signatures)
-    // Fail-closed: signature gagal = install gagal. TIDAK ADA fallback npm update.
-    // `defaultNpmRunner()` selalu menjatuhkan `opts?.cwd` yang kosong ke `tmpdir()`
-    // (bukan cwd workspace), sehingga `.npmrc` repo tak pernah dibaca dan kontrak
-    // runner inject (opts?.cwd absent untuk install -g) tetap terjaga.
-    const globalInstall = run("npm", [
-      "install",
-      "-g",
-      "--ignore-scripts",
-      // Sama seperti verifikasi: revalidasi packument agar versi yang baru
-      // saja terbit tidak kena ETARGET dari cache npm lokal yang basi.
-      "--prefer-online",
-      "--registry",
-      NPM_REGISTRY,
-      `${PKG_NAME}@${version}`,
-    ])
-    if (globalInstall.status !== 0) return recordFailure("npm install -g", globalInstall)
-    return true
+    // `defaultBunRunner()` menjatuhkan `opts?.cwd` kosong ke `tmpdir()` agar
+    // bunfig.toml repo tak pernah terbaca dan kontrak runner inject tetap terjaga.
+    const updateRes = run("bun", ["update", "-g", PKG_NAME, "--latest", "--ignore-scripts"])
+    if (updateRes.status === 0) return true
+    const updateDetail = `${updateRes.stderr ?? ""}\n${updateRes.error ?? ""}`
+    if (/not in bun\.lock/i.test(updateDetail)) {
+      const addRes = run("bun", ["add", "-g", `${PKG_NAME}@latest`, "--ignore-scripts"])
+      if (addRes.status !== 0) return recordFailure("bun add -g", addRes)
+      return true
+    }
+    return recordFailure("bun update -g", updateRes)
   } catch (err) {
-    return recordFailure("npm install", { status: null, error: errorMessage(err) })
-  } finally {
-    if (verifyRoot && existsSync(verifyRoot)) {
-      try {
-        rmSync(verifyRoot, { recursive: true, force: true })
-      } catch {}
-    }
+    return recordFailure("bun update -g", { status: null, error: errorMessage(err) })
   }
 }
 
@@ -720,7 +658,7 @@ export async function runManualUpdate(
   clearLastUpdateFailure()
   // Saat test menyuntikkan `install`, izinkan alur tanpa salinan global kecuali
   // `installSource` diisi eksplisit untuk menguji penolakan preflight.
-  const source = opts.installSource ?? (opts.install ? "npm-global" : classifyInstallSource())
+  const source = opts.installSource ?? (opts.install ? "bun-global" : classifyInstallSource())
   if (source === "source-checkout") {
     return {
       ok: false,
@@ -747,13 +685,6 @@ export async function runManualUpdate(
   }
   if (opts.signal?.aborted) return { ok: false, aborted: true, step: "check" }
   if (!latest) return { ok: true, alreadyLatest: true }
-  if (source === "bun-global") {
-    return {
-      ok: false,
-      step: "preflight",
-      reason: `terpasang via Bun global — jalankan: bun add -g ${PKG_NAME}@${latest}`,
-    }
-  }
 
   await notifyPhase(opts, "install", latest)
   let installed = false
@@ -766,7 +697,7 @@ export async function runManualUpdate(
   }
   if (!installed) {
     const failure: UpdateFailure = getLastUpdateFailure() ?? {
-      step: "npm install",
+      step: "bun update -g",
       result: {
         status: null,
         error: thrown ? errorMessage(thrown) : "instalasi gagal tanpa detail",
@@ -800,4 +731,16 @@ export async function runManualUpdate(
     }
   }
   return { ok: true, latest }
+}
+
+/**
+ * Saat instalasi lama berasal dari npm global lalu baru diperbarui lewat Bun,
+ * arahkan target respawn ke salinan Bun global yang baru bila sudah tersedia.
+ */
+export function resolveUpdatedEntry(entry = process.argv[1] ?? ""): string {
+  if (!entry) return entry
+  if (classifyInstallSource(entry) !== "npm-global") return entry
+  const base = process.env.BUN_INSTALL?.trim() || join(homeDir(), ".bun")
+  const bunEntry = join(base, "install", "global", "node_modules", PKG_NAME, "cli", "minicode.js")
+  return existsSync(bunEntry) ? bunEntry : entry
 }

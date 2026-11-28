@@ -255,17 +255,15 @@ export function createCalibratedEstimator(opts: { maxFactor?: number } = {}): Ca
 }
 
 const MAX_SYSTEM_CHARS = LIMITS.SYSTEM_PROMPT_MAX_CHARS
-const STATIC_PROMPT_SECTIONS_TTL_MS = 500
+// Coalesce hanya request yang sedang in-flight agar paralel sub-agent berbagi
+// pembacaan disk tanpa melayani cache basi setelah AGENTS.md/MEMORY.md berubah.
 const staticPromptSectionsCache = new Map<
   string,
-  {
-    expiresAt: number
-    promise: Promise<{
-      memRaw: string
-      agentSections: { heading: string; body: string }[]
-      repoSection: { heading: string; body: string } | null
-    }>
-  }
+  Promise<{
+    memRaw: string
+    agentSections: { heading: string; body: string }[]
+    repoSection: { heading: string; body: string } | null
+  }>
 >()
 
 // Tandai setiap potongan: pemotongan diam-diam membuat model bekerja dengan
@@ -351,9 +349,9 @@ export async function buildSystemPrompt(
   const coreText = baseParts.join("\n\n")
   if (coreText.length >= budget) return cutMarked(coreText, budget)
 
-  // Cache coalescing singkat (500 ms) untuk beban statis disk/repo-map agar fan-out
-  // sub-agen paralel (hingga 5 anak) membaca AGENTS.md & repoMap hanya ONCE,
-  // tanpa menyisakan state basi lintas turn maupun membocorkan abort antar pemanggil.
+  // Coalesce hanya pembacaan in-flight agar fan-out sub-agen paralel (hingga 5
+  // anak) berbagi satu promise disk/repo-map. Tanpa TTL, AGENTS.md/MEMORY.md
+  // selalu dibaca ulang setelah promise selesai: tak ada state basi lintas turn.
   const cacheKey = `${cwd}\0${opts.allowLocalConfig ? "1" : "0"}`
   const cachedEntry = staticPromptSectionsCache.get(cacheKey)
   let sectionsPromise: Promise<{
@@ -361,8 +359,8 @@ export async function buildSystemPrompt(
     agentSections: { heading: string; body: string }[]
     repoSection: { heading: string; body: string } | null
   }>
-  if (cachedEntry && cachedEntry.expiresAt > Date.now()) {
-    sectionsPromise = cachedEntry.promise
+  if (cachedEntry) {
+    sectionsPromise = cachedEntry
   } else {
     const internalSignal = AbortSignal.timeout(5000)
     const memPromise = (async () => {
@@ -446,17 +444,18 @@ export async function buildSystemPrompt(
       }
     })()
 
-    sectionsPromise = Promise.all([memPromise, agentPromise, repoSectionPromise]).then(
-      ([memRaw, agentSections, repoSection]) => ({ memRaw, agentSections, repoSection }),
-    )
+    sectionsPromise = Promise.all([memPromise, agentPromise, repoSectionPromise])
+      .then(([memRaw, agentSections, repoSection]) => ({ memRaw, agentSections, repoSection }))
+      .finally(() => {
+        if (staticPromptSectionsCache.get(cacheKey) === sectionsPromise) {
+          staticPromptSectionsCache.delete(cacheKey)
+        }
+      })
     if (staticPromptSectionsCache.size >= 16) {
       const oldest = staticPromptSectionsCache.keys().next().value
       if (oldest !== undefined) staticPromptSectionsCache.delete(oldest)
     }
-    staticPromptSectionsCache.set(cacheKey, {
-      expiresAt: Date.now() + STATIC_PROMPT_SECTIONS_TTL_MS,
-      promise: sectionsPromise,
-    })
+    staticPromptSectionsCache.set(cacheKey, sectionsPromise)
   }
 
   const { memRaw, agentSections, repoSection } = await sectionsPromise

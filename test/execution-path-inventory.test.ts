@@ -134,7 +134,7 @@ export const EXECUTION_PATHS: Readonly<Record<string, RegisteredPath>> = {
   },
   "src/policy/update-check.ts": {
     cls: "external-integration",
-    entry: "checkForUpdate/installUpdate (fetch + npm -g)",
+    entry: "checkForUpdate/installUpdate (fetch + bun -g)",
     note: "Self-update. Terpisah dari session/execution lifecycle.",
   },
   "src/lib/keystore.ts": {

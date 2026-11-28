@@ -147,6 +147,13 @@ Disetujui pemilik (2026-11-28) di atas kontrak `Amandemen pasca-v0.52.1` (mengam
    - Seluruh teks `› <nama>` berdenyut halus meredup–menyala (`c.info` ↔ `c.gray` bergantian tiap `600 ms`, mengikuti clock repaint TUI), dan tetap `c.info` statis saat `MINICODE_MOTION=0`.
    - Tool non-sub-agent tetap memakai format `› <label> … running/berjalan (<Ns>)` seperti pada `v0.51`/`v0.52.1`.
 
+## Amandemen updater & `/update` ke Bun-only (2026-11-28)
+
+Disetujui pemilik (2026-11-28) di atas kontrak `v0.41` auto-update & `/update` (menggantikan runner `npm` / `npm audit signatures` dengan runner `bun`-only):
+
+1. **Instalasi, auto-update startup (`maybeAutoUpdate`), dan `/update` hanya memakai `bun` (tanpa spawn `npm`).** Baik `bun-global` maupun instalasi lama berjalan via `bun update -g minicode-ai --latest --ignore-scripts` (fallback otomatis ke `bun add -g minicode-ai@latest --ignore-scripts` bila paket belum ada di `bun.lock` global), sehingga range caret `^0.x.y` tidak menahan minor bump `0.x`. Checkout source / `bun link` tetap dilewati (fail-closed).
+2. **Verifikasi & handoff `/update` tetap atomik.** `readGlobalInstalledVersion()` membaca versi terpasang via `bun pm ls -g`; rollback saat ketidakcocokan memakai `bun add -g minicode-ai@<versi> --ignore-scripts --exact`. Status handoff `/update` pasca-lepas alt-screen mencetak `Updating minicode-ai via bun to v<latest>…`, tanpa mengklaim verifikasi signature npm. Opt-out (`NO_UPDATE_CHECK=1`, `MINICODE_AUTO_UPDATE=0|false|off`, `CI=1`) dan guard `MINICODE_AUTO_UPDATE_DONE=1` tetap berlaku.
+
 ## Amandemen pasca-v0.52.1 (live sub-agent 2 lapis, riwayat per putaran, & budget sub-agent)
 
 Disetujui pemilik (2026-11-27) di atas kontrak `v0.52.1` tanpa mengubah geometri frame (`chatCols`, margin `3+3`, kotak composer, footer, ratchet):

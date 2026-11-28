@@ -4,7 +4,7 @@ The variables that most determine behaviour (the rest are referenced below):
 
 - **Autonomy limits on your own machine:** `MINICODE_SANDBOX` + `MINICODE_SANDBOX_STRICT=1` (deny bash when isolation is absent) + `MINICODE_BUDGET_STRICT=1` (unknown cost = over budget).
 - **Privacy/minimal footprint:** `MINICODE_TELEMETRY=0` (no traces), `MINICODE_AUTO_MEMORY=0` (no automatic memory saving).
-- **CI/automation:** `CI=1` -> auto-update is fail-closed (no install, no npm spawn); see v0.41.
+- **CI/automation:** `CI=1` -> auto-update is fail-closed (no install, no updater spawn); see v0.41.
 - **Unfamiliar repo:** do NOT set `MINICODE_ALLOW_LOCAL_CONFIG=1` unless the workspace is yours.
 - **Legacy consoles/accessibility:** `MINICODE_ASCII=1`, `MINICODE_A11Y=1`, `MINICODE_BELL=0`, `NO_COLOR`.
 
@@ -17,7 +17,7 @@ The variables that most determine behaviour (the rest are referenced below):
 | `MINICODE_DEBUG` | `1` -> print the full stack trace when the process fails fatally (default: one line with the cause only) |
 | `NO_UPDATE_CHECK` | `1` -> skip the update check at startup (honoured since v0.41) |
 | `MINICODE_AUTO_UPDATE` | `0`/`false`/`off` -> disable the automatic update check and install; any other value = enabled |
-| `CI` | `1` -> treat as CI: auto-update is fail-closed (no install, no npm spawn) — see v0.41 |
+| `CI` | `1` -> treat as CI: auto-update is fail-closed (no install, no updater spawn) — see v0.41 |
 | `MINICODE_AUTO_UPDATE_DONE` | Internal guard: set to `1` on the restart process produced by `/update` so it does not trigger another check/install (loop). Do not set manually |
 | `MINICODE_PERMISSION` | `allowlist` -> bash tool-access policy (legacy profile) |
 | `MINICODE_TOOL_SCOPE` | `explore` -> read-only subset of 17 tools (same as `--tool-scope explore`) |
@@ -53,10 +53,11 @@ process produced by an update so it does not trigger another check/install (loop
 
 Manual instruction: see [manual installation](getting-started.md).
 
-On Windows the npm runner picks `npm_execpath` / `npm.cmd` with a 60-second
-timeout; the signature-verification order stays fail-closed. The `/update` slash
-command exists only in the interactive TUI; non-TTY/one-shot/ACP answer "not
-available" without spawning npm.
+The runner invokes `bun` directly without a shell and with a 60-second timeout
+(`bun update -g minicode-ai --latest --ignore-scripts`, falling back to
+`bun add -g minicode-ai@latest --ignore-scripts` if not yet in global `bun.lock`);
+`npm` is never invoked. The `/update` slash command exists only in the interactive
+TUI; non-TTY/one-shot/ACP answer "not available" without spawning any updater.
 
 ## Language, diagnostics & keys
 

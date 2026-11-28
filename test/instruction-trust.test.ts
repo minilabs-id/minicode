@@ -261,6 +261,19 @@ test("instruksi: project A tak bocor ke project B", async () => {
   }
 })
 
+test("instruksi: pembaruan AGENTS.md langsung terbaca tanpa cache basi (< 500 ms)", async () => {
+  const dir = tmpRoot()
+  try {
+    const first = await buildSystemPrompt({ cwd: dir })
+    expect(first).not.toContain("AGENTS-SEGAR-123")
+    writeFileSync(join(dir, "AGENTS.md"), "AGENTS-SEGAR-123")
+    const second = await buildSystemPrompt({ cwd: dir })
+    expect(second).toContain("AGENTS-SEGAR-123")
+  } finally {
+    await cleanup(dir)
+  }
+})
+
 // ── 5. Capability boundary: teks ≠ policy ──
 
 test("instruksi: prosa adversarial di argumen tak mengubah keputusan policy", async () => {
