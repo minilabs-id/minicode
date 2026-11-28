@@ -751,4 +751,47 @@ describe("P13.2 — registrar produksi (server LSP)", () => {
     const gone = await waitFor(() => processGone(pid!), 5_000)
     expect(gone).toBe(true)
   })
+
+  test("P1-9: unregister / registrasi instance baru mereset anggaran tanpa memicu loop saat restart", async () => {
+    const sup = createProcessSupervision({
+      policy: { maxAttempts: 1, backoffBaseMs: 0, backoffMaxMs: 0 },
+      sleep: async () => {},
+    })
+    let restarts = 0
+    const childA: ManagedChild = {
+      id: "lsp:.ts",
+      kind: "lsp-server",
+      restartSafety: "safe",
+      observe: () => ({ status: "exited", exitCode: 1 }),
+      stop: async () => {},
+      restart: async () => {
+        restarts++
+        // Simulasi LspConnection.doStart memanggil register() lagi dengan handle stabil.
+        sup.register(childA)
+      },
+    }
+    sup.register(childA)
+    await sup.notifyExit("lsp:.ts", { status: "failed", exitCode: 1 })
+    await sup.notifyExit("lsp:.ts", { status: "failed", exitCode: 1 })
+    expect(restarts).toBe(1)
+    expect(sup.status().escalations).toBe(1)
+
+    // Mengganti dengan instance baru pada childId yang sama memberi anggaran segar.
+    const childB: ManagedChild = {
+      id: "lsp:.ts",
+      kind: "lsp-server",
+      restartSafety: "safe",
+      observe: () => ({ status: "exited", exitCode: 1 }),
+      stop: async () => {},
+      restart: async () => {
+        restarts++
+      },
+    }
+    sup.register(childB)
+    await sup.notifyExit("lsp:.ts", { status: "failed", exitCode: 1 })
+    expect(restarts).toBe(2)
+
+    sup.unregister("lsp:.ts")
+    expect(sup.status().managed).toBe(0)
+  })
 })

@@ -394,3 +394,29 @@ test("B-wait-bound: timeout invalid ditolak (kontrak bounded)", async () => {
   await backend.wait(handle, 5000)
   backend.dispose(handle)
 })
+
+test("P0-1: dua wait() konkuren dengan timeout berbeda memakai timer masing-masing", async () => {
+  const backend = createHostBackend()
+  const started = await backend.start({ cmd: sleeper(20_000) })
+  if (!started.started) throw new Error("unreachable")
+
+  const longWait = backend.wait(started.handle, 450)
+  const shortWait = backend.wait(started.handle, 50)
+  expect(await shortWait).toEqual({ status: "timeout" })
+
+  // Setelah shortWait selesai, longWait masih menunggu sampai batas 450 ms sendiri
+  // (timer longWait tidak boleh terhapus oleh shortWait.onTimeout maupun ter-override).
+  const raceBeforeTimeout = await Promise.race([
+    longWait.then(() => "resolved"),
+    new Promise<string>((r) => setTimeout(() => r("still-waiting"), 80)),
+  ])
+  expect(raceBeforeTimeout).toBe("still-waiting")
+  expect(await longWait).toEqual({ status: "timeout" })
+
+  // dispose() menyelesaikan seluruh waiter tertunda dan membersihkan semua timernya.
+  const pendingA = backend.wait(started.handle, 5000)
+  const pendingB = backend.wait(started.handle, 6000)
+  backend.dispose(started.handle)
+  expect(await pendingA).toEqual({ status: "unknown", detail: "disposed" })
+  expect(await pendingB).toEqual({ status: "unknown", detail: "disposed" })
+})

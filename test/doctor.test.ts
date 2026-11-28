@@ -59,6 +59,7 @@ test("buildDoctorReport: in-process, tanpa jaringan, fallback jujur", async () =
     expect(typeof r.providers).toBe("number")
     expect(typeof r.memoryRows).toBe("number")
     expect(typeof r.pricing.stale).toBe("boolean")
+    expect(typeof r.lsp?.configured).toBe("number")
     // Mesin ini tanpa sandbox OS/docker → catatan fallback wajib ada.
     if (r.sandboxOs === "none" && !r.sandboxDocker) {
       expect(r.fallbackNote).toContain("allowlist")

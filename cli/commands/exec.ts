@@ -1,6 +1,7 @@
 import { resolve as resolvePath } from "node:path"
 import { expandMentions } from "../../src/app/mentions.ts"
 import { NoProviderError } from "../../src/app/provider-layer.ts"
+import { createAutonomousLoopController } from "../../src/policy/autonomous-loop.ts"
 // F3.2 parity: exec ikut menghormati MINICODE_COMPACT_KEEP_TURNS, sama seperti
 // jalur one-shot (cli/index.ts) — sebelumnya env ini hanya berlaku di REPL.
 import { parseCompactKeepTurns } from "../../src/policy/compaction.ts"
@@ -55,9 +56,14 @@ Options:
   --sandbox docker|os     bash sandbox mode
   --verify                auto-verify + self-heal (requires BUILD)
   --auto-continue         continue if turn hits --max-steps
-  --max-turns <n>         auto-continue turn cap (default: 3, max: 20)
+  --autonomous            enable multi-epoch autonomous loop (BUILD recommended)
+  --max-turns <n>         auto-continue turn cap (default: 3, max: 20 without --autonomous)
+  --max-epochs <n>        max autonomous epochs (0 = unlimited)
+  --max-cost-hour <usd>   hourly spend circuit breaker in autonomous mode
   --max-steps <n>         max tool steps per turn
-  --timeout <ms>          run timeout in ms (default: 900000)
+  --timeout <ms>          inactivity timeout in ms (default: 3600000, 0 = off)
+  --wall-timeout <ms>     optional total wall-clock cap in ms (default: unlimited)
+  --takeover              take over session lease left by a dead process
   --budget <usd>          session cost ceiling
   --runtime off|constructed|owned  execution architecture
   --allow-local-config    trust repo .minicode/config.json`
@@ -163,7 +169,15 @@ export async function handleExec(
     warnStderr(`[work-mode] ${modeLabel}${modeNote}\n`)
   }
   const parsedNums = parseRuntimeNumericFlags(getArg, warnStderr)
-  const { maxSteps, contextWindowTokens, budget } = parsedNums
+  const { maxSteps, contextWindowTokens, budget, wallTimeoutMs, maxEpochs, maxCostPerHour } =
+    parsedNums
+  const autonomous = hasFlag(subArgs, "--autonomous")
+  const takeover = hasFlag(subArgs, "--takeover")
+  if (autonomous && workMode !== "EXECUTE") {
+    warnStderr(
+      "[warn] --autonomous in DISCUSS mode stays strictly read-only; pass --work-mode BUILD to allow autonomous workspace changes\n",
+    )
+  }
   const rateLimiter =
     parsedNums.ratelimitRpm !== undefined ? createRateLimiter(parsedNums.ratelimitRpm) : undefined
   const keepTurnsRaw = (process.env.MINICODE_COMPACT_KEEP_TURNS ?? "").trim()
@@ -238,6 +252,11 @@ export async function handleExec(
     ...(contextWindowTokens && contextWindowTokens > 0 ? { contextWindowTokens } : {}),
     ...(keepRecentTurns ? { keepRecentTurns } : {}),
     ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    ...(wallTimeoutMs !== undefined ? { wallTimeoutMs } : {}),
+    ...(autonomous ? { autonomous: true } : {}),
+    ...(takeover ? { takeover: true } : {}),
+    ...(maxEpochs !== undefined ? { maxEpochs } : {}),
+    ...(maxCostPerHour !== undefined ? { maxCostHour: maxCostPerHour } : {}),
     // WorkMode efektif (sudah di-resolve, default DISCUSS).
     workMode,
     workModeExplicit: workModeResolved.explicit,
@@ -300,25 +319,74 @@ export async function handleExec(
     const runPrompt = effectivePrompt.includes("@")
       ? (await expandMentions(effectivePrompt, cwd ?? process.cwd())).prompt
       : effectivePrompt
-    if (autoContinue) {
+    if (autoContinue || autonomous) {
       // Lanjutkan sampai selesai / cap tercapai. `isStepLimit` memisahkan
       // "habis langkah" (layak dilanjut) dari error lain (auth/network/dll yang
-      // wajib gagal keras). Tiap iterasi = satu turn utuh pada sesi sama; kernel
-      // sudah commit progres parsial turn yang gagal (safeTurnBoundary).
+      // wajib gagal keras).
       const isStepLimit = (e: unknown): boolean =>
         (e as { kind?: string } | undefined)?.kind === "max_steps_exceeded" ||
         /max.?steps/i.test(String((e as { message?: string } | undefined)?.message ?? ""))
-      for (let i = 0; i <= autoContinueBudget; i++) {
+      const loopCtl = autonomous
+        ? createAutonomousLoopController({
+            workMode,
+            maxEpochs: maxEpochs && maxEpochs > 0 ? maxEpochs : undefined,
+            maxCostUsd: budget,
+            maxCostPerHourUsd: maxCostPerHour,
+          })
+        : null
+      const maxLoops = autonomous
+        ? maxEpochs && maxEpochs > 0
+          ? maxEpochs - 1
+          : Number.POSITIVE_INFINITY
+        : autoContinueBudget
+      let prevCost = ctx.usage.getSession(ctx.modelRef.current).cost ?? 0
+      for (let i = 0; i <= maxLoops; i++) {
+        let nextPrompt = runPrompt
+        if (i > 0) {
+          if (loopCtl) {
+            const gate = loopCtl.canStartNextEpoch()
+            if (!gate.allow) {
+              warnStderr(`[autonomous] stopping: ${gate.message}\n`)
+              break
+            }
+            nextPrompt = loopCtl.formatEpochPrompt(
+              runPrompt,
+              "Previous turn hit --max-steps; continue cleanly from preserved state.",
+            )
+          } else {
+            nextPrompt = CONTINUE_PROMPT
+          }
+        }
         let err: unknown = null
         try {
-          await ctx.runPromptWithVerify(i === 0 ? runPrompt : CONTINUE_PROMPT)
+          await ctx.runPromptWithVerify(nextPrompt)
         } catch (e) {
           err = e
         }
-        if (err === null) break
-        if (!isStepLimit(err) || i >= autoContinueBudget) throw err
+        const curCost = ctx.usage.getSession(ctx.modelRef.current).cost ?? 0
+        const stepCostDelta = Math.max(0, curCost - prevCost)
+        prevCost = curCost
+        if (loopCtl) {
+          const rec = loopCtl.recordEpoch({
+            progressed: err === null || isStepLimit(err),
+            costUsd: stepCostDelta,
+            completed: err === null,
+            ...(err !== null && !isStepLimit(err)
+              ? { failedApproach: (err as Error)?.message ?? String(err) }
+              : {}),
+          })
+          if (err === null) break
+          if (!isStepLimit(err)) throw err
+          if (rec.stopped) {
+            warnStderr(`[autonomous] ${rec.message ?? "stopped"}\n`)
+            break
+          }
+        } else {
+          if (err === null) break
+          if (!isStepLimit(err) || i >= maxLoops) throw err
+        }
         process.stderr.write(
-          `[auto-continue] batas langkah tercapai — melanjutkan (turn lanjutan ${i + 1}/${autoContinueBudget})\n`,
+          `[auto-continue] batas langkah tercapai — melanjutkan (turn lanjutan ${i + 1}/${Number.isFinite(maxLoops) ? maxLoops : "inf"})\n`,
         )
       }
     } else {

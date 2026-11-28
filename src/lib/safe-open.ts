@@ -1,6 +1,6 @@
 import { constants } from "node:fs"
 import type { FileHandle } from "node:fs/promises"
-import { open, realpath, stat as statPath } from "node:fs/promises"
+import { lstat as lstatPath, open, realpath, stat as statPath } from "node:fs/promises"
 import { homedir, tmpdir } from "node:os"
 import { basename, dirname, isAbsolute, join, parse, relative, resolve } from "node:path"
 import { isOwnedHook, isPathOutsideRoot, isSensitive } from "../policy/jail.ts"
@@ -188,6 +188,106 @@ export async function safeStat(abs: string, root: string, relaxed = false) {
     return await handle.stat()
   } finally {
     await handle.close().catch(() => {})
+  }
+}
+
+export interface SafeScanReader {
+  readCapped(abs: string, maxBytes: number): Promise<{ text: string; truncated: boolean }>
+}
+
+/**
+ * Pembaca batch untuk walk/scan read-only (repo-map, dep-graph, grep):
+ * men-cache `realpath` direktori induk selama satu operasi scan agar folder
+ * berisi ratusan berkas tidak mengulang 3x `realpath`, tetap menjaga TOCTOU
+ * `lstat -> O_NOFOLLOW -> fstat(dev+ino)` + tolak hardlink, dan fallback ke
+ * `safeReadFileCapped` penuh bila menemukan symlink.
+ */
+export function createSafeScanReader(root: string, relaxed = false): SafeScanReader {
+  let realRootPromise: Promise<string> | null = null
+  const getRealRoot = () => (realRootPromise ??= realpath(root).catch(() => root))
+  const verifiedDirs = new Map<string, Promise<string>>()
+  const getVerifiedDir = (dir: string): Promise<string> => {
+    let cached = verifiedDirs.get(dir)
+    if (!cached) {
+      cached = (async () => {
+        const realRoot = await getRealRoot()
+        const realDir = await realpath(dir)
+        if (!relaxed && isPathOutsideRoot(realDir, realRoot)) {
+          throw new Error(`symlink points outside workspace: ${dir}`)
+        }
+        if (isSensitive(realDir)) throw new Error(`blocked sensitive file: ${dir}`)
+        return realDir
+      })()
+      verifiedDirs.set(dir, cached)
+    }
+    return cached
+  }
+
+  return {
+    async readCapped(abs: string, maxBytes: number): Promise<{ text: string; truncated: boolean }> {
+      if (!Number.isSafeInteger(maxBytes) || maxBytes < 1)
+        throw new RangeError("maxBytes must be a positive safe integer")
+      if (isSensitive(abs)) throw new Error(`blocked sensitive file: ${abs}`)
+      if (!relaxed && isPathOutsideRoot(abs, root))
+        throw new Error(`symlink points outside workspace: ${abs}`)
+      const realDir = await getVerifiedDir(dirname(abs))
+      const target = join(realDir, basename(abs))
+      if (isSensitive(target)) throw new Error(`blocked sensitive file: ${abs}`)
+
+      let lst: Awaited<ReturnType<typeof lstatPath>>
+      try {
+        lst = await lstatPath(target, { bigint: true })
+      } catch {
+        return safeReadFileCapped(abs, root, maxBytes, relaxed)
+      }
+      if (lst.isSymbolicLink() || lst.ino === 0n) {
+        return safeReadFileCapped(abs, root, maxBytes, relaxed)
+      }
+      if (!lst.isFile()) throw new Error(`refusing to read non-regular file: ${abs}`)
+      if (lst.nlink > 1n) {
+        throw new Error(
+          `refusing to read file with multiple hardlinks (nlink=${lst.nlink}): ${abs}`,
+        )
+      }
+      let handle: FileHandle
+      try {
+        handle = await open(target, O_RDONLY | O_NOFOLLOW)
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException).code
+        if (code === "ELOOP" || (code === "EINVAL" && O_NOFOLLOW !== 0)) {
+          return safeReadFileCapped(abs, root, maxBytes, relaxed)
+        }
+        throw e
+      }
+      try {
+        const opened = await handle.stat({ bigint: true })
+        if (!opened.isFile()) throw new Error(`refusing to read non-regular file: ${abs}`)
+        if (opened.ino === 0n || opened.dev !== lst.dev || opened.ino !== lst.ino) {
+          throw new Error(
+            `file changed during safe open; refusing to read unverified target: ${abs}`,
+          )
+        }
+        if (opened.nlink > 1n) {
+          throw new Error(
+            `refusing to read file with multiple hardlinks (nlink=${opened.nlink}): ${abs}`,
+          )
+        }
+        const buffer = Buffer.alloc(maxBytes + 1)
+        let bytesRead = 0
+        while (bytesRead < buffer.length) {
+          const result = await handle.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead)
+          if (result.bytesRead === 0) break
+          bytesRead += result.bytesRead
+        }
+        const truncated = bytesRead > maxBytes || opened.size > BigInt(maxBytes)
+        return {
+          text: buffer.subarray(0, Math.min(bytesRead, maxBytes)).toString("utf8"),
+          truncated,
+        }
+      } finally {
+        await handle.close().catch(() => {})
+      }
+    },
   }
 }
 

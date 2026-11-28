@@ -10,7 +10,7 @@ export const applyPatchTool: Tool = {
   // v7.33: kalimat keputusan identik dengan edit.ts & write_file.ts (wire
   // contract). Jangan diubah sendiri-sendiri — test audit membandingkannya.
   description:
-    "FILE EDIT: Apply SEARCH/REPLACE block(s) to one file (max 50 blocks, applied sequentially). 1 change → edit; ≥2 changes in one file → apply_patch; full rewrite/new file → write_file. Every search block must match exactly once — add surrounding lines if ambiguous. Cannot edit outside the workspace or secrets (.env, .ssh, node_modules). Editing .minicode/ state is ALLOWED by owner decision (2026-11-23) — be careful not to overwrite sessions.db or config; .minicode/hooks/ stays blocked.",
+    "FILE EDIT: Apply SEARCH/REPLACE blocks to one file (max 50, sequential). 1 change → edit; ≥2 changes in one file → apply_patch; full rewrite/new file → write_file. Every search block must match exactly once — add surrounding lines if ambiguous. Workspace-only; secrets (.env, .ssh, node_modules, .minicode/hooks/) blocked (.minicode/ state allowed except sessions.db/config).",
   parameters: {
     type: "object",
     properties: {

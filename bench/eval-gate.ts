@@ -344,8 +344,8 @@ export function compareAceAblation(
       `verifiedTaskSuccessRate regressed: ${baseline.verifiedTaskSuccessRate} -> ${candidate.verifiedTaskSuccessRate}`,
     )
   }
-  const retryImproved = candidate.unproductiveRetryRate <= baseline.unproductiveRetryRate
-  const regressionImproved = candidate.regressionRate <= baseline.regressionRate
+  const retryImproved = candidate.unproductiveRetryRate < baseline.unproductiveRetryRate
+  const regressionImproved = candidate.regressionRate < baseline.regressionRate
   if (!retryImproved && !regressionImproved) {
     reasons.push(
       `neither unproductiveRetryRate nor regressionRate improved (retry ${baseline.unproductiveRetryRate}->${candidate.unproductiveRetryRate}; regression ${baseline.regressionRate}->${candidate.regressionRate})`,

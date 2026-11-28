@@ -49,10 +49,10 @@
 
 ## Internal specifications (FROZEN — Indonesian only)
 
-* [Terminal Contract](TERMINAL_CONTRACT.md)
-* [Output Event Model](OUTPUT_EVENT_MODEL.md)
-* [Output Protocol Spec](OUTPUT_PROTOCOL_SPEC.md)
-* [Output Rendering Spec](OUTPUT_RENDERING_SPEC.md)
-* [Output UX Rules](OUTPUT_UX_RULES.md)
-* [Control Plane Map](CONTROL-PLANE-MAP.md)
-* [UI Render Pipeline](UI_RENDER_PIPELINE.md)
+* [Terminal Contract](../docs/TERMINAL_CONTRACT.md)
+* [Output Event Model](../docs/OUTPUT_EVENT_MODEL.md)
+* [Output Protocol Spec](../docs/OUTPUT_PROTOCOL_SPEC.md)
+* [Output Rendering Spec](../docs/OUTPUT_RENDERING_SPEC.md)
+* [Output UX Rules](../docs/OUTPUT_UX_RULES.md)
+* [Control Plane Map](../docs/CONTROL-PLANE-MAP.md)
+* [UI Render Pipeline](../docs/UI_RENDER_PIPELINE.md)

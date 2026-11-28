@@ -39,8 +39,15 @@ export type SideEffectTier =
  * - `path-serialized-write` menulis workspace; butuh slot tulis + file-lock.
  * - `exclusive`            tidak punya path tunggal untuk dikunci; batch yang
  *                          memuatnya dijalankan sekuensial penuh.
+ * - `internal-exclusive`   hanya menulis state internal (`.minicode/todos`);
+ *                          paralel dengan `parallel-read` workspace, tapi
+ *                          tetap berseri terhadap pembaca/penulis state sama.
  */
-export type ConcurrencyClass = "parallel-read" | "path-serialized-write" | "exclusive"
+export type ConcurrencyClass =
+  | "parallel-read"
+  | "path-serialized-write"
+  | "exclusive"
+  | "internal-exclusive"
 
 /**
  * [v7.33 / audit F2] Jenis argumen path yang DIAWASSI jail permission.
@@ -150,7 +157,7 @@ const ex = (name: string, cc: ConcurrencyClass, opts: ContractFlags = {}) =>
   C(name, "EXTERNAL_IRREVERSIBLE", cc, opts)
 
 /**
- * Registry 41 tool bawaan. Urutan di sini adalah urutan tampilan/derivasi;
+ * Registry 42 tool bawaan. Urutan di sini adalah urutan tampilan/derivasi;
  * tidak ada konsumen yang boleh mengandalkan urutan selain derivasi daftar.
  */
 export const TOOL_CONTRACTS: readonly ToolContractMetadata[] = [
@@ -169,6 +176,7 @@ export const TOOL_CONTRACTS: readonly ToolContractMetadata[] = [
   pr("read_image", { allowedInExplore: true, jailTarget: "file" }),
   pr("glob", { jailTarget: "cwd" }),
   pr("grep", { jailTarget: "cwd" }),
+  pr("dep_graph", { jailTarget: "cwd" }),
   pr("git_status", { jailTarget: "cwd" }),
   pr("git_diff", { allowedInExplore: true, jailTarget: "cwd" }),
   pr("git_log", { jailTarget: "cwd" }),
@@ -219,7 +227,7 @@ export const TOOL_CONTRACTS: readonly ToolContractMetadata[] = [
     journalMutation: true,
     internalWrite: true,
   }),
-  lm("todo_write", "exclusive", {
+  lm("todo_write", "internal-exclusive", {
     idempotent: true,
     internalWrite: true,
     noPrompt: true,
@@ -284,6 +292,11 @@ export const WRITE_TOOLS: ReadonlySet<string> = new Set(
 /** Derivasi: tool yang harus eksklusif (tanpa path tunggal untuk dikunci). */
 export const EXCLUSIVE_TOOLS: ReadonlySet<string> = new Set(
   TOOL_CONTRACTS.filter((c) => c.concurrencyClass === "exclusive").map((c) => c.name),
+)
+
+/** Derivasi: tool state internal (mis. todo_write) — paralel dgn baca workspace, berseri dgn state sama. */
+export const INTERNAL_EXCLUSIVE_TOOLS: ReadonlySet<string> = new Set(
+  TOOL_CONTRACTS.filter((c) => c.concurrencyClass === "internal-exclusive").map((c) => c.name),
 )
 
 /** Derivasi: tool yang di-gate approval secara default. */

@@ -343,6 +343,19 @@ ${c.bold(`Context windows — ${sanitizeAnsiLine(provider.id)}`)}
       )
       process.exit(1)
     }
+    const { loadConfig } = await import("../../src/config.ts")
+    const { saveProvider } = await import("../../src/providers/provision.ts")
+    const global = !args.includes("--local")
+    const cfg = await loadConfig(getArg("--cwd"), {
+      allowLocal: allowLocalHere(args) || !global,
+    })
+    const entry = cfg.providers.find((p) => p.id === id)
+    if (!entry) {
+      console.error(
+        `provider "${sanitizeAnsiLine(id)}" not found in config — add it first before running set-key`,
+      )
+      process.exit(1)
+    }
     const { askSecret } = await import("../../src/ui/input/input.ts")
     const secret = await askSecret(
       `API key for ${sanitizeAnsiLine(id)} (hidden, empty = cancel) > `,
@@ -354,19 +367,6 @@ ${c.bold(`Context windows — ${sanitizeAnsiLine(provider.id)}`)}
     const backend = await setSecret(key, secret)
     if (!backend) {
       console.error("could not store secret (keystore unavailable, locked, corrupt, or unwritable)")
-      process.exit(1)
-    }
-    const { loadConfig } = await import("../../src/config.ts")
-    const { saveProvider } = await import("../../src/providers/provision.ts")
-    const global = !args.includes("--local")
-    const cfg = await loadConfig(getArg("--cwd"), {
-      allowLocal: allowLocalHere(args) || !global,
-    })
-    const entry = cfg.providers.find((p) => p.id === id)
-    if (!entry) {
-      console.error(
-        `provider "${sanitizeAnsiLine(id)}" not found - secret stored, but no provider points at it yet`,
-      )
       process.exit(1)
     }
     await saveProvider({ ...entry, apiKey: `keystore:${key}` }, { global, cwd: getArg("--cwd") })

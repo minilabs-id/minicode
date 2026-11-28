@@ -4,7 +4,11 @@ import type { ToolSchema } from "#minicore/core/tool.ts"
 import type { Message } from "#minicore/core/types.ts"
 import { applyMicrocompact } from "../src/policy/microcompact.ts"
 import { createUsageCollector } from "../src/policy/usage.ts"
-import { toAnthropicMessages, toAnthropicTools } from "../src/providers/anthropic.ts"
+import {
+  createAnthropicProvider,
+  toAnthropicMessages,
+  toAnthropicTools,
+} from "../src/providers/anthropic.ts"
 
 test("usage: tracks cache read and write tokens and reduces cost", () => {
   const bus = createEventBus()
@@ -217,4 +221,73 @@ test("Fase 7.1: endpoint diam (tak menyebut cache) mempertahankan default AKTIF"
   }
   expect(bodies.length).toBeGreaterThan(0)
   expect(bodies[0]).toContain("cache_control")
+})
+
+test("Wave 2 (F1a): SSE thinking+signature & redacted_thinking dipreservasikan ke turn tool_use", async () => {
+  const provider = createAnthropicProvider({
+    baseUrl: "https://example.invalid",
+    apiKey: "test",
+    models: ["claude-sonnet-4"],
+    thinking: 2048,
+  })
+  const sseChunks = [
+    'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}\n\n',
+    'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"analyze step"}}\n\n',
+    'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig_abc123"}}\n\n',
+    'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+    'event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"redacted_thinking","data":"enc_blob"}}\n\n',
+    'event: content_block_stop\ndata: {"type":"content_block_stop","index":1}\n\n',
+    'event: content_block_start\ndata: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"tu_1","name":"read_file"}}\n\n',
+    'event: content_block_delta\ndata: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":\\"a.ts\\"}"}}\n\n',
+    'event: content_block_stop\ndata: {"type":"content_block_stop","index":2}\n\n',
+    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}\n\n',
+  ]
+  const realFetch = globalThis.fetch
+  globalThis.fetch = (async () =>
+    new Response(sseChunks.join(""), {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    })) as unknown as typeof fetch
+  const blocks: unknown[] = []
+  let reasoningText = ""
+  try {
+    for await (const ev of provider.stream(
+      { messages: [{ role: "user", content: "hi" }], model: "claude-sonnet-4" },
+      new AbortController().signal,
+    )) {
+      if (ev.type === "extension" && ev.kind === "reasoning") {
+        reasoningText += String((ev.data as { text?: string }).text ?? "")
+      } else if (ev.type === "extension" && ev.kind === "reasoning_blocks") {
+        blocks.push((ev.data as { block: unknown }).block)
+      }
+    }
+  } finally {
+    globalThis.fetch = realFetch
+  }
+  expect(reasoningText).toBe("analyze step")
+  expect(blocks).toEqual([
+    { type: "thinking", thinking: "analyze step", signature: "sig_abc123" },
+    { type: "redacted_thinking", data: "enc_blob" },
+  ])
+
+  // Replay toAnthropicMessages harus menyertakan blok thinking+signature dan mengabaikan blok tanpa signature.
+  const payload = toAnthropicMessages([
+    { role: "user", content: "hi" },
+    {
+      role: "assistant",
+      content: "reading",
+      reasoningBlocks: [
+        ...(blocks as Record<string, unknown>[]),
+        { type: "thinking", thinking: "unsigned broken", signature: "" },
+      ],
+      toolCalls: [{ id: "tu_1", name: "read_file", args: { path: "a.ts" } }],
+    },
+    { role: "tool", toolCallId: "tu_1", name: "read_file", content: "file body" },
+  ]) as Array<{ role: string; content: Array<{ type: string }> }>
+  expect(payload[1]!.content.map((b) => b.type)).toEqual([
+    "thinking",
+    "redacted_thinking",
+    "text",
+    "tool_use",
+  ])
 })

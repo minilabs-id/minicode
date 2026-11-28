@@ -41,21 +41,22 @@ const WRITE_TOOLS = [
 const PLAN_EXTRA = ["todo_write", "delegate_task", "submit_result"] as const
 
 describe("work-mode tool visibility — fixture", () => {
-  test("himpunan kontrak baca (EXPLORE=16, LOCAL_READONLY=16, READONLY=18) ada di allTools", () => {
+  test("himpunan kontrak baca (EXPLORE=17, LOCAL_READONLY=17, READONLY=19) ada di allTools", () => {
     const names = new Set(nameOf(allTools))
-    expect(EXPLORE_TOOL_NAMES.length).toBe(16)
-    expect(LOCAL_READONLY_TOOL_NAMES.length).toBe(16)
-    expect(READONLY_TOOL_NAMES.size).toBe(18)
+    expect(EXPLORE_TOOL_NAMES.length).toBe(17)
+    expect(LOCAL_READONLY_TOOL_NAMES.length).toBe(17)
+    expect(READONLY_TOOL_NAMES.size).toBe(19)
     for (const n of EXPLORE_TOOL_NAMES) expect(names.has(n)).toBe(true)
     for (const n of LOCAL_READONLY_TOOL_NAMES) expect(names.has(n)).toBe(true)
     for (const n of READONLY_TOOL_NAMES) expect(names.has(n)).toBe(true)
   })
 
-  test("predikat workModeVisible: EXECUTE = identitas, DISCUSS = 18/21 sesuai PM (unified read-only + planning)", () => {
+  test("predikat workModeVisible: EXECUTE = identitas, DISCUSS = 19/22 sesuai PM (unified read-only + planning)", () => {
     expect(workModeVisible("read_file", "EXECUTE")).toBe(true)
     expect(workModeVisible("write_file", "EXECUTE")).toBe(true)
-    // DISCUSS default/auto: 18 READONLY_TOOL_NAMES + 3 PLAN_EXTRA = 21.
+    // DISCUSS default/auto: 19 READONLY_TOOL_NAMES + 3 PLAN_EXTRA = 22.
     expect(workModeVisible("read_file", "DISCUSS")).toBe(true)
+    expect(workModeVisible("dep_graph", "DISCUSS")).toBe(true)
     expect(workModeVisible("read_image", "DISCUSS")).toBe(true)
     expect(workModeVisible("git_diff", "DISCUSS")).toBe(true)
     expect(workModeVisible("lsp_references", "DISCUSS")).toBe(true)
@@ -76,7 +77,7 @@ describe("work-mode tool visibility — fixture", () => {
 
 describe("DISCUSS × permission mode — tidak memperluas permission mode (visible === callable)", () => {
   for (const pm of ["auto", "ask", "plan", "allow-all"] as const) {
-    test(`DISCUSS × ${pm}: tepat 21 tool (18 READONLY + 3 PLAN_EXTRA)`, async () => {
+    test(`DISCUSS × ${pm}: tepat 22 tool (19 READONLY + 3 PLAN_EXTRA)`, async () => {
       const { sessionTools } = await setupToolLayer(
         cfgEmpty,
         "full",
@@ -87,7 +88,7 @@ describe("DISCUSS × permission mode — tidak memperluas permission mode (visib
       )
       const names = nameOf(sessionTools)
       const allowed = new Set([...READONLY_TOOL_NAMES, ...PLAN_EXTRA])
-      expect(names).toHaveLength(21)
+      expect(names).toHaveLength(22)
       for (const n of allowed) expect(names).toContain(n)
       for (const n of names) expect(allowed.has(n)).toBe(true)
       for (const w of WRITE_TOOLS) expect(names).not.toContain(w)
@@ -95,7 +96,7 @@ describe("DISCUSS × permission mode — tidak memperluas permission mode (visib
   }
 
   for (const pm of ["readonly", "allowlist"] as const) {
-    test(`DISCUSS × ${pm}: tepat 18 READONLY_TOOL_NAMES tanpa PLAN_EXTRA (G5 tertutup)`, async () => {
+    test(`DISCUSS × ${pm}: tepat 19 READONLY_TOOL_NAMES tanpa PLAN_EXTRA (G5 tertutup)`, async () => {
       const { sessionTools } = await setupToolLayer(
         cfgEmpty,
         "full",
@@ -105,7 +106,7 @@ describe("DISCUSS × permission mode — tidak memperluas permission mode (visib
         "DISCUSS",
       )
       const names = nameOf(sessionTools)
-      expect(names).toHaveLength(18)
+      expect(names).toHaveLength(19)
       for (const n of READONLY_TOOL_NAMES) expect(names).toContain(n)
       for (const n of names) expect(READONLY_TOOL_NAMES).toContain(n)
       for (const extra of PLAN_EXTRA) expect(names).not.toContain(extra)
@@ -136,7 +137,7 @@ describe("EXECUTE × permission mode — perilaku lama + keselarasan READONLY_TO
     expect(nameOf(sessionTools)).toHaveLength(autoCount)
     expect(nameOf(sessionTools)).not.toContain("ask_user")
   })
-  test("EXECUTE × readonly: tepat 18 READONLY_TOOL_NAMES", async () => {
+  test("EXECUTE × readonly: tepat 19 READONLY_TOOL_NAMES", async () => {
     const { sessionTools } = await setupToolLayer(
       cfgEmpty,
       "full",
@@ -146,11 +147,11 @@ describe("EXECUTE × permission mode — perilaku lama + keselarasan READONLY_TO
       "EXECUTE",
     )
     const names = nameOf(sessionTools)
-    expect(names).toHaveLength(18)
+    expect(names).toHaveLength(19)
     for (const n of READONLY_TOOL_NAMES) expect(names).toContain(n)
     for (const w of WRITE_TOOLS) expect(names).not.toContain(w)
   })
-  test("EXECUTE × plan: tepat 21 tool (18 READONLY + 3 PLAN_EXTRA)", async () => {
+  test("EXECUTE × plan: tepat 22 tool (19 READONLY + 3 PLAN_EXTRA)", async () => {
     const { sessionTools } = await setupToolLayer(
       cfgEmpty,
       "full",
@@ -160,7 +161,7 @@ describe("EXECUTE × permission mode — perilaku lama + keselarasan READONLY_TO
       "EXECUTE",
     )
     const names = nameOf(sessionTools)
-    expect(names).toHaveLength(21)
+    expect(names).toHaveLength(22)
     for (const n of READONLY_TOOL_NAMES) expect(names).toContain(n)
     for (const extra of PLAN_EXTRA) expect(names).toContain(extra)
   })
@@ -173,9 +174,9 @@ describe("EXECUTE × permission mode — perilaku lama + keselarasan READONLY_TO
       undefined,
       "DISCUSS",
     )
-    expect(sessionTools).toHaveLength(21)
+    expect(sessionTools).toHaveLength(22)
     setPermissionMode!("allowlist")
-    expect(sessionTools).toHaveLength(18)
+    expect(sessionTools).toHaveLength(19)
     expect(nameOf(sessionTools)).not.toContain("todo_write")
     setWorkMode!("EXECUTE")
     setPermissionMode!("auto")
@@ -199,7 +200,7 @@ describe("unrestricted × WorkMode — INV-WM1: WorkMode mempersempit, unrestric
     expect(workModeVisible("write_file", "EXECUTE", "unrestricted")).toBe(true)
     expect(workModeVisible("git_commit", "EXECUTE", "unrestricted")).toBe(true)
   })
-  test("DISCUSS × unrestricted: tetap 21 tool ceiling DISCUSS (ceiling menang atas unrestricted)", async () => {
+  test("DISCUSS × unrestricted: tetap 22 tool ceiling DISCUSS (ceiling menang atas unrestricted)", async () => {
     const { sessionTools } = await setupToolLayer(
       cfgEmpty,
       "full",
@@ -210,7 +211,7 @@ describe("unrestricted × WorkMode — INV-WM1: WorkMode mempersempit, unrestric
     )
     const names = nameOf(sessionTools)
     const allowed = new Set([...READONLY_TOOL_NAMES, ...PLAN_EXTRA])
-    expect(names).toHaveLength(21)
+    expect(names).toHaveLength(22)
     for (const w of WRITE_TOOLS) expect(names).not.toContain(w)
     for (const n of names) expect(allowed.has(n)).toBe(true)
   })

@@ -179,6 +179,8 @@ test("helper subcommand: positionalSubArg, hasHelpFlag, allowLocalSubcommand, pa
   expect(hasHelpFlag(["stats", "--help"])).toBe(true)
   expect(hasHelpFlag(["stats", "-h"])).toBe(true)
   expect(hasHelpFlag(["stats", "--json"])).toBe(false)
+  expect(hasHelpFlag(["--model", "--help"])).toBe(false)
+  expect(hasHelpFlag(["stats", "--", "--help"])).toBe(false)
 
   expect(allowLocalSubcommand(["providers", "--allow-local-config"])).toBe(true)
   expect(allowLocalSubcommand(["providers"])).toBe(false)
@@ -201,6 +203,8 @@ test("missingValueFlags & unknownFlagsBeforePrompt menangkap salah pakai flag se
 
   expect(unknownFlagsBeforePrompt(["--bogus", "halo"])).toEqual(["--bogus"])
   expect(unknownFlagsBeforePrompt(["--cwd", "/tmp", "--bogus=1", "halo"])).toEqual(["--bogus"])
+  expect(unknownFlagsBeforePrompt(["-x", "halo"])).toEqual(["-x"])
+  expect(unknownFlagsBeforePrompt(["-123", "halo"])).toEqual([])
   expect(unknownFlagsBeforePrompt(["--", "--bogus", "halo"])).toEqual([])
   expect(unknownFlagsBeforePrompt(["halo", "--bogus"])).toEqual([])
 })

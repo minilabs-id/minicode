@@ -96,25 +96,26 @@ test("M7 budget: sub-budget + reservasi; overcommit tanpa threading didokumentas
   const a = admitted({ mode: "explore", budgetSteps: 3, parentRemainingSteps: 100 })
   expect(a.budgetSteps).toBe(3)
   expect(a.parentRemainingAfter).toBe(97)
-  // Cap mode: explore=5 (evidence LIMITS) — request 40 → 5.
+  // Cap mode: explore=LIMITS.SUB_AGENT_BUDGET_EXPLORE (24) — request 40 → 24.
   const capped = admitted({ mode: "explore", budgetSteps: 40 })
-  expect(capped.budgetSteps).toBe(5)
-  // Sisa 2 → efektif 2 (bukan 5).
+  expect(capped.budgetSteps).toBe(LIMITS.SUB_AGENT_BUDGET_EXPLORE)
+  // Sisa 2 → efektif 2 (bukan cap).
   const low = admitted({ mode: "explore", budgetSteps: 5, parentRemainingSteps: 2 })
   expect(low.budgetSteps).toBe(2)
   expect(low.parentRemainingAfter).toBe(0)
   expect(admitChild(spec({ parentRemainingSteps: 0 })).admitted).toBe(false)
-  // Reservation threading mencegah overcommit: 100 → 85 → 70 (cap plan=15 evidence LIMITS).
-  const first = admitted({ mode: "plan", budgetSteps: 15, parentRemainingSteps: 100 })
-  expect(first.budgetSteps).toBe(15)
-  expect(first.parentRemainingAfter).toBe(85)
+  // Reservation threading mencegah overcommit: 100 → 100-planCap → sisanya (cap plan=LIMITS.SUB_AGENT_BUDGET_PLAN).
+  const planCap = LIMITS.SUB_AGENT_BUDGET_PLAN
+  const first = admitted({ mode: "plan", budgetSteps: planCap, parentRemainingSteps: 100 })
+  expect(first.budgetSteps).toBe(planCap)
+  expect(first.parentRemainingAfter).toBe(100 - planCap)
   const second = admitted({
     mode: "plan",
     budgetSteps: 90,
     parentRemainingSteps: first.parentRemainingAfter!,
   })
-  expect(second.budgetSteps).toBe(15)
-  expect(second.parentRemainingAfter).toBe(70)
+  expect(second.budgetSteps).toBe(planCap)
+  expect(second.parentRemainingAfter).toBe(100 - planCap * 2)
 })
 
 // Workspace: inherit bounded; escape ditolak.

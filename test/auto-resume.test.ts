@@ -24,6 +24,7 @@ import {
   RECOVERY_BUDGET_MS,
   RECOVERY_MAX_DELAY_MS,
   RECOVERY_MIN_DELAY_MS,
+  RECOVERY_STALL_RETRY_CAP,
   recoveryDelay,
 } from "../src/policy/recovery-budget.ts"
 
@@ -320,6 +321,61 @@ describe("retry provider (cappedRecovery) memakai anggaran yang sama", () => {
     expect(policy.onError(new ProviderError("context_length_exceeded", "full"), 1).type).toBe(
       "force_compact_and_retry",
     )
+  })
+
+  test("turn panjang >45 dtk lalu kena 503/stall tetap menyalakan episode baru dan resetEpisode memulihkannya", () => {
+    let clock = 1_000
+    const ledger = createRecoveryLedger(() => clock)
+    const policy = createSessionRecoveryPolicy(() => ledger)
+
+    // Turn berjalan sehat selama 3 menit sebelum error pertama muncul.
+    clock += 180_000
+    const first = policy.onError(new ProviderError("server", "503"), 1)
+    expect(first.type).toBe("retry")
+    expect(ledger.remainingMs()).toBe(RECOVERY_BUDGET_MS)
+
+    // Episode gagal hanya memakan waktu setelah error pertama terjadi.
+    clock += 20_000
+    expect(policy.onError(new ProviderError("server", "503"), 2).type).toBe("retry")
+
+    // Setelah step pulih dan resetEpisode dipanggil, anggaran kembali penuh.
+    ledger.resetEpisode()
+    clock += 300_000
+    expect(ledger.attemptsUsed()).toBe(0)
+    expect(policy.onError(new ProviderError("network", "ECONNRESET"), 1).type).toBe("retry")
+    expect(ledger.remainingMs()).toBe(RECOVERY_BUDGET_MS)
+  })
+
+  test("stall/timeout mendapat tepat 2x retry lintas session + decideTurnResume lalu berhenti", () => {
+    let clock = 1_000
+    const ledger = createRecoveryLedger(() => clock)
+    const policy = createSessionRecoveryPolicy(() => ledger)
+
+    // Simulasikan turn panjang + stall pertama (60s) → tetap dapat Retry #1.
+    clock += 170_000
+    expect(RECOVERY_STALL_RETRY_CAP).toBe(2)
+    const r1 = policy.onError(
+      new ProviderError("server", "provider sent nothing for 60000ms (connection stalled)"),
+      1,
+    )
+    expect(r1.type).toBe("retry")
+
+    // Percobaan ke-2 juga stall (90s) → tetap dapat Retry #2 (naik 2x).
+    clock += 90_000
+    const r2 = policy.onError(
+      new ProviderError("server", "provider sent nothing for 90000ms (connection stalled)"),
+      2,
+    )
+    expect(r2.type).toBe("retry")
+
+    // Kegagalan stall ke-3 (melewati cap 2x) berhenti total di kedua lapisan.
+    clock += 60_000
+    const r3 = policy.onError(
+      new ProviderError("server", "provider sent nothing for 60000ms (connection stalled)"),
+      3,
+    )
+    expect(r3.type).toBe("throw")
+    expect(ledger.nextDelay({ category: "server", stalled: true })).toBeNull()
   })
 })
 

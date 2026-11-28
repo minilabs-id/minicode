@@ -48,7 +48,12 @@ Options:
   --allowlist         bash allowlist only (see MINICODE_BASH_ALLOWLIST)
   --max-steps <n>     max tool steps (default ${LIMITS.DEFAULT_MAX_STEPS})
   --context-window <n> context window tokens
-  --timeout <ms>      hard deadline per run (default 3600000 = 1h, 0 = off)
+  --timeout <ms>      inactivity timeout in ms (default 3600000 = 1h idle, 0 = off)
+  --wall-timeout <ms> optional total wall-clock cap in ms (default: unlimited)
+  --autonomous        enable multi-epoch autonomous loop (BUILD mode recommended)
+  --max-epochs <n>    max autonomous epochs (0 = unlimited)
+  --max-cost-hour <n> hourly USD circuit breaker in autonomous mode
+  --takeover          allow taking over a session lease left by a dead process
   --interactive       interactive TUI (default bila tanpa prompt di TTY)
   --verify            auto-verify + self-heal (typecheck/test/tsconfig)
   --sandbox <mode>    bash sandbox: docker (ephemeral, no network) | os (bwrap/seatbelt)
@@ -120,7 +125,27 @@ export function buildHelpJson(): object {
       { flag: "--context-window <n>", desc: "context window tokens" },
       {
         flag: "--timeout <ms>",
-        desc: "hard deadline per run (default 3600000 = 60min; 0 = Infinity)",
+        desc: "inactivity timeout in ms (default 3600000 = 60min idle; 0 = Infinity)",
+      },
+      {
+        flag: "--wall-timeout <ms>",
+        desc: "optional total wall-clock timeout in ms (default: unlimited)",
+      },
+      {
+        flag: "--autonomous",
+        desc: "enable multi-epoch autonomous loop (bounded by WorkMode)",
+      },
+      {
+        flag: "--max-epochs <n>",
+        desc: "max autonomous epochs (0 = unlimited)",
+      },
+      {
+        flag: "--max-cost-hour <n>",
+        desc: "hourly USD circuit breaker for autonomous sessions",
+      },
+      {
+        flag: "--takeover",
+        desc: "allow taking over a session lease left by a dead process",
       },
       { flag: "-y, --allow-all", desc: "allow all tools (privileged access profile)" },
       { flag: "--ask", desc: "ask per tool (human-supervised)" },

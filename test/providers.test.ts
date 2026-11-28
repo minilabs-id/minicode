@@ -666,3 +666,43 @@ test("openai-compat argumen kosong menjadi {} dan tool call tetap flush tanpa fi
     globalThis.fetch = origFetch
   }
 })
+
+test("P1-6: openai-compat retry 401 jatuh ke getApiKey bila refreshApiKey mengembalikan undefined", async () => {
+  const origFetch = globalThis.fetch
+  const seenAuths: Array<string | null> = []
+  let reqCount = 0
+  ;(globalThis as unknown as { fetch: unknown }).fetch = async (
+    _url: unknown,
+    init?: { headers?: Record<string, string> },
+  ) => {
+    reqCount++
+    seenAuths.push(init?.headers?.authorization ?? null)
+    if (reqCount === 1) return new Response("unauthorized", { status: 401 })
+    return new Response("data: [DONE]\n\n", {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    })
+  }
+  try {
+    let current = "stale-token"
+    const p = createOpenAICompatProvider({
+      apiKey: "",
+      baseUrl: "https://x/v1",
+      models: ["m"],
+      getApiKey: async () => current,
+      refreshApiKey: async () => {
+        current = "fresh-via-get"
+        return undefined
+      },
+    })
+    for await (const _ev of p.stream(
+      { messages: [{ role: "user", content: "hi" }], model: "m" },
+      new AbortController().signal,
+    )) {
+      // habiskan stream
+    }
+    expect(seenAuths).toEqual(["Bearer stale-token", "Bearer fresh-via-get"])
+  } finally {
+    globalThis.fetch = origFetch
+  }
+})

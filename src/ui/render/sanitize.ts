@@ -215,11 +215,13 @@ export function createStreamSanitizer(): StreamSanitizer {
 // ── Kebijakan ANSI non-TTY (temuan F2) ──
 
 const ESC_CH = String.fromCharCode(27)
+// Pola dibangun tanpa literal kontrol (aturan lint noControlCharactersInRegex).
+const SGR_STRIP_RE = new RegExp(`${ESC_CH}\\[[0-9;:]*m`, "g")
 
 /** Buang SGR (sesudah sanitizeAnsi, hanya ini yang tersisa) untuk pipa. */
 export function stripSgr(s: string): string {
-  // Pola dibangun tanpa literal kontrol (aturan lint noControlCharactersInRegex).
-  return s.replace(new RegExp(`${ESC_CH}\\[[0-9;:]*m`, "g"), "")
+  if (!s.includes(ESC_CH)) return s
+  return s.replace(SGR_STRIP_RE, "")
 }
 
 /**

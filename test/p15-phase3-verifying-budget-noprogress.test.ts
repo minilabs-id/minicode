@@ -901,3 +901,238 @@ describe("LOOP-G19 & LOOP-G27 — detektor deterministik No-Progress & Oscillati
     expect(classifyVerifyFailure({ ok: false, output: "", timedOut: true }).transient).toBe(true)
   })
 })
+
+describe("Wave 5 / G4 — pengetatan NoProgressDetector & regresi planning", () => {
+  test("streak error sekunder (tool + normalizedErrorHeadline, ambang 5) memblokir variasi argumen kecil", async () => {
+    const det = createNoProgressDetector({ maxRepeatedErrors: 3, maxSimilarErrors: 5 })
+    for (let i = 1; i <= 4; i++) {
+      expect(
+        det.evaluateBeforeCall({ name: "bash", args: { cmd: `check --flag=${i}` } }).allowed,
+      ).toBe(true)
+      const outcome = det.recordOutcome({
+        name: "bash",
+        args: { cmd: `check --flag=${i}` },
+        isError: true,
+        content: `TypeError: foo is not a function (duration_ms=${i * 10})`,
+      })
+      expect(outcome.allowed).toBe(true)
+    }
+    det.evaluateBeforeCall({ name: "bash", args: { cmd: "check --flag=5" } })
+    const fifth = det.recordOutcome({
+      name: "bash",
+      args: { cmd: "check --flag=5" },
+      isError: true,
+      content: "TypeError: foo is not a function (duration_ms=99)",
+    })
+    expect(fifth.allowed).toBe(false)
+    if (!fifth.allowed) expect(fifth.reason).toBe("REPEATED_ACTION_ERROR")
+
+    // Percobaan ke-6 dengan argumen baru tanpa bukti baru langsung diblokir sebelum jalan
+    const blocked = det.evaluateBeforeCall({ name: "bash", args: { cmd: "check --flag=6" } })
+    expect(blocked.allowed).toBe(false)
+
+    // Bukti baca baru membuka tepat 1 retry terjustifikasi; sukses memulihkan blokir headline
+    det.recordOutcome({ name: "read_file", args: { path: "src/app.ts" }, content: "fix me" })
+    expect(det.evaluateBeforeCall({ name: "bash", args: { cmd: "check --fixed" } }).allowed).toBe(
+      true,
+    )
+    expect(
+      det.recordOutcome({ name: "bash", args: { cmd: "check --fixed" }, content: "ok" }).allowed,
+    ).toBe(true)
+    expect(det.evaluateBeforeCall({ name: "bash", args: { cmd: "check --next" } }).allowed).toBe(
+      true,
+    )
+
+    // End-to-end session: 5x tool error beda argumen menghentikan panggilan ke-6 sebelum eksekusi
+    const dir = tempDir()
+    let executions = 0
+    const varyingFailTool: Tool = tool(
+      "varying_fail",
+      async () => {
+        executions += 1
+        throw new Error("ENOENT missing artifact at /tmp/run-12345")
+      },
+      {
+        type: "object",
+        properties: { flag: { type: "number" } },
+        additionalProperties: false,
+      },
+    )
+    const session = await createMinicodeSession({
+      provider: new FakeProvider([
+        { events: [toolCall("varying_fail", { flag: 1 }, "v1"), finish("tool_calls")] },
+        { events: [toolCall("varying_fail", { flag: 2 }, "v2"), finish("tool_calls")] },
+        { events: [toolCall("varying_fail", { flag: 3 }, "v3"), finish("tool_calls")] },
+        { events: [toolCall("varying_fail", { flag: 4 }, "v4"), finish("tool_calls")] },
+        { events: [toolCall("varying_fail", { flag: 5 }, "v5"), finish("tool_calls")] },
+        { events: [toolCall("varying_fail", { flag: 6 }, "v6"), finish("tool_calls")] },
+        { events: [text("berhenti memutar"), finish("stop")] },
+      ]),
+      tools: [varyingFailTool],
+      cwd: dir,
+      permissionMode: "allow-all",
+    })
+    const res = await session.run("uji variasi argumen")
+    expect(res.finalText).toBe("berhenti memutar")
+    expect(executions).toBe(5)
+    const msgs = session.state.history.filter((m) => m.role === "tool")
+    expect(msgs).toHaveLength(6)
+    expect(String(msgs[5]!.content)).toContain(
+      "[LOOP_GUARD kind=NO_PROGRESS reason=REPEATED_ACTION_ERROR count=5]",
+    )
+  })
+
+  test("noteAssistantResponse tidak me-reset READ_ONLY_THRASHING & todo_write identik adalah no-op", async () => {
+    const det = createNoProgressDetector({
+      maxConsecutiveReadCalls: 3,
+      getPosture: () => "active",
+    })
+    expect(det.evaluateBeforeCall({ name: "read_file", args: { path: "a.ts" } }).allowed).toBe(true)
+    expect(det.evaluateBeforeCall({ name: "read_file", args: { path: "b.ts" } }).allowed).toBe(true)
+    expect(det.snapshot().consecutiveReadCalls).toBe(2)
+
+    // Narasi teks biasa tidak boleh mengosongkan counter baca
+    det.noteAssistantResponse()
+    expect(det.snapshot().consecutiveReadCalls).toBe(2)
+
+    // Pembaruan todo_write pertama (payload baru) mereset counter
+    const todoPayload = { todos: [{ taskId: "1", content: "audit", status: "in_progress" }] }
+    expect(det.evaluateBeforeCall({ name: "todo_write", args: todoPayload }).allowed).toBe(true)
+    expect(det.snapshot().consecutiveReadCalls).toBe(0)
+
+    // Baca lagi lalu ulang todo_write IDENTIK tanpa perubahan -> TIDAK mereset!
+    expect(det.evaluateBeforeCall({ name: "read_file", args: { path: "c.ts" } }).allowed).toBe(true)
+    expect(det.evaluateBeforeCall({ name: "read_file", args: { path: "d.ts" } }).allowed).toBe(true)
+    expect(det.evaluateBeforeCall({ name: "todo_write", args: todoPayload }).allowed).toBe(true)
+    expect(det.snapshot().consecutiveReadCalls).toBe(2)
+
+    // Delta/perubahan nyata pada todo_write memutus rentetan lagi
+    expect(
+      det.evaluateBeforeCall({
+        name: "todo_write",
+        args: { updates: [{ id: "1", status: "completed" }] },
+      }).allowed,
+    ).toBe(true)
+    expect(det.snapshot().consecutiveReadCalls).toBe(0)
+  })
+
+  test("shellCandidatePaths melacak file root tanpa ekstensi via redirect / cp / tee", async () => {
+    const dir = tempDir()
+    const makePath = join(dir, "Makefile")
+    writeFileSync(makePath, "V1", "utf8")
+    const det = createNoProgressDetector({ maxOscillations: 2 })
+    await det.beforeToolEffectCheck(
+      { id: "w1", name: "write_file", args: { path: "Makefile", content: "V2" } },
+      dir,
+    )
+    writeFileSync(makePath, "V2", "utf8")
+    await det.completePostMutation(
+      { id: "w1", name: "write_file", args: { path: "Makefile" } },
+      dir,
+    )
+    await det.beforeToolEffectCheck(
+      { id: "b1", name: "bash", args: { cmd: "echo V1 > Makefile" } },
+      dir,
+    )
+    writeFileSync(makePath, "V1", "utf8")
+    await det.completePostMutation(
+      { id: "b1", name: "bash", args: { cmd: "echo V1 > Makefile" } },
+      dir,
+    )
+    await det.beforeToolEffectCheck(
+      { id: "b2", name: "bash", args: { cmd: "echo V2 | tee Makefile" } },
+      dir,
+    )
+    writeFileSync(makePath, "V2", "utf8")
+    await det.completePostMutation(
+      { id: "b2", name: "bash", args: { cmd: "echo V2 | tee Makefile" } },
+      dir,
+    )
+    await det.beforeToolEffectCheck(
+      { id: "b3", name: "bash", args: { cmd: "cp other Makefile > build.log" } },
+      dir,
+    )
+    writeFileSync(makePath, "V1", "utf8")
+    const v = await det.completePostMutation(
+      { id: "b3", name: "bash", args: { cmd: "cp other Makefile > build.log" } },
+      dir,
+    )
+    expect(v.allowed).toBe(false)
+    if (!v.allowed) expect(v.reason).toBe("WORKSPACE_REVERT_CYCLE")
+  })
+
+  test("pemulihan blokir headline mengembalikan kuota retry terjustifikasi untuk blokir baru", () => {
+    const det = createNoProgressDetector({
+      maxRepeatedErrors: 3,
+      maxSimilarErrors: 5,
+      maxNewEvidenceRetries: 1,
+    })
+    for (let i = 1; i <= 5; i++) {
+      det.evaluateBeforeCall({ name: "bash", args: { cmd: `t --i=${i}` } })
+      det.recordOutcome({
+        name: "bash",
+        args: { cmd: `t --i=${i}` },
+        isError: true,
+        content: "Err A",
+      })
+    }
+    det.recordOutcome({ name: "read_file", args: { path: "f1.ts" }, content: "evidence 1" })
+    expect(det.evaluateBeforeCall({ name: "bash", args: { cmd: "t --ok" } }).allowed).toBe(true)
+    expect(
+      det.recordOutcome({ name: "bash", args: { cmd: "t --ok" }, content: "ok" }).allowed,
+    ).toBe(true)
+    expect(det.snapshot().justifiedRetriesUsed).toBe(0)
+
+    for (let i = 1; i <= 5; i++) {
+      det.evaluateBeforeCall({ name: "bash", args: { cmd: `u --i=${i}` } })
+      det.recordOutcome({
+        name: "bash",
+        args: { cmd: `u --i=${i}` },
+        isError: true,
+        content: "Err B",
+      })
+    }
+    det.recordOutcome({ name: "read_file", args: { path: "f2.ts" }, content: "evidence 2" })
+    expect(det.evaluateBeforeCall({ name: "bash", args: { cmd: "u --retry" } }).allowed).toBe(true)
+  })
+
+  test("PLANNING_REGRESSION_TASKS: setup/verify & batch paralel todo_write + read_file", async () => {
+    const { PLANNING_REGRESSION_TASKS } = await import("../bench/tasks.ts")
+    expect(PLANNING_REGRESSION_TASKS).toHaveLength(3)
+    for (const task of PLANNING_REGRESSION_TASKS) {
+      const dir = await task.setup()
+      try {
+        const res = await task.verify(dir)
+        expect(res.passed).toBe(true)
+        if (task.id === "parallel-plan-and-read") {
+          const session = await createMinicodeSession({
+            provider: new FakeProvider([
+              {
+                events: [
+                  toolCall(
+                    "todo_write",
+                    { todos: [{ taskId: "p1", content: "inspect config", status: "in_progress" }] },
+                    "tw1",
+                  ),
+                  toolCall("read_file", { path: "config.json" }, "rf1"),
+                  finish("tool_calls"),
+                ],
+              },
+              { events: [text("batch selesai"), finish("stop")] },
+            ]),
+            tools: [todoWriteTool, readFileTool],
+            cwd: dir,
+            permissionMode: "allow-all",
+          })
+          const out = await session.run(task.prompt)
+          expect(out.finalText).toBe("batch selesai")
+          const toolResults = session.state.history.filter((m) => m.role === "tool")
+          expect(toolResults).toHaveLength(2)
+          expect(String(toolResults[1]!.content)).toContain('"mode":"strict"')
+        }
+      } finally {
+        await task.cleanup(dir)
+      }
+    }
+  })
+})

@@ -19,7 +19,7 @@
 // menambah provider = menambah satu entri, bukan menulis alur baru.
 
 import { LIMITS } from "../constants.ts"
-import { type AuthCredentials, getAuth, saveAuth } from "./auth-store.ts"
+import { type AuthCredentials, getAuth, isExpired, saveAuth } from "./auth-store.ts"
 
 export interface OAuthProviderSpec {
   id: string
@@ -360,13 +360,34 @@ const refreshInflight = new Map<string, Promise<string | null>>()
 export async function getValidAccessToken(providerId: string): Promise<string | null> {
   const creds = await getAuth(providerId)
   if (!creds) return null
-  const { isExpired } = await import("./auth-store.ts")
   if (!isExpired(creds)) return creds.accessToken
   // Dedup refresh konkuren (temuan audit #03): dua pemanggil paralel
   // (sesi utama + sub-agen) tanpa ini memicu dua token POST dan last-wins
   // saveAuth — rotasi bisa menginvalidasi token pertama.
   const ongoing = refreshInflight.get(providerId)
   if (ongoing) return ongoing
+  let run!: Promise<string | null>
+  run = (async () => {
+    try {
+      const refreshed = await refreshAccessToken(providerId, creds)
+      return refreshed?.accessToken ?? null
+    } finally {
+      if (refreshInflight.get(providerId) === run) refreshInflight.delete(providerId)
+    }
+  })()
+  refreshInflight.set(providerId, run)
+  return run
+}
+
+/**
+ * Paksa refresh access token meskipun TTL lokal belum habis (dipanggil saat
+ * endpoint menolak token lama dengan HTTP 401 pada sesi multi-jam/hari).
+ */
+export async function forceRefreshAccessToken(providerId: string): Promise<string | null> {
+  const ongoing = refreshInflight.get(providerId)
+  if (ongoing) return ongoing
+  const creds = await getAuth(providerId)
+  if (!creds) return null
   let run!: Promise<string | null>
   run = (async () => {
     try {

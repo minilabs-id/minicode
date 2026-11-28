@@ -4,8 +4,9 @@ import type { Tool } from "#minicore"
 import { LIMITS } from "../constants.ts"
 import { assertSafeWriteTarget, resolveSafePath, safeReadFile } from "../lib/safe-open.ts"
 import { trashFile } from "../lib/trash.ts"
-import { getConfiguredExts } from "../lsp/client.ts"
+import { closeLspDocument, getConfiguredExts } from "../lsp/client.ts"
 import { appendLspDiagnostics } from "../policy/verifier.ts"
+import { invalidateRepoGraphCache, lookupDependentImporters } from "../repo/repomap.ts"
 import { contextUnrestricted, requireToolCwd } from "./context.ts"
 
 export const moveFileTool: Tool = {
@@ -69,8 +70,15 @@ export const moveFileTool: Tool = {
       const trashed = await trashFile(root, absTo)
       backup = ` (previous dest backed up to ${trashed})`
     }
+    const staleImporters = st.isFile() ? await lookupDependentImporters(root, absFrom) : []
     await rename(absFrom, absTo)
-    const base = `moved ${f} -> ${t}${backup}`
+    closeLspDocument(absFrom, root)
+    invalidateRepoGraphCache(root)
+    const depWarn =
+      staleImporters.length > 0
+        ? `\n[dep-graph] warning: ${staleImporters.length} file(s) still reference ${f}: ${staleImporters.slice(0, 5).join(", ")}${staleImporters.length > 5 ? ` (+${staleImporters.length - 5} more)` : ""}`
+        : ""
+    const base = `moved ${f} -> ${t}${backup}${depWarn}`
     if (!st.isFile() || st.size > LIMITS.READ_FILE_MAX_BYTES) return base
     const ext = extname(absTo).toLowerCase()
     if (!getConfiguredExts().includes(ext)) return base

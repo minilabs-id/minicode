@@ -44,11 +44,11 @@ bun run gate:fast   # tsc + lint + test + coverage + pack + bash + bench:smoke +
 
 Slow/stochastic gates (docker sandbox) stay in `slow.yml` — their failure is an investigation signal, not a PR rejection. The per-commit CI (`ci.yml`) only runs the deterministic ones.
 
-### Package size budget (5,000 KiB)
+### Package size budget (5,250 KiB)
 
-`bun run gate:pack` measures the tarball size (`npm pack --dry-run`, KiB) and refuses when it **exceeds 5,000 KiB (4.9 MiB)**. The single figure lives in `scripts/pack-budget.ts` — one source for the gate and the tests, so the two cannot drift. This limit is a **regression alarm** (catching `node_modules`/`test` leaking in), not a size target to chase.
+`bun run gate:pack` measures the tarball size (`npm pack --dry-run`, KiB) and refuses when it **exceeds 5,250 KiB (5.13 MiB)**. The single figure lives in `scripts/pack-budget.ts` — one source for the gate and the tests, so the two cannot drift. This limit is a **regression alarm** (catching `node_modules`/`test` leaking in), not a size target to chase.
 
-The 5,000 KiB limit was approved by the owner on 2026-11-19 (re-baselined from 4,608 KiB after the v7.32–v7.41 total audit: actual package 4,709 KiB / 331 files, ~290 KiB margin). Do not raise the budget without new evidence and owner approval; measure runtime and prunable non-runtime files first.
+The 5,250 KiB limit was approved by the owner on 2026-11-25 (re-baselined from 5,000 KiB after v0.50.0 hardening & UI/compaction: actual package 5,013 KiB / 342 files, ~237 KiB margin). Do not raise the budget without new evidence and owner approval; measure runtime and prunable non-runtime files first.
 
 Other gates:
 

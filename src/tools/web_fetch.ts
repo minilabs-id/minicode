@@ -8,26 +8,9 @@ const MAX_REDIRECTS = LIMITS.WEB_FETCH_MAX_REDIRECTS
 // Hard-cap pembacaan body SEBELUM slicing — cegah OOM dari response raksasa.
 const BODY_HARD_CAP_BYTES = LIMITS.WEB_RESPONSE_BODY_HARD_CAP_BYTES
 
-/**
- * Ekstrak teks terbaca dari HTML agar halaman web penuh <script>/<style>/<svg>
- * tidak memboroskan budget 8000 karakter sebelum isi artikel sempat terbaca.
- */
-export function extractReadableHtml(html: string): string {
-  const withoutBlocks = html
-    .replace(/<!--[\s\S]*?-->/g, " ")
-    .replace(/<(script|style|noscript|svg)\b[^>]*>[\s\S]*?<\/\1>/gi, "\n")
-    .replace(
-      /<\/?(?:p|div|section|article|main|aside|header|footer|nav|h[1-6]|li|tr|td|th|blockquote|pre|br|hr)\b[^>]*>/gi,
-      "\n",
-    )
-    .replace(/<[^>]+>/g, " ")
-  const decoded = withoutBlocks
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;|&apos;/gi, "'")
+/** Dekode entitas numerik HTML/XML (`&#123;`, `&#x1A;`) dengan validasi batas code point aman. */
+export function decodeNumericHtmlEntities(text: string): string {
+  return text
     .replace(/&#(\d+);/g, (_m, n) => {
       const cp = Number(n)
       return Number.isSafeInteger(cp) && cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : ""
@@ -36,6 +19,110 @@ export function extractReadableHtml(html: string): string {
       const cp = Number.parseInt(hex, 16)
       return Number.isSafeInteger(cp) && cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : ""
     })
+}
+
+/** Buang komentar `<!--...-->` dan blok `<script|style|noscript|svg>` secara linear O(N) tanpa regex dot-all. */
+function stripHtmlNoiseLinear(html: string): string {
+  const lower = html.toLowerCase()
+  const out: string[] = []
+  const noClose = new Set<string>()
+  let pos = 0
+  let noCommentClose = false
+
+  while (pos < html.length) {
+    const lt = html.indexOf("<", pos)
+    if (lt === -1) break
+
+    if (html.startsWith("<!--", lt)) {
+      if (noCommentClose) {
+        out.push(html.slice(pos, lt + 4))
+        pos = lt + 4
+        continue
+      }
+      const end = html.indexOf("-->", lt + 4)
+      if (end === -1) {
+        noCommentClose = true
+        out.push(html.slice(pos, lt + 4))
+        pos = lt + 4
+        continue
+      }
+      out.push(html.slice(pos, lt), " ")
+      pos = end + 3
+      continue
+    }
+
+    const tagM = /^<(script|style|noscript|svg)(?=[\s/>])/.exec(lower.slice(lt, lt + 16))
+    if (tagM) {
+      const name = tagM[1]!
+      if (noClose.has(name)) {
+        out.push(html.slice(pos, lt + 1))
+        pos = lt + 1
+        continue
+      }
+      const gt = html.indexOf(">", lt + 1 + name.length)
+      if (gt === -1) break
+      const closeIdx = lower.indexOf(`</${name}>`, gt + 1)
+      if (closeIdx === -1) {
+        noClose.add(name)
+        out.push(html.slice(pos, lt + 1))
+        pos = lt + 1
+        continue
+      }
+      out.push(html.slice(pos, lt), "\n")
+      pos = closeIdx + name.length + 3
+      continue
+    }
+
+    out.push(html.slice(pos, lt + 1))
+    pos = lt + 1
+  }
+  if (pos === 0) return html
+  if (pos < html.length) out.push(html.slice(pos))
+  return out.join("")
+}
+
+const BLOCK_TAG_NAME_RE =
+  /^\/?(?:p|div|section|article|main|aside|header|footer|nav|h[1-6]|li|tr|td|th|blockquote|pre|br|hr)(?=[\s/>]|$)/i
+
+/** Hapus sisa tag `<...>` secara linear (blok -> `\n`, inline -> spasi) supaya `<` tak berpasangan aman. */
+function stripRemainingTagsLinear(text: string): string {
+  if (!text.includes("<")) return text
+  const out: string[] = []
+  let pos = 0
+  while (pos < text.length) {
+    const lt = text.indexOf("<", pos)
+    if (lt === -1) break
+    const gt = text.indexOf(">", lt + 1)
+    if (gt === -1) break
+    if (gt > lt + 1) {
+      const replacement = BLOCK_TAG_NAME_RE.test(text.slice(lt + 1, Math.min(gt, lt + 15)))
+        ? "\n"
+        : " "
+      out.push(text.slice(pos, lt), replacement)
+    } else {
+      out.push(text.slice(pos, gt + 1))
+    }
+    pos = gt + 1
+  }
+  return pos === 0 ? text : out.join("") + text.slice(pos)
+}
+
+/**
+ * Ekstrak teks terbaca dari HTML agar halaman web penuh <script>/<style>/<svg>
+ * tidak memboroskan budget 8000 karakter sebelum isi artikel sempat terbaca.
+ */
+export function extractReadableHtml(html: string): string {
+  const withoutNoise = stripHtmlNoiseLinear(html)
+  const withoutBlocks = stripRemainingTagsLinear(withoutNoise)
+  const decoded = decodeNumericHtmlEntities(
+    withoutBlocks
+      .replace(/&nbsp;/gi, " ")
+      .replace(/&amp;/gi, "&")
+      .replace(/&lt;/gi, "<")
+      .replace(/&gt;/gi, ">")
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;|&apos;/gi, "'"),
+  )
   const cleaned = decoded
     .split("\n")
     .map((line) => line.replace(/[ \t\r]+/g, " ").trim())

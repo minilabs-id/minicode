@@ -34,6 +34,7 @@ import {
   watchedSessions,
 } from "../src/task/session-ownership.ts"
 import { resetTaskStoreHandles, TaskStore } from "../src/task/store.ts"
+import type { TriggerEvent } from "../src/task/trigger.ts"
 
 let dir: string
 let store: TaskStore
@@ -944,5 +945,35 @@ describe("J. an autonomous execution escapes into nothing", () => {
     for (const v of [undefined, false, true]) {
       expect({ v, enabled: schedulerGateFor(v).enabled }).toEqual({ v, enabled: v === true })
     }
+  })
+
+  test("P1-2: verifier throw mengemisikan trigger:cycle_failed dan menandai task secara jujur", async () => {
+    const task = store.createTask(S, {
+      title: "t-verif",
+      status: "PENDING",
+      order: 1,
+      provenance: prov,
+    })
+    const triggerEvents: TriggerEvent[] = []
+    const handle = await createProductionScheduler(
+      GATE_ENABLED,
+      deps({
+        verifier: async () => {
+          throw new Error("verifier boom")
+        },
+        onTriggerEvent: (e) => triggerEvents.push(e),
+      }),
+    )
+    const trig = await handle.fire("explicit-command")
+    await handle.stop("shutdown")
+
+    expect(trig?.outcome).toBe("EVALUATED")
+    expect(
+      triggerEvents.some(
+        (e) => e.kind === "trigger:cycle_failed" && e.detail.includes("verifier boom"),
+      ),
+    ).toBe(true)
+    const after = store.getTask(S, task.id)
+    expect(after?.status).toBe("BLOCKED")
   })
 })

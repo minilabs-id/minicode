@@ -11,16 +11,30 @@ export interface Allowlist {
 const GLOBAL_ALLOW = join(homedir(), ".minicode", "allowlist.json")
 const LOCAL_ALLOW = ".minicode/allowlist.json"
 
+function sanitizeAllowedEntries(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return []
+  const out: string[] = []
+  let invalid = 0
+  for (const entry of raw) {
+    if (typeof entry === "string" && entry.length > 0) out.push(entry)
+    else invalid++
+  }
+  if (invalid > 0) {
+    process.stderr.write(`[warn] allowlist: ignoring ${invalid} non-string/empty entry\n`)
+  }
+  return out
+}
+
 export async function loadAllowlist(
   cwd?: string,
   opts: { allowLocal?: boolean } = {},
 ): Promise<Allowlist> {
-  let globalList: Allowlist = { allowed: [] }
-  let localList: Allowlist = { allowed: [] }
+  let globalList: string[] = []
+  let localList: string[] = []
   try {
     const txt = await readFile(GLOBAL_ALLOW, "utf8")
-    const parsed = JSON.parse(txt) as Allowlist
-    if (Array.isArray(parsed.allowed)) globalList = parsed
+    const parsed = JSON.parse(txt) as { allowed?: unknown }
+    globalList = sanitizeAllowedEntries(parsed?.allowed)
   } catch {}
   // Sama seperti config (audit #07 P0): allowlist lokal adalah input repo —
   // repo yang memberi dirinya sendiri "always" = persetujuan palsu. Hanya
@@ -29,26 +43,27 @@ export async function loadAllowlist(
     try {
       const path = resolve(cwd ?? process.cwd(), LOCAL_ALLOW)
       const txt = await readFile(path, "utf8")
-      const parsed = JSON.parse(txt) as Allowlist
-      if (Array.isArray(parsed.allowed)) localList = parsed
+      const parsed = JSON.parse(txt) as { allowed?: unknown }
+      localList = sanitizeAllowedEntries(parsed?.allowed)
     } catch {}
   }
   // merge global+local, dedup
-  const merged = new Set<string>([...globalList.allowed, ...localList.allowed])
+  const merged = new Set<string>([...globalList, ...localList])
   return { allowed: [...merged] }
 }
 
 export async function saveAllowlist(entry: string, cwd?: string, opts: { global?: boolean } = {}) {
+  if (typeof entry !== "string" || entry.length === 0) return
   const path = opts.global ? GLOBAL_ALLOW : resolve(cwd ?? process.cwd(), LOCAL_ALLOW)
   await mkdir(dirname(path), { recursive: true }).catch(() => {})
-  let list: Allowlist = { allowed: [] }
+  let allowed: string[] = []
   try {
-    const parsed = JSON.parse(await readFile(path, "utf8")) as Allowlist
-    if (Array.isArray(parsed.allowed)) list = parsed
+    const parsed = JSON.parse(await readFile(path, "utf8")) as { allowed?: unknown }
+    allowed = sanitizeAllowedEntries(parsed?.allowed)
   } catch {}
-  if (!list.allowed.includes(entry)) list.allowed.push(entry)
+  if (!allowed.includes(entry)) allowed.push(entry)
   await mkdir(dirname(path), { recursive: true }).catch(() => {})
-  await atomicWriteText(path, JSON.stringify(list, null, 2))
+  await atomicWriteText(path, JSON.stringify({ allowed }, null, 2))
 }
 
 // [Audit #2 C.F6] Cache kompilasi RegExp per pola allowlist: `new RegExp`

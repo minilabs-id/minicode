@@ -16,18 +16,36 @@ import { isLeaseActive, newOwnerToken, SESSION_LEASE_MS } from "../task/session-
 import { TaskStore } from "../task/store.ts"
 import { readWriterEpoch, StaleWriterError, takeoverSessionEpoch } from "./persistence.ts"
 
+export function isProcessAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (e) {
+    return (e as { code?: string } | null)?.code === "EPERM"
+  }
+}
+
 export class SessionBusyError extends Error {
   readonly code = "REFUSED_LEASE_HELD"
   readonly sessionId: string
-  constructor(sessionId: string, holderPid: number | null, expiresAt: number | null) {
+  readonly holderAlive: boolean | null
+  constructor(
+    sessionId: string,
+    holderPid: number | null,
+    expiresAt: number | null,
+    holderAlive: boolean | null = holderPid !== null ? isProcessAlive(holderPid) : null,
+  ) {
     super(
       `[session] sid=${sessionId} is actively owned by another writer` +
         (holderPid !== null ? ` (pid ${holderPid}` : " (pid unknown") +
+        (holderAlive === false ? ", process exited — pass --takeover to reclaim" : "") +
         (expiresAt !== null ? `, lease until ${new Date(expiresAt).toISOString()}` : "") +
         ") — refusing second writer (single-writer contract)",
     )
     this.name = "SessionBusyError"
     this.sessionId = sessionId
+    this.holderAlive = holderAlive
   }
 }
 
@@ -159,6 +177,8 @@ export function acquireSessionWriter(opts: {
   token?: string
   reason?: string
   now?: number
+  /** Bila true (`--takeover`), izinkan ambil alih lease aktif JIKA PID pemiliknya sudah mati di OS. */
+  allowDeadPidTakeover?: boolean
 }): AcquireWriterOutcome {
   const { sessionId, cwd, bootId } = opts
   const now = opts.now ?? Date.now()
@@ -169,9 +189,18 @@ export function acquireSessionWriter(opts: {
   const leaseOutcome = store.withTransaction((tx) => {
     const pre = tx.getSessionAuthority(sessionId)
     if (pre && pre.ownerToken !== token && isLeaseActive(pre.leaseExpiresAt, now)) {
-      return {
-        ok: false as const,
-        holder: { pid: pre.ownerPid, expiresAt: pre.leaseExpiresAt },
+      const deadPidTakeover =
+        opts.allowDeadPidTakeover === true &&
+        pre.ownerPid !== null &&
+        pre.ownerPid !== process.pid &&
+        !isProcessAlive(pre.ownerPid)
+      if (deadPidTakeover) {
+        tx.releaseSessionAuthority(sessionId, pre.ownerToken)
+      } else {
+        return {
+          ok: false as const,
+          holder: { pid: pre.ownerPid, expiresAt: pre.leaseExpiresAt },
+        }
       }
     }
     const acquired = tx.acquireSessionAuthority(sessionId, token, SESSION_LEASE_MS, now)

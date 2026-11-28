@@ -5,7 +5,7 @@ import type { ContextStore } from "./history.ts";
 import type { RecoveryAction } from "./errors.ts";
 import type { ExecutorDeps } from "./executor.ts";
 import type { StreamRequest, FinishReason } from "./provider.ts";
-import { snapshotMessages, snapshotState, snapshotStep, snapshotToolCall, snapshotToolResult, snapshotToolSchemas } from "./snapshot.ts";
+import { lazySnapshotState, snapshotMessages, snapshotStep, snapshotToolCall, snapshotToolResult, snapshotToolSchemas } from "./snapshot.ts";
 import { estimateSessionContext, estimateSystem, estimateTools } from "./tokens.ts";
 import type { ToolSchema } from "./tool.ts";
 import type { ToolCall, ToolResult } from "./types.ts";
@@ -55,7 +55,11 @@ export async function executeTurn(
   // Permit one follow-up policy compaction after tool results grow the current
   // turn. The hard cap prevents a no-progress compactor from looping forever.
   let budgetCompactions = 0;
+  let totalTurnBudgetCompactions = 0;
   const maxBudgetCompactions = 3;
+  // Izinkan turn multi-step panjang mengompaksi lintas step tanpa membuka loop tak terbatas dalam 1 step.
+  const maxTotalTurnBudgetCompactions = 64;
+  let compactedBackToBack = false;
   // Berapa kali berturut-turut kompaksi tidak mengurangi apa pun. Dipakai untuk
   // membedakan "konteks penuh tapi bisa dipadatkan" dari "sudah di titik tetap".
   let noProgressCompactions = 0;
@@ -133,7 +137,16 @@ export async function executeTurn(
         pressure = s.budget.evaluate({ usedTokens: afterMicro, limitTokens: contextWindowTokens });
       }
     }
-    if (s.budget.shouldCompact(pressure) && budgetCompactions < maxBudgetCompactions) {
+    if (!compactedBackToBack) {
+      budgetCompactions = 0;
+    }
+    compactedBackToBack = false;
+    if (
+      s.budget.shouldCompact(pressure) &&
+      budgetCompactions < maxBudgetCompactions &&
+      totalTurnBudgetCompactions < maxTotalTurnBudgetCompactions
+    ) {
+      totalTurnBudgetCompactions++;
       // Biaya TETAP (system prompt + skema tool + pesan yang tak boleh dibuang)
       // tidak pernah tersentuh kompaksi. Bila biaya itu sendiri sudah melebihi
       // jendela, mencoba kompaksi hanya membakar satu panggilan LLM untuk
@@ -171,7 +184,13 @@ export async function executeTurn(
       if (!reduced) noProgressCompactions++;
       else noProgressCompactions = 0;
     }
-    if (s.budget.shouldCompact(pressure) && reduced && budgetCompactions < maxBudgetCompactions) {
+    if (
+      s.budget.shouldCompact(pressure) &&
+      reduced &&
+      budgetCompactions < maxBudgetCompactions &&
+      totalTurnBudgetCompactions < maxTotalTurnBudgetCompactions
+    ) {
+      compactedBackToBack = true;
       continue;
     }
     if (pressure === "critical") {
@@ -209,6 +228,7 @@ export async function executeTurn(
     const toolCalls: ToolCall[] = [];
     let text = "";
     let reasoning = ""; // DeepSeek-style thinking content
+    const reasoningBlocks: Record<string, unknown>[] = [];
     let attempt = 0;
     // The original ProviderError behind the current attempt (if any), kept so a
     // terminal throw can carry it as `cause` — callers/CLI can then reach the
@@ -221,6 +241,7 @@ export async function executeTurn(
       // its partial text or tool calls into the next one.
       text = "";
       reasoning = "";
+      reasoningBlocks.length = 0;
       toolCalls.length = 0;
       providerError = undefined;
       let action: RecoveryAction | null = null;
@@ -247,6 +268,12 @@ export async function executeTurn(
             case "extension":
               s.events.emit({ type: "provider:extension", kind: ev.kind, data: ev.data });
               if (ev.kind === "reasoning") reasoning += (ev.data as { text?: string }).text ?? "";
+              else if (ev.kind === "reasoning_blocks") {
+                const block = (ev.data as { block?: unknown } | undefined)?.block;
+                if (block && typeof block === "object") {
+                  reasoningBlocks.push(block as Record<string, unknown>);
+                }
+              }
               break;
             case "tool_call":
               toolCalls.push(snapshotToolCall({ id: ev.id, name: ev.name, args: ev.args }));
@@ -319,9 +346,12 @@ export async function executeTurn(
 
     // Dispatch.
     if (signal.aborted) throw abortError(signal);
-    // Reasoning (DeepSeek-style thinking) disimpan di assistant message agar
-    // provider thinking-mode bisa menerima history (butuh reasoning_content).
-    const reasoningNote = reasoning.length ? { reasoning } : {};
+    // Reasoning (DeepSeek reasoning_content & blok thinking terotentikasi Anthropic)
+    // disimpan di assistant message agar multi-step tool loop mempertahankan konteks berpikir.
+    const reasoningNote = {
+      ...(reasoning.length ? { reasoning } : {}),
+      ...(reasoningBlocks.length ? { reasoningBlocks: [...reasoningBlocks] } : {}),
+    };
     if (toolCalls.length === 0) {
       store.append({ role: "assistant", content: text, ...reasoningNote });
       finalText = text || undefined;
@@ -350,7 +380,7 @@ export async function executeTurn(
       permissions: s.permissions,
       events: s.events,
       signal,
-      state: snapshotState(s.state),
+      state: lazySnapshotState(s.state),
       maxResultTokens: s.toolResultMaxTokens,
       cwd: s.cwd,
       ...(s.sessionId ? { sessionId: s.sessionId } : {}),
@@ -494,6 +524,14 @@ function delay(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
+function wireToolsForContext(s: SessionInternal): readonly import("./tool.ts").ToolSchema[] {
+  let tools: readonly import("./tool.ts").ToolSchema[] = s.registry.list();
+  try {
+    tools = s.wireTools?.() ?? tools;
+  } catch {}
+  return tools;
+}
+
 function contextTokens(s: SessionInternal): number {
   // Single source in tokens.ts `estimateSessionContext` — shared by the
   // loop and the Session getter so no duplicate estimator can drift.
@@ -501,7 +539,7 @@ function contextTokens(s: SessionInternal): number {
   try {
     system = s.systemForContext?.() ?? system;
   } catch {}
-  return estimateSessionContext(s.store, system, s.registry.list(), s.estimator);
+  return estimateSessionContext(s.store, system, wireToolsForContext(s), s.estimator);
 }
 
 /**
@@ -517,7 +555,7 @@ function fixedContextTokens(s: SessionInternal): number {
   try {
     system = s.systemForContext?.() ?? system;
   } catch {}
-  return estimateSystem(system, s.estimator) + estimateTools(s.registry.list(), s.estimator);
+  return estimateSystem(system, s.estimator) + estimateTools(wireToolsForContext(s), s.estimator);
 }
 
 // The single compaction seam. Prefers the strategy's optional async method

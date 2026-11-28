@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { existsSync } from "node:fs"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { sanitizeSpawnEnv } from "../src/policy/scrub.ts"
@@ -44,6 +44,42 @@ describe("grep subprocess isolation", () => {
       if (previousEngine === undefined) delete process.env.MINICODE_GREP_ENGINE
       else process.env.MINICODE_GREP_ENGINE = previousEngine
       await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test("Wave 4 fallback JS: memprioritaskan src/ di atas CHANGELOG.md/test/ dan menolak symlink keluar", async () => {
+    const root = await mkdtemp(join(tmpdir(), "minicode-grep-prio-"))
+    const outside = await mkdtemp(join(tmpdir(), "minicode-grep-out-"))
+    const prevEngine = process.env.MINICODE_GREP_ENGINE
+    try {
+      process.env.MINICODE_GREP_ENGINE = "js"
+      await mkdir(join(root, "src"), { recursive: true })
+      await mkdir(join(root, "test"), { recursive: true })
+      await writeFile(
+        join(root, "CHANGELOG.md"),
+        Array.from({ length: 12 }, (_, i) => `NEEDLE_TOKEN changelog ${i}`).join("\n"),
+        "utf8",
+      )
+      await writeFile(join(root, "test", "a.test.ts"), "const x = 'NEEDLE_TOKEN in test'\n", "utf8")
+      await writeFile(join(root, "src", "hub.ts"), "export const NEEDLE_TOKEN = 1\n", "utf8")
+      const outFile = join(outside, "leak.ts")
+      await writeFile(outFile, "export const NEEDLE_TOKEN = 'OUTSIDE'\n", "utf8")
+      try {
+        await symlink(outFile, join(root, "src", "escape.ts"), "file")
+      } catch {}
+
+      const out = (await grepTool.execute({ pattern: "NEEDLE_TOKEN", cwd: root, limit: 1 }, {
+        cwd: root,
+        signal: new AbortController().signal,
+      } as never)) as string
+      expect(out).toContain("src/hub.ts:1:")
+      expect(out).not.toContain("CHANGELOG.md")
+      expect(out).not.toContain("OUTSIDE")
+    } finally {
+      if (prevEngine === undefined) delete process.env.MINICODE_GREP_ENGINE
+      else process.env.MINICODE_GREP_ENGINE = prevEngine
+      await rm(root, { recursive: true, force: true }).catch(() => {})
+      await rm(outside, { recursive: true, force: true }).catch(() => {})
     }
   })
 })

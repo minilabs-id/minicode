@@ -361,7 +361,7 @@ export function isPathWithinWorkspace(root: string, p: string): boolean {
 export async function restoreTree(
   cwd: string,
   tree: string,
-  opts?: { paths: readonly string[]; strict: true },
+  opts?: { paths?: readonly string[]; strict?: true },
 ): Promise<RestoreResult> {
   const root = resolve(cwd)
   const applied: string[] = []
@@ -378,10 +378,11 @@ export async function restoreTree(
   // Restore adalah operasi KRITIS: kegagalan baca diff harus melempar, bukan
   // jadi `[]` yang dibaca sebagai "sudah identik" (undo sukses tanpa restore).
   const allChanges = await diffTrees(cwd, tree, now, true)
-  const changes = opts
+  const filterPaths = opts?.paths
+  const changes = filterPaths
     ? allChanges.filter(
         (change) =>
-          opts.paths.includes(change.path) || (!!change.from && opts.paths.includes(change.from)),
+          filterPaths.includes(change.path) || (!!change.from && filterPaths.includes(change.from)),
       )
     : allChanges
   if (changes.length === 0) return { applied, skipped: [] }
@@ -447,7 +448,10 @@ export async function restoreTree(
 
   if (toCheckout.length > 0) {
     const dir = await gitDir(cwd)
-    if (!dir) return { applied, skipped: ["(not a git repository)"] }
+    if (!dir) {
+      if (opts) throw new Error("restore failed: not a git repository")
+      return { applied, skipped: ["(not a git repository)"] }
+    }
     const idx = join(dir, `minicode-restore-${Date.now()}-${randomUUID().slice(0, 6)}`)
     const env = { GIT_INDEX_FILE: idx }
     try {
@@ -475,7 +479,7 @@ export async function restoreTree(
   if (opts && skipped.length) throw new Error(`restore failed: ${skipped.join(", ")}`)
   // v0.33 (audit MEDIUM-HIGH): gagal hapal (EBUSY/EPERM di Windows) dulu tetap
   // dicatat "(removed)" → receipt bohong, file selamat dari undo. Sekarang
-  // kegagalan masuk `skipped` dan dilaporkan ke pemanggil/UI.
+  // kegagalan masuk `skipped` dan dilaporkan ke pemanggil/UI (atau lempar di mode strict).
   for (const p of toDelete) {
     try {
       await rm(resolve(root, p), { force: true, recursive: false })
@@ -488,6 +492,7 @@ export async function restoreTree(
       skipped.push(`${p} (remove failed: ${reason})`)
     }
   }
+  if (opts && skipped.length) throw new Error(`restore failed: ${skipped.join(", ")}`)
 
   return { applied, skipped }
 }
@@ -503,6 +508,26 @@ export async function pruneSessionRefs(cwd: string, sessionId: string): Promise<
     .filter(Boolean)
   let n = 0
   for (const ref of refs) {
+    if ((await git(["update-ref", "-d", ref], cwd)).code === 0) n++
+  }
+  return n
+}
+
+/** Hapus ref shadow milik sesi yang tree-nya sudah ter-evict dari manifest checkpoint. */
+export async function pruneUnlistedSessionRefs(
+  cwd: string,
+  sessionId: string,
+  retainedTrees: ReadonlySet<string>,
+): Promise<number> {
+  const prefix = `${REF_NAMESPACE}/${sanitizeRefPart(sessionId)}/`
+  const r = await git(["for-each-ref", "--format=%(refname) %(objectname)", prefix], cwd)
+  if (r.code !== 0) return 0
+  let n = 0
+  for (const line of r.stdout.split("\n")) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    const [ref, tree] = trimmed.split(" ")
+    if (!ref || !tree || retainedTrees.has(tree)) continue
     if ((await git(["update-ref", "-d", ref], cwd)).code === 0) n++
   }
   return n

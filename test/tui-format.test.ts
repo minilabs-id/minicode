@@ -25,7 +25,7 @@ import {
 } from "../src/ui/render/format.ts"
 import { decorateMarkdown, renderInline } from "../src/ui/render/markdown.ts"
 import { reasoning, setReasoningVisible } from "../src/ui/render/reasoning.ts"
-import { stripAnsi } from "../src/ui/render/theme.ts"
+import { glyphs, stripAnsi } from "../src/ui/render/theme.ts"
 import { humanToolLabel, tSystem } from "../src/ui/render/tool-label.ts"
 import { displayWidth } from "../src/ui/render/width.ts"
 import { formatWrapped, justifyLine, visibleLen, wordWrap } from "../src/ui/render/wrap.ts"
@@ -257,6 +257,56 @@ describe("markdown: fence & inline", () => {
     }
   })
 
+  test("renderInline menuntaskan nested emphasis, multi-backtick, dan tautan bersarang", () => {
+    const nested = "Ini **kalimat *utama*** dan `kode()` serta ***tebal miring***."
+    expect(stripAnsi(renderInline(nested))).toBe("Ini kalimat utama dan kode() serta tebal miring.")
+    expect(stripAnsi(renderInline("**Bold dengan *italic* di dalam**"))).toBe(
+      "Bold dengan italic di dalam",
+    )
+    expect(stripAnsi(renderInline("***Bold+italic dan *nested* teks***"))).toBe(
+      "Bold+italic dan nested teks",
+    )
+    expect(stripAnsi(renderInline("**tebal `x` lalu **ganda****"))).toBe("tebal x lalu ganda")
+    expect(stripAnsi(renderInline("****empat bintang****"))).toBe("empat bintang")
+    expect(
+      stripAnsi(
+        renderInline("Kalimat dengan ``double backtick`` dan ```triple backtick``` inline"),
+      ),
+    ).toBe("Kalimat dengan double backtick dan triple backtick inline")
+    expect(stripAnsi(renderInline("Lihat `a`, `b`, dan `` ` `` atau `` `c` ``"))).toBe(
+      "Lihat a, b, dan ` atau `c`",
+    )
+    expect(stripAnsi(renderInline("Satu `baris\ndua` lanjut"))).toBe("Satu baris\ndua lanjut")
+    expect(
+      stripAnsi(
+        renderInline("Baca [**docs** & `api.ts`](https://en.wikipedia.org/wiki/Markdown_(spec))"),
+      ),
+    ).toBe("Baca docs & api.ts")
+  })
+
+  test("decorateMarkdown membuang ## pada heading berindentasi/list/kutipan dan merender pemisah horizontal", () => {
+    const md = [
+      "  ## Sub Berindentasi",
+      "- ## Sub Dalam Bullet",
+      "1. ### Sub Bernomor",
+      "> ## Kutipan Heading",
+      "### Judul Penutup ##",
+      "***",
+      "---",
+    ].join("\n")
+    const plain = stripAnsi(decorateMarkdown(md))
+    const lines = plain.split("\n").map((l) => l.trim())
+    expect(plain).toContain("Sub Berindentasi")
+    expect(plain).toContain("- Sub Dalam Bullet")
+    expect(plain).toContain("1. Sub Bernomor")
+    expect(plain).toContain("> Kutipan Heading")
+    expect(plain).toContain("Judul Penutup")
+    expect(plain).not.toContain("##")
+    expect(plain).not.toContain("***")
+    expect(lines.filter((l) => l === glyphs.hLine.repeat(24)).length).toBe(2)
+    expect(lines).not.toContain("---")
+  })
+
   test("list bernomor & bersarang tetap mempertahankan tingkatnya dan jeda poin utama", () => {
     const src = "1. satu\n2. dua\n   - sub a\n   - sub b"
     const rawLines = stripAnsi(decorateMarkdown(src)).split("\n")
@@ -332,10 +382,12 @@ test("v7.29: markdown mengeluarkan SGR saat TTY + warna aktif", () => {
   // Pasangan dari blok mono di atas: color-by-default menyala saat TTY tanpa
   // MINICODE_COLOR/NO_COLOR. Mengunci jalur warna tetap benar-benar teruji.
   const savedTty = process.stdout.isTTY
+  const savedTerm = process.env.TERM
   const savedColorterm = process.env.COLORTERM
   const savedNoColor = process.env.NO_COLOR
   const savedMinicodeColor = process.env.MINICODE_COLOR
   Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
+  process.env.TERM = "xterm-256color"
   process.env.COLORTERM = "truecolor"
   delete process.env.NO_COLOR
   delete process.env.MINICODE_COLOR
@@ -346,6 +398,8 @@ test("v7.29: markdown mengeluarkan SGR saat TTY + warna aktif", () => {
     expect(stripAnsi(out)).toContain("const x = 1")
   } finally {
     Object.defineProperty(process.stdout, "isTTY", { value: savedTty, configurable: true })
+    if (savedTerm == null) delete process.env.TERM
+    else process.env.TERM = savedTerm
     if (savedColorterm == null) delete process.env.COLORTERM
     else process.env.COLORTERM = savedColorterm
     if (savedNoColor == null) delete process.env.NO_COLOR

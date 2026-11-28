@@ -26,3 +26,13 @@ test("allowlist: perintah di luar daftar tetap deny", async () => {
   expect(await h.check(bash("rm -rf node_modules"), {} as never)).toBe("deny")
   expect(await h.check(bash("git push --force"), {} as never)).toBe("deny")
 })
+
+test("P0-3: npx >NUL ditolak di POSIX karena NUL bukan null sink non-Windows", async () => {
+  const posix = createPermissionHandler({ mode: "allowlist", root: "/", platform: "linux" })
+  expect(await posix.check(bash("npx tsc >NUL"), {} as never)).toBe("deny")
+  expect(await posix.check(bash("npx tsc >/dev/null"), {} as never)).toBe("allow")
+  expect(await posix.check(bash("npx tsc >/dev/null/evil"), {} as never)).toBe("deny")
+
+  const win = createPermissionHandler({ mode: "allowlist", root: "/", platform: "win32" })
+  expect(await win.check(bash("npx tsc >NUL"), {} as never)).toBe("allow")
+})

@@ -62,9 +62,7 @@ export const askUserTool: Tool = {
   },
   async execute({ question, options }, ctx) {
     ctx.signal.throwIfAborted()
-    const q = String(question ?? "")
-      .trim()
-      .slice(0, 2000)
+    const q = sliceSafeChars(String(question ?? "").trim(), 2000)
     if (!q) throw new Error("question empty")
     const opts = Array.isArray(options)
       ? (options as unknown[]).map((o) => sliceSafeChars(String(o), 200)).slice(0, 8)
@@ -130,6 +128,6 @@ export const askUserTool: Tool = {
       call: callInfo,
       outcome: { decision: "allow", by: "user" },
     })
-    return answer.trim().slice(0, 4000)
+    return sliceSafeChars(answer.trim(), 4000)
   },
 }

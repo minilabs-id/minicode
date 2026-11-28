@@ -16,6 +16,7 @@ import {
   estimateSystem,
   estimateTools,
   safeStringify,
+  type TokenEstimator,
 } from "#minicore/core/tokens.ts"
 import type { Message, UserMessage } from "#minicore/core/types.ts"
 import { LIMITS } from "../constants.ts"
@@ -134,46 +135,84 @@ export const RATE_LIMIT_RETRY_ATTEMPTS = 3
  * kernel (`onError` hanya dapat `attempt`). Satu ledger = satu prompt user,
  * dipakai retry provider + resume turn agar biaya tak berlipat. */
 export interface RecoveryLedger {
-  /** Waktu mulai (epoch ms). */
+  /** Waktu mulai episode kegagalan aktif (atau waktu buat bila belum ada error). */
   readonly startedAtMs: number
-  /** Percobaan yang sudah dipakai (retry provider + resume turn). */
+  /** Percobaan yang sudah dipakai (retry provider + resume turn) di episode aktif. */
   attemptsUsed(): number
+  /** Percobaan retry stall/timeout yang sudah dipakai di episode aktif. */
+  stallAttemptsUsed(): number
   /** Catat satu percobaan terpakai. */
   consume(): void
+  /** Reset anggaran episode setelah sebuah step/panggilan berhasil pulih. */
+  resetEpisode(): void
   /** Jeda berikutnya menurut anggaran bersama, atau null bila harus berhenti. */
-  nextDelay(failure: { category?: string; kind?: string; retryAfterMs?: number }): {
+  nextDelay(failure: {
+    category?: string
+    kind?: string
+    retryAfterMs?: number
+    stalled?: boolean
+  }): {
     delayMs: number
     attempt: number
   } | null
-  /** Sisa anggaran waktu (ms) pada saat dipanggil. */
+  /** Sisa anggaran waktu episode (ms) pada saat dipanggil. */
   remainingMs(): number
 }
 
-/** Buat ledger baru untuk satu panggilan logis. `now` di-inject untuk uji. */
+/** Apakah pesan error berasal dari guard timeout/stall stream (bukan fail-fast HTTP). */
+export function isTimeoutOrStallMessage(message: string): boolean {
+  return stalledMsFromMessage(message) !== undefined || /timed out after \d+ms/i.test(message)
+}
+
+/** Buat ledger baru per turn dengan jam episode yang baru menyala saat error pertama
+ * dan di-reset ulang ketika langkah berhasil. `now` di-inject untuk uji. */
 export function createRecoveryLedger(now: () => number = Date.now): RecoveryLedger {
-  const startedAtMs = now()
+  const createdAtMs = now()
+  let episodeStartedAtMs: number | null = null
   let used = 0
+  let stallUsed = 0
   return {
-    startedAtMs,
+    get startedAtMs() {
+      return episodeStartedAtMs ?? createdAtMs
+    },
     attemptsUsed: () => used,
+    stallAttemptsUsed: () => stallUsed,
     consume: () => {
+      if (episodeStartedAtMs === null) episodeStartedAtMs = now()
       used += 1
     },
+    resetEpisode: () => {
+      episodeStartedAtMs = null
+      used = 0
+      stallUsed = 0
+    },
     nextDelay(failure) {
+      const tNow = now()
+      if (episodeStartedAtMs === null) episodeStartedAtMs = tNow
       const decision = planRecovery(
         {
           ...(failure.category !== undefined ? { category: failure.category } : {}),
           ...(failure.kind !== undefined ? { kind: failure.kind } : {}),
           ...(failure.retryAfterMs !== undefined ? { retryAfterMs: failure.retryAfterMs } : {}),
+          ...(failure.stalled ? { stalled: true } : {}),
         },
-        { startedAtMs, nowMs: now(), attemptsUsed: used },
+        {
+          startedAtMs: episodeStartedAtMs,
+          nowMs: tNow,
+          attemptsUsed: used,
+          stallAttemptsUsed: stallUsed,
+        },
         { hasPrompt: true },
       )
       if (decision.action === "stop") return null
       used = decision.attempt
+      if (failure.stalled) stallUsed += 1
       return { delayMs: decision.delayMs, attempt: decision.attempt }
     },
-    remainingMs: () => RECOVERY_BUDGET_MS - (now() - startedAtMs),
+    remainingMs: () =>
+      episodeStartedAtMs === null
+        ? RECOVERY_BUDGET_MS
+        : RECOVERY_BUDGET_MS - (now() - episodeStartedAtMs),
   }
 }
 
@@ -220,20 +259,29 @@ function evaluateCappedRecovery(
     if (!isRecoverable({ category })) {
       return defaultRecoveryPolicy.onError(sanitizeProviderErrorForFallback(error), attempt)
     }
+    const stalled = isTimeoutOrStallMessage(error.message)
     const next = ledger.nextDelay({
       category,
       ...(saneRetryAfter !== undefined ? { retryAfterMs: saneRetryAfter } : {}),
+      ...(stalled ? { stalled: true } : {}),
     })
     return next !== null ? { type: "retry", delayMs: next.delayMs } : { type: "throw" }
   }
 
+  const stalled = isTimeoutOrStallMessage(error.message)
   const decision = planRecovery(
     {
       category,
       ...(saneRetryAfter !== undefined ? { retryAfterMs: saneRetryAfter } : {}),
+      ...(stalled ? { stalled: true } : {}),
     },
     // Jalur statis tanpa ledger: kuota percobaan yang menahan.
-    { startedAtMs: 0, nowMs: 0, attemptsUsed: attempt - 1 },
+    {
+      startedAtMs: 0,
+      nowMs: 0,
+      attemptsUsed: attempt - 1,
+      stallAttemptsUsed: stalled ? attempt - 1 : 0,
+    },
     { hasPrompt: true },
   )
   if (decision.action === "retry") return { type: "retry", delayMs: decision.delayMs }
@@ -425,20 +473,87 @@ function annotateLastUserMessage(messages: readonly Message[], note: string): re
  * Satu filter untuk `stream()` dan `liveToolSchemas()` agar estimasi token
  * sesuai wire. Diekspor untuk test. */
 type WireToolSchema = Parameters<typeof estimateTools>[0][number]
+type ProjectedWireTool = Pick<WireToolSchema, "name" | "description" | "parameters">
+
+const wireToolObjectCache = new WeakMap<
+  WireToolSchema,
+  { name: string; description: string; parameters: unknown; projected: ProjectedWireTool }
+>()
+const wireToolListCache = new WeakMap<
+  readonly WireToolSchema[],
+  {
+    hiddenSig: string
+    sourceRefs: readonly WireToolSchema[]
+    visibleRefs: readonly WireToolSchema[]
+    projectedRefs: ProjectedWireTool[]
+  }
+>()
+
+function projectWireTool<T extends WireToolSchema>(
+  tool: T,
+): Pick<T, "name" | "description" | "parameters"> {
+  const cached = wireToolObjectCache.get(tool)
+  if (
+    cached &&
+    cached.name === tool.name &&
+    cached.description === tool.description &&
+    cached.parameters === tool.parameters
+  ) {
+    return cached.projected as Pick<T, "name" | "description" | "parameters">
+  }
+  const projected: ProjectedWireTool = {
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.parameters,
+  }
+  wireToolObjectCache.set(tool, {
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.parameters,
+    projected,
+  })
+  return projected as Pick<T, "name" | "description" | "parameters">
+}
 
 export function visibleWireToolSchemas<T extends WireToolSchema>(
   tools: readonly T[],
   hiddenWireTools?: ReadonlySet<string>,
 ): Pick<T, "name" | "description" | "parameters">[] {
+  const hiddenSig =
+    hiddenWireTools && hiddenWireTools.size > 0 ? [...hiddenWireTools].sort().join("\0") : ""
+  const listHit = wireToolListCache.get(tools)
+  if (listHit && listHit.hiddenSig === hiddenSig && listHit.sourceRefs.length === tools.length) {
+    let unchanged = true
+    for (let i = 0; i < tools.length; i++) {
+      if (tools[i] !== listHit.sourceRefs[i]) {
+        unchanged = false
+        break
+      }
+    }
+    if (unchanged) {
+      for (let i = 0; i < listHit.projectedRefs.length; i++) {
+        if (projectWireTool(listHit.visibleRefs[i]!) !== listHit.projectedRefs[i]) {
+          unchanged = false
+          break
+        }
+      }
+      if (unchanged) {
+        return listHit.projectedRefs as Pick<T, "name" | "description" | "parameters">[]
+      }
+    }
+  }
   const visible =
     hiddenWireTools && hiddenWireTools.size > 0
       ? tools.filter((t) => !hiddenWireTools.has(t.name))
       : tools
-  return visible.map((t) => ({
-    name: t.name,
-    description: t.description,
-    parameters: t.parameters,
-  }))
+  const projectedRefs = visible.map((t) => projectWireTool(t))
+  wireToolListCache.set(tools, {
+    hiddenSig,
+    sourceRefs: tools.slice(),
+    visibleRefs: visible,
+    projectedRefs,
+  })
+  return projectedRefs
 }
 
 export async function createMinicodeSession(
@@ -584,17 +699,23 @@ export async function createMinicodeSession(
   // Root = cwd sesi (sama untuk resolve path target tool).
   const approvalBindings = _approvalBindings ?? new ApprovalBindingStore(defaultCwd)
   // Sanitasi batas di lapisan app (juga pemanggil library): nilai invalid
-  // (NaN/negatif/0/Infinity) → default kernel, bukan error, agar sesi aman.
+  // (NaN/negatif) -> default kernel; Infinity sengaja dipertahankan (`--timeout 0`)
+  // agar operator/mode otonom benar-benar menonaktifkan batas waktu dinding.
   {
-    const t = (rest as Record<string, unknown>).timeoutMs
-    if (typeof t === "number" && (!Number.isFinite(t) || t < 0))
-      delete (rest as Record<string, unknown>).timeoutMs
-    else if (typeof t === "number" && t > LIMITS.MAX_TIMER_DELAY_MS)
-      (rest as Record<string, unknown>).timeoutMs = LIMITS.MAX_TIMER_DELAY_MS
-    const m = (rest as Record<string, unknown>).maxSteps
-    if (typeof m !== "number" || !Number.isFinite(m) || m < 1)
-      delete (rest as Record<string, unknown>).maxSteps
-    else (rest as Record<string, unknown>).maxSteps = Math.floor(m)
+    const rec = rest as Record<string, unknown>
+    const t = rec.timeoutMs
+    if (typeof t === "number") {
+      if (Number.isNaN(t) || t < 0) delete rec.timeoutMs
+      else if (Number.isFinite(t) && t > LIMITS.MAX_TIMER_DELAY_MS)
+        rec.timeoutMs = LIMITS.MAX_TIMER_DELAY_MS
+    }
+    const idle = rec.idleTimeoutMs
+    if (typeof idle === "number") {
+      if (Number.isNaN(idle) || idle <= 0) delete rec.idleTimeoutMs
+    }
+    const m = rec.maxSteps
+    if (typeof m !== "number" || !Number.isFinite(m) || m < 1) delete rec.maxSteps
+    else rec.maxSteps = Math.floor(m)
   }
   const safeConcurrency =
     typeof concurrency === "number" && Number.isFinite(concurrency) && concurrency > 0
@@ -666,6 +787,8 @@ export async function createMinicodeSession(
       : createNoProgressDetector({
           ...(noProgress ?? {}),
           getPosture: noProgress?.getPosture ?? livePosture,
+          hasTodoWrite:
+            noProgress?.hasTodoWrite ?? registeredTools.some((t) => t.name === "todo_write"),
           onGuardEvent: (ev) => {
             noProgress?.onGuardEvent?.(ev)
             guardEventSink?.(ev)
@@ -836,7 +959,18 @@ export async function createMinicodeSession(
     if (tok) return Math.ceil(tok.countTokens(text))
     return calibrationFor(model).estimator(text)
   }
-  const calibratedEstimator = (text: string) => preciseEstimator(currentContextModel(), text)
+  const makeEstimatorForModel = (getModel: () => string | undefined): TokenEstimator =>
+    Object.assign((text: string) => preciseEstimator(getModel(), text), {
+      // Menjaga keamanan cache: membedakan model BPE ter-cache vs factor kalibrasi live.
+      cacheKey: () => {
+        const m = getModel()
+        const tok = m ? getCachedTokenizer(m) : null
+        if (tok) return `bpe:${m}`
+        const f = calibrationFor(m).snapshot().factor
+        return f > 1 ? `minicode:cal:${f}` : "minicode:heur:v1"
+      },
+    })
+  const calibratedEstimator = makeEstimatorForModel(currentContextModel)
   // Warm tokenizer di latar (fire-and-forget): vocab di-cache, request berikut presisi.
   void loadTokenizer(currentContextModel() ?? "").catch(() => {})
   let lastRequestLocalEstimate: { model: string; tokens: number } | undefined
@@ -999,8 +1133,9 @@ export async function createMinicodeSession(
       let limit = contextWindowForModel(model)
       let maxOutputTokens = maxOutputTokensForModel(model)
       const estimatorModel = model?.includes("::") ? model : (currentContextModel() ?? model)
-      let calibration = calibrationFor(estimatorModel)
-      let estimator = (text: string) => preciseEstimator(estimatorModel, text)
+      let activeEstModel = estimatorModel
+      let calibration = calibrationFor(activeEstModel)
+      const estimator: TokenEstimator = makeEstimatorForModel(() => activeEstModel)
       let admittedFactor = calibration.snapshot().factor
       const rawTools = req.tools ?? []
       const tools =
@@ -1017,10 +1152,15 @@ export async function createMinicodeSession(
       } finally {
         perfCount("session.estimateLocalInput", perfEnabled() ? performance.now() - __estT : 0)
       }
+      // Ketika BPE belum termuat dan factor kalibrasi === 1, nilainya identik
+      // dengan `localInputTokens` sehingga tidak perlu memindai histori ulang.
+      const hasBpe = Boolean(activeEstModel && getCachedTokenizer(activeEstModel))
       let inputTokens =
-        estimateMessages(messages, estimator) +
-        estimateSystem(system, estimator) +
-        estimateTools(tools, estimator)
+        !hasBpe && admittedFactor <= 1
+          ? localInputTokens
+          : estimateMessages(messages, estimator) +
+            estimateSystem(system, estimator) +
+            estimateTools(tools, estimator)
       // Jangan biarkan estimasi (chars/4, under-count 2–5×) jatuh di bawah anchor
       // provider. Reset anchor bila pesan menyusut (kompaksi/rewind/clear).
       if (messages.length < lastRequestMessageCount) {
@@ -1123,8 +1263,8 @@ export async function createMinicodeSession(
               const effectiveLimit = contextWindowForModel(effectiveModel)
               maxOutputTokens = maxOutputTokensForModel(effectiveModel) ?? maxOutputTokens
               limit = Math.min(limit, effectiveLimit)
+              activeEstModel = effectiveModel
               calibration = calibrationFor(effectiveModel)
-              estimator = (text: string) => preciseEstimator(effectiveModel, text)
               admittedFactor = calibration.snapshot().factor
               inputTokens = Math.max(
                 inputTokens,
@@ -1172,13 +1312,10 @@ export async function createMinicodeSession(
         if (
           error instanceof ProviderError &&
           error.category === "context_length_exceeded" &&
-          !reclassifiedOverflow
+          !reclassifiedOverflow &&
+          error !== clientOverflowErr
         ) {
-          escalateContextWindow(
-            model,
-            Math.max(inputTokens + outputTokens, limit),
-            error === clientOverflowErr,
-          )
+          escalateContextWindow(model, Math.max(inputTokens + outputTokens, limit), false)
         }
         // 400 generik ("invalid_request") bisa berarti konteks penuh →
         // reklasifikasi agar kernel compact-and-retry, bukan mati fatal. Ambang
@@ -1254,19 +1391,23 @@ export async function createMinicodeSession(
     // Kompaksi lebih agresif (host-side): ringkas mulai 65% jendela, bukan 75%.
     budget: createAggressiveBudgetPolicy(() => maxOutputTokensForModel(currentContextModel())),
     provider: dynamicProvider,
+    wireTools: liveToolSchemas,
     system: computeLiveSystem(),
     systemForContext: computeLiveSystem,
     permissions: withEffectBarrier,
     permissionMode: livePermissionMode,
     // Timer estimator kernel tanpa mengubah identitas/perilaku fungsi.
-    estimator: (text: string): number => {
-      const __t = perfEnabled() ? performance.now() : 0
-      try {
-        return calibratedEstimator(text)
-      } finally {
-        perfCount("session.estimator.kernel", perfEnabled() ? performance.now() - __t : 0)
-      }
-    },
+    estimator: Object.assign(
+      (text: string): number => {
+        const __t = perfEnabled() ? performance.now() : 0
+        try {
+          return calibratedEstimator(text)
+        } finally {
+          perfCount("session.estimator.kernel", perfEnabled() ? performance.now() - __t : 0)
+        }
+      },
+      ...(calibratedEstimator.cacheKey ? [{ cacheKey: calibratedEstimator.cacheKey }] : []),
+    ),
     recovery: recoveryWithTelemetry,
     executor: parallelExecutor({
       getAuthorizationVersion: () => authorizationVersion,
@@ -1295,6 +1436,16 @@ export async function createMinicodeSession(
   }
   core.events.on("context:compacted", () => {
     lastProviderInputTokens = undefined
+  })
+  core.events.on("step:completed", (e) => {
+    if ((e as { forwardedChild?: unknown }).forwardedChild == null) {
+      activeRecoveryLedger?.resetEpisode()
+    }
+  })
+  core.events.on("turn:completed", (e) => {
+    if ((e as { forwardedChild?: unknown }).forwardedChild == null) {
+      activeRecoveryLedger?.resetEpisode()
+    }
   })
   core.events.on("provider:extension", (e) => {
     if ((e as { forwardedChild?: unknown }).forwardedChild != null) return

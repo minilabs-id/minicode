@@ -2,6 +2,8 @@ import { stat } from "node:fs/promises"
 import type { Tool } from "#minicore"
 import { resolveSafePath } from "../lib/safe-open.ts"
 import { trashFile } from "../lib/trash.ts"
+import { closeLspDocument } from "../lsp/client.ts"
+import { invalidateRepoGraphCache, lookupDependentImporters } from "../repo/repomap.ts"
 import { contextUnrestricted, requireToolCwd } from "./context.ts"
 
 export const deleteFileTool: Tool = {
@@ -28,8 +30,15 @@ export const deleteFileTool: Tool = {
     if (!st) throw new Error(`file not found: ${p}`)
     if (st.isDirectory())
       throw new Error(`path is a directory, cannot delete directories with delete_file: ${p}`)
+    const staleImporters = await lookupDependentImporters(root, abs)
     // soft-delete ke .minicode/.trash (gitignored, cap 100) — restore via move_file
     const dest = await trashFile(root, abs)
-    return `deleted ${p} -> ${dest} (soft-delete, restore via move_file if needed)`
+    closeLspDocument(abs, root)
+    invalidateRepoGraphCache(root)
+    const depWarn =
+      staleImporters.length > 0
+        ? `\n[dep-graph] warning: ${staleImporters.length} file(s) still import ${p}: ${staleImporters.slice(0, 5).join(", ")}${staleImporters.length > 5 ? ` (+${staleImporters.length - 5} more)` : ""}`
+        : ""
+    return `deleted ${p} -> ${dest} (soft-delete, restore via move_file if needed)${depWarn}`
   },
 }

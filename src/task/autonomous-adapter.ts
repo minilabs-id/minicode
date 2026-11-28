@@ -16,7 +16,9 @@
 // default here would mean an executor running in the wrong workspace or against
 // the wrong generation.
 
+import type { WorkMode } from "../policy/work-mode.ts"
 import type { ProductionExecutionRunner } from "../runtime/production-execution.ts"
+import { assertModeBoundedAutonomousToolScope } from "./autonomous-build-policy.ts"
 import {
   type AutonomousContextConfig,
   type AutonomousContextEvent,
@@ -24,7 +26,6 @@ import {
   type AutonomousSession,
   type AutonomousSessionSpec,
   type AutonomousTurnResult,
-  assertAutonomousToolScope,
 } from "./autonomous-context.ts"
 import type { ExecutionHandle, ExecutionObservation, SchedulerWorkItem } from "./scheduler.ts"
 import type { TaskStore } from "./store.ts"
@@ -45,6 +46,10 @@ export interface AutonomousAdapterConfig {
   readonly model?: string
   readonly maxSteps?: number
   readonly timeoutMs?: number
+  readonly idleTimeoutMs?: number
+  readonly workMode?: WorkMode
+  readonly restrictBash?: boolean
+  readonly bashAllowlist?: readonly string[]
   /** [DESIGN DECISION] REQUIRED. Never defaulted to `process.cwd()`. */
   readonly cwdFor: (sessionId: string) => string
   readonly onContextEvent?: (event: AutonomousContextEvent) => void
@@ -111,6 +116,10 @@ export function planAutonomousContext(
     ...(config.model ? { model: config.model } : {}),
     ...(config.maxSteps ? { maxSteps: config.maxSteps } : {}),
     ...(config.timeoutMs ? { timeoutMs: config.timeoutMs } : {}),
+    ...(config.idleTimeoutMs !== undefined ? { idleTimeoutMs: config.idleTimeoutMs } : {}),
+    ...(config.workMode ? { workMode: config.workMode } : {}),
+    ...(config.restrictBash !== undefined ? { restrictBash: config.restrictBash } : {}),
+    ...(config.bashAllowlist ? { bashAllowlist: config.bashAllowlist } : {}),
     ...(config.provider !== undefined ? { provider: config.provider } : {}),
     sessionFactory: config.sessionFactory,
     tools: config.tools,
@@ -133,34 +142,35 @@ export function buildAutonomousRunTurn(
 ): (work: SchedulerWorkItem, active?: ExecutionHandle) => Promise<ExecutionObservation> {
   // Fail at ADAPTER construction, not on first dispatch: a wider tool set is a
   // configuration error and should never reach the point of granting an
-  // unattended executor write access.
-  assertAutonomousToolScope(config.tools.map((t) => t.name))
+  // unattended executor wider access than its WorkMode permits.
+  assertModeBoundedAutonomousToolScope(
+    config.tools.map((t) => t.name),
+    config.workMode ?? "DISCUSS",
+  )
 
-  return async (
-    work: SchedulerWorkItem,
-    active?: ExecutionHandle,
-  ): Promise<ExecutionObservation> => {
-    // [DESIGN DECISION] A refusal to plan is allowed to THROW. The Scheduler
-    // treats a synchronous throw from the bridge as a DISPATCH failure and
-    // releases the claim, which is correct: an execution that was never planned
-    // must not be recorded as an attempt that happened.
+  return (work: SchedulerWorkItem, active?: ExecutionHandle): Promise<ExecutionObservation> => {
+    // Evaluasi binding & context SECARA SINKRON sebelum promise dibentuk sehingga
+    // penolakan planning melempar sinkron sesuai kontrak `dispatch-failed` Scheduler
+    // (melepas claim, tanpa mencatat attempt atau membakar execGeneration).
     const context = new AutonomousExecutionContext(
       planAutonomousContext(work, bindingFor(work.taskId), config),
     )
-    try {
-      // [PHASE 6T] Publish the context's cancel to the lifecycle handle BEFORE
-      // initializing, so a session deletion racing startup still lands. `attach`
-      // fires immediately if the cancel already happened, which is the whole
-      // reason the handle records a request it cannot yet deliver.
-      active?.attach(() => context.cancel("session-deleted"))
-      const result = await context.execute()
-      return toExecutionObservation(result)
-    } finally {
-      // The context owns the child session, the AbortController and the provider
-      // resources. Disposal is unconditional and idempotent, so no path can leak
-      // them - including the error path.
-      context.dispose()
-    }
+    return (async () => {
+      try {
+        // [PHASE 6T] Publish the context's cancel to the lifecycle handle BEFORE
+        // initializing, so a session deletion racing startup still lands. `attach`
+        // fires immediately if the cancel already happened, which is the whole
+        // reason the handle records a request it cannot yet deliver.
+        active?.attach(() => context.cancel("session-deleted"))
+        const result = await context.execute()
+        return toExecutionObservation(result)
+      } finally {
+        // The context owns the child session, the AbortController and the provider
+        // resources. Disposal is unconditional and idempotent, so no path can leak
+        // them - including the error path.
+        context.dispose()
+      }
+    })()
   }
 }
 

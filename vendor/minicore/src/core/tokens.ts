@@ -8,9 +8,40 @@ import type { Content, Message } from "./types.ts";
 
 export const DEFAULT_CHARS_PER_TOKEN = 4;
 
-export type TokenEstimator = (text: string) => number;
+export type TokenEstimator = ((text: string) => number) & {
+  /** Kunci cache deterministik opsional agar estimasi pesan/skema bisa di-memoisasi O(1). */
+  cacheKey?: () => string;
+};
 
-export const defaultTokenEstimator: TokenEstimator = (text) => Math.ceil(text.length / DEFAULT_CHARS_PER_TOKEN);
+export const defaultTokenEstimator: TokenEstimator = Object.assign(
+  (text: string) => Math.ceil(text.length / DEFAULT_CHARS_PER_TOKEN),
+  { cacheKey: () => "minicore:default:v1" },
+);
+
+// Cache O(1) per referensi Message/ToolSchema untuk estimator deterministik yang
+// menyediakan `cacheKey()`. Estimator tanpa `cacheKey` (mis. closure stateful di
+// test) selalu dihitung ulang tanpa menyentuh cache.
+const MAX_CACHE_KEYS_PER_ITEM = 6;
+const msgTokenCache = new WeakMap<Message, Map<string, number>>();
+const toolTokenCache = new WeakMap<ToolSchema, Map<string, number>>();
+const sysTokenCache = new Map<string, { text: string; tokens: number }>();
+
+function cacheGet<K extends object>(map: WeakMap<K, Map<string, number>>, item: K, key: string): number | undefined {
+  return map.get(item)?.get(key);
+}
+
+function cacheSet<K extends object>(map: WeakMap<K, Map<string, number>>, item: K, key: string, value: number): void {
+  let byKey = map.get(item);
+  if (!byKey) {
+    byKey = new Map();
+    map.set(item, byKey);
+  }
+  if (!byKey.has(key) && byKey.size >= MAX_CACHE_KEYS_PER_ITEM) {
+    const oldest = byKey.keys().next();
+    if (!oldest.done) byKey.delete(oldest.value);
+  }
+  byKey.set(key, value);
+}
 
 export function contentToText(content: Content): string {
   if (typeof content === "string") return content;
@@ -50,12 +81,25 @@ export function safeStringify(value: unknown): string {
   }
 }
 
-export function estimateMessage(message: Message, est: TokenEstimator): number {
+function estimateMessageUncached(message: Message, est: TokenEstimator): number {
   switch (message.role) {
     case "user":
       return estimateContent(message.content, est);
-    case "assistant":
-      return estimateContent(message.content, est) + est(safeStringify(message.toolCalls ?? [])) + est(message.reasoning ?? "");
+    case "assistant": {
+      let blocksTokens = 0;
+      if (message.reasoningBlocks?.length) {
+        for (const b of message.reasoningBlocks) {
+          if (typeof b.signature === "string" && b.signature) blocksTokens += est(b.signature);
+          if (b.type === "redacted_thinking" && typeof b.data === "string") blocksTokens += est(b.data);
+        }
+      }
+      return (
+        estimateContent(message.content, est) +
+        est(safeStringify(message.toolCalls ?? [])) +
+        est(message.reasoning ?? "") +
+        blocksTokens
+      );
+    }
     case "tool": {
       const c = message.content;
       // Binary tool results (e.g. images): JSON.stringify of a Uint8Array
@@ -69,22 +113,71 @@ export function estimateMessage(message: Message, est: TokenEstimator): number {
   }
 }
 
+export function estimateMessage(message: Message, est: TokenEstimator): number {
+  const key = est.cacheKey?.();
+  if (key !== undefined) {
+    const cached = cacheGet(msgTokenCache, message, key);
+    if (cached !== undefined) return cached;
+    const computed = estimateMessageUncached(message, est);
+    cacheSet(msgTokenCache, message, key, computed);
+    return computed;
+  }
+  return estimateMessageUncached(message, est);
+}
+
 export function estimateMessages(messages: readonly Message[], est: TokenEstimator): number {
+  const key = est.cacheKey?.();
   let total = 0;
-  for (const message of messages) total += estimateMessage(message, est);
+  if (key !== undefined) {
+    for (const message of messages) {
+      let val = cacheGet(msgTokenCache, message, key);
+      if (val === undefined) {
+        val = estimateMessageUncached(message, est);
+        cacheSet(msgTokenCache, message, key, val);
+      }
+      total += val;
+    }
+    return total;
+  }
+  for (const message of messages) total += estimateMessageUncached(message, est);
   return total;
 }
 
 /** The fixed per-request cost of the tool schemas sent with every call. */
 export function estimateTools(tools: readonly ToolSchema[], est: TokenEstimator): number {
+  const key = est.cacheKey?.();
   let total = 0;
+  if (key !== undefined) {
+    for (const tool of tools) {
+      let val = cacheGet(toolTokenCache, tool, key);
+      if (val === undefined) {
+        val = est(tool.name) + est(tool.description) + est(safeStringify(tool.parameters));
+        cacheSet(toolTokenCache, tool, key, val);
+      }
+      total += val;
+    }
+    return total;
+  }
   for (const tool of tools) total += est(tool.name) + est(tool.description) + est(safeStringify(tool.parameters));
   return total;
 }
 
 /** The fixed per-request cost of the system prompt. */
 export function estimateSystem(system: string | undefined, est: TokenEstimator): number {
-  return system ? est(system) : 0;
+  if (!system) return 0;
+  const key = est.cacheKey?.();
+  if (key !== undefined) {
+    const cached = sysTokenCache.get(key);
+    if (cached && cached.text === system) return cached.tokens;
+    const tokens = est(system);
+    if (sysTokenCache.size >= MAX_CACHE_KEYS_PER_ITEM) {
+      const oldest = sysTokenCache.keys().next();
+      if (!oldest.done) sysTokenCache.delete(oldest.value);
+    }
+    sysTokenCache.set(key, { text: system, tokens });
+    return tokens;
+  }
+  return est(system);
 }
 
 /**

@@ -31,6 +31,7 @@ below. Narration and model answers still use the user's language (`/lang`).
 | `/undo [n\|list]` | Undo conversation **and** files back to before turn `n` (no argument: newest-first picker; `last`: the last turn). `Esc Esc` with an empty composer opens the picker. The original session stays intact; the target prompt opens as a draft in the branch session. `list` shows turn numbers. In DISCUSS, undo that touches files is refused; conversation-only undo remains allowed |
 | `/redo` | Return to the source session after `/undo` and restore the workspace to its pre-undo state; refused if a new turn already exists in the branch |
 | `/sessions [id\|history\|branches]` | With no argument = resume picker popup; `<id>` = resume directly; `history` = the last 20 prompt entries; `branches` = undo branch list |
+| `/logs` | View active session runtime & turn error logs in a popup |
 | `/status` | Runtime + **cumulative session** usage & cost |
 | `/mode [discuss\|build\|auto\|ask]` | With no argument = two-axis popup: WorkMode (`discuss`/`build`) + PermissionMode (`auto`/`ask`). WorkMode bounds how the agent works: `DISCUSS` is read-only investigation/planning, `BUILD` adds no ceiling (internal identity `EXECUTE`). An invalid value is rejected and the active mode is unchanged. Tab/Shift+Tab remain quick shortcuts. |
 | `/lang [en\|id]` | UI language; with no argument it shows the active one |

@@ -91,6 +91,82 @@ function orderKeys(state: PresentationState): Set<string> {
   return keys
 }
 
+interface ActivityIndices {
+  activities: Map<string, ActivityEntry>
+  byTurn: Map<string, ActivityEntry[]>
+  byChildSession: Map<string, ActivityEntry[]>
+  byRootToolCallId: Map<string, ActivityEntry[]>
+  syncedSize: number
+}
+
+const activityIndexCache = new WeakMap<PresentationState, ActivityIndices>()
+
+function pushBucket<K>(map: Map<K, ActivityEntry[]>, key: K, entry: ActivityEntry): void {
+  const arr = map.get(key)
+  if (arr) arr.push(entry)
+  else map.set(key, [entry])
+}
+
+function removeBucket<K>(map: Map<K, ActivityEntry[]>, key: K, entry: ActivityEntry): void {
+  const arr = map.get(key)
+  if (!arr) return
+  const idx = arr.indexOf(entry)
+  if (idx >= 0) {
+    if (arr.length === 1) map.delete(key)
+    else arr.splice(idx, 1)
+  }
+}
+
+function addToIndices(indices: ActivityIndices, entry: ActivityEntry): void {
+  pushBucket(indices.byTurn, turnKey(entry.sessionId, entry.turnId), entry)
+  if (entry.childSessionId) pushBucket(indices.byChildSession, entry.childSessionId, entry)
+  if (!entry.parentToolCallId) pushBucket(indices.byRootToolCallId, entry.toolCallId, entry)
+}
+
+function buildActivityIndices(state: PresentationState): ActivityIndices {
+  const indices: ActivityIndices = {
+    activities: state.activities,
+    byTurn: new Map(),
+    byChildSession: new Map(),
+    byRootToolCallId: new Map(),
+    syncedSize: state.activities.size,
+  }
+  for (const entry of state.activities.values()) addToIndices(indices, entry)
+  activityIndexCache.set(state, indices)
+  return indices
+}
+
+function getActivityIndices(state: PresentationState): ActivityIndices {
+  const cached = activityIndexCache.get(state)
+  if (
+    cached &&
+    cached.activities === state.activities &&
+    cached.syncedSize === state.activities.size
+  ) {
+    return cached
+  }
+  return buildActivityIndices(state)
+}
+
+function indexActivity(state: PresentationState, entry: ActivityEntry): void {
+  const cached = activityIndexCache.get(state)
+  if (!cached || cached.activities !== state.activities) {
+    buildActivityIndices(state)
+    return
+  }
+  addToIndices(cached, entry)
+  cached.syncedSize = state.activities.size
+}
+
+function unindexActivity(state: PresentationState, entry: ActivityEntry): void {
+  const cached = activityIndexCache.get(state)
+  if (!cached || cached.activities !== state.activities) return
+  removeBucket(cached.byTurn, turnKey(entry.sessionId, entry.turnId), entry)
+  if (entry.childSessionId) removeBucket(cached.byChildSession, entry.childSessionId, entry)
+  if (!entry.parentToolCallId) removeBucket(cached.byRootToolCallId, entry.toolCallId, entry)
+  cached.syncedSize = state.activities.size
+}
+
 function addOrder(
   state: PresentationState,
   kind: PresentationState["order"][number]["kind"],
@@ -193,6 +269,7 @@ function evidenceActivity(
     incomplete: true,
   }
   state.activities.set(key, entry)
+  indexActivity(state, entry)
   addOrder(state, "tool", key, event.eventSeq)
   return entry
 }
@@ -204,16 +281,27 @@ export function deriveSupersedes(
     turnId: number
     qualified: string
     target?: string
+    intent?: string
     startSeq: number
     excludeId?: string
   },
 ): string | undefined {
   let best: { id: string; endSeq: number } | undefined
-  for (const a of state.activities.values()) {
-    if (a.sessionId !== probe.sessionId || a.turnId !== probe.turnId) continue
+  const turnActivities = getActivityIndices(state).byTurn.get(
+    turnKey(probe.sessionId, probe.turnId),
+  )
+  if (!turnActivities) return undefined
+  for (const a of turnActivities) {
     if (a.toolCallId === probe.excludeId) continue
     if (a.identity.qualified !== probe.qualified) continue
     if ((a.target ?? undefined) !== (probe.target ?? undefined)) continue
+    // Delegasi berbeda pada putaran lanjutan sama-sama bertarget undefined:
+    // hanya anggap retry jika niat/tugasnya eksplisit sama.
+    if (
+      probe.qualified === "delegate_task" &&
+      (!probe.intent || (a.intent ?? undefined) !== probe.intent)
+    )
+      continue
     if (a.status !== "failed" && a.status !== "denied") continue
     if (a.endSeq === undefined || a.endSeq >= probe.startSeq) continue
     if (!best || a.endSeq > best.endSeq) best = { id: a.toolCallId, endSeq: a.endSeq }
@@ -232,9 +320,7 @@ export function deriveTurnSummary(
   fallback?: TurnSummary,
 ): TurnSummary {
   const turn = state.turns.get(turnKey(sessionId, turnId))
-  const activities = [...state.activities.values()].filter(
-    (a) => a.sessionId === sessionId && a.turnId === turnId,
-  )
+  const activities = getActivityIndices(state).byTurn.get(turnKey(sessionId, turnId)) ?? []
   let toolsOk = 0
   let toolsFailed = 0
   let toolsDenied = 0
@@ -307,8 +393,8 @@ function forceCloseTurn(
     ap.outcome = { decision: "cancelled", by: "system", reason: "parent-ended" }
     ap.seq = seq
   }
-  for (const a of state.activities.values()) {
-    if (a.sessionId !== sessionId || a.turnId !== turnId || a.status !== "running") continue
+  for (const a of getActivityIndices(state).byTurn.get(turnKey(sessionId, turnId)) ?? []) {
+    if (a.status !== "running") continue
     a.status = "cancelled"
     a.endSeq = seq
     a.tsEnd = a.tsEnd ?? tsEnd
@@ -369,6 +455,7 @@ function trimState(state: PresentationState): void {
       }
       if (removedKey === undefined || removedValue === undefined) return
       values.delete(removedKey)
+      if (kind === "tool") unindexActivity(state, removedValue as unknown as ActivityEntry)
       state.evicted.push({ kind, id: removedKey, seq: removedValue.seq, reason: "bounded" })
       removeOrder(state, kind, removedKey)
     }
@@ -461,11 +548,13 @@ export function reduce(
           turnId: event.turnId,
           qualified: event.identity.qualified,
           target,
+          ...(entry.intent ? { intent: entry.intent } : {}),
           startSeq: seq,
           excludeId: event.toolCallId,
         })
         if (supersedes) entry.supersedes = supersedes
         state.activities.set(key, entry)
+        indexActivity(state, entry)
         addOrder(state, "tool", key, seq)
         return state
       }
@@ -550,16 +639,16 @@ export function reduce(
           if (a.label !== event.label) a.label = event.label
           return state
         }
+        const indices = getActivityIndices(state)
         let updated = false
-        for (const entry of state.activities.values()) {
-          // Perbarui label pada tool anak maupun baris induk `delegate_task` agar
-          // judul peran tampil seragam baik saat berjalan maupun di ledger.
-          if (
-            ((entry.childSessionId === event.sessionId &&
-              entry.parentToolCallId === event.toolCallId) ||
-              (!entry.parentToolCallId && entry.toolCallId === event.toolCallId)) &&
-            entry.label !== event.label
-          ) {
+        for (const entry of indices.byChildSession.get(event.sessionId) ?? []) {
+          if (entry.parentToolCallId === event.toolCallId && entry.label !== event.label) {
+            entry.label = event.label
+            updated = true
+          }
+        }
+        for (const entry of indices.byRootToolCallId.get(event.toolCallId) ?? []) {
+          if (entry.label !== event.label) {
             entry.label = event.label
             updated = true
           }

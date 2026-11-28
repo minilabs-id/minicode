@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite"
 import { existsSync, mkdirSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
+import { LIMITS } from "../../src/constants.ts"
 import { homeDir } from "../../src/lib/db-path.ts"
 import { resolveSessionDisplayTarget } from "../../src/session/identity.ts"
 import { deleteJournalFile, findOrphanJournals } from "../../src/session/journal.ts"
@@ -96,25 +97,27 @@ export async function handleSessions(
         })()
     const db = new Database(dbPath)
     try {
-      // Jurnal mengikuti lifecycle sesi: hapus file jurnal milik sesi yang
-      // akan di-purge (best-effort) sebelum baris DB-nya hilang.
+      try {
+        db.exec(`PRAGMA busy_timeout=${LIMITS.SQLITE_BUSY_TIMEOUT_MS}`)
+      } catch {}
+      let staleIds: string[] = []
       try {
         const days = getSessionTtlDays()
         if (days > 0) {
           const cutoff = Date.now() - days * 24 * 60 * 60 * 1000
-          const stale = db
-            .prepare("SELECT id FROM sessions WHERE COALESCE(updated_at, created_at) < ?")
-            .all(cutoff) as { id: string }[]
-          const journalCwd = existsSync(localPath) ? (cwdArg ?? process.cwd()) : homeDir()
-          for (const s of stale) deleteJournalFile(s.id, journalCwd)
+          staleIds = (
+            db
+              .prepare("SELECT id FROM sessions WHERE COALESCE(updated_at, created_at) < ?")
+              .all(cutoff) as { id: string }[]
+          ).map((r) => r.id)
         }
       } catch {}
       const removed = purgeExpired(db)
-      // Yatim: jurnal milik sesi yang sudah tak ada di tabel (termasuk anak
-      // yang tak pernah persist) + tak dirujuk parent hidup + lebih tua dari
-      // TTL. Unreadable tak pernah dihapus (tak terbukti yatim).
+      // Yatim & jurnal sesi terhapus dibersihkan SETELAH `purgeExpired` sukses
+      // agar gagal purge tidak meninggalkan baris DB hidup tanpa file jurnalnya.
       let orphans = 0
       try {
+        const journalCwd = existsSync(localPath) ? (cwdArg ?? process.cwd()) : homeDir()
         const journalDir = join(dirname(dbPath), "")
         const alive = new Set(
           (
@@ -123,6 +126,9 @@ export async function handleSessions(
             }[]
           ).map((r) => r.id),
         )
+        for (const id of staleIds) {
+          if (!alive.has(id)) deleteJournalFile(id, journalCwd)
+        }
         const { unlinkSync } = await import("node:fs")
         for (const f of await findOrphanJournals(journalDir, alive, getSessionTtlDays())) {
           try {

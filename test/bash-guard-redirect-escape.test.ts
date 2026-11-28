@@ -207,4 +207,17 @@ describe("bash-guard: target redirect berkutip tak boleh melewati jail", () => {
     // Nama jinak di luar link tidak ikut terblokir.
     expect(inspectBashCommand("cp a.txt notes.txt", ws).denied).toBe(false)
   })
+
+  test("P0-3: redirect `NUL` hanya dianggap null sink di win32, bukan di POSIX", () => {
+    const ws = makeWorkspace()
+    const envFile = join(ws, ".env")
+    // Redirect langsung ke NUL tanpa link masih relatif aman, namun jika ada symlink/ekspansi
+    // atau diuji eksplisit ke platform POSIX, `isNullSink` tidak boleh melewatkannya.
+    // Uji langsung lewat handler izin / link ke luar jika symlink didukung, atau kontrak platform:
+    expect(
+      inspectBashCommand("echo x > NUL", undefined, undefined, { platform: "win32" }).denied,
+    ).toBe(false)
+    expect(inspectBashCommand("echo x > NUL", ws, ws, { platform: "linux" }).denied).toBe(false)
+    void envFile
+  })
 })

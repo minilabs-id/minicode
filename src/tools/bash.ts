@@ -351,24 +351,23 @@ function makeBashTool(ownerSid: string | null): Tool {
     // tool; yang HARUS tetap ada adalah aturan "jangan retry buta" (penting
     // untuk command ber-efek samping) dan petunjuk Windows (dipindah ke `cmd`).
     description:
-      "SHELL: Run a shell command (30s timeout, 20k output cap, exit prefixed). background:true for long jobs — collect via bash_output, stop via bash_kill. Prefer read_file, grep, glob, edit, apply_patch, and git_status/git_diff over raw shell. On allowlist denial do NOT retry blindly: switch to read_file/edit or ask the operator to rerun with --allow-all/--sandbox docker.",
+      "SHELL: Run command (30s timeout, 20k cap); background:true returns job id for bash_output/bash_kill. Prefer dedicated file/grep/glob/edit/apply_patch and git_status/git_diff tools. On denial do NOT retry blindly.",
     parameters: {
       type: "object",
       properties: {
         cmd: {
           type: "string",
           description:
-            "command to run (Windows: cmd.exe syntax — use double quotes \"...\", NOT single quotes '...' around >/<|& or heredoc <<)",
+            "shell command (Windows: cmd.exe — use double quotes \"...\", NOT single quotes '...' around >/<|& or <<)",
         },
         cwd: {
           type: "string",
-          description: "working directory relative to the workspace (default: workspace root)",
+          description: "working dir relative to workspace (default root)",
         },
-        timeoutMs: { type: "number", description: "timeout in ms (default 30000)" },
+        timeoutMs: { type: "number", description: "timeout ms (default 30000)" },
         background: {
           type: "boolean",
-          description:
-            "run without waiting for completion; returns a job id for bash_output/bash_kill",
+          description: "run async and return job id",
         },
       },
       required: ["cmd"],
@@ -418,6 +417,22 @@ function makeBashTool(ownerSid: string | null): Tool {
         return `background job started: ${id}\ncmd: ${scrubSecrets(String(cmd)).slice(0, 200)}\ncollect output: bash_output({ id: "${id}" })`
       }
 
+      // Progres inkremental ringan untuk sandbox agar turn & sub-agent watchdog tetap
+      // mengetahui command sandbox yang terus mengeluarkan output masih hidup.
+      let lastSandboxBeatAt = 0
+      const emitSandboxHeartbeat = () => {
+        const now = Date.now()
+        if (now - lastSandboxBeatAt < 2_000) return
+        lastSandboxBeatAt = now
+        try {
+          ctx.emit?.({
+            type: "provider:extension",
+            kind: "tool-heartbeat",
+            data: { tool: "bash" },
+          })
+        } catch {}
+      }
+
       // Docker sandbox mode — run in ephemeral isolated container
       if (process.env.MINICODE_SANDBOX === "docker") {
         if (dockerAvailable()) {
@@ -425,6 +440,7 @@ function makeBashTool(ownerSid: string | null): Tool {
             timeoutMs: timeout,
             env: sanitizeSpawnEnv(process.env, undefined, relaxed) as Record<string, string>,
             signal: ctx.signal,
+            onActivity: emitSandboxHeartbeat,
             // Teruskan flag unrestricted: runInDocker menyanitasi ulang env,
             // tanpa ini kredensial git yang lolos di sini bakal dihapus lagi.
             allowGitCredentials: relaxed,
@@ -508,8 +524,23 @@ function makeBashTool(ownerSid: string | null): Tool {
         })
         const buf = new CappedBuffer(LIMITS.BASH_OUTPUT_MAX_CHARS)
         // Progres inkremental: command panjang (bun test, build) tidak lagi
-        // membisu sampai selesai. Event ini opsional bagi UI.
+        // membisu sampai selesai. Sekaligus kirim heartbeat tiap ~2 dtk agar
+        // watchdog turn & sub-agent tahu proses anak aktif bekerja.
+        let lastHeartbeatAt = 0
+        const emitHeartbeat = () => {
+          const now = Date.now()
+          if (now - lastHeartbeatAt < 2_000) return
+          lastHeartbeatAt = now
+          try {
+            ctx.emit?.({
+              type: "provider:extension",
+              kind: "tool-heartbeat",
+              data: { tool: "bash" },
+            })
+          } catch {}
+        }
         const emitChunk = (piece: string) => {
+          emitHeartbeat()
           if (!piece) return
           try {
             ctx.emit?.({
@@ -612,8 +643,26 @@ function makeBashTool(ownerSid: string | null): Tool {
             } catch {}
           }
         }
+        const MAX_ACTIVE_BASH_MS =
+          !hasExplicitTimeout && relaxed ? Math.max(timeout, 14_400_000) : timeout
+        const armBashTotalLimit = () => {
+          if (cleanedUp || settled || timedOut) return
+          if (t) clearTimeout(t)
+          const elapsed = Math.max(0, Date.now() - startedAt)
+          const remainingCap = Math.max(1, MAX_ACTIVE_BASH_MS - elapsed)
+          const stepMs = Math.min(timeout, remainingCap)
+          t = setTimeout(() => {
+            timedOut = true
+            triggerKill()
+          }, stepMs)
+          try {
+            ;(t as unknown as { unref?: () => void }).unref?.()
+          } catch {}
+        }
         const resetIdleTimer = () => {
-          if (idleLimitMs === null || cleanedUp || settled || timedOut) return
+          if (cleanedUp || settled || timedOut) return
+          if (!hasExplicitTimeout && relaxed) armBashTotalLimit()
+          if (idleLimitMs === null) return
           if (idleTimer) clearTimeout(idleTimer)
           idleTimer = setTimeout(() => {
             timedOut = true

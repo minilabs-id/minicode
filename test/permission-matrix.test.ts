@@ -18,6 +18,7 @@ const READONLY = new Set([
   "read_file",
   "glob",
   "grep",
+  "dep_graph",
   "git_status",
   "git_diff",
   "git_log",
@@ -74,6 +75,7 @@ const ARGS: Record<string, Record<string, unknown>> = {
   apply_patch: { path: "probe.txt", patches: [{ search: "a", replace: "b" }] },
   glob: { pattern: "*.ts" },
   grep: { pattern: "x" },
+  dep_graph: { action: "summary" },
   move_file: { path: "a.txt", destination: "b.txt" },
   delete_file: { path: "probe.txt" },
   read_image: { path: "i.png" },
@@ -113,9 +115,9 @@ const ARGS: Record<string, Record<string, unknown>> = {
 
 const NAMES = Object.keys(ARGS).sort()
 
-test("registry allTools tepat 41 nama yang dicakup matriks", () => {
+test("registry allTools tepat 42 nama yang dicakup matriks", () => {
   expect(allTools.map((t) => t.name).sort()).toEqual(NAMES)
-  expect(NAMES).toHaveLength(41)
+  expect(NAMES).toHaveLength(42)
 })
 
 type Ask = (call: { name: string; args?: unknown }) => Promise<"allow" | "deny" | "always">
@@ -185,7 +187,7 @@ function expected(mode: PermissionMode, ask: boolean, name: string): "allow" | "
 const MODES: PermissionMode[] = ["auto", "ask", "readonly", "plan", "allowlist", "allow-all"]
 
 for (const mode of MODES) {
-  test(`matriks ${mode} × 41 tool (headless, tanpa ask fn)`, async () => {
+  test(`matriks ${mode} × 42 tool (headless, tanpa ask fn)`, async () => {
     const savedSandbox = process.env.MINICODE_SANDBOX
     const savedAllow = process.env.MINICODE_BASH_ALLOWLIST
     delete process.env.MINICODE_SANDBOX

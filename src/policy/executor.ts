@@ -17,6 +17,11 @@ function isWrite(call: ToolCall): boolean {
   return WRITE_TOOLS.has(call.name) || EXCLUSIVE_TOOLS.has(call.name)
 }
 
+/** Kunci lock bersama untuk state internal todo agar `todo_write` paralel dgn baca workspace tapi berseri dgn `todo_read`. */
+function internalLockKey(call: ToolCall): string | null {
+  return call.name === "todo_write" || call.name === "todo_read" ? "__minicode_todos__" : null
+}
+
 // Kunci file-lock: hanya WRITE_TOOLS dengan args.path string valid.
 // EXCLUSIVE_TOOLS (tanpa path) dan move_file (memakai path+destination) sengaja
 // tidak punya kunci — inilah yang membuat writeConcurrency > 1 tidak aman untuk
@@ -295,26 +300,23 @@ export function parallelExecutor(
           if (idx >= calls.length) break
           const call = calls[idx]!
           const needWrite = isWrite(call)
-          const filePath = needWrite ? getLockPath(call, deps.cwd) : null
-          let held = false
+          const lockPath = needWrite ? getLockPath(call, deps.cwd) : internalLockKey(call)
+          let heldWrite = false
+          let heldLock = false
           try {
             if (needWrite) {
               await acquireWrite() // nothing held yet — safe to throw
-              try {
-                await acquireFileLock(filePath)
-                held = true
-              } catch (e) {
-                releaseWrite()
-                throw e
-              }
+              heldWrite = true
+            }
+            if (lockPath !== null) {
+              await acquireFileLock(lockPath)
+              heldLock = true
             }
             const res = await invoke(call, depsFor(call))
             results[idx] = res
           } finally {
-            if (held) {
-              releaseFileLock(filePath)
-              releaseWrite()
-            }
+            if (heldLock) releaseFileLock(lockPath)
+            if (heldWrite) releaseWrite()
           }
         }
       })

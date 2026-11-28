@@ -5,8 +5,17 @@ import { isLocalConfigProvider, type MinicodeConfig } from "../config.ts"
 import { createAnthropicProvider } from "./anthropic.ts"
 import { allowedEfforts, thinkingFamily, withEffortFallback } from "./effort.ts"
 import { withStreamGuards } from "./guards.ts"
-import { getValidAccessToken } from "./oauth.ts"
+import { forceRefreshAccessToken, getValidAccessToken } from "./oauth.ts"
 import { createResponsesProvider } from "./responses.ts"
+
+export interface DynamicAuthResolver {
+  getApiKey: () => Promise<string | undefined>
+  refreshApiKey: () => Promise<string | undefined>
+}
+
+export interface BuildProviderOptions {
+  authResolvers?: Readonly<Record<string, DynamicAuthResolver>>
+}
 
 // Satu-satunya tempat membangun daftar provider dari config (hybrid anthropic/openai-compat).
 // Dipakai CLI, sub-agent (task.ts), dan MCP server agar logika tidak terduplikasi.
@@ -18,9 +27,13 @@ import { createResponsesProvider } from "./responses.ts"
 // Diekspor agar teruji tanpa membangun provider sungguhan.
 export { mapReasoningToThinking } from "./anthropic.ts"
 
-export function buildProviderList(cfg: MinicodeConfig): ModelProvider[] {
+export function buildProviderList(
+  cfg: MinicodeConfig,
+  opts: BuildProviderOptions = {},
+): ModelProvider[] {
   const out: ModelProvider[] = []
   for (const p of cfg.providers) {
+    const auth = opts.authResolvers?.[p.id]
     if (p.providerHint === "responses") {
       out.push(
         // F-11/F-16: guard stream (timeout + text-cap) di satu titik bangun —
@@ -30,6 +43,7 @@ export function buildProviderList(cfg: MinicodeConfig): ModelProvider[] {
             id: p.id,
             baseUrl: p.baseUrl,
             apiKey: p.apiKey,
+            ...(auth ?? {}),
             models: p.models,
             defaultModel: p.models[0],
             ...(p.reasoningEffort ? { reasoningEffort: p.reasoningEffort } : {}),
@@ -44,6 +58,7 @@ export function buildProviderList(cfg: MinicodeConfig): ModelProvider[] {
           createAnthropicProvider({
             id: p.id,
             apiKey: p.apiKey,
+            ...(auth ?? {}),
             baseUrl: p.baseUrl,
             models: p.models,
             defaultModel: p.models[0],
@@ -59,6 +74,7 @@ export function buildProviderList(cfg: MinicodeConfig): ModelProvider[] {
         id: p.id,
         baseUrl: p.baseUrl,
         apiKey: p.apiKey,
+        ...(auth ?? {}),
         models: p.models,
         defaultModel: p.models[0],
         ...(zenHeaders ? { headers: zenHeaders } : {}),
@@ -151,13 +167,23 @@ export async function buildProviderListAsync(cfg: MinicodeConfig): Promise<Model
 
   const settled = await Promise.allSettled(jobs)
   const resolved: MinicodeConfig = { ...cfg, providers: [] }
+  const authResolvers: Record<string, DynamicAuthResolver> = {}
   settled.forEach((s, i) => {
     if (s.status === "fulfilled") {
-      if (s.value !== null) resolved.providers.push(s.value)
+      if (s.value !== null) {
+        resolved.providers.push(s.value)
+        if (s.value.auth === "oauth") {
+          const pid = s.value.id
+          authResolvers[pid] = {
+            getApiKey: async () => (await getValidAccessToken(pid)) ?? undefined,
+            refreshApiKey: async () => (await forceRefreshAccessToken(pid)) ?? undefined,
+          }
+        }
+      }
       return
     }
     const id = cfg.providers[i]?.id ?? "?"
     process.stderr.write(`[auth] provider "${id}" resolution failed — skipped.\n`)
   })
-  return buildProviderList(resolved)
+  return buildProviderList(resolved, { authResolvers })
 }

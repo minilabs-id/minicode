@@ -63,9 +63,16 @@ beforeEach(() => {
   resetSessionOwnershipForTests()
 })
 
+function releaseDbHandles(): void {
+  resetTaskStoreHandles()
+  // bun:sqlite menahan handle WAL sampai statement `db.prepare` dibersihkan GC;
+  // memaksa GC sebelum spawn CLI di Windows mencegah busy_timeout 5 dtk per subproses.
+  if (typeof Bun !== "undefined" && typeof Bun.gc === "function") Bun.gc(true)
+}
+
 afterEach(() => {
   resetSessionOwnershipForTests()
-  resetTaskStoreHandles()
+  releaseDbHandles()
   rm(dir, { recursive: true, force: true }).catch(() => {})
 })
 
@@ -976,6 +983,7 @@ describe("P14.4/P14.5 — CLI openwork full-scope", () => {
   const entry = resolvePath(import.meta.dir, "..", "cli", "index.ts")
 
   function runCli(args: string[]): { code: number; stdout: string; stderr: string } {
+    releaseDbHandles()
     const home = join(dir, "home")
     mkdirSync(join(home, ".minicode"), { recursive: true })
     const r = spawnSync(process.execPath, [entry, ...args], {

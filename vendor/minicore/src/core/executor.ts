@@ -12,7 +12,7 @@ import type { Execution } from "./session.ts";
 import type { ToolCall, ToolResult } from "./types.ts";
 import { DEFAULT_CHARS_PER_TOKEN } from "./tokens.ts";
 import { abortError } from "./errors.ts";
-import { snapshotExecution, snapshotState, snapshotToolCall } from "./snapshot.ts";
+import { lazySnapshotState, snapshotExecution, snapshotToolCall } from "./snapshot.ts";
 
 export interface ExecutorDeps {
   readonly registry: ToolRegistry;
@@ -63,7 +63,7 @@ export async function runCall(call: ToolCall, deps: ExecutorDeps): Promise<ToolR
   // exactly like a tool error: a deterministic error result (observation),
   // never a raw rejection that escapes run() without an error taxonomy.
   let decision: Awaited<ReturnType<PermissionHandler["check"]>>;
-  const permissionDeps: ExecutorDeps = { ...deps, state: snapshotState(deps.state) };
+  const permissionDeps: ExecutorDeps = { ...deps, state: lazySnapshotState(deps.state) };
   try {
     decision = await deps.permissions.check(snapshotToolCall(safeCall), permissionDeps);
   } catch (error) {
@@ -91,7 +91,7 @@ export async function runCall(call: ToolCall, deps: ExecutorDeps): Promise<ToolR
 
   const ctx = {
     signal: deps.signal,
-    state: snapshotState(deps.state),
+    state: lazySnapshotState(deps.state),
     emit: deps.events.emit,
     cwd: deps.cwd,
     sessionId: deps.sessionId,
@@ -137,6 +137,18 @@ function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw abortError(signal);
 }
 
+function clampHeadEnd(text: string, idx: number): number {
+  if (idx <= 0 || idx >= text.length) return Math.max(0, Math.min(idx, text.length))
+  const c = text.charCodeAt(idx - 1)
+  return c >= 0xd800 && c <= 0xdbff ? idx - 1 : idx
+}
+
+function clampTailStart(text: string, idx: number): number {
+  if (idx <= 0 || idx >= text.length) return Math.max(0, Math.min(idx, text.length))
+  const c = text.charCodeAt(idx)
+  return c >= 0xdc00 && c <= 0xdfff ? idx + 1 : idx
+}
+
 function serializeContent(value: unknown, maxTokens: number): unknown {
   if (value instanceof Uint8Array) return value;
   let text: string;
@@ -150,12 +162,15 @@ function serializeContent(value: unknown, maxTokens: number): unknown {
   }
   const maxChars = maxTokens * DEFAULT_CHARS_PER_TOKEN;
   if (text.length <= maxChars) return text;
-  const headLen = Math.max(0, Math.floor(maxChars * 0.7));
-  const tailLen = Math.max(0, maxChars - headLen - 12);
-  // Penanda menyebut CARA mengambil sisa, bukan sekadar "terpotong": tanpa itu
-  // model tahu ada yang hilang tapi tak tahu harus berbuat apa, lalu menebak
-  // atau menyerah. Pola head+tail dipilih agar awal dan akhir (lokasi error /
-  // ringkasan hasil) tetap terbaca.
-  const omitted = text.length - headLen - tailLen;
-  return `${text.slice(0, headLen)}\n…[output dipotong: ${omitted} karakter tidak ditampilkan; jalankan ulang tool dengan batas lebih sempit (mis. path/baris/pola spesifik) atau baca bertahap]…\n${text.slice(-tailLen)}`;
+  const noticeHead = "\n…[output dipotong: ";
+  const noticeTail =
+    " karakter tidak ditampilkan; jalankan ulang tool dengan batas lebih sempit (mis. path/baris/pola spesifik) atau baca bertahap]…\n";
+  const noticeBudget = noticeHead.length + String(text.length).length + noticeTail.length;
+  const usable = Math.max(0, maxChars - noticeBudget);
+  const headEnd = clampHeadEnd(text, Math.floor(usable * 0.7));
+  const tailBudget = Math.max(0, usable - headEnd);
+  const tailStart = tailBudget > 0 ? clampTailStart(text, Math.max(headEnd, text.length - tailBudget)) : text.length;
+  const omitted = Math.max(0, tailStart - headEnd);
+  const tail = tailStart < text.length ? text.slice(tailStart) : "";
+  return `${text.slice(0, headEnd)}${noticeHead}${omitted}${noticeTail}${tail}`;
 }

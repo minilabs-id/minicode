@@ -98,13 +98,13 @@ const ARG_KEYS = [
 
 export function summarizeArgs(args: unknown): string {
   if (args == null) return ""
-  if (typeof args === "string") return scrubSecrets(args.slice(0, 120))
-  if (typeof args !== "object") return scrubSecrets(String(args).slice(0, 120))
+  if (typeof args === "string") return scrubSecrets(scrubSecrets(args).slice(0, 120))
+  if (typeof args !== "object") return scrubSecrets(scrubSecrets(String(args)).slice(0, 120))
   const rec = args as Record<string, unknown>
   const parts: string[] = []
   for (const k of ARG_KEYS) {
     const v = rec[k]
-    if (typeof v === "string" && v) parts.push(`${k}=${v.slice(0, 120)}`)
+    if (typeof v === "string" && v) parts.push(`${k}=${scrubSecrets(v).slice(0, 120)}`)
     else if (typeof v === "number" || typeof v === "boolean") parts.push(`${k}=${v}`)
   }
   return scrubSecrets(parts.join(" ").slice(0, 300))
@@ -224,20 +224,30 @@ function noteAppend(file: string): boolean {
   return true
 }
 
-async function rotateFile(file: string): Promise<void> {
-  const currentLock = rotationLocks.get(file) ?? Promise.resolve()
-  const nextLock = currentLock.then(async () => {
-    rotationStats.rotations++
-    try {
-      const txt = await readFile(file, "utf8")
-      const lines = txt.split("\n").filter(Boolean)
-      if (lines.length > LIMITS.TRACE_MAX_LINES) {
-        await atomicWriteText(file, `${lines.slice(-LIMITS.TRACE_MAX_LINES).join("\n")}\n`)
-      }
-    } catch {}
-  })
-  rotationLocks.set(file, nextLock)
-  await nextLock
+async function withTraceLock<T>(file: string, fn: () => Promise<T>): Promise<T> {
+  const prev = rotationLocks.get(file) ?? Promise.resolve()
+  let release!: () => void
+  const gate = new Promise<void>((res) => (release = res))
+  const tail = prev.then(() => gate)
+  rotationLocks.set(file, tail)
+  await prev
+  try {
+    return await fn()
+  } finally {
+    release()
+    if (rotationLocks.get(file) === tail) rotationLocks.delete(file)
+  }
+}
+
+async function rotateFileUnlocked(file: string): Promise<void> {
+  rotationStats.rotations++
+  try {
+    const txt = await readFile(file, "utf8")
+    const lines = txt.split("\n").filter(Boolean)
+    if (lines.length > LIMITS.TRACE_MAX_LINES) {
+      await atomicWriteText(file, `${lines.slice(-LIMITS.TRACE_MAX_LINES).join("\n")}\n`)
+    }
+  } catch {}
 }
 
 // Telemetry ringan: satu baris JSON per run di .minicode/traces.jsonl.
@@ -248,18 +258,18 @@ export async function writeTrace(cwd: string | undefined, trace: RunTrace): Prom
     const dir = resolve(cwd ?? ".", ".minicode")
     await mkdir(dir, { recursive: true, mode: 0o700 }).catch(() => {})
     const file = join(dir, "traces.jsonl")
-    // prompt/error/model di-redact sebelum persist — bisa berisi secret/PII
+    // Scrub sebelum dipotong supaya token yang melintasi batas potong tetap tersensor.
     const safe: RunTrace = {
       ...trace,
-      prompt: scrubSecrets(trace.prompt.slice(0, 2000)),
-      ...(trace.error ? { error: scrubSecrets(trace.error.slice(0, 1000)) } : {}),
+      prompt: scrubSecrets(trace.prompt).slice(0, 2000),
+      ...(trace.error ? { error: scrubSecrets(trace.error).slice(0, 1000) } : {}),
       ...(trace.model ? { model: scrubSecrets(trace.model) } : {}),
     }
-    await appendFile(file, `${JSON.stringify(safe)}\n`, "utf8")
-    await ensureChmodOnce(file)
-    // Rotate: hanya saat counter pemicu tercapai; rotateFile tetap baca berkas
-    // nyata dan memotong ke TRACE_MAX_LINES baris terakhir.
-    if (noteAppend(file)) await rotateFile(file)
+    await withTraceLock(file, async () => {
+      await appendFile(file, `${JSON.stringify(safe)}\n`, "utf8")
+      await ensureChmodOnce(file)
+      if (noteAppend(file)) await rotateFileUnlocked(file)
+    })
   } catch {}
 }
 
@@ -270,9 +280,11 @@ export async function writeStepTrace(cwd: string | undefined, step: StepTrace): 
     await mkdir(dir, { recursive: true, mode: 0o700 }).catch(() => {})
     const file = join(dir, "step-traces.jsonl")
     const safe: StepTrace = { ...step, ...(step.args ? { args: scrubSecrets(step.args) } : {}) }
-    await appendFile(file, `${JSON.stringify(safe)}\n`, "utf8")
-    await ensureChmodOnce(file)
-    if (noteAppend(file)) await rotateFile(file)
+    await withTraceLock(file, async () => {
+      await appendFile(file, `${JSON.stringify(safe)}\n`, "utf8")
+      await ensureChmodOnce(file)
+      if (noteAppend(file)) await rotateFileUnlocked(file)
+    })
   } catch {}
 }
 
@@ -284,9 +296,8 @@ export async function writeStepTrace(cwd: string | undefined, step: StepTrace): 
 // rewrite atomik; baris korup (tak ter-parse) DIPERTAHANKAN (fail-closed:
 // jangan hapus yang tak bisa diatribusikan).
 //
-// Tradeoff jujur: rewrite read-filter-write balapan dengan append konkuren
-// (trace sesi lain yang ditulis tepat di jendela ini bisa hilang — kehilangan
-// observability, bukan kebocoran). Dipanggil best-effort dari deleteSession.
+// Tradeoff jujur: rewrite read-filter-write lewat withTraceLock mencegah
+// balapan append/rotasi dalam satu proses. Dipanggil best-effort dari deleteSession.
 export async function purgeSessionTraces(
   sessionId: string,
   cwd: string | undefined,
@@ -295,35 +306,37 @@ export async function purgeSessionTraces(
   for (const name of ["traces.jsonl", "step-traces.jsonl"]) {
     try {
       const file = join(resolve(cwd ?? ".", ".minicode"), name)
-      let txt: string
-      try {
-        txt = await readFile(file, "utf8")
-      } catch {
-        continue // tak ada berkas = tak ada residual
-      }
-      const lines = txt.split("\n").filter(Boolean)
-      if (lines.length === 0) continue
-      const keep: string[] = []
-      for (const line of lines) {
+      removed += await withTraceLock(file, async () => {
+        let txt: string
         try {
-          const row = JSON.parse(line) as { sessionId?: unknown }
-          if (row.sessionId === sessionId) {
-            removed++
-            continue
-          }
+          txt = await readFile(file, "utf8")
         } catch {
-          // baris korup: pertahankan (lihat kontrak di atas)
+          return 0
         }
-        keep.push(line)
-      }
-      if (keep.length === lines.length) continue // tak ada milik sesi ini
-      if (keep.length === 0) {
-        await unlink(file).catch(() => {})
-        // Berkas baru kelak butuh chmod lagi; counter rotasi ikut direset agar
-        // tidak langsung memicu rotasi pada append pertama setelah purge.
-        chmodDone.delete(file)
-        appendCounts.delete(file)
-      } else await atomicWriteText(file, `${keep.join("\n")}\n`)
+        const lines = txt.split("\n").filter(Boolean)
+        if (lines.length === 0) return 0
+        let localRemoved = 0
+        const keep: string[] = []
+        for (const line of lines) {
+          try {
+            const row = JSON.parse(line) as { sessionId?: unknown }
+            if (row.sessionId === sessionId) {
+              localRemoved++
+              continue
+            }
+          } catch {
+            // baris korup: pertahankan (lihat kontrak di atas)
+          }
+          keep.push(line)
+        }
+        if (keep.length === lines.length) return 0
+        if (keep.length === 0) {
+          await unlink(file).catch(() => {})
+          chmodDone.delete(file)
+          appendCounts.delete(file)
+        } else await atomicWriteText(file, `${keep.join("\n")}\n`)
+        return localRemoved
+      })
     } catch {}
   }
   return removed

@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer"
-import { type ChildProcess, spawn, spawnSync } from "node:child_process"
-import { extname, resolve as resolvePath } from "node:path"
+import { type ChildProcess, spawn } from "node:child_process"
+import { existsSync } from "node:fs"
+import { dirname, extname, isAbsolute, relative, resolve as resolvePath } from "node:path"
 import { pathToFileURL } from "node:url"
 import { LIMITS } from "../constants.ts"
 import { sanitizeIncoming } from "../daemon/sanitize.ts"
@@ -35,6 +36,35 @@ let processSupervision: ProcessSupervision | null = null
 /** Pasang/lepas jalur ownership proses (composition root). */
 export function setLspProcessSupervisor(supervisor: ProcessSupervision | null): void {
   processSupervision = supervisor
+}
+
+async function killWindowsTreeAsync(pid: number): Promise<void> {
+  await new Promise<void>((resolve) => {
+    try {
+      const child = spawn(resolveTrustedExecutable("taskkill"), ["/pid", String(pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true,
+        env: sanitizeSpawnEnv(process.env),
+      })
+      const timer = setTimeout(() => {
+        try {
+          child.kill()
+        } catch {}
+        resolve()
+      }, 2_000)
+      timer.unref?.()
+      child.once("exit", () => {
+        clearTimeout(timer)
+        resolve()
+      })
+      child.once("error", () => {
+        clearTimeout(timer)
+        resolve()
+      })
+    } catch {
+      resolve()
+    }
+  })
 }
 
 const LANG_ID: Record<string, string> = {
@@ -209,12 +239,24 @@ class LspConnection {
   private stopping = false
   /** [P13.2] root workspace — dipakai lagi saat restart. */
   private rootPath = ""
+  /** Referensi handle stabil supaya restart berulang tetap memakai identitas yang sama di supervisor. */
+  private managedHandle: ManagedChild | null = null
 
-  constructor(public entry: LspServerEntry) {}
+  constructor(
+    public entry: LspServerEntry,
+    private readonly projectRoot = "",
+    private readonly isSubRoot = false,
+  ) {}
 
-  /** Id anak proses (stabil per ekstensi) — kunci recovery di jalur ownership. */
+  /** Id anak proses: pertahankan `lsp:<ext>` pada root utama demi kompatibilitas supervisi, tambah hash hanya untuk sub-root monorepo. */
   private get childId(): string {
-    return `lsp:${this.entry.ext}`
+    return this.isSubRoot && this.projectRoot
+      ? `lsp:${this.entry.ext}:${shortRootHash(this.projectRoot)}`
+      : `lsp:${this.entry.ext}`
+  }
+
+  get serverRoot(): string {
+    return this.projectRoot || this.rootPath
   }
 
   start(rootPath: string): Promise<void> {
@@ -276,7 +318,10 @@ class LspConnection {
 
     // [P13.2] Serahkan kepemilikan anak ke jalur ownership proses runtime.
     const supervisor = processSupervision
-    if (supervisor) supervisor.register(this.managedChild())
+    if (supervisor) {
+      if (!this.managedHandle) this.managedHandle = this.managedChild()
+      supervisor.register(this.managedHandle)
+    }
 
     // initialize handshake — bila gagal/timeout, wajib bersihkan `this.starting`
     // dan matikan proses LSP agar sesi tak terkunci permanen pada promise ditolak.
@@ -293,7 +338,7 @@ class LspConnection {
               hover: { contentFormat: ["markdown", "plaintext"] },
               definition: {},
               references: {},
-              documentSymbol: { hierarchicalDocumentSymbolSupport: false },
+              documentSymbol: { hierarchicalDocumentSymbolSupport: true },
             },
           },
         },
@@ -313,16 +358,7 @@ class LspConnection {
       if (dead && dead.exitCode === null && dead.signalCode === null) {
         try {
           if (process.platform === "win32" && dead.pid !== undefined) {
-            spawnSync(
-              resolveTrustedExecutable("taskkill"),
-              ["/pid", String(dead.pid), "/T", "/F"],
-              {
-                stdio: "ignore",
-                timeout: 2_000,
-                windowsHide: true,
-                env: sanitizeSpawnEnv(process.env),
-              },
-            )
+            await killWindowsTreeAsync(dead.pid)
           } else if (process.platform !== "win32" && dead.pid !== undefined) {
             process.kill(-dead.pid, "SIGKILL")
           } else {
@@ -431,8 +467,14 @@ class LspConnection {
         textDocument: { uri, languageId: langId, version: 1, text },
       })
       this.opened.set(uri, { version: 1, text, langId })
+    } else if (known.text === text) {
+      // Isi identik: segarkan urutan LRU tanpa didChange palsu yang memicu diagnostics ulang.
+      this.opened.delete(uri)
+      this.opened.set(uri, known)
     } else {
       const v = known.version + 1
+      // Hapus cache diagnostik lama sebelum didChange agar waitForDiagnostics tidak memulangkan hasil versi sebelumnya.
+      this.diagnostics.delete(uri)
       this.notify("textDocument/didChange", {
         textDocument: { uri, version: v },
         contentChanges: [{ text }],
@@ -442,6 +484,17 @@ class LspConnection {
       this.opened.set(uri, { version: v, text, langId })
     }
     return uri
+  }
+
+  closeDocument(absPath: string): void {
+    const uri = pathToFileURL(absPath).href
+    if (this.opened.has(uri)) {
+      this.opened.delete(uri)
+      try {
+        this.notify("textDocument/didClose", { textDocument: { uri } })
+      } catch {}
+    }
+    this.diagnostics.delete(uri)
   }
 
   /**
@@ -468,6 +521,7 @@ class LspConnection {
   }
 
   async waitForDiagnostics(uri: string, timeoutMs = 5_000): Promise<Record<string, unknown>[]> {
+    if (timeoutMs <= 0) return this.diagnostics.get(uri) ?? []
     if (this.diagnostics.has(uri)) {
       await sleep(100) // settle window for follow-up pushes
       return this.diagnostics.get(uri) ?? []
@@ -525,14 +579,7 @@ class LspConnection {
     } catch {}
     const p = this.proc
     if (process.platform === "win32" && p.pid !== undefined && p.exitCode === null) {
-      try {
-        spawnSync(resolveTrustedExecutable("taskkill"), ["/pid", String(p.pid), "/T", "/F"], {
-          stdio: "ignore",
-          timeout: 2_000,
-          windowsHide: true,
-          env: sanitizeSpawnEnv(process.env),
-        })
-      } catch {}
+      await killWindowsTreeAsync(p.pid)
     }
     this.killSignal.abort()
     if (p.exitCode === null && p.signalCode === null) {
@@ -559,10 +606,20 @@ class LspConnection {
     this.started = false
     this.starting = undefined
     this.frames.reset()
+    processSupervision?.unregister(this.childId)
   }
 
   private handleData(chunk: Buffer) {
-    for (const msg of this.frames.push(chunk)) {
+    let msgs: unknown[]
+    try {
+      msgs = this.frames.push(chunk)
+    } catch (err) {
+      // Frame corrupt / melebihi batas: reset parser dan fail-all pending request, bukan throw di listener stdout.
+      this.frames.reset()
+      this.failAll(err instanceof Error ? err : new Error(String(err)))
+      return
+    }
+    for (const msg of msgs) {
       if (msg && typeof msg === "object" && !Array.isArray(msg)) {
         try {
           this.dispatch(msg as Record<string, unknown>)
@@ -605,9 +662,18 @@ class LspConnection {
     // server → client notifications
     if (msg.method === "textDocument/publishDiagnostics") {
       const params = msg.params as
-        | { uri?: string; diagnostics?: Record<string, unknown>[] }
+        | { uri?: string; version?: number; diagnostics?: Record<string, unknown>[] }
         | undefined
       if (params?.uri) {
+        // Abaikan notifikasi yang secara eksplisit membawa versi lebih tua dari state terbuka saat ini.
+        const openedVersion = this.opened.get(params.uri)?.version
+        if (
+          typeof params.version === "number" &&
+          openedVersion !== undefined &&
+          params.version < openedVersion
+        ) {
+          return
+        }
         this.diagnostics.set(params.uri, params.diagnostics ?? [])
         const waiters = this.diagnosticWaiters.get(params.uri)
         if (waiters) {
@@ -630,36 +696,106 @@ class LspConnection {
   }
 }
 
-// registry keyed by lowercase extension
+const PROJECT_ROOT_MARKERS = [
+  "tsconfig.json",
+  "jsconfig.json",
+  "package.json",
+  "pyproject.toml",
+  "Cargo.toml",
+  "go.mod",
+] as const
+
+function normRootKey(p: string): string {
+  const abs = resolvePath(p)
+  return process.platform === "win32" ? abs.toLowerCase() : abs
+}
+
+function shortRootHash(root: string): string {
+  let h = 0x811c9dc5
+  const norm = normRootKey(root)
+  for (let i = 0; i < norm.length; i++) {
+    h ^= norm.charCodeAt(i)
+    h = Math.imul(h, 0x01000193)
+  }
+  return (h >>> 0).toString(16).padStart(8, "0")
+}
+
+/** Temukan akar sub-proyek terdekat di dalam workspace untuk isolasi LSP monorepo. */
+export function findProjectRoot(absFile: string, workspaceRoot: string): string {
+  const root = resolvePath(workspaceRoot)
+  const file = resolvePath(root, absFile)
+  const rel = relative(root, file)
+  if (!rel || rel.startsWith("..") || isAbsolute(rel)) return root
+  let dir = dirname(file)
+  for (;;) {
+    for (const marker of PROJECT_ROOT_MARKERS) {
+      if (existsSync(resolvePath(dir, marker))) return dir
+    }
+    if (normRootKey(dir) === normRootKey(root)) break
+    const parent = dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  return root
+}
+
+// Entri terkonfigurasi per ekstensi + koneksi aktif keyed `${ext}\0${normRoot}`.
+const configuredEntries = new Map<string, LspServerEntry>()
 const activeServers = new Map<string, LspConnection>()
 
 export function configureServers(entries: LspServerEntry[]): void {
   for (const e of entries) {
     const key = e.ext.toLowerCase()
-    if (!activeServers.has(key)) activeServers.set(key, new LspConnection(e))
+    if (!configuredEntries.has(key)) configuredEntries.set(key, e)
   }
 }
 
 // Seam uji: kosongkan registry (isolasi antar test file — repomap mengambil
 // jalur LSP begitu ADA server terdaftar, jadi stub uji tak boleh bocor).
 export function clearLspServers(): void {
+  configuredEntries.clear()
   activeServers.clear()
 }
 
 export function getConfiguredExts(): string[] {
-  return [...activeServers.keys()]
+  return [...configuredEntries.keys()]
+}
+
+function getOrCreateConnection(
+  ext: string,
+  entry: LspServerEntry,
+  projectRoot: string,
+  workspaceRoot: string,
+): LspConnection {
+  const normProject = normRootKey(projectRoot)
+  const normWorkspace = normRootKey(workspaceRoot)
+  const key = `${ext}\0${normProject}`
+  let conn = activeServers.get(key)
+  if (!conn) {
+    conn = new LspConnection(entry, resolvePath(projectRoot), normProject !== normWorkspace)
+    activeServers.set(key, conn)
+  }
+  return conn
 }
 
 async function getConnection(file: string, cwd?: string): Promise<LspConnection> {
   const ext = extname(file).toLowerCase()
-  const conn = activeServers.get(ext)
-  if (!conn) throw new Error(`no LSP configured for '${ext}' — add via minicode config lsp add`)
-  // Root server = workspace sesi, BUKAN process.cwd(): tanpa ini sesi --cwd
-  // beda direktori menjalankan server di direktori yang salah (simbol dan
-  // diagnostics menunjuk workspace yang keliru). Default process.cwd()
-  // mempertahankan pemanggil lama (verifier tanpa konteks cwd).
-  await conn.start(cwd ?? process.cwd())
+  const entry = configuredEntries.get(ext)
+  if (!entry) throw new Error(`no LSP configured for '${ext}' — add via minicode config lsp add`)
+  const workspaceRoot = resolvePath(cwd ?? process.cwd())
+  const projectRoot = findProjectRoot(file, workspaceRoot)
+  const conn = getOrCreateConnection(ext, entry, projectRoot, workspaceRoot)
+  // Root server mengikuti akar proyek terdekat (atau workspaceRoot bila tunggal), BUKAN process.cwd().
+  await conn.start(projectRoot)
   return conn
+}
+
+/** Tutup dokumen di koneksi LSP aktif (dipakai move_file / delete_file agar diagnosa lama tidak tertinggal). */
+export function closeLspDocument(absPath: string, _cwd?: string): void {
+  const ext = extname(absPath).toLowerCase()
+  for (const conn of activeServers.values()) {
+    if (conn.entry.ext.toLowerCase() === ext) conn.closeDocument(absPath)
+  }
 }
 
 export interface LspPositionResult {
@@ -724,11 +860,12 @@ export async function lspCall(
   method: string,
   params: Record<string, unknown>,
   cwd?: string,
-  waitDiagsMs = 3_000,
+  // Query navigasi/simbol read-only tidak perlu memblokir 3 detik menunggu pushDiagnostics.
+  waitDiagsMs = 0,
 ): Promise<unknown> {
   const conn = await getConnection(absPath, cwd)
   const uri = conn.openDocument(absPath, text)
-  await conn.waitForDiagnostics(uri, waitDiagsMs).catch(() => [])
+  if (waitDiagsMs > 0) await conn.waitForDiagnostics(uri, waitDiagsMs).catch(() => [])
   return conn.request(method, params)
 }
 
@@ -755,12 +892,28 @@ export async function workspaceSymbols(
   timeoutMs = 4000,
   cwd?: string,
 ): Promise<WorkspaceSymbol[]> {
-  const conns = [...activeServers.values()]
-  if (conns.length === 0) return []
+  if (configuredEntries.size === 0 && activeServers.size === 0) return []
+  const workspaceRoot = resolvePath(cwd ?? process.cwd())
+  const targetConns = new Map<LspConnection, string>()
+  for (const conn of activeServers.values()) {
+    const r = conn.serverRoot || workspaceRoot
+    const rel = relative(workspaceRoot, resolvePath(r))
+    if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) {
+      targetConns.set(conn, r)
+    }
+  }
+  for (const [ext, entry] of configuredEntries) {
+    const hasUnderRoot = [...targetConns.keys()].some((c) => c.entry.ext.toLowerCase() === ext)
+    if (!hasUnderRoot) {
+      const conn = getOrCreateConnection(ext, entry, workspaceRoot, workspaceRoot)
+      targetConns.set(conn, workspaceRoot)
+    }
+  }
+  if (targetConns.size === 0) return []
   const results = await Promise.all(
-    conns.map(async (conn) => {
+    [...targetConns.entries()].map(async ([conn, root]) => {
       try {
-        await conn.start(cwd ?? process.cwd())
+        await conn.start(root)
         const res = (await conn.request("workspace/symbol", { query }, timeoutMs)) as
           | WorkspaceSymbol[]
           | null

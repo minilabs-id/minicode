@@ -230,3 +230,187 @@ describe("marker step tidak bocor ke chat/prompt", () => {
     expect(summaryLines(screen())).toHaveLength(1)
   })
 })
+
+describe("durasi turn di akhir turn (bersama rekap & tanpa tool)", () => {
+  test("turn dengan tool menampilkan rekap + durasi berspasi (1m 05s)", () => {
+    setSessionLocale("en")
+    let clock = 10_000
+    const bus = createFakeBus()
+    let handler: ((event: UiPresentationEvent) => void) | undefined
+    const transcript = new Transcript(bus as never, {
+      now: () => clock,
+      onPresentationEvent: (next) => {
+        handler = next as (event: UiPresentationEvent) => void
+        return () => {
+          handler = undefined
+        }
+      },
+    })
+    handler?.({ type: "turn.started", seq: 1, turnId: 1 })
+    handler?.({
+      type: "tool.completed",
+      seq: 2,
+      turnId: 1,
+      toolCallId: "c1",
+      name: "read_file",
+      status: "completed",
+    })
+    handler?.({
+      type: "tool.completed",
+      seq: 3,
+      turnId: 1,
+      toolCallId: "c2",
+      name: "bash",
+      status: "completed",
+    })
+    clock += 65_400
+    handler?.({ type: "turn.completed", seq: 4, turnId: 1 })
+    const summaries = summaryLines(transcript.view(120, 20, 0).map(stripAnsi))
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0]).toBe(`1 command ${glyphs.dot} 1 read ${glyphs.dot} 1m 05s`)
+  })
+
+  test("turn tanpa tool tetap menampilkan durasi turn & tidak mengotori /copy", () => {
+    let clock = 1_000
+    const bus = createFakeBus()
+    const transcript = new Transcript(bus as never, { now: () => clock })
+    transcript.pushUser("halo")
+    bus.emit("turn:started", { turn: 1 })
+    bus.emit("provider:text", { text: "Siap dibantu." })
+    clock += 14_200
+    bus.emit("turn:completed", {})
+
+    const lines = transcript.view(80, 10, 0).map(stripAnsi)
+    expect(summaryLines(lines)).toHaveLength(0)
+    expect(lines.some((l) => l === "14s")).toBe(true)
+    expect(transcript.copyTurnTexts(1)).toEqual(["Siap dibantu."])
+  })
+
+  test("idempoten bila bus turn:completed & presentation turn.completed tiba beruntun (kedua urutan)", () => {
+    for (const busFirst of [false, true]) {
+      let clock = 5_000
+      const bus = createFakeBus()
+      let handler: ((event: UiPresentationEvent) => void) | undefined
+      const transcript = new Transcript(bus as never, {
+        now: () => clock,
+        onPresentationEvent: (next) => {
+          handler = next as (event: UiPresentationEvent) => void
+          return () => {
+            handler = undefined
+          }
+        },
+      })
+      bus.emit("turn:started", { turn: 1 })
+      handler?.({ type: "turn.started", seq: 1, turnId: 1 })
+      handler?.({
+        type: "tool.completed",
+        seq: 2,
+        turnId: 1,
+        toolCallId: "c1",
+        name: "read_file",
+        status: "completed",
+      })
+      clock += 65_000
+      if (busFirst) {
+        bus.emit("turn:completed", {})
+        handler?.({
+          type: "turn.completed",
+          seq: 3,
+          turnId: 1,
+          summary: {
+            toolsOk: 1,
+            toolsFailed: 0,
+            toolsDenied: 0,
+            toolsCancelled: 0,
+            toolsInterrupted: 0,
+            filesChanged: 0,
+            durationMs: 65_000,
+          },
+        })
+      } else {
+        handler?.({
+          type: "turn.completed",
+          seq: 3,
+          turnId: 1,
+          summary: {
+            toolsOk: 1,
+            toolsFailed: 0,
+            toolsDenied: 0,
+            toolsCancelled: 0,
+            toolsInterrupted: 0,
+            filesChanged: 0,
+            durationMs: 65_000,
+          },
+        })
+        bus.emit("turn:completed", {})
+      }
+      const view = transcript.view(80, 10, 0).map(stripAnsi)
+      expect(summaryLines(view)).toHaveLength(1)
+      expect(summaryLines(view)[0]).toBe(`1 read ${glyphs.dot} 1m 05s`)
+    }
+  })
+
+  test("rekap segmen tengah turn bebas durasi; segmen akhir ditimpa rekap+durasi & --resume memakai summary.durationMs", () => {
+    let clock = 1_000
+    const bus = createFakeBus()
+    let handler: ((event: UiPresentationEvent) => void) | undefined
+    const transcript = new Transcript(bus as never, {
+      now: () => clock,
+      onPresentationEvent: (next) => {
+        handler = next as (event: UiPresentationEvent) => void
+        return () => {
+          handler = undefined
+        }
+      },
+    })
+    handler?.({ type: "turn.started", seq: 1, turnId: 1 })
+    bus.emit("provider:text", { text: "NARASI-1" })
+    handler?.({
+      type: "tool.completed",
+      seq: 2,
+      turnId: 1,
+      toolCallId: "c1",
+      name: "read_file",
+      status: "completed",
+    })
+    bus.emit("provider:text", { text: "NARASI-2" })
+    handler?.({ type: "tool.started", seq: 3, turnId: 1, toolCallId: "c2" })
+    handler?.({
+      type: "tool.completed",
+      seq: 4,
+      turnId: 1,
+      toolCallId: "c2",
+      name: "bash",
+      status: "completed",
+    })
+    clock += 12_000
+    handler?.({ type: "turn.completed", seq: 5, turnId: 1 })
+
+    const recaps = summaryLines(transcript.view(80, 20, 0).map(stripAnsi))
+    expect(recaps).toEqual([`1 read`, `1 command ${glyphs.dot} 1 read ${glyphs.dot} 12s`])
+
+    // replayHistory (--resume) harus memakai durable summary.durationMs (bukan clock replay 0ms).
+    const replayed = new Transcript(createFakeBus() as never, { now: () => clock })
+    replayed.replayHistory([
+      { type: "user.message", text: "cek repo", turnId: 1 },
+      { type: "turn.started", seq: 1, turnId: 1 },
+      { type: "model.completed", text: "Selesai.", turnId: 1 },
+      {
+        type: "turn.completed",
+        seq: 2,
+        turnId: 1,
+        summary: {
+          toolsOk: 0,
+          toolsFailed: 0,
+          toolsDenied: 0,
+          toolsCancelled: 0,
+          toolsInterrupted: 0,
+          filesChanged: 0,
+          durationMs: 75_000,
+        },
+      },
+    ])
+    const replayOut = replayed.view(80, 10, 0).map(stripAnsi).join("\n")
+    expect(replayOut).toContain("1m 15s")
+  })
+})

@@ -154,7 +154,18 @@ export class McpHttpTransport implements McpTransportLike {
     const body = JSON.stringify({ jsonrpc: "2.0", id, method, params })
 
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(new Error("timeout")), timeoutMs)
+    const maxActiveMs = Math.max(timeoutMs * 10, timeoutMs)
+    const startedMono = performance.now()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const armTimer = () => {
+      if (timer !== undefined) clearTimeout(timer)
+      const elapsed = Math.max(0, performance.now() - startedMono)
+      const remaining = Math.max(1, maxActiveMs - Math.floor(elapsed))
+      const stepMs = Math.min(timeoutMs, remaining)
+      timer = setTimeout(() => controller.abort(new Error("timeout")), stepMs)
+      timer.unref?.()
+    }
+    armTimer()
     // Pembatalan parent BENAR-BENAR membatalkan fetch HTTP (beda dengan stdio).
     const onAbort = () => controller.abort(signal?.reason ?? new Error("aborted"))
     if (signal?.aborted) controller.abort(signal.reason)
@@ -199,7 +210,7 @@ export class McpHttpTransport implements McpTransportLike {
 
       const ctype = (res.headers.get("content-type") ?? "").toLowerCase()
       const payload = ctype.includes("text/event-stream")
-        ? await readSseResponse(res, id)
+        ? await readSseResponse(res, id, armTimer)
         : await readJsonResponse(res, id)
 
       if (!payload) throw new Error(`MCP http: ${method} returned no response`)
@@ -301,6 +312,7 @@ export async function readJsonResponse(
 export async function readSseResponse(
   res: Response,
   id: string | number,
+  onActivity?: () => void,
 ): Promise<JsonRpcResponse | null> {
   if (!res.body) return null
   const reader = res.body.getReader()
@@ -315,6 +327,7 @@ export async function readSseResponse(
         reachedEof = true
         break
       }
+      if (value.byteLength > 0) onActivity?.()
       total += value.byteLength
       if (total > LIMITS.MCP_HTTP_BODY_MAX_BYTES) {
         throw new Error("MCP http: aliran SSE melewati batas ukuran")
@@ -326,16 +339,10 @@ export async function readSseResponse(
       while (sep !== -1) {
         const rawEvent = buffer.slice(0, sep)
         buffer = buffer.slice(sep).replace(/^(?:\r?\n){1,2}/, "")
-        const data = rawEvent
-          .split(/\r?\n/)
-          .filter((l) => l.startsWith("data:"))
-          .map((l) => l.slice(5).trim())
-          .join("")
-        if (data) {
-          let msg: JsonRpcResponse | JsonRpcResponse[]
-          try {
-            msg = JSON.parse(data)
-          } catch {
+        const rawLines = extractSseDataLines(rawEvent)
+        if (rawLines.length > 0) {
+          const msg = parseSseJson(rawLines)
+          if (msg === null) {
             sep = findEventBoundary(buffer)
             continue // event bukan JSON → lewati, jangan gagalkan seluruh request
           }
@@ -345,18 +352,12 @@ export async function readSseResponse(
         sep = findEventBoundary(buffer)
       }
     }
-    // Aliran berakhir: coba sisa buffer.
-    const tail = buffer
-      .split(/\r?\n/)
-      .filter((l) => l.startsWith("data:"))
-      .map((l) => l.slice(5).trim())
-      .join("")
-    if (tail) {
-      try {
-        return matchResponse(JSON.parse(tail), id)
-      } catch {
-        return null
-      }
+    // Aliran berakhir: coba sisa buffer + flush decoder UTF-8.
+    buffer += decoder.decode()
+    const tailLines = extractSseDataLines(buffer)
+    if (tailLines.length > 0) {
+      const msg = parseSseJson(tailLines)
+      return msg ? matchResponse(msg, id) : null
     }
     return null
   } finally {
@@ -364,6 +365,27 @@ export async function readSseResponse(
     // agar soket HTTP keep-alive tidak bocor menggantung.
     if (!reachedEof) await reader.cancel().catch(() => {})
     reader.releaseLock()
+  }
+}
+
+function extractSseDataLines(rawEvent: string): string[] {
+  return rawEvent
+    .split(/\r?\n/)
+    .filter((l) => l.startsWith("data:"))
+    .map((l) => l.slice(5).trim())
+    .filter((l) => l.length > 0)
+}
+
+function parseSseJson(lines: string[]): JsonRpcResponse | JsonRpcResponse[] | null {
+  try {
+    return JSON.parse(lines.join("\n")) as JsonRpcResponse | JsonRpcResponse[]
+  } catch {
+    if (lines.length <= 1) return null
+    try {
+      return JSON.parse(lines.join("")) as JsonRpcResponse | JsonRpcResponse[]
+    } catch {
+      return null
+    }
   }
 }
 
@@ -392,6 +414,7 @@ async function readCapped(res: Response): Promise<string> {
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
   let out = ""
+  let bytes = 0
   let reachedEof = false
   try {
     while (true) {
@@ -400,11 +423,13 @@ async function readCapped(res: Response): Promise<string> {
         reachedEof = true
         break
       }
-      out += decoder.decode(value, { stream: true })
-      if (out.length > LIMITS.MCP_HTTP_BODY_MAX_BYTES) {
+      bytes += value.byteLength
+      if (bytes > LIMITS.MCP_HTTP_BODY_MAX_BYTES) {
         throw new Error("MCP http: balasan melewati batas ukuran")
       }
+      out += decoder.decode(value, { stream: true })
     }
+    out += decoder.decode()
   } finally {
     if (!reachedEof) await reader.cancel().catch(() => {})
     reader.releaseLock()

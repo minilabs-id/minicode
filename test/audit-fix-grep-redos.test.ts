@@ -1,7 +1,7 @@
 // v7.38 (L7): pagar ReDoS pada fallback JS grep.
 // Seam yang dipakai: MINICODE_GREP_ENGINE=js memaksa walker JS (lihat grep.ts).
 import { describe, expect, test } from "bun:test"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { ToolContext } from "#minicore"
@@ -60,6 +60,99 @@ describe("L7: pagar ReDoS fallback JS grep", () => {
     }
     expect(redosGuardMessage("foo.*Error")).toBeNull()
     expect(redosGuardMessage("(a+)+$")).toContain("ReDoS-prone")
+  })
+
+  test("alternasi datar linear diizinkan pada fallback JS; cabang berantai tetap ditolak", async () => {
+    const safeAlternations = [
+      "paste.*help|help.*paste|paste.*slash|slash.*paste|pasted.*submit|submit.*pasted",
+      "scrubSecrets\\([^\\n]*slice|slice\\([^\\n]*\\).*scrub|sanitizeLabel\\([^\\n]*scrub|scrubSecrets\\(.*sanitizeLabel",
+    ]
+    for (const p of safeAlternations) {
+      expect(isReDosPronePattern(p), p).toBe(false)
+    }
+    expect(isReDosPronePattern("ok|.*.*.*.*x")).toBe(true)
+    expect(isReDosPronePattern("\\w+\\w+\\w+!|normal")).toBe(true)
+
+    const { root, ctx, cleanup } = await setup()
+    const prev = saveEngine()
+    try {
+      process.env.MINICODE_GREP_ENGINE = "js"
+      await writeFile(
+        join(root, "scrub.ts"),
+        "const a = scrubSecrets(text.slice(0, 10))\nconst b = sanitizeLabel(scrubSecrets(raw))\n",
+        "utf8",
+      )
+      const out = (await grepTool.execute(
+        {
+          pattern: safeAlternations[1]!,
+          cwd: root,
+          limit: 10,
+        },
+        ctx,
+      )) as string
+      expect(out).toContain("scrub.ts:1:")
+      expect(out).toContain("scrub.ts:2:")
+    } finally {
+      restoreEngine(prev)
+      await cleanup()
+    }
+  })
+
+  test("grep mendukung multi-path (`paths` dan split aman `src cli`) tanpa melonggarkan pagar keamanan", async () => {
+    const { root, ctx, cleanup } = await setup()
+    const prev = saveEngine()
+    try {
+      process.env.MINICODE_GREP_ENGINE = "js"
+      await mkdir(join(root, "src"), { recursive: true })
+      await mkdir(join(root, "cli"), { recursive: true })
+      await mkdir(join(root, "my dir"), { recursive: true })
+      await writeFile(join(root, "src", "a.ts"), "export const NEEDLE = 1\n", "utf8")
+      await writeFile(join(root, "cli", "b.ts"), "export const NEEDLE = 2\n", "utf8")
+      await writeFile(join(root, "my dir", "c.ts"), "export const NEEDLE = 3\n", "utf8")
+      await writeFile(join(root, ".env"), "NEEDLE=secret\n", "utf8")
+
+      const viaArray = (await grepTool.execute(
+        { pattern: "NEEDLE", paths: ["src", "cli"] },
+        ctx,
+      )) as string
+      expect(viaArray).toContain("src/a.ts:1:")
+      expect(viaArray).toContain("cli/b.ts:1:")
+      expect(viaArray).not.toContain("my dir")
+
+      const viaSpace = (await grepTool.execute(
+        { pattern: "NEEDLE", path: "src cli" },
+        ctx,
+      )) as string
+      expect(viaSpace).toContain("src/a.ts:1:")
+      expect(viaSpace).toContain("cli/b.ts:1:")
+
+      // Direktori harfiah yang memang mengandung spasi tetap diutamakan tanpa split.
+      const literalSpace = (await grepTool.execute(
+        { pattern: "NEEDLE", path: "my dir" },
+        ctx,
+      )) as string
+      expect(literalSpace).toContain("c.ts:1:")
+
+      // Cap limit global dihormati antar target + marker truncated tepat pada batas.
+      const capped = (await grepTool.execute(
+        { pattern: "NEEDLE", paths: ["src", "cli"], limit: 1 },
+        ctx,
+      )) as string
+      expect(capped).toContain("showing first 1 matches")
+
+      await expect(grepTool.execute({ pattern: "NEEDLE", path: "src .env" }, ctx)).rejects.toThrow(
+        /sensitive/,
+      )
+      await expect(
+        grepTool.execute({ pattern: "NEEDLE", path: "src ../outside" }, ctx),
+      ).rejects.toThrow(/outside workspace/)
+      await expect(
+        grepTool.execute({ pattern: "NEEDLE", path: "missing1 missing2" }, ctx),
+      ).rejects.toThrow(/file not found: missing1 missing2/)
+    } finally {
+      restoreEngine(prev)
+      await cleanup()
+    }
   })
 
   test("(a+)+$ dengan fallback JS ditolak sebelum re.test (tak menggantung)", async () => {

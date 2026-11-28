@@ -13,6 +13,7 @@ The variables that most determine behaviour (the rest are referenced below):
 | Variable | Function |
 |---|---|
 | `MINICODE_TIMEOUT_MS` | Default timeout (ms) when `--timeout` is not set; `0` = Infinity. This is the **total** budget for one prompt (default 1 hour for interactive sessions) |
+| `MINICODE_WALL_TIMEOUT_MS` | Optional hard wall-clock ceiling (`--wall-timeout`, ms) alongside the inactivity watchdog |
 | `MINICODE_DEBUG` | `1` -> print the full stack trace when the process fails fatally (default: one line with the cause only) |
 | `NO_UPDATE_CHECK` | `1` -> skip the update check at startup (honoured since v0.41) |
 | `MINICODE_AUTO_UPDATE` | `0`/`false`/`off` -> disable the automatic update check and install; any other value = enabled |
@@ -20,13 +21,14 @@ The variables that most determine behaviour (the rest are referenced below):
 | `MINICODE_AUTO_UPDATE_DONE` | Internal guard: set to `1` on the restart process produced by `/update` so it does not trigger another check/install (loop). Do not set manually |
 | `MINICODE_PERMISSION` | `allowlist` -> bash tool-access policy (legacy profile) |
 | `MINICODE_TOOL_SCOPE` | `explore` -> read-only subset of 12 tools (same as `--tool-scope explore`) |
-| `MINICODE_WORK_MODE` | `DISCUSS` \| `PLAN` \| `BUILD` -> operating mode (same as `--work-mode`; default `DISCUSS`; `BUILD` maps to the internal `EXECUTE`; the flag beats the env var; an unknown value falls back to `DISCUSS` with a warning) |
+| `MINICODE_WORK_MODE` | `DISCUSS` \| `BUILD` -> operating mode (same as `--work-mode`; default `DISCUSS`; legacy `PLAN` normalises to `DISCUSS`; `BUILD` maps to internal `EXECUTE`; flag wins over env) |
 | `MINICODE_HOOKS` | `1` -> run `pre/post-run` hooks from `~/.minicode/hooks/*.js` & `.minicode/hooks/*.js` (context in the `MINICODE_HOOK_CTX` env; hook env is sanitised without secrets; skipped when the session is cancelled) |
 | `MINICODE_SESSION_TTL_DAYS` | Session TTL (default 30; `0` = forever) |
 | `MINICODE_REWIND_DRAFT` | Internal `/undo` handoff: `1` -> the TUI loads the target prompt from the rewind record into the branch composer |
 | `MINICODE_REWIND_NOTICE` | Internal `/undo`/`/redo` handoff: base64 notice shown once in the child session transcript |
-| `MINICODE_SUB_AGENT_TIMEOUT_MS` | Default per-delegation sub-agent timeout (ms, finite >0; default 300000 / 5 minutes). Overridable per delegation with the `timeoutMs` argument of `delegate_task` |
-| `MINICODE_SUB_AGENT_POOL_SIZE` | Number of parallel sub-agent execution slots (1..16, default 3). Raise it when you routinely fan out to 5+ agents at once |
+| `MINICODE_SUB_AGENT_TIMEOUT_MS` | Default per-delegation sub-agent timeout (ms, finite >0; default 3600000 / 1 hour). Overridable per delegation with `timeoutMs` on `delegate_task` |
+| `MINICODE_SUB_AGENT_POOL_SIZE` | Number of parallel sub-agent execution slots (1..16, default 5). Raise it when you routinely fan out more than 5 agents at once |
+| `MINICODE_SUBAGENT_LLM_TITLE` | `1` -> enable parallel lightweight LLM title generation for unnamed `delegate_task` sub-agents; off by default (uses deterministic label derived from `prompt`) |
 | `MINICODE_REWIND_LOCK_MAX_AGE_MS` | Maximum age of the rewind `operation.lock` before it is treated as stale (default 600000 ms / 10 minutes). Operators may extend it when rewind is often interrupted on a slow machine |
 | `MINICODE_BOOT_ID` | Machine boot marker for cross-restart rewind-lock validation. When unset it is derived from `hostname` + `Date.now() - os.uptime()`; set it explicitly for determinism when the NTP clock shifts |
 | `MINICODE_HOME` | Override the home for local/global DBs (sessions + vector); default `~` |
@@ -74,7 +76,7 @@ available" without spawning npm.
 > For that label alone the **OS locale** (`Intl`, id/en) wins on every surface —
 > TUI, one-shot/`exec`, and ACP via `src/ui/assistant/simple.ts` — so tool
 > vocabulary stays consistent across surfaces. There is no env var to override
-> this; see the v0.35 entry in `TERMINAL_CONTRACT.md`.
+> this; see the v0.35 entry in [docs/TERMINAL_CONTRACT.md](../docs/TERMINAL_CONTRACT.md).
 
 ## Sandbox
 

@@ -1,10 +1,10 @@
 import { spawn, spawnSync } from "node:child_process"
-import { realpath, stat } from "node:fs/promises"
-import { isAbsolute, relative, resolve } from "node:path"
+import { readdir, realpath, stat } from "node:fs/promises"
+import { isAbsolute, join, relative, resolve } from "node:path"
 import type { Tool } from "#minicore"
 import { LIMITS } from "../constants.ts"
-import { loadIgnoreMatchers } from "../lib/ignore.ts"
-import { safeReadFile } from "../lib/safe-open.ts"
+import { isIgnored, loadIgnoreMatchers } from "../lib/ignore.ts"
+import { createSafeScanReader, safeReadFile } from "../lib/safe-open.ts"
 import { resolveTrustedExecutable } from "../lib/trusted-exec.ts"
 import {
   isCwdOutsideRoot,
@@ -14,7 +14,7 @@ import {
   isSensitiveReal,
 } from "../policy/jail.ts"
 import { sanitizeSpawnEnv, scrubSecrets } from "../policy/scrub.ts"
-import { requireToolCwd, resolveSearchRoot, walkWorkspaceFiles } from "./context.ts"
+import { requireToolCwd, resolveSearchRoot } from "./context.ts"
 import { globToRegExp } from "./glob.ts"
 
 // v7.32 (L6): prefix marker timeout ripgrep. Dipakai dua arah — runRipgrep
@@ -98,6 +98,62 @@ function hasOverlappingAlternation(structural: string): boolean {
   return false
 }
 
+/** Pisahkan cabang `|` level-atas (di luar `(...)` dan `[...]`) dengan tetap menghormati escape `\`. */
+function splitTopLevelAlternations(pattern: string): string[] {
+  const branches: string[] = []
+  let depth = 0
+  let inClass = false
+  let start = 0
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i]!
+    if (c === "\\") {
+      i++
+      continue
+    }
+    if (c === "[") {
+      inClass = true
+      continue
+    }
+    if (c === "]" && inClass) {
+      inClass = false
+      continue
+    }
+    if (inClass) continue
+    if (c === "(") {
+      depth++
+      continue
+    }
+    if (c === ")") {
+      if (depth > 0) depth--
+      continue
+    }
+    if (c === "|" && depth === 0) {
+      branches.push(pattern.slice(start, i))
+      start = i + 1
+    }
+  }
+  branches.push(pattern.slice(start))
+  return branches
+}
+
+/** Periksa batas quantifier bebas pada satu cabang tunggal agar alternasi datar linear tidak ditolak palsu. */
+function hasExcessiveBranchQuantifiers(branch: string): boolean {
+  const topStructural = structuralChars(branch)
+  if (/(?:\.\*|\.\+){2,}/.test(topStructural)) return true
+  if (
+    /(\[[^\]\r\n]{1,64}\]|\\[wWdDsS]|\.)(?:[*+]|\{\d{1,4},\})\1(?:[*+]|\{\d{1,4},\})/.test(
+      branch,
+    ) ||
+    /(?:\\(?:w|W|d|D|s|S)|\.)(?:[*+]|\{\d{1,4},\})(?:\\(?:w|W|d|D|s|S)|\.)(?:[*+]|\{\d{1,4},\})(?:\\(?:w|W|d|D|s|S)|\.)(?:[*+]|\{\d{1,4},\})/.test(
+      branch,
+    )
+  ) {
+    return true
+  }
+  const unboundedCount = (topStructural.match(/(?:\.\*|\.\+|[*+])/g) ?? []).length
+  return unboundedCount >= 4 && /(?:\\(?:w|W|d|D|s|S)|\.\*|\.\+)/.test(branch)
+}
+
 /**
  * Deteksi statis regex rawan catastrophic backtracking pada fallback JS:
  * quantifier bersarang (`(a+)+`, `(a*)*`), alternasi tumpang tindih yang
@@ -160,23 +216,11 @@ export function isReDosPronePattern(pattern: string): boolean {
   // polinomial/eksponensial pada fallback JS (mis. `.*.*.*.*`, `.+.+.+.+`).
   // Hanya menandai bila ada >= 2 pengulangan wildcard berdekatan (`.*.*`) atau
   // >= 4 quantifier tak-terbatas (`*`/`+`) di luar character class.
-  const topStructural = structuralChars(pattern)
-  if (/(?:\.\*|\.\+){2,}/.test(topStructural)) return true
-  // Rantai kelas karakter ter-quantifier yang berdekatan (mis. `\w+\w+\w+!`,
-  // `[a-z]+[a-z]+$`) memicu backtracking eksponensial/polinomial di JSC YARR
-  // walau tanpa `.*`/`.+`.
-  if (
-    /(\[[^\]\r\n]{1,64}\]|\\[wWdDsS]|\.)(?:[*+]|\{\d{1,4},\})\1(?:[*+]|\{\d{1,4},\})/.test(
-      pattern,
-    ) ||
-    /(?:\\(?:w|W|d|D|s|S)|\.)(?:[*+]|\{\d{1,4},\})(?:\\(?:w|W|d|D|s|S)|\.)(?:[*+]|\{\d{1,4},\})(?:\\(?:w|W|d|D|s|S)|\.)(?:[*+]|\{\d{1,4},\})/.test(
-      pattern,
-    )
-  ) {
-    return true
+  // Evaluasi batas quantifier per cabang `|` level-atas agar pola OR datar linear
+  // (mis. `foo.*bar|baz.*qux|a.*b|c.*d`) tidak terkena false positive.
+  for (const branch of splitTopLevelAlternations(pattern)) {
+    if (hasExcessiveBranchQuantifiers(branch)) return true
   }
-  const unboundedCount = (topStructural.match(/(?:\.\*|\.\+|[*+])/g) ?? []).length
-  if (unboundedCount >= 4 && /(?:\\(?:w|W|d|D|s|S)|\.\*|\.\+)/.test(pattern)) return true
   return false
 }
 
@@ -275,6 +319,82 @@ interface ContextFileMatch {
   matchIndices: number[]
 }
 
+interface GrepCandidate {
+  full: string
+  rel: string
+}
+
+const BINARY_GREP_EXT_RE = /\.(png|jpg|jpeg|gif|webp|pdf|zip|exe|dll|bin)$/i
+
+function isSecondaryGrepPath(rel: string): boolean {
+  return (
+    /^(?:test|tests|__tests__|spec|docs)\//i.test(rel) ||
+    /(?:^|\/)CHANGELOG\.md$/i.test(rel) ||
+    /(?:\.|_)(?:test|spec)\.[^.]+$/i.test(rel)
+  )
+}
+
+/**
+ * Kumpulkan kandidat berkas tanpa realpath/open per file terlebih dahulu,
+ * tolak symlink luar/sensitif, dan prioritaskan sumber produksi sebelum `test/` & `CHANGELOG.md`.
+ */
+async function collectGrepCandidates(opts: {
+  dir: string
+  root: string
+  signal: AbortSignal
+  includeRe?: RegExp | null
+  ignoreMatchers: ((rel: string) => boolean)[]
+  relaxed: boolean
+  includeDotfiles: boolean
+}): Promise<GrepCandidate[]> {
+  const realRoot = resolve(opts.root)
+  const primary: GrepCandidate[] = []
+  const secondary: GrepCandidate[] = []
+  const visitedDirs = new Set<string>()
+
+  const walk = async (curDir: string): Promise<void> => {
+    if (opts.signal.aborted) throw new Error("aborted")
+    const curReal = await realpath(curDir).catch(() => curDir)
+    if (visitedDirs.has(curReal)) return
+    visitedDirs.add(curReal)
+    const entries = await readdir(curDir, { withFileTypes: true }).catch(() => [])
+    for (const e of entries) {
+      if (e.name === "node_modules" || e.name === ".git") continue
+      if (!opts.includeDotfiles && e.name.startsWith(".")) continue
+      const full = join(curDir, e.name)
+      const rel = relative(opts.root, full).replace(/\\/g, "/")
+      if (isIgnored(rel, opts.ignoreMatchers)) continue
+      if (e.isDirectory()) {
+        if (!opts.relaxed && isSensitive(full)) continue
+        await walk(full)
+        continue
+      }
+      if (e.isSymbolicLink()) {
+        const real = await realpath(full).catch(() => null)
+        if (!real) continue
+        if (!opts.relaxed && isPathOutsideRoot(real, realRoot)) continue
+        if (isSensitive(real)) continue
+        const lst = await stat(real).catch(() => null)
+        if (lst?.isDirectory()) {
+          await walk(full)
+          continue
+        }
+      }
+      if (BINARY_GREP_EXT_RE.test(e.name)) continue
+      if (opts.includeRe && !opts.includeRe.test(rel) && !opts.includeRe.test(e.name)) continue
+      if (isSensitive(full) || isSensitive(rel)) continue
+      const item = { full, rel }
+      if (isSecondaryGrepPath(rel)) secondary.push(item)
+      else primary.push(item)
+    }
+  }
+
+  await walk(opts.dir)
+  primary.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0))
+  secondary.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0))
+  return [...primary, ...secondary]
+}
+
 async function walkGrep(
   dir: string,
   re: RegExp,
@@ -288,76 +408,85 @@ async function walkGrep(
   includeDotfiles = false,
   ctxLines = 0,
 ): Promise<{ lines: string[]; hasMore: boolean; matchCount: number }> {
+  const candidates = await collectGrepCandidates({
+    dir,
+    root,
+    signal,
+    includeRe,
+    ignoreMatchers,
+    relaxed,
+    includeDotfiles,
+  })
+  const reader = createSafeScanReader(root, relaxed)
+  const CONCURRENCY = 8
+
   if (ctxLines <= 0) {
-    await walkWorkspaceFiles(
-      {
-        dir,
-        root,
-        signal,
-        ignoreMatchers,
-        relaxed,
-        includeDotfiles,
-        shouldStop: () => out.length >= limit,
-      },
-      async ({ rel, name, real }) => {
-        if (includeRe && !includeRe.test(rel) && !includeRe.test(name)) return
-        if (/\.(png|jpg|jpeg|gif|webp|pdf|zip|exe|dll|bin)$/i.test(name)) return
-        const st = await stat(real).catch(() => null)
-        if (!st || st.size > LIMITS.GREP_FILE_MAX_BYTES) return
-        const text = (await safeReadFile(real, root, relaxed).catch(() => null)) ?? ""
-        if (text.includes("\0")) return
+    for (let i = 0; i < candidates.length && out.length < limit; i += CONCURRENCY) {
+      if (signal.aborted) throw new Error("aborted")
+      const batch = candidates.slice(i, i + CONCURRENCY)
+      const texts = await Promise.all(
+        batch.map(async (c) => {
+          try {
+            const loaded = await reader.readCapped(c.full, LIMITS.GREP_FILE_MAX_BYTES)
+            return loaded.truncated ? null : loaded.text
+          } catch {
+            return null
+          }
+        }),
+      )
+      for (let b = 0; b < batch.length && out.length < limit; b++) {
+        const text = texts[b]
+        if (!text || text.includes("\0")) continue
+        const rel = batch[b]!.rel
         const lines = text.split("\n")
-        for (let i = 0; i < lines.length; i++) {
-          const line = lines[i]!
-          // v7.38 (L7): baris sangat panjang dilewati di fallback. Bahkan pola yang
-          // lolos pagar statis tak boleh menggantung walker pada satu baris raksasa;
-          // jalur ripgrep tetap memprosesnya (regex Rust linear, tak ada ReDoS).
+        for (let ln = 0; ln < lines.length; ln++) {
+          const line = lines[ln]!
+          // v7.38 (L7): baris sangat panjang dilewati di fallback (anti-ReDoS).
           if (line.length > GREP_JS_LINE_MAX_CHARS) continue
           re.lastIndex = 0
           if (re.test(line)) {
-            out.push(formatGrepLine(rel, i + 1, ":", line))
+            out.push(formatGrepLine(rel, ln + 1, ":", line))
             if (out.length >= limit) break
           }
         }
-      },
-    )
+      }
+    }
     return { lines: out, hasMore: false, matchCount: out.length }
   }
 
   let totalFound = 0
   const fileMatches: ContextFileMatch[] = []
-  await walkWorkspaceFiles(
-    {
-      dir,
-      root,
-      signal,
-      ignoreMatchers,
-      relaxed,
-      includeDotfiles,
-      shouldStop: () => totalFound >= limit,
-    },
-    async ({ rel, name, real }) => {
-      if (includeRe && !includeRe.test(rel) && !includeRe.test(name)) return
-      if (/\.(png|jpg|jpeg|gif|webp|pdf|zip|exe|dll|bin)$/i.test(name)) return
-      const st = await stat(real).catch(() => null)
-      if (!st || st.size > LIMITS.GREP_FILE_MAX_BYTES) return
-      const text = (await safeReadFile(real, root, relaxed).catch(() => null)) ?? ""
-      if (text.includes("\0")) return
+  for (let i = 0; i < candidates.length && totalFound < limit; i += CONCURRENCY) {
+    if (signal.aborted) throw new Error("aborted")
+    const batch = candidates.slice(i, i + CONCURRENCY)
+    const texts = await Promise.all(
+      batch.map(async (c) => {
+        try {
+          const loaded = await reader.readCapped(c.full, LIMITS.GREP_FILE_MAX_BYTES)
+          return loaded.truncated ? null : loaded.text
+        } catch {
+          return null
+        }
+      }),
+    )
+    for (let b = 0; b < batch.length && totalFound < limit; b++) {
+      const text = texts[b]
+      if (!text || text.includes("\0")) continue
       const fileLines = text.split("\n")
       const matchIndices: number[] = []
-      for (let i = 0; i < fileLines.length; i++) {
-        const line = fileLines[i]!
+      for (let ln = 0; ln < fileLines.length; ln++) {
+        const line = fileLines[ln]!
         if (line.length > GREP_JS_LINE_MAX_CHARS) continue
         re.lastIndex = 0
         if (re.test(line)) {
-          matchIndices.push(i)
+          matchIndices.push(ln)
           totalFound++
           if (totalFound >= limit) break
         }
       }
-      if (matchIndices.length > 0) fileMatches.push({ rel, fileLines, matchIndices })
-    },
-  )
+      if (matchIndices.length > 0) fileMatches.push({ rel: batch[b]!.rel, fileLines, matchIndices })
+    }
+  }
   fileMatches.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0))
   const displayLimit = Math.max(0, limit - 1)
   const hasMore = totalFound > displayLimit
@@ -696,41 +825,260 @@ export function formatContextCapMark(
   return parts.join("\n")
 }
 
+interface ResolvedGrepTarget {
+  rawPath: string
+  targetAbs: string
+  realTarget: string
+  isFile: boolean
+  isDirectory: boolean
+  relToBase: string
+  relToSession: string
+}
+
+interface GrepCollectResult {
+  lines: string[]
+  hasMore: boolean
+  matchCount: number
+  timedOut: boolean
+}
+
+/** Validasi batas workspace & sensitivitas untuk satu kandidat path grep; null bila tidak ada di disk. */
+async function inspectGrepTarget(
+  rawTarget: string,
+  baseRootRoot: string,
+  sessionRoot: string,
+  relaxed: boolean,
+): Promise<ResolvedGrepTarget | null> {
+  const targetAbs = isAbsolute(rawTarget) ? resolve(rawTarget) : resolve(baseRootRoot, rawTarget)
+  if (
+    !relaxed &&
+    (isPathOutsideRoot(targetAbs, sessionRoot) || isCwdOutsideRoot(rawTarget, sessionRoot))
+  ) {
+    throw new Error(`path outside workspace: ${rawTarget}`)
+  }
+  const relToSession = relative(sessionRoot, targetAbs).replace(/\\/g, "/") || "."
+  if (!relaxed && (isSensitive(targetAbs) || isSensitive(relToSession))) {
+    throw new Error(`cannot search sensitive file: ${rawTarget}`)
+  }
+  const targetSt = await stat(targetAbs).catch(() => null)
+  if (!targetSt) return null
+  const realTarget = await realpath(targetAbs).catch(() => targetAbs)
+  if (!relaxed && isRealPathOutsideRoot(realTarget, sessionRoot)) {
+    throw new Error(`path outside workspace: ${rawTarget}`)
+  }
+  if (!relaxed && isSensitive(realTarget)) {
+    throw new Error(`cannot search sensitive file: ${rawTarget}`)
+  }
+  const relToBase = relative(baseRootRoot, targetAbs).replace(/\\/g, "/") || relToSession
+  return {
+    rawPath: rawTarget,
+    targetAbs,
+    realTarget,
+    isFile: targetSt.isFile(),
+    isDirectory: targetSt.isDirectory(),
+    relToBase,
+    relToSession,
+  }
+}
+
+/** Selesaikan `path` / `paths` menjadi daftar target terverifikasi (termasuk split `src cli` aman bila harfiahnya tidak ada). */
+async function resolveGrepTargets(
+  rawPath: string | undefined,
+  rawPaths: unknown,
+  baseRootRoot: string,
+  sessionRoot: string,
+  relaxed: boolean,
+): Promise<ResolvedGrepTarget[]> {
+  const resolved: ResolvedGrepTarget[] = []
+  if (rawPath) {
+    const exact = await inspectGrepTarget(rawPath, baseRootRoot, sessionRoot, relaxed)
+    if (exact) {
+      resolved.push(exact)
+    } else if (/\s/.test(rawPath)) {
+      // Model kerap mengirim multi-direktori ala CLI (mis. `path: "src cli"`):
+      // cek nama harfiah dulu; hanya pecah spasi jika seluruh tokennya ada
+      // di dalam workspace dan lolos penjagaan jalur/sensitif.
+      const tokens = rawPath.split(/\s+/).filter(Boolean)
+      if (tokens.length < 2) throw new Error(`file not found: ${rawPath}`)
+      for (const tok of tokens) {
+        const t = await inspectGrepTarget(tok, baseRootRoot, sessionRoot, relaxed)
+        if (!t) {
+          throw new Error(`file not found: ${rawPath} (pass one path per call or use paths: [...])`)
+        }
+        resolved.push(t)
+      }
+    } else {
+      throw new Error(`file not found: ${rawPath}`)
+    }
+  }
+  if (Array.isArray(rawPaths)) {
+    for (const entry of rawPaths) {
+      const trimmed = typeof entry === "string" ? entry.trim() : ""
+      if (!trimmed) continue
+      const t = await inspectGrepTarget(trimmed, baseRootRoot, sessionRoot, relaxed)
+      if (!t) throw new Error(`file not found: ${trimmed}`)
+      resolved.push(t)
+    }
+  }
+  const seen = new Set<string>()
+  return resolved.filter((t) => {
+    if (seen.has(t.realTarget)) return false
+    seen.add(t.realTarget)
+    return true
+  })
+}
+
+async function searchDirectoryTarget(opts: {
+  dirAbs: string
+  displayRoot: string
+  ignoreRoot: string
+  pat: string
+  re: RegExp
+  lim: number
+  signal: AbortSignal
+  include: string | undefined
+  relaxed: boolean
+  ignoreCase: boolean
+  withDotfiles: boolean
+  ctxLines: number
+  redosChecked: { done: boolean }
+}): Promise<GrepCollectResult> {
+  const st = await stat(opts.dirAbs).catch(() => null)
+  if (!st?.isDirectory()) return { lines: [], hasMore: false, matchCount: 0, timedOut: false }
+  // Minta satu lebih agar tahu pasti apakah hasil terpotong (temuan #02).
+  const want = opts.lim + 1
+  const relPrefix =
+    opts.displayRoot === opts.dirAbs
+      ? ""
+      : relative(opts.displayRoot, opts.dirAbs).replace(/\\/g, "/")
+  const applyPrefix = (lines: string[]) =>
+    !relPrefix || relPrefix === "."
+      ? lines
+      : lines.map((l) =>
+          l.startsWith(RIPGREP_TIMEOUT_MARKER) || l === "--" ? l : `${relPrefix}/${l}`,
+        )
+
+  if (process.env.MINICODE_GREP_ENGINE !== "js" && ripgrepAvailable()) {
+    try {
+      const rg = await runRipgrep(
+        opts.pat,
+        opts.dirAbs,
+        want,
+        opts.signal,
+        opts.include,
+        opts.relaxed,
+        opts.ignoreCase,
+        opts.withDotfiles,
+        opts.ctxLines,
+      )
+      if (opts.ctxLines === 0) {
+        if (rg.lines.length === 1 && rg.lines[0]!.startsWith(RIPGREP_TIMEOUT_MARKER)) {
+          return { lines: [], hasMore: false, matchCount: 0, timedOut: true }
+        }
+        const body = [...rg.lines]
+        let timedOut = false
+        const last = body[body.length - 1]
+        if (typeof last === "string" && last.startsWith(RIPGREP_TIMEOUT_PREFIX)) {
+          body.pop()
+          timedOut = true
+        }
+        const hasMore = body.length > opts.lim
+        const sliced = hasMore ? body.slice(0, opts.lim) : body
+        return { lines: applyPrefix(sliced), hasMore, matchCount: sliced.length, timedOut }
+      }
+      if (rg.timedOut && rg.matchCount === 0) {
+        return { lines: [], hasMore: false, matchCount: 0, timedOut: true }
+      }
+      return {
+        lines: applyPrefix(rg.lines),
+        hasMore: rg.hasMore,
+        matchCount: rg.matchCount,
+        timedOut: rg.timedOut,
+      }
+    } catch (e) {
+      if ((e as Error).message === "aborted") throw e
+      // rg gagal (regex flavour berbeda, binary rusak, permission) → fallback
+      process.stderr.write(`[warn] grep: ripgrep failed (${(e as Error).message}) — fallback JS\n`)
+    }
+  }
+
+  // v7.38 (L7): pagar ReDoS HANYA untuk jalur fallback JS.
+  if (!opts.redosChecked.done) {
+    const redosError = redosGuardMessage(opts.pat)
+    if (redosError !== null) throw new Error(redosError)
+    opts.redosChecked.done = true
+  }
+
+  const incRe = opts.include ? includeToRegExp(opts.include) : null
+  const ignoreMatchers = await loadIgnoreMatchers(opts.ignoreRoot)
+  const out: string[] = []
+  const walked = await walkGrep(
+    opts.dirAbs,
+    opts.re,
+    out,
+    opts.displayRoot,
+    want,
+    opts.signal,
+    incRe,
+    ignoreMatchers,
+    opts.relaxed,
+    opts.withDotfiles,
+    opts.ctxLines,
+  )
+  if (opts.ctxLines === 0) {
+    // Potong dulu sebelum sort agar hasil terpotong tetap mempertahankan prioritas sumber produksi (src/ sebelum CHANGELOG/test).
+    const hasMore = out.length > opts.lim
+    const sliced = hasMore ? out.slice(0, opts.lim) : [...out]
+    sliced.sort()
+    return { lines: sliced, hasMore, matchCount: sliced.length, timedOut: false }
+  }
+  return {
+    lines: walked.lines,
+    hasMore: walked.hasMore,
+    matchCount: walked.matchCount,
+    timedOut: false,
+  }
+}
+
 export const grepTool: Tool = {
   name: "grep",
   // v7.33 (wire contract): tag family untuk grouping di model.
   description:
-    "FILE SEARCH: Search a regex across files or a single `path`; supports `contextLines` (0-10 before/after). Returns file:line: content, capped at 100/500 matches. Prefer `path` + `contextLines` over bash grep/sed. Skips .git, node_modules, dotfiles; no symlink follow.",
+    "FILE SEARCH: Regex search across files, `path`, or `paths` with `contextLines` (0-10). Caps at 100/500 matches; skips .git, node_modules, dotfiles, symlinks. Prefer over bash grep/sed.",
   parameters: {
     type: "object",
     properties: {
       pattern: { type: "string", description: "regex pattern (e.g. log.*Error)" },
       path: {
         type: "string",
-        description:
-          "optional file or directory path relative to the workspace (use instead of bash grep/sed)",
+        description: "file or dir relative to workspace",
+      },
+      paths: {
+        type: "array",
+        items: { type: "string" },
+        description: "list of file/dir paths relative to workspace",
       },
       cwd: { type: "string", description: "root directory (default: workspace root)" },
-      include: { type: "string", description: "file glob filter (e.g. *.ts or *.{ts,tsx})" },
+      include: { type: "string", description: "glob filter (e.g. *.ts)" },
       limit: { type: "number" },
       caseInsensitive: {
         type: "boolean",
-        description: "ignore case when matching (default false)",
+        description: "case-insensitive (default false)",
       },
       includeDotfiles: {
         type: "boolean",
-        description: "include dotfiles/dotdirs like .github (default false)",
+        description: "include dotfiles (default false)",
       },
       contextLines: {
         type: "number",
-        description: "lines of before/after context per match (0-10, default 0)",
+        description: "context lines per match (0-10, default 0)",
       },
     },
     required: ["pattern"],
     additionalProperties: false,
   },
   async execute(
-    { pattern, path, cwd, include, limit, caseInsensitive, includeDotfiles, contextLines },
+    { pattern, path, paths, cwd, include, limit, caseInsensitive, includeDotfiles, contextLines },
     ctx,
   ) {
     const baseRoot = resolveSearchRoot(cwd, ctx)
@@ -757,135 +1105,122 @@ export const grepTool: Tool = {
     }
 
     const rawPath = typeof path === "string" && path.trim() !== "" ? path.trim() : undefined
-    let root = baseRoot.root
-    let rawRoot = baseRoot.rawRoot
-    if (!relaxed && (isSensitive(root) || isSensitiveReal(root, sessionRoot))) {
-      throw new Error(`cannot search sensitive directory: ${rawRoot}`)
+    if (!relaxed && (isSensitive(baseRoot.root) || isSensitiveReal(baseRoot.root, sessionRoot))) {
+      throw new Error(`cannot search sensitive directory: ${baseRoot.rawRoot}`)
     }
 
-    if (rawPath) {
-      const targetAbs = isAbsolute(rawPath) ? resolve(rawPath) : resolve(baseRoot.root, rawPath)
-      if (
-        !relaxed &&
-        (isPathOutsideRoot(targetAbs, sessionRoot) || isCwdOutsideRoot(rawPath, sessionRoot))
-      ) {
-        throw new Error(`path outside workspace: ${rawPath}`)
-      }
-      const relTarget = relative(sessionRoot, targetAbs).replace(/\\/g, "/") || "."
-      if (!relaxed && (isSensitive(targetAbs) || isSensitive(relTarget))) {
-        throw new Error(`cannot search sensitive file: ${rawPath}`)
-      }
-      const targetSt = await stat(targetAbs).catch(() => null)
-      if (!targetSt) throw new Error(`file not found: ${rawPath}`)
-      const realTarget = await realpath(targetAbs).catch(() => targetAbs)
-      if (!relaxed && isRealPathOutsideRoot(realTarget, sessionRoot)) {
-        throw new Error(`path outside workspace: ${rawPath}`)
-      }
-      if (!relaxed && isSensitive(realTarget)) {
-        throw new Error(`cannot search sensitive file: ${rawPath}`)
-      }
-      if (targetSt.isFile()) {
-        const redosError = redosGuardMessage(pat)
-        if (redosError !== null) throw new Error(redosError)
-        const relDisplay = relative(baseRoot.root, targetAbs).replace(/\\/g, "/") || relTarget
-        const single = await grepSingleFile({
-          real: realTarget,
-          rel: relDisplay,
-          sessionRoot,
-          re,
-          limit: lim,
-          ctxLines,
-          relaxed,
-        })
-        if (single.matchCount === 0) {
-          return `no matches for /${rawPat}/ in ${rawPath} — broaden pattern or check another file`
-        }
-        return ctxLines > 0
-          ? formatContextCapMark(single.lines, single.hasMore, false, lim)
-          : single.hasMore
-            ? `${single.lines.join("\n")}\n… [truncated: showing first ${lim} matches — refine pattern/include]`
-            : single.lines.join("\n")
-      }
-      root = targetAbs
-      rawRoot = rawPath
-    }
+    const explicitTargets = await resolveGrepTargets(
+      rawPath,
+      paths,
+      baseRoot.root,
+      sessionRoot,
+      relaxed,
+    )
+    const multiTarget = explicitTargets.length > 1
+    const singleTarget = explicitTargets.length === 1 ? explicitTargets[0]! : null
+    const targetLabel = multiTarget
+      ? explicitTargets.map((t) => t.rawPath).join(", ")
+      : singleTarget
+        ? singleTarget.rawPath
+        : baseRoot.rawRoot
 
     // v7.33 (wire contract): hasil kosong butuh langkah lanjutan yang jelas —
     // tanpa ini model mengulang pola/include yang sama persis.
-    const noMatch = () =>
-      `no matches for /${rawPat}/ in ${rawRoot}${include ? ` (include ${include})` : ""} — broaden pattern or drop include`
-    const st = await stat(root).catch(() => null)
-    if (!st?.isDirectory()) return noMatch()
-    const withDotfiles = includeDotfiles === true
+    const noMatch = () => {
+      const includeNote = include && !singleTarget?.isFile ? ` (include ${include})` : ""
+      const emptyHint = singleTarget?.isFile
+        ? "broaden pattern or check another file"
+        : "broaden pattern or drop include"
+      return `no matches for /${rawPat}/ in ${targetLabel}${includeNote} — ${emptyHint}`
+    }
 
-    // Minta satu lebih agar tahu pasti apakah hasil terpotong (temuan #02:
-    // limit-hit diam-diam tampak lengkap). Tampilkan tetap `lim`.
-    const want = lim + 1
-    if (process.env.MINICODE_GREP_ENGINE !== "js" && ripgrepAvailable()) {
-      try {
-        const rg = await runRipgrep(
+    const targets: ResolvedGrepTarget[] =
+      explicitTargets.length > 0
+        ? explicitTargets
+        : [
+            {
+              rawPath: baseRoot.rawRoot,
+              targetAbs: baseRoot.root,
+              realTarget: baseRoot.root,
+              isFile: false,
+              isDirectory: true,
+              relToBase: ".",
+              relToSession: ".",
+            },
+          ]
+
+    const displayRootForDir = (t: ResolvedGrepTarget) => (multiTarget ? baseRoot.root : t.targetAbs)
+    const withDotfiles = includeDotfiles === true
+    const redosChecked = { done: false }
+    const allLines: string[] = []
+    let totalMatches = 0
+    let anyHasMore = false
+    let anyTimedOut = false
+
+    for (const target of targets) {
+      const remaining = lim - totalMatches
+      if (remaining <= 0 && anyHasMore) break
+      const targetLim = remaining > 0 ? remaining : 1
+
+      let res: GrepCollectResult
+      if (target.isFile) {
+        if (!redosChecked.done) {
+          const redosError = redosGuardMessage(pat)
+          if (redosError !== null) throw new Error(redosError)
+          redosChecked.done = true
+        }
+        const single = await grepSingleFile({
+          real: target.realTarget,
+          rel: target.relToBase,
+          sessionRoot,
+          re,
+          limit: targetLim,
+          ctxLines,
+          relaxed,
+        })
+        res = { ...single, timedOut: false }
+      } else {
+        res = await searchDirectoryTarget({
+          dirAbs: target.targetAbs,
+          displayRoot: displayRootForDir(target),
+          ignoreRoot: multiTarget ? baseRoot.root : target.targetAbs,
           pat,
-          root,
-          want,
-          ctx.signal,
-          include as string | undefined,
+          re,
+          lim: targetLim,
+          signal: ctx.signal,
+          include: include as string | undefined,
           relaxed,
           ignoreCase,
           withDotfiles,
           ctxLines,
-        )
-        if (ctxLines === 0) {
-          // v7.32 (L6): rg timeout dengan nol match menyisakan SATU marker —
-          // bedakan dari "no matches" sungguhan supaya model tak mengira pola
-          // memang tak ada (padahal pencarian cuma kehabisan waktu).
-          if (rg.lines.length === 1 && rg.lines[0]!.startsWith(RIPGREP_TIMEOUT_MARKER))
-            return ripgrepTimeoutEmptyMessage(rawPat, rawRoot)
-          if (rg.lines.length === 0) return noMatch()
-          return withCapMark(rg.lines, lim)
+          redosChecked,
+        })
+      }
+
+      if (res.timedOut) anyTimedOut = true
+      if (remaining <= 0) {
+        if (res.matchCount > 0 || res.hasMore) {
+          anyHasMore = true
+          break
         }
-        if (rg.timedOut && rg.matchCount === 0) return ripgrepTimeoutEmptyMessage(rawPat, rawRoot)
-        if (rg.matchCount === 0) return noMatch()
-        return formatContextCapMark(rg.lines, rg.hasMore, rg.timedOut, lim)
-      } catch (e) {
-        if ((e as Error).message === "aborted") throw e
-        // rg gagal (regex flavour berbeda, binary rusak, permission) → fallback
-        process.stderr.write(
-          `[warn] grep: ripgrep failed (${(e as Error).message}) — fallback JS\n`,
-        )
+        continue
+      }
+
+      if (ctxLines > 0 && allLines.length > 0 && res.lines.length > 0) {
+        allLines.push("--")
+      }
+      allLines.push(...res.lines)
+      totalMatches += res.matchCount
+      if (res.hasMore) {
+        anyHasMore = true
+        break
       }
     }
 
-    // v7.38 (L7): pagar ReDoS HANYA untuk jalur fallback JS. Jalur ripgrep
-    // (regex Rust linear) sudah return di atas dan tak pernah terkena pagar ini.
-    // Lempar Error supaya kernel menandai isError, konsisten dengan "invalid regex".
-    const redosError = redosGuardMessage(pat)
-    if (redosError !== null) throw new Error(redosError)
-
-    const incRe = include ? includeToRegExp(include as string) : null
-    const ignoreMatchers = await loadIgnoreMatchers(root)
-    const out: string[] = []
-    const walked = await walkGrep(
-      root,
-      re,
-      out,
-      root,
-      want,
-      ctx.signal,
-      incRe,
-      ignoreMatchers,
-      relaxed,
-      withDotfiles,
-      ctxLines,
-    )
-    if (ctxLines === 0) {
-      // v7.32 (L4): walker memakai urutan readdir yang tak stabil — sort supaya
-      // hasil fallback JS deterministik (sama seperti jalur glob/ripgrep).
-      out.sort()
-      return out.length === 0 ? noMatch() : withCapMark(out, lim)
+    if (totalMatches === 0) {
+      return anyTimedOut ? ripgrepTimeoutEmptyMessage(rawPat, targetLabel) : noMatch()
     }
-    return walked.matchCount === 0
-      ? noMatch()
-      : formatContextCapMark(walked.lines, walked.hasMore, false, lim)
+    return formatContextCapMark(allLines, anyHasMore, anyTimedOut, lim)
   },
 }
 

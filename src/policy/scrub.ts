@@ -20,8 +20,6 @@ const SECRET_PATTERNS: RegExp[] = [
   /\b((?:AKIA|ASIA)[0-9A-Z]{16})\b/g,
   // Stripe live keys & GitLab PAT
   /\b(sk_live_[A-Za-z0-9]{16,}|glpat-[A-Za-z0-9_-]{20,})\b/g,
-  // Private key PEM blocks — lazy dot-all, aman karena terbatas ukuran file (2MB)
-  /-----BEGIN (?:ENCRYPTED |RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----[\s\S]*?-----END (?:ENCRYPTED |RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----/g,
   // Generic api_key / secret / token = <value> — whitelist test/example/mock
   /\b(?:api[_-]?key|apikey|secret[_-]?key|access[_-]?token|auth[_-]?token|password)\s*[:=]\s*["']?[A-Za-z0-9_-]{16,}["']?/gi,
   // Daemon bootstrap secret di .minicode/daemon-endpoint.json
@@ -103,12 +101,49 @@ const SECRET_PATTERNS: RegExp[] = [
 const QUERY_PARAM_RE =
   /([?&](?:api[_-]?key|apikey|token|auth[_-]?token|access[_-]?token|secret|client[_-]?secret|password|sig(?:nature)?)=)[^&\s"'<>]*/gi
 
+const PEM_BEGIN_RE = /^-----BEGIN (?:ENCRYPTED |RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----/
+const PEM_END_RE = /^-----END (?:ENCRYPTED |RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----/
+
+// Pemindai PEM linear O(N): pola dot-all `[\s\S]*?` memicu backtracking O(N^2) bila
+// ada ribuan `-----BEGIN PRIVATE KEY-----` tanpa `-----END ...-----` pada 2 MiB teks.
+function redactPemPrivateKeys(text: string): string {
+  if (!text.includes("-----BEGIN ")) return text
+  let out = ""
+  let pos = 0
+  while (pos < text.length) {
+    const begin = text.indexOf("-----BEGIN ", pos)
+    if (begin === -1) break
+    const headerMatch = PEM_BEGIN_RE.exec(text.slice(begin, begin + 48))
+    if (!headerMatch) {
+      out += text.slice(pos, begin + 11)
+      pos = begin + 11
+      continue
+    }
+    let search = begin + headerMatch[0].length
+    let matchedEnd = -1
+    while (search < text.length) {
+      const endIdx = text.indexOf("-----END ", search)
+      if (endIdx === -1) break
+      const endMatch = PEM_END_RE.exec(text.slice(endIdx, endIdx + 48))
+      if (endMatch) {
+        matchedEnd = endIdx + endMatch[0].length
+        break
+      }
+      search = endIdx + 9
+    }
+    if (matchedEnd === -1) break
+    out += `${text.slice(pos, begin)}[REDACTED]`
+    pos = matchedEnd
+  }
+  return pos === 0 ? text : out + text.slice(pos)
+}
+
 // Redact secrets dalam teks. Ganti match dengan [REDACTED].
 // Tidak ada whitelist kata (test/example/mock) — secret sungguhan bisa saja
 // mengandung substring itu; false-positive redaction lebih aman daripada leak.
 export function scrubSecrets(text: string): string {
   if (!text) return text
-  let out = text.replace(QUERY_PARAM_RE, "$1[REDACTED]")
+  let out = redactPemPrivateKeys(text).replace(QUERY_PARAM_RE, "$1[REDACTED]")
   for (const re of SECRET_PATTERNS) out = out.replace(re, "[REDACTED]")
   return out
 }

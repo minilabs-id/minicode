@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite"
 import { createHash, randomUUID } from "node:crypto"
 import { existsSync } from "node:fs"
+import { LIMITS } from "../constants.ts"
 import { isSqliteContention } from "../lib/db-path.ts"
 // [Audit F-04 2026-11-22] Instrumentasi durasi; nonaktif = no-op O(1).
 import { perfCount, perfEnabled } from "../lib/perf-debug.ts"
@@ -47,6 +48,8 @@ import {
   StaleWriterError,
   sessionRowExistsInTxn,
   withBusyRetrySync,
+  withSessionDb,
+  withSessionDbAsync,
 } from "./db/schema.ts"
 
 export type { RunRow, RunStatus }
@@ -513,16 +516,18 @@ export function loadPresentationEventsRange(
  * "satu event sudah terkirim").
  */
 export function presentationHead(id: string, cwd?: string, reuse?: Database): number {
-  const db = reuse ?? open(cwd)
-  const owned = reuse === undefined
-  try {
+  if (reuse !== undefined) {
+    const row = reuse
+      .prepare("SELECT MAX(event_seq) AS head FROM presentation_events WHERE session_id = ?")
+      .get(id) as { head: number | null } | null
+    return row?.head ?? -1
+  }
+  return withSessionDb(cwd, (db) => {
     const row = db
       .prepare("SELECT MAX(event_seq) AS head FROM presentation_events WHERE session_id = ?")
       .get(id) as { head: number | null } | null
     return row?.head ?? -1
-  } finally {
-    if (owned) db.close()
-  }
+  })
 }
 
 /**
@@ -532,15 +537,12 @@ export function presentationHead(id: string, cwd?: string, reuse?: Database): nu
  * `-1` bila belum ada pesan (sama alasan dengan `presentationHead`).
  */
 export function messageHead(id: string, cwd?: string): number {
-  const db = open(cwd)
-  try {
+  return withSessionDb(cwd, (db) => {
     const row = db
       .prepare("SELECT MAX(seq) AS head FROM messages WHERE session_id = ?")
       .get(id) as { head: number | null } | null
     return row?.head ?? -1
-  } finally {
-    db.close()
-  }
+  })
 }
 
 export interface PresentationPersistStats {
@@ -585,48 +587,45 @@ export async function appendPresentationEvents(
   const stats: PresentationPersistStats = { written: 0, duplicates: 0, collisions: 0 }
   const durable = events.filter((event) => DURABILITY[event.type]?.durable)
   if (durable.length === 0) return stats
-  const db = open(cwd)
-  const txn = db.transaction(() => {
-    // P2.2: pagar generasi di dalam txn yang sama dengan tulis (bukan
-    // check-then-write terpisah). Absennya baris sesi + ekspektasi 0 =
-    // sesi pra-save pertama: diizinkan (baris dibuat oleh saveSession).
-    if (opts?.expectedEpoch !== undefined) assertWriterEpochInTxn(db, id, opts.expectedEpoch)
-    const existing = db.prepare(
-      "SELECT payload FROM presentation_events WHERE session_id = ? AND event_seq = ?",
-    )
-    const insert = db.prepare(
-      "INSERT OR IGNORE INTO presentation_events (session_id, event_seq, type, turn_id, ts, payload) VALUES (?, ?, ?, ?, ?, ?)",
-    )
-    for (const event of durable) {
-      const payload = encodePresentationEvent(event)
-      // P2.11: bedakan duplikat vs tabrakan pada identitas yang sama.
-      // Duplikat (payload kanonis identik) = idempoten, lewati diam-diam.
-      // Tabrakan (payload berbeda) = pertahankan baris existing, tolak yang
-      // datang, hitung + diagnostik — jangan pernah menimpa, jangan simpulkan
-      // apa pun tentang runtime dari tabrakan ini.
-      const row = existing.get(id, event.eventSeq) as { payload: string } | undefined
-      if (row) {
-        if (sameCanonicalPayload(row.payload, payload)) {
-          stats.duplicates++
-        } else {
-          stats.collisions++
-          process.stderr.write(
-            `[warn] presentation identity collision (session ${id} seq ${event.eventSeq} type ${event.type}): kept existing row, rejected incoming\n`,
-          )
-        }
-        continue
-      }
-      insert.run(id, event.eventSeq, event.type, event.turnId, event.ts, payload)
-      stats.written++
-    }
-  })
   const __t = perfEnabled() ? performance.now() : 0
   try {
-    try {
+    await withSessionDbAsync(cwd, async (db) => {
+      const txn = db.transaction(() => {
+        // P2.2: pagar generasi di dalam txn yang sama dengan tulis (bukan
+        // check-then-write terpisah). Absennya baris sesi + ekspektasi 0 =
+        // sesi pra-save pertama: diizinkan (baris dibuat oleh saveSession).
+        if (opts?.expectedEpoch !== undefined) assertWriterEpochInTxn(db, id, opts.expectedEpoch)
+        const existing = db.prepare(
+          "SELECT payload FROM presentation_events WHERE session_id = ? AND event_seq = ?",
+        )
+        const insert = db.prepare(
+          "INSERT OR IGNORE INTO presentation_events (session_id, event_seq, type, turn_id, ts, payload) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        for (const event of durable) {
+          const payload = encodePresentationEvent(event)
+          // P2.11: bedakan duplikat vs tabrakan pada identitas yang sama.
+          // Duplikat (payload kanonis identik) = idempoten, lewati diam-diam.
+          // Tabrakan (payload berbeda) = pertahankan baris existing, tolak yang
+          // datang, hitung + diagnostik — jangan pernah menimpa, jangan simpulkan
+          // apa pun tentang runtime dari tabrakan ini.
+          const row = existing.get(id, event.eventSeq) as { payload: string } | undefined
+          if (row) {
+            if (sameCanonicalPayload(row.payload, payload)) {
+              stats.duplicates++
+            } else {
+              stats.collisions++
+              process.stderr.write(
+                `[warn] presentation identity collision (session ${id} seq ${event.eventSeq} type ${event.type}): kept existing row, rejected incoming\n`,
+              )
+            }
+            continue
+          }
+          insert.run(id, event.eventSeq, event.type, event.turnId, event.ts, payload)
+          stats.written++
+        }
+      })
       await withBusyRetry(() => txn())
-    } finally {
-      db.close()
-    }
+    })
     return stats
   } finally {
     perfCount(
@@ -683,6 +682,10 @@ function normalizeMessageTupleForDedup(m: StoredMsg): Norm {
   ]
 }
 
+// Batasi pembersihan TTL otomatis dari jalur simpan panas maksimal 1× per 60 menit.
+const AUTO_PURGE_INTERVAL_MS = 60 * 60 * 1000
+let lastAutoPurgeAt = 0
+
 export async function saveSession(
   id: string,
   cwd: string | undefined,
@@ -699,213 +702,213 @@ export async function saveSession(
     workMode?: "DISCUSS" | "EXECUTE"
   },
 ) {
-  const db = open(cwd)
-  const now = Date.now()
-  const txn = db.transaction(() => {
-    // P2.2: CAS generasi + mutasi = SATU transaksi. Lempar di sini → rollback
-    // total (tak ada tulis parsial), dan withBusyRetry tak menyentuh error ini
-    // (bukan SQLITE_BUSY) sehingga tak ada retry buta.
-    if (opts?.expectedEpoch !== undefined) assertWriterEpochInTxn(db, id, opts.expectedEpoch)
-    const existing = db
-      .prepare("SELECT created_at, updated_at FROM sessions WHERE id = ?")
-      .get(id) as { created_at: number; updated_at: number | null } | null
-    const createdAt = existing?.created_at ?? now
-    // P2.2: upsert MEMPERTAHANKAN writer_epoch. INSERT OR REPLACE menghapus
-    // lalu menyisipkan ulang (epoch kembali 0!) — dilarang untuk baris sesi.
-    db.prepare(
-      "INSERT INTO sessions (id, created_at, updated_at, cwd, system, writer_epoch, work_mode) VALUES (?, ?, ?, ?, ?, COALESCE((SELECT writer_epoch FROM sessions WHERE id = ?), 0), ?) ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at, cwd = CASE WHEN excluded.cwd = '' THEN sessions.cwd ELSE excluded.cwd END, system = CASE WHEN excluded.system = '' THEN sessions.system ELSE excluded.system END, work_mode = COALESCE(excluded.work_mode, sessions.work_mode)",
-    ).run(id, createdAt, now, cwd ?? "", system ?? "", id, opts?.workMode ?? null)
-    // P2.4: histori dimiliki default Thread — ensure atomik dalam txn yang
-    // sama (sesi + thread tak pernah terpisah; tak ada sesi threadless yang
-    // durable). Backfill NULL aditif; archived menolak tulis (dorman).
-    const thread = ensureDefaultThreadInTxn(db, id, now)
-    if (thread.status === "archived") throw new ThreadArchivedError(id, thread.thread_id)
-    const tid = thread.thread_id
-    const ins = db.prepare(
-      "INSERT INTO messages (session_id, thread_id, seq, role, content, toolCalls, toolCallId, name, reasoning, is_error, ts, event_id, run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    )
-    // StoredMsg/Norm/norm: modul-level (dipakai saveSession + shrinkThreadHistory).
-    // F-05: JANGAN pakai messages.length sebagai proksi perubahan. Kompaksi
-    // (atau replace apa pun) bisa mengganti N pesan dengan N pesan BERBEDA —
-    // panjang sama, isi beda. Tanpa verifikasi prefix, tulis dilewat dan
-    // resume memuat sejarah basi. Bandingkan prefix tersimpan dengan incoming:
-    // sama persis = re-save (bukan turn baru, jaga guard anti turn-hantu);
-    // prefix sama + tumbuh = append; selain itu = rewrite penuh.
-    // P2.4: pembanding prefix dibatasi histori default Thread (inklusif NULL
-    // transisional untuk baris pra-backfill; pasca-backfill tak ada NULL).
-    const stored = db
-      .prepare(
-        "SELECT seq, role, content, toolCalls, toolCallId, name, reasoning, is_error, event_id, run_id FROM messages WHERE session_id = ? AND (thread_id = ? OR thread_id IS NULL) ORDER BY seq",
-      )
-      .all(id, tid) as {
-      seq: number
-      role: string
-      content: string
-      toolCalls: string
-      toolCallId: string | null
-      name: string | null
-      reasoning: string | null
-      is_error: number | null
-      event_id: string | null
-      run_id: string | null
-    }[]
-    const known = stored.length
-    let prefixSame = stored.length <= messages.length
-    if (prefixSame) {
-      for (let i = 0; i < stored.length; i++) {
-        const want = normalizeMessageTupleForDedup(messages[i] as StoredMsg)
-        const got = stored[i]!
-        if (
-          got.seq !== i ||
-          got.role !== want[0] ||
-          // v0.33 (audit): baris legacy bisa punya content/toolCalls NULL.
-          // Tanpa coalesce, prefix selalu dianggap berubah → RefusedHistoryRewrite
-          // berulang tiap saveSession. Samakan dengan field lain di bawah.
-          (got.content ?? "") !== (want[1] ?? "") ||
-          (got.toolCalls ?? "") !== (want[2] ?? "") ||
-          (got.toolCallId ?? null) !== want[3] ||
-          (got.name ?? null) !== want[4] ||
-          (got.reasoning ?? null) !== want[5] ||
-          (got.is_error ?? 0) !== want[6]
-        ) {
-          prefixSame = false
-          break
-        }
-      }
-    }
-    const changed = !prefixSame || stored.length !== messages.length
-    if (changed && prefixSame) {
-      // incremental append-only: cukup insert pesan baru (umumnya 1 turn).
-      // P2.5: tiap baris baru mendapat event_id fresh SATU KALI di sini;
-      // save ulang identik = no-op (prefixSame) sehingga id stabil.
-      // P2.6: baris baru dicap run_id pemanggil (bila ada).
-      //
-      // [T-004 OBSERVATION] `ts` WAJIB per-baris, bukan satu `now` untuk seluruh
-      // batch. Dengan satu nilai, seluruh riwayat yang tersimpan lewat jalur ini
-      // berbagi timestamp identik (sesi 17b6a5ff: 159 pesan / 1 nilai) sehingga
-      // linimasa tidak bisa direkonstruksi dari DB sama sekali. Penjaga monotonic
-      // mempertahankan invariant yang selama ini tak sengaja berlaku: ts tidak
-      // pernah mundur terhadap seq (jam sistem bisa mundur/NTP koreksi).
-      let stamp = now
-      for (let i = known; i < messages.length; i++) {
-        const m = messages[i] as StoredMsg
-        const w = normalizeMessageTupleForDedup(m)
-        stamp = Math.max(stamp, Date.now())
-        ins.run(
-          id,
-          tid,
-          i,
-          w[0],
-          w[1],
-          w[2],
-          w[3],
-          w[4],
-          w[5],
-          w[6],
-          stamp,
-          allocateHistoryEventId(),
-          opts?.runId ?? null,
-        )
-      }
-    } else if (changed) {
-      // P2.7: saveSession APPEND-ONLY. Riwayat menyusut ATAU prefix berubah
-      // (kompaksi N→N) DITOLAK eksplisit — bukan ditulis ulang diam-diam.
-      // Jalur eksplisit: shrinkThreadHistory (berpagar epoch, menolak run
-      // live, mencatat provenance, menginvalidasi proyeksi, satu txn).
-      // Menghapus cabang DELETE+rewrite implisit menutup jalur destruktif
-      // tanpa provenance (guard P2.7 menegakkannya tetap hilang).
-      // P3.1-retarget: bedakan "kanonik tumbuh melampaui buffer" dari
-      // lipatan/divergensi buffer sendiri — pembedanya dibawa dalam error
-      // (grewBeyondBuffer) agar composition root menolak shrink otomatis pada
-      // kasus pertama. Perbandingan field IDENTIK dengan loop prefix di atas
-      // (F-05); bila loop itu berubah, sinkronkan keduanya.
-      let grewBeyondBuffer = false
-      if (stored.length > messages.length) {
-        grewBeyondBuffer = true
-        for (let i = 0; i < messages.length; i++) {
-          const want = normalizeMessageTupleForDedup(messages[i] as StoredMsg)
-          const got = stored[i]!
-          if (
-            got.seq !== i ||
-            got.role !== want[0] ||
-            got.content !== want[1] ||
-            got.toolCalls !== want[2] ||
-            (got.toolCallId ?? null) !== want[3] ||
-            (got.name ?? null) !== want[4] ||
-            (got.reasoning ?? null) !== want[5] ||
-            (got.is_error ?? 0) !== want[6]
-          ) {
-            grewBeyondBuffer = false
-            break
-          }
-        }
-      }
-      throw new RefusedHistoryRewriteError(
-        id,
-        tid,
-        `stored=${stored.length} incoming=${messages.length} prefixSame=${prefixSame}`,
-        grewBeyondBuffer,
-      )
-    }
-    // P2.4: head cache = MAX(seq) histori thread ini (-1 bila kosong).
-    const head = recomputeThreadHeadInTxn(db, id, tid)
-    // P2.6: kursor run maju ke head DALAM txn yang sama (atomik histori +
-    // kursor: event durable TANPA kursor basi, dan sebaliknya, tak mungkin
-    // terpisah). Baris terminal dibekukan (persist-duplikat pasca-terminal
-    // = no-op aman, bukan pergerakan).
-    if (opts?.runId !== undefined) {
-      // Kepemilikan run diverifikasi (bukan diasumsikan): run milik sesi+thread
-      // lain tidak boleh "menyerap" kursor histori ini.
-      const runRow = db
-        .prepare("SELECT session_id, thread_id FROM runs WHERE run_id = ?")
-        .get(opts.runId) as { session_id: string; thread_id: string } | null
-      if (!runRow) throw new Error(`run not found: ${opts.runId}`)
-      if (runRow.session_id !== id || runRow.thread_id !== tid)
-        throw new Error(`run ${opts.runId} does not belong to ${id}/${tid}`)
-      // Kursor = posisi histori milik run ini. Baris head yang dicap run lain
-      // (atau NULL warisan) tak boleh jadi klaim kursor. Run terminal beku:
-      // persist pasca-terminal = no-op kursor (histori tetap durable).
-      if (head >= 0) {
-        const status = db.prepare("SELECT status FROM runs WHERE run_id = ?").get(opts.runId) as {
-          status: string
-        }
-        if (!RUN_TERMINAL.has(status.status)) advanceRunCursorInTxn(db, opts.runId, head, id)
-      }
-    }
-    if (usage) {
-      // Audit #08 P1 (§16): baris turns = turn SELESAI, bukan panggilan save.
-      // Menyimpan ulang riwayat yang sama (retry/crash antara save dan
-      // finalize) sebelumnya menambah turn_idx hantu — suppressor stitch
-      // palsu di decideRecovery (turn yang tak pernah durable dikira ada).
-      // Aturan: tumbuh (pesan baru), susut, atau isi berubah (rewrite
-      // pasca-kompaksi) = turn terjadi; sama persis = re-save, bukan turn baru.
-      if (changed) {
-        const maxRow = db
-          .prepare("SELECT MAX(turn_idx) as m FROM turns WHERE session_id = ?")
-          .get(id) as { m: number | null } | null
-        const nextIdx = (maxRow?.m ?? -1) + 1
-        db.prepare("INSERT INTO turns (session_id, turn_idx, usage, ts) VALUES (?, ?, ?, ?)").run(
-          id,
-          nextIdx,
-          JSON.stringify(usage),
-          now,
-        )
-      }
-    }
-    // TTL: hapus sesi basi + orphan rows (best-effort; 0 = forever)
-    try {
-      purgeExpired(db, now)
-    } catch (e) {
-      process.stderr.write(`[warn] persistence: TTL purge failed: ${(e as Error).message}\n`)
-    }
-  })
   const __t = perfEnabled() ? performance.now() : 0
   try {
-    try {
+    await withSessionDbAsync(cwd, async (db) => {
+      const now = Date.now()
+      const txn = db.transaction(() => {
+        // P2.2: CAS generasi + mutasi = SATU transaksi. Lempar di sini → rollback
+        // total (tak ada tulis parsial), dan withBusyRetry tak menyentuh error ini
+        // (bukan SQLITE_BUSY) sehingga tak ada retry buta.
+        if (opts?.expectedEpoch !== undefined) assertWriterEpochInTxn(db, id, opts.expectedEpoch)
+        const existing = db
+          .prepare("SELECT created_at, updated_at FROM sessions WHERE id = ?")
+          .get(id) as { created_at: number; updated_at: number | null } | null
+        const createdAt = existing?.created_at ?? now
+        // P2.2: upsert MEMPERTAHANKAN writer_epoch. INSERT OR REPLACE menghapus
+        // lalu menyisipkan ulang (epoch kembali 0!) — dilarang untuk baris sesi.
+        db.prepare(
+          "INSERT INTO sessions (id, created_at, updated_at, cwd, system, writer_epoch, work_mode) VALUES (?, ?, ?, ?, ?, COALESCE((SELECT writer_epoch FROM sessions WHERE id = ?), 0), ?) ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at, cwd = CASE WHEN excluded.cwd = '' THEN sessions.cwd ELSE excluded.cwd END, system = CASE WHEN excluded.system = '' THEN sessions.system ELSE excluded.system END, work_mode = COALESCE(excluded.work_mode, sessions.work_mode)",
+        ).run(id, createdAt, now, cwd ?? "", system ?? "", id, opts?.workMode ?? null)
+        // P2.4: histori dimiliki default Thread — ensure atomik dalam txn yang
+        // sama (sesi + thread tak pernah terpisah; tak ada sesi threadless yang
+        // durable). Backfill NULL aditif; archived menolak tulis (dorman).
+        const thread = ensureDefaultThreadInTxn(db, id, now)
+        if (thread.status === "archived") throw new ThreadArchivedError(id, thread.thread_id)
+        const tid = thread.thread_id
+        const ins = db.prepare(
+          "INSERT INTO messages (session_id, thread_id, seq, role, content, toolCalls, toolCallId, name, reasoning, is_error, ts, event_id, run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        // StoredMsg/Norm/norm: modul-level (dipakai saveSession + shrinkThreadHistory).
+        // F-05: JANGAN pakai messages.length sebagai proksi perubahan. Kompaksi
+        // (atau replace apa pun) bisa mengganti N pesan dengan N pesan BERBEDA —
+        // panjang sama, isi beda. Tanpa verifikasi prefix, tulis dilewat dan
+        // resume memuat sejarah basi. Bandingkan prefix tersimpan dengan incoming:
+        // sama persis = re-save (bukan turn baru, jaga guard anti turn-hantu);
+        // prefix sama + tumbuh = append; selain itu = rewrite penuh.
+        // P2.4: pembanding prefix dibatasi histori default Thread (inklusif NULL
+        // transisional untuk baris pra-backfill; pasca-backfill tak ada NULL).
+        const stored = db
+          .prepare(
+            "SELECT seq, role, content, toolCalls, toolCallId, name, reasoning, is_error, event_id, run_id FROM messages WHERE session_id = ? AND (thread_id = ? OR thread_id IS NULL) ORDER BY seq",
+          )
+          .all(id, tid) as {
+          seq: number
+          role: string
+          content: string
+          toolCalls: string
+          toolCallId: string | null
+          name: string | null
+          reasoning: string | null
+          is_error: number | null
+          event_id: string | null
+          run_id: string | null
+        }[]
+        const known = stored.length
+        let prefixSame = stored.length <= messages.length
+        if (prefixSame) {
+          for (let i = 0; i < stored.length; i++) {
+            const want = normalizeMessageTupleForDedup(messages[i] as StoredMsg)
+            const got = stored[i]!
+            if (
+              got.seq !== i ||
+              got.role !== want[0] ||
+              // v0.33 (audit): baris legacy bisa punya content/toolCalls NULL.
+              // Tanpa coalesce, prefix selalu dianggap berubah → RefusedHistoryRewrite
+              // berulang tiap saveSession. Samakan dengan field lain di bawah.
+              (got.content ?? "") !== (want[1] ?? "") ||
+              (got.toolCalls ?? "") !== (want[2] ?? "") ||
+              (got.toolCallId ?? null) !== want[3] ||
+              (got.name ?? null) !== want[4] ||
+              (got.reasoning ?? null) !== want[5] ||
+              (got.is_error ?? 0) !== want[6]
+            ) {
+              prefixSame = false
+              break
+            }
+          }
+        }
+        const changed = !prefixSame || stored.length !== messages.length
+        if (changed && prefixSame) {
+          // incremental append-only: cukup insert pesan baru (umumnya 1 turn).
+          // P2.5: tiap baris baru mendapat event_id fresh SATU KALI di sini;
+          // save ulang identik = no-op (prefixSame) sehingga id stabil.
+          // P2.6: baris baru dicap run_id pemanggil (bila ada).
+          //
+          // [T-004 OBSERVATION] `ts` WAJIB per-baris, bukan satu `now` untuk seluruh
+          // batch. Dengan satu nilai, seluruh riwayat yang tersimpan lewat jalur ini
+          // berbagi timestamp identik (sesi 17b6a5ff: 159 pesan / 1 nilai) sehingga
+          // linimasa tidak bisa direkonstruksi dari DB sama sekali. Penjaga monotonic
+          // mempertahankan invariant yang selama ini tak sengaja berlaku: ts tidak
+          // pernah mundur terhadap seq (jam sistem bisa mundur/NTP koreksi).
+          let stamp = now
+          for (let i = known; i < messages.length; i++) {
+            const m = messages[i] as StoredMsg
+            const w = normalizeMessageTupleForDedup(m)
+            stamp = Math.max(stamp, Date.now())
+            ins.run(
+              id,
+              tid,
+              i,
+              w[0],
+              w[1],
+              w[2],
+              w[3],
+              w[4],
+              w[5],
+              w[6],
+              stamp,
+              allocateHistoryEventId(),
+              opts?.runId ?? null,
+            )
+          }
+        } else if (changed) {
+          // P2.7: saveSession APPEND-ONLY. Riwayat menyusut ATAU prefix berubah
+          // (kompaksi N→N) DITOLAK eksplisit — bukan ditulis ulang diam-diam.
+          // Jalur eksplisit: shrinkThreadHistory (berpagar epoch, menolak run
+          // live, mencatat provenance, menginvalidasi proyeksi, satu txn).
+          // Menghapus cabang DELETE+rewrite implisit menutup jalur destruktif
+          // tanpa provenance (guard P2.7 menegakkannya tetap hilang).
+          // P3.1-retarget: bedakan "kanonik tumbuh melampaui buffer" dari
+          // lipatan/divergensi buffer sendiri — pembedanya dibawa dalam error
+          // (grewBeyondBuffer) agar composition root menolak shrink otomatis pada
+          // kasus pertama. Perbandingan field IDENTIK dengan loop prefix di atas
+          // (F-05); bila loop itu berubah, sinkronkan keduanya.
+          let grewBeyondBuffer = false
+          if (stored.length > messages.length) {
+            grewBeyondBuffer = true
+            for (let i = 0; i < messages.length; i++) {
+              const want = normalizeMessageTupleForDedup(messages[i] as StoredMsg)
+              const got = stored[i]!
+              if (
+                got.seq !== i ||
+                got.role !== want[0] ||
+                got.content !== want[1] ||
+                got.toolCalls !== want[2] ||
+                (got.toolCallId ?? null) !== want[3] ||
+                (got.name ?? null) !== want[4] ||
+                (got.reasoning ?? null) !== want[5] ||
+                (got.is_error ?? 0) !== want[6]
+              ) {
+                grewBeyondBuffer = false
+                break
+              }
+            }
+          }
+          throw new RefusedHistoryRewriteError(
+            id,
+            tid,
+            `stored=${stored.length} incoming=${messages.length} prefixSame=${prefixSame}`,
+            grewBeyondBuffer,
+          )
+        }
+        // P2.4: head cache = MAX(seq) histori thread ini (-1 bila kosong).
+        const head = recomputeThreadHeadInTxn(db, id, tid)
+        // P2.6: kursor run maju ke head DALAM txn yang sama (atomik histori +
+        // kursor: event durable TANPA kursor basi, dan sebaliknya, tak mungkin
+        // terpisah). Baris terminal dibekukan (persist-duplikat pasca-terminal
+        // = no-op aman, bukan pergerakan).
+        if (opts?.runId !== undefined) {
+          // Kepemilikan run diverifikasi (bukan diasumsikan): run milik sesi+thread
+          // lain tidak boleh "menyerap" kursor histori ini.
+          const runRow = db
+            .prepare("SELECT session_id, thread_id FROM runs WHERE run_id = ?")
+            .get(opts.runId) as { session_id: string; thread_id: string } | null
+          if (!runRow) throw new Error(`run not found: ${opts.runId}`)
+          if (runRow.session_id !== id || runRow.thread_id !== tid)
+            throw new Error(`run ${opts.runId} does not belong to ${id}/${tid}`)
+          // Kursor = posisi histori milik run ini. Baris head yang dicap run lain
+          // (atau NULL warisan) tak boleh jadi klaim kursor. Run terminal beku:
+          // persist pasca-terminal = no-op kursor (histori tetap durable).
+          if (head >= 0) {
+            const status = db
+              .prepare("SELECT status FROM runs WHERE run_id = ?")
+              .get(opts.runId) as {
+              status: string
+            }
+            if (!RUN_TERMINAL.has(status.status)) advanceRunCursorInTxn(db, opts.runId, head, id)
+          }
+        }
+        if (usage) {
+          // Audit #08 P1 (§16): baris turns = turn SELESAI, bukan panggilan save.
+          // Menyimpan ulang riwayat yang sama (retry/crash antara save dan
+          // finalize) sebelumnya menambah turn_idx hantu — suppressor stitch
+          // palsu di decideRecovery (turn yang tak pernah durable dikira ada).
+          // Aturan: tumbuh (pesan baru), susut, atau isi berubah (rewrite
+          // pasca-kompaksi) = turn terjadi; sama persis = re-save, bukan turn baru.
+          if (changed) {
+            const maxRow = db
+              .prepare("SELECT MAX(turn_idx) as m FROM turns WHERE session_id = ?")
+              .get(id) as { m: number | null } | null
+            const nextIdx = (maxRow?.m ?? -1) + 1
+            db.prepare(
+              "INSERT INTO turns (session_id, turn_idx, usage, ts) VALUES (?, ?, ?, ?)",
+            ).run(id, nextIdx, JSON.stringify(usage), now)
+          }
+        }
+        // TTL: hapus sesi basi + orphan rows dengan throttle per-jam di jalur simpan panas
+        // (fungsi purgeExpired langsung tetap menjalankan penuh saat dipanggil eksplisit).
+        if (now - lastAutoPurgeAt >= AUTO_PURGE_INTERVAL_MS) {
+          lastAutoPurgeAt = now
+          try {
+            purgeExpired(db, now)
+          } catch (e) {
+            process.stderr.write(`[warn] persistence: TTL purge failed: ${(e as Error).message}\n`)
+          }
+        }
+      })
       await withBusyRetry(() => txn())
-    } finally {
-      db.close()
-    }
+    })
   } finally {
     perfCount("persist.saveSession", perfEnabled() ? performance.now() - __t : 0, messages.length)
   }
@@ -1377,16 +1380,13 @@ export function loadThreadHistoryWithSeq(
   threadId: string,
   cwd?: string,
 ): { seq: number; message: unknown }[] {
-  const db = open(cwd)
-  try {
+  return withSessionDb(cwd, (db) => {
     const rows = db
       .prepare("SELECT * FROM messages WHERE session_id = ? AND thread_id = ? ORDER BY seq")
       .all(sessionId, threadId) as StoredMessageRow[]
     const decoded = decodeMessageRows(rows)
     return decoded.map((message, i) => ({ seq: rows[i]!.seq, message }))
-  } finally {
-    db.close()
-  }
+  })
 }
 
 export interface SessionTurnRecord {
@@ -1426,7 +1426,14 @@ export function listSessionTurns(id: string, cwd?: string): SessionTurnRecord[] 
       status: row.status,
       beforeSeq: row.before_seq,
       beforeEventSeq: row.before_event_seq,
-      beforeMessages: JSON.parse(row.before_messages),
+      beforeMessages: (() => {
+        try {
+          const parsed = JSON.parse(row.before_messages)
+          return Array.isArray(parsed) ? parsed : []
+        } catch {
+          return []
+        }
+      })(),
       checkpointId: row.checkpoint_id,
       startedAt: row.started_at,
       endedAt: row.ended_at,
@@ -1447,9 +1454,8 @@ export function beginSessionTurn(
   cwd: string,
   opts: { expectedEpoch: number },
 ): SessionTurnRecord {
-  const db = open(cwd)
-  try {
-    return db.transaction(() => {
+  return withSessionDb(cwd, (db) =>
+    db.transaction(() => {
       assertWriterEpochInTxn(db, id, opts.expectedEpoch)
       const max = db
         .prepare("SELECT MAX(ordinal) AS n FROM turn_ledger WHERE session_id = ?")
@@ -1486,10 +1492,8 @@ export function beginSessionTurn(
         record.startedAt,
       )
       return record
-    })()
-  } finally {
-    db.close()
-  }
+    })(),
+  )
 }
 
 export function settleSessionTurn(
@@ -1500,17 +1504,28 @@ export function settleSessionTurn(
   cwd: string,
   opts: { expectedEpoch: number },
 ): void {
-  const db = open(cwd)
-  try {
+  withSessionDb(cwd, (db) => {
     db.transaction(() => {
       assertWriterEpochInTxn(db, id, opts.expectedEpoch)
       db.prepare(
         "UPDATE turn_ledger SET status = ?, checkpoint_id = ?, ended_at = ? WHERE session_id = ? AND ordinal = ?",
       ).run(status, checkpointId, Date.now(), id, ordinal)
+      // Pangkas payload JSON before_messages pada turn lama yang sudah selesai (sisakan 5 terbaru)
+      // agar sesi ribuan turn tidak membengkakkan SQLite WAL/DB.
+      db.prepare(
+        `UPDATE turn_ledger
+           SET before_messages = '[]'
+         WHERE session_id = ?
+           AND status != 'RUNNING'
+           AND before_messages != '[]'
+           AND ordinal NOT IN (
+             SELECT ordinal FROM turn_ledger
+             WHERE session_id = ? AND status != 'RUNNING'
+             ORDER BY ordinal DESC LIMIT 5
+           )`,
+      ).run(id, id)
     })()
-  } finally {
-    db.close()
-  }
+  })
 }
 
 export function listPersistedTurns(id: string, cwd?: string): number[] {
@@ -1635,25 +1650,41 @@ export function listSessions(
  * resolusi yang dipakai `saveSession`, jadi meta yang dibaca proyeksi
  * dan meta yang ditulis lifecycle tak bisa berbeda domain.
  */
+function withReadOnlyDb<T>(cwd: string | undefined, fn: (db: Database) => T, fallback: T): T {
+  const p = dbPath(cwd)
+  if (!existsSync(p)) return fallback
+  try {
+    const res = withBusyRetrySync(() => {
+      const db = new Database(p, { readonly: true })
+      try {
+        try {
+          db.exec(`PRAGMA busy_timeout=${LIMITS.SQLITE_BUSY_TIMEOUT_MS}`)
+        } catch {}
+        return fn(db)
+      } finally {
+        db.close()
+      }
+    })
+    return res ?? fallback
+  } catch {
+    // DB rusak/tak terbaca = metadata tidak diketahui; gagal-jujur tanpa crash.
+    return fallback
+  }
+}
+
 export function readSessionMetaRows(
   cwd?: string,
 ): { id: string; created_at: number; updated_at: number }[] {
-  const p = dbPath(cwd)
-  if (!existsSync(p)) return []
-  const db = new Database(p)
-  try {
-    const rows = db
-      .prepare(
-        "SELECT id, created_at, COALESCE(updated_at, created_at) AS updated_at FROM sessions",
-      )
-      .all() as { id: string; created_at: number; updated_at: number }[]
-    return rows
-  } catch {
-    // DB rusak/tak terbaca = meta tidak diketahui; gagal-jujur tanpa crash.
-    return []
-  } finally {
-    db.close()
-  }
+  return withReadOnlyDb(
+    cwd,
+    (db) =>
+      db
+        .prepare(
+          "SELECT id, created_at, COALESCE(updated_at, created_at) AS updated_at FROM sessions",
+        )
+        .all() as { id: string; created_at: number; updated_at: number }[],
+    [],
+  )
 }
 
 // ── P14.0/P14.2 — pembaca READ-ONLY untuk inventaris & ekstraksi intent ──────
@@ -1672,35 +1703,32 @@ export interface SessionInventoryRow {
 }
 
 export function readSessionInventoryRows(cwd?: string): SessionInventoryRow[] {
-  const p = dbPath(cwd)
-  if (!existsSync(p)) return []
-  const db = new Database(p)
-  try {
-    const rows = db
-      .prepare(
-        "SELECT id, created_at, COALESCE(updated_at, created_at) AS updated_at, cwd, parent_session_id FROM sessions",
-      )
-      .all() as {
-      id: string
-      created_at: number
-      updated_at: number
-      cwd?: string | null
-      parent_session_id?: string | null
-    }[]
-    // NULL/undefined (baris legacy pra-binding) dinormalkan ke null supaya
-    // pemanggil tidak pernah menghadapi undefined dari SQLite.
-    return rows.map((r) => ({
-      id: r.id,
-      created_at: r.created_at,
-      updated_at: r.updated_at,
-      cwd: r.cwd ?? null,
-      parent_session_id: r.parent_session_id ?? null,
-    }))
-  } catch {
-    return []
-  } finally {
-    db.close()
-  }
+  return withReadOnlyDb(
+    cwd,
+    (db) => {
+      const rows = db
+        .prepare(
+          "SELECT id, created_at, COALESCE(updated_at, created_at) AS updated_at, cwd, parent_session_id FROM sessions",
+        )
+        .all() as {
+        id: string
+        created_at: number
+        updated_at: number
+        cwd?: string | null
+        parent_session_id?: string | null
+      }[]
+      // NULL/undefined (baris legacy pra-binding) dinormalkan ke null supaya
+      // pemanggil tidak pernah menghadapi undefined dari SQLite.
+      return rows.map((r) => ({
+        id: r.id,
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+        cwd: r.cwd ?? null,
+        parent_session_id: r.parent_session_id ?? null,
+      }))
+    },
+    [],
+  )
 }
 
 export interface ReadOnlyEventLoad {
@@ -1717,26 +1745,23 @@ export interface ReadOnlyEventLoad {
  * jadi "seolah tidak pernah ada".
  */
 export function readAllPresentationEventsReadOnly(cwd?: string): ReadOnlyEventLoad {
-  const p = dbPath(cwd)
-  if (!existsSync(p)) return { events: [], rejected: 0 }
-  const db = new Database(p)
-  try {
-    const rows = db
-      .prepare("SELECT payload FROM presentation_events ORDER BY session_id, event_seq")
-      .all() as { payload: string }[]
-    const events: DomainEvent[] = []
-    let rejected = 0
-    for (const row of rows) {
-      const ev = decodePresentationEvent(row.payload)
-      if (ev !== null) events.push(ev)
-      else rejected++
-    }
-    return { events, rejected }
-  } catch {
-    return { events: [], rejected: 0 }
-  } finally {
-    db.close()
-  }
+  return withReadOnlyDb(
+    cwd,
+    (db) => {
+      const rows = db
+        .prepare("SELECT payload FROM presentation_events ORDER BY session_id, event_seq")
+        .all() as { payload: string }[]
+      const events: DomainEvent[] = []
+      let rejected = 0
+      for (const row of rows) {
+        const ev = decodePresentationEvent(row.payload)
+        if (ev !== null) events.push(ev)
+        else rejected++
+      }
+      return { events, rejected }
+    },
+    { events: [], rejected: 0 },
+  )
 }
 
 export interface RunInventoryRow {
@@ -1749,18 +1774,16 @@ export interface RunInventoryRow {
 }
 
 export function readRunRowsReadOnly(cwd?: string): RunInventoryRow[] {
-  const p = dbPath(cwd)
-  if (!existsSync(p)) return []
-  const db = new Database(p)
-  try {
-    return db
-      .prepare("SELECT run_id, session_id, status, started_at, ended_at, recovery_status FROM runs")
-      .all() as RunInventoryRow[]
-  } catch {
-    return []
-  } finally {
-    db.close()
-  }
+  return withReadOnlyDb(
+    cwd,
+    (db) =>
+      db
+        .prepare(
+          "SELECT run_id, session_id, status, started_at, ended_at, recovery_status FROM runs",
+        )
+        .all() as RunInventoryRow[],
+    [],
+  )
 }
 
 // P2.1 — primitif peta alias identitas sesi (IO murni; keputusan di
@@ -2423,16 +2446,13 @@ export function ensureDefaultThread(
   cwd?: string,
   opts?: { expectedEpoch?: number },
 ): ThreadRow {
-  const db = open(cwd)
-  try {
-    return db.transaction(() => {
+  return withSessionDb(cwd, (db) =>
+    db.transaction(() => {
       if (opts?.expectedEpoch !== undefined)
         assertWriterEpochInTxn(db, sessionId, opts.expectedEpoch)
       return ensureDefaultThreadInTxn(db, sessionId, Date.now())
-    })()
-  } finally {
-    db.close()
-  }
+    })(),
+  )
 }
 
 // Primitif create untuk P2 branching/sub-agen mendatang. Tanpa CLI/UX.

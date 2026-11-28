@@ -16,7 +16,7 @@
 // derived, observation, lifecycle, or watermark stores. It also never imports
 // presentation, context, persistence, task, or CLI modules.
 
-import { spawnSync } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
 import { lstat } from "node:fs/promises"
 import { isAbsolute, relative, resolve } from "node:path"
@@ -1713,51 +1713,90 @@ export function __setEvaluationDirtyScanForTest(fn: DirtyScan | null): void {
   dirtyScanOverride = fn
 }
 
-function listDirtyEvaluationPathsResult(root: string): { ok: boolean; paths: string[] } {
+function parseDirtyPorcelain(stdout: string): string[] {
+  const out: string[] = []
+  for (const rawLine of stdout.split(/\r?\n/)) {
+    if (rawLine.length < 4) continue
+    let p = rawLine.slice(3).trim()
+    const arrow = p.indexOf(" -> ")
+    if (arrow !== -1) p = p.slice(arrow + 4).trim()
+    if ((p.startsWith('"') && p.endsWith('"')) || (p.startsWith("'") && p.endsWith("'"))) {
+      p = p.slice(1, -1)
+    }
+    if (p) out.push(p.replace(/\\/g, "/"))
+  }
+  return out
+}
+
+function spawnGitStdoutAsync(
+  root: string,
+  gitArgs: readonly string[],
+): Promise<{ ok: boolean; stdout: string }> {
+  return new Promise((resolvePromise) => {
+    let settled = false
+    let stdout = ""
+    let bytes = 0
+    const finish = (ok: boolean, out = "") => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolvePromise({ ok, stdout: out })
+    }
+    let child: ReturnType<typeof spawn>
+    try {
+      child = spawn(resolveTrustedExecutable("git"), [...gitArgs], {
+        cwd: root,
+        stdio: ["ignore", "pipe", "ignore"],
+        env: sanitizeSpawnEnv(process.env),
+      })
+    } catch {
+      resolvePromise({ ok: false, stdout: "" })
+      return
+    }
+    const timer = setTimeout(() => {
+      try {
+        child.kill()
+      } catch {}
+      finish(false)
+    }, GIT_OBSERVE_TIMEOUT_MS)
+    ;(timer as unknown as { unref?: () => void }).unref?.()
+    child.stdout?.setEncoding("utf8")
+    child.stdout?.on("data", (chunk: string) => {
+      bytes += Buffer.byteLength(chunk, "utf8")
+      if (bytes > INTEGRITY_MAX_BYTES) {
+        try {
+          child.kill()
+        } catch {}
+        finish(false)
+        return
+      }
+      stdout += chunk
+    })
+    child.on("error", () => finish(false))
+    child.on("close", (code) => finish(code === 0, stdout))
+  })
+}
+
+async function listDirtyEvaluationPathsAsync(
+  root: string,
+): Promise<{ ok: boolean; paths: string[] }> {
   if (dirtyScanOverride) return dirtyScanOverride(root)
   if (!isGitRepo(root)) return { ok: false, paths: [] }
   try {
     const neutral = gitFilterNeutralizersSync(root)
-    const r = spawnSync(
-      resolveTrustedExecutable("git"),
-      [
-        ...GIT_SAFE_BASE,
-        ...neutral,
-        "status",
-        "--porcelain",
-        "--untracked-files=all",
-        "--",
-        ...EVALUATION_SCAN_ROOTS,
-      ],
-      {
-        cwd: root,
-        encoding: "utf8",
-        timeout: GIT_OBSERVE_TIMEOUT_MS,
-        maxBuffer: INTEGRITY_MAX_BYTES,
-        env: sanitizeSpawnEnv(process.env),
-      },
-    )
-    if (r.status !== 0 || typeof r.stdout !== "string") return { ok: false, paths: [] }
-    const out: string[] = []
-    for (const rawLine of r.stdout.split(/\r?\n/)) {
-      if (rawLine.length < 4) continue
-      let p = rawLine.slice(3).trim()
-      const arrow = p.indexOf(" -> ")
-      if (arrow !== -1) p = p.slice(arrow + 4).trim()
-      if ((p.startsWith('"') && p.endsWith('"')) || (p.startsWith("'") && p.endsWith("'"))) {
-        p = p.slice(1, -1)
-      }
-      if (p) out.push(p.replace(/\\/g, "/"))
-    }
-    return { ok: true, paths: out }
+    const r = await spawnGitStdoutAsync(root, [
+      ...GIT_SAFE_BASE,
+      ...neutral,
+      "status",
+      "--porcelain",
+      "--untracked-files=all",
+      "--",
+      ...EVALUATION_SCAN_ROOTS,
+    ])
+    return r.ok ? { ok: true, paths: parseDirtyPorcelain(r.stdout) } : { ok: false, paths: [] }
   } catch {
     return { ok: false, paths: [] }
   }
-}
-
-/** Pembungkus kompatibel: hanya path-nya, untuk pemanggil lama. */
-function listDirtyEvaluationPaths(root: string): string[] {
-  return listDirtyEvaluationPathsResult(root).paths
 }
 
 async function hashWorkspaceRel(root: string, rel: string): Promise<string> {
@@ -1780,17 +1819,17 @@ export async function captureSessionEvaluationBaseline(
 ): Promise<void> {
   const root = resolve(workspaceRoot)
   const key = sessionBaselineKey(sessionId, root)
-  const scanned = listDirtyEvaluationPathsResult(root)
+  const scanned = await listDirtyEvaluationPathsAsync(root)
   // Fail-closed JUJUR: git gagal → jangan simpan baseline kosong yang nanti
   // membuat semua path kotor tampak "berubah dari baseline".
   if (!scanned.ok) {
     setSessionBaseline(key, GIT_FAILED)
     return
   }
-  const baseline = new Map<string, string>()
-  for (const rel of scanned.paths) {
-    baseline.set(rel, await hashWorkspaceRel(root, rel))
-  }
+  const hashed = await Promise.all(
+    scanned.paths.map(async (rel) => [rel, await hashWorkspaceRel(root, rel)] as const),
+  )
+  const baseline = new Map<string, string>(hashed)
   setSessionBaseline(key, baseline)
 }
 
@@ -1834,8 +1873,10 @@ export async function collectSessionModifiedFiles(
         childIds.add(r.childSessionId)
       }
     }
-    for (const cid of [...childIds].slice(0, 20)) {
-      const childLoaded = await loadJournal(cid, root).catch(() => null)
+    const childLoads = await Promise.all(
+      [...childIds].slice(0, 20).map((cid) => loadJournal(cid, root).catch(() => null)),
+    )
+    for (const childLoaded of childLoads) {
       if (childLoaded?.status === "valid") {
         allRecords.push(...childLoaded.records)
         for (const p of collectModifiedFilesFromJournal(childLoaded.records)) {
@@ -1854,26 +1895,24 @@ export async function collectSessionModifiedFiles(
   }
 
   if (sessionMutatingTools.size > 0) {
-    const dirtyPaths = listDirtyEvaluationPaths(root)
+    const { paths: dirtyPaths } = await listDirtyEvaluationPathsAsync(root)
     if (dirtyPaths.length > 0) {
       const baseline = getSessionBaseline(sessionBaselineKey(sessionId, root))
-      for (const rel of dirtyPaths) {
-        if (baseline === GIT_FAILED) {
-          // Baseline gagal dibuat (git error/bukan repo). Menandai semua path
-          // kotor sebagai tamper di sini adalah false-positive: kita tak punya
-          // titik perbandingan yang valid.
-          continue
-        }
+      if (baseline !== GIT_FAILED) {
         if (!baseline) {
           // Baseline memang tidak ada (capture tak pernah dipanggil) →
           // fail-closed tetap berlaku: anggap path berubah.
-          combined.add(rel)
-          continue
-        }
-        const prevHash = baseline.get(rel)
-        const nowHash = await hashWorkspaceRel(root, rel)
-        if (prevHash === undefined || prevHash !== nowHash) {
-          combined.add(rel)
+          for (const rel of dirtyPaths) combined.add(rel)
+        } else {
+          const hashed = await Promise.all(
+            dirtyPaths.map(async (rel) => [rel, await hashWorkspaceRel(root, rel)] as const),
+          )
+          for (const [rel, nowHash] of hashed) {
+            const prevHash = baseline.get(rel)
+            if (prevHash === undefined || prevHash !== nowHash) {
+              combined.add(rel)
+            }
+          }
         }
       }
     }
@@ -1883,7 +1922,8 @@ export async function collectSessionModifiedFiles(
 
 function verificationScriptsFingerprint(text: string): string | null {
   try {
-    const parsed = JSON.parse(text) as { scripts?: Record<string, unknown> }
+    const clean = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text
+    const parsed = JSON.parse(clean) as { scripts?: Record<string, unknown> }
     const scripts = parsed.scripts ?? {}
     return Object.keys(scripts)
       .filter((k) => /^(?:test|verify|lint|check|gate|eval)/i.test(k))

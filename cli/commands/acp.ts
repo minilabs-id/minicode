@@ -634,7 +634,7 @@ export async function handleAcp(args: readonly string[] = []): Promise<void> {
   const loop: AcpLoop = {
     write,
     runOne,
-    flightActive: () => flight.active(),
+    flightActive: () => busy || flight.active(),
     cancelFlight: () => flight.stop(),
     isShuttingDown: () => shuttingDown,
     beginShutdown: () => {

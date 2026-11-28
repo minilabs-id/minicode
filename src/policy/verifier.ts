@@ -75,6 +75,7 @@ export async function runVerify(
   cwd: string,
   timeoutMs: number = LIMITS.VERIFY_DEFAULT_TIMEOUT_MS,
   signal?: AbortSignal,
+  onActivity?: () => void,
 ): Promise<VerifyResult> {
   signal?.throwIfAborted()
   const env = sanitizeSpawnEnv(process.env)
@@ -141,31 +142,55 @@ export async function runVerify(
     }
     signal?.addEventListener("abort", onAbort, { once: true })
 
-    const timer = setTimeout(() => {
-      timedOut = true
-      terminate()
-      // Backstop: jika cucu menahan FD pipe di OS tertentu, pastikan Promise
-      // tetap settle walau `close` tidak kunjung datang.
-      settleBackstop = setTimeout(() => {
-        finish({
-          ok: false,
-          output: buildOutput(`verify timed out after ${timeoutMs}ms`).slice(0, 8000),
-          command,
-          timedOut: true,
-          infraFailure: true,
-        })
-      }, 1000)
-      settleBackstop.unref?.()
-    }, timeoutMs)
-    timer.unref?.()
+    const MAX_ACTIVE_VERIFY_MS = Math.max(timeoutMs, 600_000)
+    const verifyStartMono = performance.now()
+    let timer: ReturnType<typeof setTimeout>
+    const armTimer = () => {
+      clearTimeout(timer)
+      const elapsed = Math.max(0, performance.now() - verifyStartMono)
+      const remainingCap = Math.max(1, MAX_ACTIVE_VERIFY_MS - Math.floor(elapsed))
+      const stepMs = Math.min(timeoutMs, remainingCap)
+      timer = setTimeout(() => {
+        timedOut = true
+        terminate()
+        // Backstop: jika cucu menahan FD pipe di OS tertentu, pastikan Promise
+        // tetap settle walau `close` tidak kunjung datang.
+        settleBackstop = setTimeout(() => {
+          finish({
+            ok: false,
+            output: buildOutput(`verify timed out after ${timeoutMs}ms`).slice(0, 8000),
+            command,
+            timedOut: true,
+            infraFailure: true,
+          })
+        }, 1000)
+        settleBackstop.unref?.()
+      }, stepMs)
+      timer.unref?.()
+    }
+    let lastVerifyBeatAt = 0
+    const touchVerify = () => {
+      if (settled || timedOut || aborted) return
+      armTimer()
+      const now = Date.now()
+      if (onActivity && now - lastVerifyBeatAt >= 1500) {
+        lastVerifyBeatAt = now
+        try {
+          onActivity()
+        } catch {}
+      }
+    }
+    armTimer()
 
     p.stdout?.on("data", (chunk: Buffer) => {
+      touchVerify()
       if (capturedBytes >= VERIFY_MAX_CAPTURE_BYTES) return
       const take = chunk.subarray(0, VERIFY_MAX_CAPTURE_BYTES - capturedBytes)
       capturedBytes += take.byteLength
       stdoutBuf += take.toString("utf8")
     })
     p.stderr?.on("data", (chunk: Buffer) => {
+      touchVerify()
       if (capturedBytes >= VERIFY_MAX_CAPTURE_BYTES) return
       const take = chunk.subarray(0, VERIFY_MAX_CAPTURE_BYTES - capturedBytes)
       capturedBytes += take.byteLength
@@ -295,6 +320,8 @@ export function buildBaselineNote(v: VerifyResult): string {
 export interface SelfHealDeps {
   run: (prompt: string, signal?: AbortSignal) => Promise<void>
   verify: (signal?: AbortSignal) => Promise<VerifyResult>
+  /** Opsional: lewati verify pasca-run (mis. saat turn non-mutasi setelah baseline). */
+  shouldVerify?: () => boolean
   maxCycles?: number
   onCycle?: (cycle: number, max: number, result: VerifyResult) => void
   onOk?: (cycles: number) => void
@@ -312,6 +339,7 @@ export async function runWithSelfHeal(
   // setelah verify agar abort-di-tengah-verify tak diproses sebagai gagal.
   if (signal?.aborted) return
   await deps.run(initialPrompt, signal)
+  if (deps.shouldVerify && !deps.shouldVerify()) return
   const max = deps.maxCycles ?? 3
   for (let cycle = 1; cycle <= max; cycle++) {
     if (signal?.aborted) return

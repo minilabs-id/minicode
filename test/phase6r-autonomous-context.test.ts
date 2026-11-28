@@ -615,6 +615,26 @@ describe("F. the adapter preserves 6P ownership and 6Q lifetime", () => {
     await sc.stop()
     expect(f.cleaned()).toBe(1)
   })
+
+  test("F4. refusal sinkron di planAutonomousContext melepas claim tanpa mencatat attempt (P0-5)", async () => {
+    const t = add()
+    const f = fakeSession({})
+    const runTurn = buildAutonomousRunTurn(
+      () => ({ parentSessionId: "", taskId: t.id, execGeneration: 0, sessionIncarnation: 1 }),
+      baseConfig(async () => f.session),
+    )
+    const sc = new Scheduler(S, { store, runTurn, instruction: "DO IT" })
+    sc.start()
+    const res = await sc.cycle()
+    await sc.stop()
+    expect(res.dispatched?.ok).toBe(false)
+    expect(res.dispatched?.failure).toBe("bridge-threw")
+    expect(res.dispatched?.lineage).toBe("NOT_ATTEMPTED")
+    expect(res.dispatched?.released).toBe(true)
+    // Claim dilepas kembali ke PENDING dan execGeneration tidak terbakar.
+    expect(store.getTask(S, t.id)!.status).toBe("PENDING")
+    expect(store.getExecutionLineage(S, t.id)?.attemptGeneration ?? 0).toBe(0)
+  })
 })
 
 // ═══ G. CONCURRENT CONTEXTS ═════════════════════════════════════════════════

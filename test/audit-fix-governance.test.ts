@@ -197,6 +197,7 @@ describe("F2 — derivasi kontrak identik dengan daftar lama", () => {
       "bash",
       "glob",
       "grep",
+      "dep_graph",
       "git_status",
       "git_diff",
       "git_log",

@@ -30,6 +30,7 @@ import {
   allowLocalSubcommand,
   displayWorkMode,
   flagNameOf,
+  parseRuntimeNumericFlags,
   resolveWorkModeFlag,
   valueFlags,
 } from "../args.ts"
@@ -237,6 +238,7 @@ export async function startDaemonHostedRuntime(opts: {
   const schedulerEnabled = schedulerEnabledForDaemon(runtimeMode)
   // Daemon mengikuti default DISCUSS serta fallback DISCUSS untuk nilai invalid.
   const workModeResolved = resolveWorkModeFlag(getArg)
+  const daemonNums = parseRuntimeNumericFlags(getArg, () => {})
 
   const { DaemonHost } = await import("../../src/daemon/host.ts")
   const feeds = new Map<string, SessionFeed>()
@@ -255,9 +257,14 @@ export async function startDaemonHostedRuntime(opts: {
   // P2.3: satu controller untuk run yang sedang berjalan. Interrupt/cancel
   // meng-abort run ini (bukan hanya mengembalikan status palsu).
   let activeRunCtl: AbortController | null = null
+  let periodicTrigger: { stop(): void } | null = null
   const closeHostedSession = async (): Promise<void> => {
     if (sessionClosed) return
     sessionClosed = true
+    try {
+      periodicTrigger?.stop()
+    } catch {}
+    periodicTrigger = null
     try {
       activeRunCtl?.abort(new Error("daemon shutdown"))
     } catch {}
@@ -352,6 +359,16 @@ export async function startDaemonHostedRuntime(opts: {
         verify: sub.includes("--verify"),
         workMode: workModeResolved.workMode,
         workModeExplicit: workModeResolved.explicit,
+        ...(sub.includes("--autonomous") ? { autonomous: true } : {}),
+        ...(sub.includes("--takeover") ? { takeover: true } : {}),
+        ...(daemonNums.timeoutMs !== undefined ? { timeoutMs: daemonNums.timeoutMs } : {}),
+        ...(daemonNums.wallTimeoutMs !== undefined
+          ? { wallTimeoutMs: daemonNums.wallTimeoutMs }
+          : {}),
+        ...(daemonNums.maxEpochs !== undefined ? { maxEpochs: daemonNums.maxEpochs } : {}),
+        ...(daemonNums.maxCostPerHour !== undefined
+          ? { maxCostHour: daemonNums.maxCostPerHour }
+          : {}),
         // [P13.2] Mode runtime yang sama dengan CLI → komposisi yang di-host
         // punya jalur ownership proses + status kanonik yang sama.
         runtimeMode,
@@ -424,11 +441,71 @@ export async function startDaemonHostedRuntime(opts: {
       },
     })
 
+    if (sub.includes("--autonomous") && schedulerEnabled) {
+      const trig = session.productionScheduler.getTrigger()
+      if (trig) {
+        const { createPeriodicTrigger } = await import("../../src/task/trigger.ts")
+        const pump = createPeriodicTrigger({
+          intervalMs: 5_000,
+          trigger: trig,
+          isRunning: () => !sessionClosed && session.productionScheduler.isActive(),
+        })
+        pump.start()
+        periodicTrigger = pump
+      }
+    }
     if (opts.autoRunPrompt === true && prompt !== undefined && prompt.trim().length > 0) {
       const ctl = new AbortController()
       activeRunCtl = ctl
-      void session
-        .runPromptWithVerify(prompt, ctl.signal)
+      const autonomousPrompt = sub.includes("--autonomous")
+      void (async () => {
+        if (!autonomousPrompt) {
+          await session.runPromptWithVerify(prompt, ctl.signal)
+          return
+        }
+        const { createAutonomousLoopController } = await import(
+          "../../src/policy/autonomous-loop.ts"
+        )
+        const loopCtl = createAutonomousLoopController({
+          workMode: session.workMode,
+          maxEpochs: session.maxEpochs,
+          maxCostUsd: session.budget,
+          maxCostPerHourUsd: session.maxCostHour,
+        })
+        const isStepLimit = (e: unknown): boolean =>
+          (e as { kind?: string } | undefined)?.kind === "max_steps_exceeded" ||
+          /max.?steps/i.test(String((e as { message?: string } | undefined)?.message ?? ""))
+        let prevCost = session.usage.getSession(session.modelRef.current).cost ?? 0
+        for (let i = 0; ; i++) {
+          if (ctl.signal.aborted) break
+          let stepPrompt = prompt
+          if (i > 0) {
+            const gate = loopCtl.canStartNextEpoch(Date.now(), ctl.signal)
+            if (!gate.allow) break
+            stepPrompt = loopCtl.formatEpochPrompt(
+              prompt,
+              "Previous turn hit --max-steps; continue cleanly from preserved state.",
+            )
+          }
+          let err: unknown = null
+          try {
+            await session.runPromptWithVerify(stepPrompt, ctl.signal)
+          } catch (e) {
+            err = e
+          }
+          const curCost = session.usage.getSession(session.modelRef.current).cost ?? 0
+          const costDelta = Math.max(0, curCost - prevCost)
+          prevCost = curCost
+          const rec = loopCtl.recordEpoch({
+            progressed: err === null || isStepLimit(err),
+            costUsd: costDelta,
+            completed: err === null,
+          })
+          if (err === null) break
+          if (!isStepLimit(err)) throw err
+          if (rec.stopped) break
+        }
+      })()
         .catch((e) => {
           if (!ctl.signal.aborted) {
             process.stderr.write(`${t("cli.daemonRunFailed", { msg: (e as Error).message })}\n`)

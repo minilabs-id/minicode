@@ -38,6 +38,7 @@ import {
   findPasteTokenAtCursor,
   findPasteTokenBeforeWordDelete,
   highlightPasteTokens,
+  parseSlashCommand,
   shaveWordWrapped,
   shouldCollapsePaste,
   snapCursorOutOfPasteToken,
@@ -92,7 +93,8 @@ export interface TuiHost {
    * ditunda sampai turn selesai (mode/UI mutasi butuh idle). `false` = ditolak
    * (command berdampak destruktif, mis. `/clear`), dan controller sudah
    * menjelaskan alasannya lewat toast. Absen = perilaku lama: input beku total
-   * saat busy. `displayText` menjaga placeholder paste ringkas saat digema.
+   * saat busy. `displayText` opsional untuk teks gema transkrip bila berbeda
+   * dari `text` yang dikirim ke model.
    */
   enqueue?(text: string, displayText?: string): boolean
   /** Batalkan turn yang berjalan (Esc saat busy). */
@@ -1638,6 +1640,7 @@ export class TuiApp {
     this.composerCache = null
     const displayLine = rawLine.trim()
     const expandedLine = expandPasteTokens(rawLine, activePastes).trim()
+    const isSlash = parseSlashCommand(expandedLine, { rawLine: displayLine }) !== null
     // Enter saat turn berjalan = antre, BUKAN turn kedua yang balapan dengan
     // yang sedang jalan. Draft dibersihkan dan baris status aktivitas kembali
     // tampil; pesannya dikirim controller setelah turn ini selesai.
@@ -1650,7 +1653,7 @@ export class TuiApp {
       this.disarmAbortQuit()
       if (expandedLine) {
         this.rememberHistory(displayLine, activePastes)
-        this.host.enqueue?.(expandedLine, displayLine)
+        this.host.enqueue?.(expandedLine, expandedLine)
       }
       this.followTail()
       this.paintCurrent()
@@ -1675,13 +1678,13 @@ export class TuiApp {
     // Built-in commands and shortcuts belong to the composer history, not the
     // conversation transcript. The command result remains independently
     // visible when it carries useful user-facing information.
-    if (!expandedLine.startsWith("/")) {
+    if (!isSlash) {
       // v7.29: prompt masuk transkrip sebagai history biasa (tanpa card).
       // Wrap gema memakai lebar CHAT (bukan cols terminal): kalau tidak,
       // prompt panjang ter-wrap dua kali — sekadar di pushUser lebar terminal,
-      // lalu lagi oleh projectText pada kolom chat yang ter-centre. Paste
-      // dipertahankan sebagai placeholder ringkas di transkrip agar log tetap rapi.
-      this.transcript.pushUser(rawLine, this.chatWidth())
+      // lalu lagi oleh projectText pada kolom chat yang ter-centre. Token paste
+      // diekspansi penuh pada gema transkrip agar riwayat chat tetap terbaca.
+      this.transcript.pushUser(expandedLine, this.chatWidth())
     }
     // Prompt user baru = awal turn baru. Ratchet dari turn sebelumnya dilepas
     // supaya history bisa kembali ke ekor (bukan terkunci oleh live yang sudah
@@ -2615,7 +2618,7 @@ export class TuiApp {
     cursor: number,
     w: number,
   ): ComposerLayout | null {
-    if (!cached?.editing || cached.cols !== w || !line) return null
+    if (!cached?.editing || cached.cols !== w || !line || this.pastedBlocks.size > 0) return null
     const prevLine = cached.line
     if (prevLine === line) return null
     const prevRows = cached.layout.rows
@@ -2627,7 +2630,6 @@ export class TuiApp {
     if (line.startsWith(prevLine)) {
       rows = appendWordWrapped(prevRows, line.slice(prevLine.length), w)
     } else if (prevLine.startsWith(line)) {
-      if (this.pastedBlocks.size > 0) return null
       rows = shaveWordWrapped(prevRows, prevLine.slice(line.length), w)
     } else {
       return null
@@ -3287,7 +3289,8 @@ export class TuiApp {
     // v7.28: indikator "baris baru" muncul saat user TIDAK berada di ekor.
     // Ambangnya memakai VIEWH FINAL yang sama dengan frame (bukan hitungan
     // terpisah yang bisa melenceng saat menu/draft berubah).
-    const tailMaxBack = Math.max(0, this.transcript.wrappedLength(contentCols, viewH) - viewH)
+    const frameMetrics = this.transcript.viewportMetrics(contentCols, viewH)
+    const tailMaxBack = frameMetrics.maxBack
     const awayFromTail = this.scrollBack < tailMaxBack
     const newCount = awayFromTail ? this.transcript.total() - this.scrollBase : 0
     const retryBadge =
@@ -3329,7 +3332,7 @@ export class TuiApp {
       this.scrollBack = Math.max(tailMaxBack, this.turnScrollFloor)
       this.turnScrollFloor = Math.max(this.turnScrollFloor, this.scrollBack)
     }
-    const viewport = this.transcript.viewport(contentCols, viewH, this.scrollBack)
+    const viewport = this.transcript.viewport(contentCols, viewH, this.scrollBack, frameMetrics)
     if (
       this.isBusy() &&
       this.transcript.hasLiveAnimation() &&

@@ -86,6 +86,8 @@ export interface ProcessSupervisionStatus {
 export interface ProcessSupervision {
   /** Register (or replace) a managed child. */
   register(child: ManagedChild): void
+  /** Lepas child & bersihkan buku besarnya saat dihentikan eksplisit. */
+  unregister(childId: string): void
   /**
    * Report that a child exited unexpectedly. Resolves when the recovery
    * attempt (restart + backoff) has finished. Never throws.
@@ -240,8 +242,27 @@ export function createProcessSupervision(opts: ProcessSupervisionOptions = {}): 
         escalate(child, `managed child limit reached (${maxManagedChildren})`)
         return
       }
+      const prev = children.get(child.id)
       children.set(child.id, child)
-      if (!attempts.has(child.id)) attempts.set(child.id, 0)
+      if (prev !== undefined && prev !== child) {
+        // Instance baru menggantikan child lama pada id sama: reset buku besar
+        // agar kuota/eskalasi lama tak terbawa. Jika prev === child (restart
+        // internal instance sama), JANGAN reset penghitung percobaan.
+        attempts.set(child.id, 0)
+        lastExitAt.delete(child.id)
+        exits.delete(child.id)
+        escalated.delete(child.id)
+      } else if (!attempts.has(child.id)) {
+        attempts.set(child.id, 0)
+      }
+    },
+
+    unregister(childId: string): void {
+      children.delete(childId)
+      attempts.delete(childId)
+      lastExitAt.delete(childId)
+      exits.delete(childId)
+      escalated.delete(childId)
     },
 
     notifyExit,

@@ -27,7 +27,14 @@ import { createMinicodeSession } from "../src/app/session.ts"
 import { setupToolLayer } from "../src/app/tool-layer.ts"
 import { shouldRunHooks } from "../src/hooks/run.ts"
 import { createPermissionHandler, type PermissionMode } from "../src/policy/permission.ts"
-import { LOCAL_READONLY_TOOL_NAMES } from "../src/policy/tool-contract.ts"
+import {
+  LOCAL_READONLY_TOOL_NAMES,
+  PLAN_EXTRA_TOOL_NAMES,
+  READONLY_TOOL_NAMES,
+} from "../src/policy/tool-contract.ts"
+
+const DISCUSS_TOOL_COUNT = READONLY_TOOL_NAMES.size + PLAN_EXTRA_TOOL_NAMES.size
+
 import { createWorkModePermissionHandler, type WorkMode } from "../src/policy/work-mode.ts"
 import {
   clearSubAgentSessionFactory,
@@ -182,7 +189,7 @@ describe("3. tool visibility mengikuti WorkMode aktif (daftar yang dilihat kerne
     expect(setWorkMode).toBeDefined()
     setWorkMode!("DISCUSS")
     // Array yang sama (identitas objek) — kernel menyimpan referensi ini.
-    expect(sessionTools.length).toBe(21)
+    expect(sessionTools.length).toBe(DISCUSS_TOOL_COUNT)
     expect(sessionTools.map((t) => t.name)).toContain("todo_write")
     setWorkMode!("EXECUTE")
     expect(sessionTools.length).toBe(full)
@@ -365,11 +372,11 @@ describe("8. jalur produksi createCliSession — wiring composition root, G1, & 
       expect(ctx.workMode).toBe("EXECUTE")
       const full = ctx.sessionTools.length
       expect(full).toBeGreaterThan(LOCAL_READONLY_TOOL_NAMES.length)
-      // Transisi operator: tool yang terlihat menyusut tepat ke 21 tool ceiling DISCUSS.
+      // Transisi operator: tool yang terlihat menyusut tepat ke ceiling DISCUSS (READONLY + PLAN_EXTRA).
       ctx.workModeControl!.setWorkMode("DISCUSS")
       expect(ctx.workModeControl!.getWorkMode()).toBe("DISCUSS")
       expect(ctx.workMode).toBe("DISCUSS")
-      expect(ctx.sessionTools).toHaveLength(21)
+      expect(ctx.sessionTools).toHaveLength(DISCUSS_TOOL_COUNT)
       expect(ctx.sessionTools.map((t) => t.name)).toContain("todo_write")
       expect(ctx.sessionTools.map((t) => t.name)).not.toContain("write_file")
       // Kembali ke EXECUTE: daftar penuh kembali.

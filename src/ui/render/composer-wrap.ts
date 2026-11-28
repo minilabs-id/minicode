@@ -466,3 +466,21 @@ export function shaveWrapped(rows: string[], removed: string, width: number): st
   out.push(trimmed)
   return out
 }
+
+/**
+ * Ekstrak slash command satu-baris yang sah; mengembalikan `null` untuk input
+ * multi-baris, paste yang diawali token `{paste ...}`, atau path absolut ber-`/`.
+ */
+export function parseSlashCommand(
+  line: string,
+  opts?: { rawLine?: string },
+): { name: string; args: string } | null {
+  const trimmed = line.trim()
+  if (!trimmed.startsWith("/") || trimmed.includes("\n") || trimmed.includes("\r")) return null
+  if (opts?.rawLine && /^\{paste\s/.test(opts.rawLine.trimStart())) return null
+  const m = /^(\S+)(?:\s+([\s\S]*))?$/.exec(trimmed)
+  if (!m) return null
+  const head = m[1]!
+  if (head.indexOf("/", 1) !== -1) return null
+  return { name: head.slice(1).toLowerCase(), args: (m[2] ?? "").trim() }
+}

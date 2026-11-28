@@ -112,6 +112,13 @@ export const TOOL_CAPABILITIES: readonly ToolClassification[] = [
     evidence:
       "VERIFIED: spawns ripgrep over the workspace. It is a process, so classified READ_ONLY only because grep has no write mode here; noted in §12.",
   },
+  {
+    name: "dep_graph",
+    capability: "READ_ONLY",
+    autonomous: true,
+    evidence:
+      "VERIFIED: static read-only dependency graph over workspace source files with cwd+path jail.",
+  },
 
   // ── filesystem write ──
   {

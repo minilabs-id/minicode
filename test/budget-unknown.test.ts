@@ -2,7 +2,7 @@
 // F-18: abort budget membawa identitas kind budget_exceeded.
 import { expect, test } from "bun:test"
 import { AgentError } from "#minicore/core/errors.ts"
-import { extractPricing, findPrice } from "../src/policy/pricing.ts"
+import { extractPricing, findPrice, normalizePriceMap } from "../src/policy/pricing.ts"
 import { budgetExceededError, budgetStatus, costFor } from "../src/policy/usage.ts"
 
 test("F-06: budgetStatus fail-closed bila ada pemakaian tanpa harga", () => {
@@ -32,6 +32,17 @@ test("F-06: harga negatif di payload = dibuang (bukan biaya negatif)", () => {
   expect(out.nan).toBeUndefined()
   expect(out.ok).toEqual({ input: 5, output: 10 })
   expect(findPrice("m-ok", { "m-ok": { input: 5, output: 10 } })).toEqual({ input: 5, output: 10 })
+})
+
+test("P1-5: normalizePriceMap melewati entri null/rusak tanpa membuang model valid lain", () => {
+  const out = normalizePriceMap({
+    corruptNull: null,
+    corruptArr: [1, 2],
+    corruptStr: "bad",
+    ValidModel: { input: 2, output: 4 },
+  })
+  expect(out.validmodel).toEqual({ input: 2, output: 4 })
+  expect(Object.keys(out)).toEqual(["validmodel"])
 })
 
 test("F-06: costFor tak pernah negatif", () => {

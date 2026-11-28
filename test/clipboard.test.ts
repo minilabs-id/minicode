@@ -1,9 +1,11 @@
 // Unit test clipboard OS native (src/lib/clipboard.ts):
 // memastikan guard SSH/osc52/non-TTY/fake-TTY bekerja dan urutan kandidat per OS tepat.
 import { describe, expect, test } from "bun:test"
+import { isAbsolute } from "node:path"
 import {
   canUseNativeClipboard,
   nativeClipboardCommands,
+  prepareClipboardSpawn,
   writeNativeClipboard,
 } from "../src/lib/clipboard.ts"
 
@@ -98,5 +100,30 @@ describe("writeNativeClipboard", () => {
     })
     expect(ok).toBe(false)
     expect(called).toBe(0)
+  })
+
+  test("P0-2: prepareClipboardSpawn menolak biner yang gagal di-resolve absolut (anti CWD hijack)", () => {
+    expect(
+      prepareClipboardSpawn("clip.exe", [], { platform: "win32", resolveExec: (n) => n }),
+    ).toBeNull()
+    expect(
+      prepareClipboardSpawn("pbcopy", [], { platform: "darwin", resolveExec: (n) => n }),
+    ).toBeNull()
+    const ok = prepareClipboardSpawn("pbcopy", [], {
+      platform: "darwin",
+      resolveExec: () =>
+        process.platform === "win32" ? "C:\\usr\\bin\\pbcopy" : "/usr/bin/pbcopy",
+    })
+    expect(ok).not.toBeNull()
+    expect(isAbsolute(ok!.command)).toBe(true)
+
+    // Jalur defaultSpawn (tanpa mock spawn) aman terhadap platform tanpa biner: tidak melempar.
+    expect(
+      writeNativeClipboard("abc", {
+        platform: process.platform === "win32" ? "darwin" : "win32",
+        env: {},
+        force: true,
+      }),
+    ).toBe(false)
   })
 })

@@ -213,8 +213,11 @@ export const LIMITS = {
    * antrean membuat total wall-clock fan-out lebih pendek.
    */
   SUB_AGENT_POOL_SIZE: envBoundedInt("MINICODE_SUB_AGENT_POOL_SIZE", 5, 1, 16),
-  SUB_AGENT_BUDGET_EXPLORE: 5,
-  SUB_AGENT_BUDGET_PLAN: 15,
+  SUB_AGENT_BUDGET_EXPLORE: 24,
+  SUB_AGENT_BUDGET_PLAN: 36,
+  /** Ambang bacaan berturut-turut untuk detektor NoProgress pada sub-agent:
+   *  angka 8 terlalu ketat bagi mode `plan` di proyek besar saat fase recon. */
+  SUB_AGENT_CONSECUTIVE_READ_LIMIT: 48,
   /** [T-008] Cap langkah eksplisit sub-agent naik 50 → 100 → 600 (persetujuan
    * owner) agar sebanding dengan timeout 1 jam (~6 dtk/langkah, rasio lama
    * 300 dtk/50). Tetap TERPILAH dari `DEFAULT_MAX_STEPS` sesi utama. KENAPA
@@ -267,16 +270,17 @@ export const LIMITS = {
    * 5 menit — itulah "macet" yang dikeluhkan. Deteksi diam ditangani
    * `PROVIDER_IDLE_TIMEOUT_MS` di bawah; keduanya dipakai bersama. */
   PROVIDER_REQUEST_TIMEOUT_MS: 300_000,
-  /** Batas DIAM (tidak ada byte apa pun dari provider) sebelum request
-   * dianggap mati. Timer di-reset setiap ada aktivitas (termasuk frame SSE
-   * keep-alive/thinking), jadi stream panjang TIDAK terpotong — hanya
-   * koneksi yang benar-benar berhenti bicara.
-   *
-   * 60 dtk: lebih pendek dari timeout turn mana pun, dan cukup di atas jeda
-   * wajar antar-chunk pada provider lambat + reasoning panjang saat pertama
-   * token belum keluar. Tanpa ini kegagalan "endpoint hidup tapi bisu"
-   * (proxy salah konfigurasi, TLS setengah terbuka, gateway overload) baru
-   * terlihat setelah 5 menit — user tak bisa membedakannya dari hang. */
+  /** Batas total maksimum satu stream HTTP provider yang TERUS aktif mengirim SSE byte/keepalive (1 jam). */
+  PROVIDER_STREAM_MAX_ACTIVE_MS: 3_600_000,
+  /** Batas tunggu byte/aktivitas PERTAMA dari provider sebelum request dianggap
+   * macet saat fase prefill/antrean (konteks 62k+ token / model reasoning tanpa
+   * SSE keepalive comment bisa melampaui 60 dtk sebelum token pertama keluar).
+   * Setelah byte/keepalive pertama tiba, batas turun ke `PROVIDER_IDLE_TIMEOUT_MS`. */
+  PROVIDER_FIRST_BYTE_TIMEOUT_MS: 90_000,
+  /** Batas DIAM antar-chunk (tidak ada byte/keepalive apa pun dari provider)
+   * setelah stream aktif sebelum request dianggap mati. Timer di-reset setiap
+   * ada byte SSE masuk (termasuk komentar `: OPENROUTER PROCESSING` / `: ping`),
+   * jadi stream lambat yang tetap hidup TIDAK terpotong. */
   PROVIDER_IDLE_TIMEOUT_MS: 60_000,
   /** F-16: cap akumulasi teks per stream (anti-OOM); hanya memotong kasus
    * patologis (~250rb token teks dalam satu turn). */
@@ -303,6 +307,8 @@ export const LIMITS = {
   OAUTH_REQUEST_TIMEOUT_MS: 15_000,
   /** Pricing dari models.dev — cache agar tidak menembak jaringan tiap run. */
   PRICING_FETCH_TIMEOUT_MS: 5_000,
+  /** Katalog models.dev asli ~4,4 MB; batasi baca stream pada 12 MiB agar tak OOM maupun terpotong di tengah JSON. */
+  PRICING_FETCH_MAX_BYTES: 12_582_912,
   PRICING_CACHE_TTL_MS: 86_400_000,
   LSP_DIAGNOSTICS_TIMEOUT_MS: 5_000,
   LSP_INIT_TIMEOUT_MS: 15_000,

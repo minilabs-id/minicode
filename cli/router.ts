@@ -4,6 +4,7 @@ export async function dispatch(
   args: string[],
   _getArg: (name: string) => string | undefined,
   HELP: string,
+  prepareAgentRuntime?: () => Promise<void>,
 ): Promise<boolean> {
   let cmdIndex = -1
   for (let i = 0; i < args.length; i++) {
@@ -130,6 +131,7 @@ export async function dispatch(
     return true
   }
   if (cmd === "mcp") {
+    if (!subArgv.includes("--help") && !subArgv.includes("-h")) await prepareAgentRuntime?.()
     const { handleMcp } = await import("./commands/mcp.ts")
     await handleMcp(scoped, subGetArg, HELP)
     return true
@@ -160,6 +162,7 @@ export async function dispatch(
     return true
   }
   if (cmd === "exec") {
+    if (!subArgv.includes("--help") && !subArgv.includes("-h")) await prepareAgentRuntime?.()
     const { handleExec } = await import("./commands/exec.ts")
     // P11.2 — argv scoped TANPA token "exec": guard lokal `args[0] === "exec"`
     // di handler hanya benar bila exec token pertama; dengan flag global
@@ -171,6 +174,7 @@ export async function dispatch(
     return true
   }
   if (cmd === "acp") {
+    if (!subArgv.includes("--help") && !subArgv.includes("-h")) await prepareAgentRuntime?.()
     // Fase 5: server JSON-RPC stdio minimal untuk IDE (subset, bukan ACP penuh).
     // Handler memblokir sampai stdin EOF/shutdown; tak ada sesi CLI yang dibuat.
     const { handleAcp } = await import("./commands/acp.ts")

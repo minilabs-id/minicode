@@ -3,6 +3,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { resetLocaleState, setSessionLocale } from "../src/ui/i18n/locale.ts"
+import { stripAnsi } from "../src/ui/render/theme.ts"
 import { resetAltScreenDepth } from "../src/ui/runtime/screen.ts"
 import { TuiApp, type TuiHost, type TuiStatusSnapshot } from "../src/ui/tui/app.ts"
 import { Transcript } from "../src/ui/tui/transcript.ts"
@@ -56,6 +57,7 @@ function setup(opts: { columns?: number; rows?: number; gateText?: string } = {}
   const transcript = new Transcript(bus as never, {})
   const calls: string[] = []
   const enqueued: string[] = []
+  const enqueuedDisplay: Array<string | undefined> = []
   const copied: string[] = []
   let releaseGate: (() => void) | undefined
 
@@ -73,8 +75,9 @@ function setup(opts: { columns?: number; rows?: number; gateText?: string } = {}
       }
       return undefined
     },
-    enqueue: (text) => {
+    enqueue: (text, displayText) => {
       enqueued.push(text)
+      enqueuedDisplay.push(displayText)
       return true
     },
     abort: () => {},
@@ -95,6 +98,7 @@ function setup(opts: { columns?: number; rows?: number; gateText?: string } = {}
     transcript,
     calls,
     enqueued,
+    enqueuedDisplay,
     copied,
     releaseSlow: async () => {
       releaseGate?.()
@@ -304,8 +308,8 @@ describe("kotak tipis sudut lengkung keliling composer (tanpa blok warna)", () =
 })
 
 describe("placeholder paste ringkas {paste text N lines}", () => {
-  test("paste 19 baris tampil ringkas di composer & transkrip, tapi submit mengirim penuh", async () => {
-    const { app, calls } = setup({ columns: 70, rows: 14 })
+  test("paste 19 baris tampil ringkas di composer, tapi terbuka penuh di transkrip chat & submit", async () => {
+    const { app, transcript, calls } = setup({ columns: 70, rows: 14 })
     const runP = app.run()
     await tty!.ready()
     await tty!.waitForOutput((o) => o.includes("00.00.00"))
@@ -322,8 +326,12 @@ describe("placeholder paste ringkas {paste text N lines}", () => {
     await waitForCall(calls, lines19)
     expect(calls).toEqual([lines19])
 
-    await tty!.waitForScreen((f) => f.some((l) => l.includes("minicode › {paste text 19 lines}")))
-    expect(tty!.screen().join("\n")).not.toContain("baris-rahasia-19")
+    await tty!.waitForScreen((f) => f.some((l) => l.includes("baris-rahasia-19")))
+    expect(tty!.screen().join("\n")).not.toContain("{paste text 19 lines}")
+    const view = stripAnsi(transcript.view(70, 30, 0).join("\n"))
+    expect(view).toContain("minicode › baris-rahasia-1")
+    expect(view).toContain("baris-rahasia-19")
+    expect(view).not.toContain("{paste text 19 lines}")
 
     await tty!.send(KEY.ctrlD)
     await runP
@@ -405,7 +413,7 @@ describe("placeholder paste ringkas {paste text N lines}", () => {
   })
 
   test("histori ↑ memulihkan token paste beserta payload penuh saat submit ulang", async () => {
-    const { app, calls } = setup({ columns: 70, rows: 14 })
+    const { app, transcript, calls } = setup({ columns: 70, rows: 14 })
     const runP = app.run()
     await tty!.ready()
     await tty!.waitForOutput((o) => o.includes("00.00.00"))
@@ -414,7 +422,8 @@ describe("placeholder paste ringkas {paste text N lines}", () => {
     await tty!.send(KEY.paste(payload))
     await tty!.send(KEY.enter)
     await waitForCall(calls, payload)
-    await tty!.waitForScreen((f) => f.some((l) => l.includes("minicode › {paste text 5 lines}")))
+    await tty!.waitForScreen((f) => f.some((l) => l.includes("hist-5")))
+    expect(transcript.view(70, 20, 0).join("\n")).not.toContain("{paste text 5 lines}")
 
     await tty!.send(KEY.up)
     expect(tty!.screen()[11] ?? "").toContain("{paste text 5 lines}")
@@ -426,8 +435,8 @@ describe("placeholder paste ringkas {paste text N lines}", () => {
     await runP
   })
 
-  test("paste bracketed saat busy (antre steering) tetap ter-ekspansi penuh", async () => {
-    const { app, calls, enqueued, releaseSlow } = setup({ columns: 70, rows: 14 })
+  test("paste bracketed saat busy (antre steering) tetap ter-ekspansi penuh ke model & gema transkrip", async () => {
+    const { app, calls, enqueued, enqueuedDisplay, releaseSlow } = setup({ columns: 70, rows: 14 })
     const runP = app.run()
     await tty!.ready()
     await tty!.waitForOutput((o) => o.includes("00.00.00"))
@@ -441,8 +450,40 @@ describe("placeholder paste ringkas {paste text N lines}", () => {
     expect(tty!.screen().join("\n")).toContain("{paste text 3 lines}")
     await tty!.send(KEY.enter)
     expect(enqueued).toEqual([queuedPayload])
+    expect(enqueuedDisplay).toEqual([queuedPayload])
 
     await releaseSlow()
+    await tty!.send(KEY.ctrlD)
+    await runP
+  })
+
+  test("paste 9 baris ringkas di composer dan terbuka lengkap di history chat setelah Enter", async () => {
+    const { app, transcript, calls } = setup({ columns: 80, rows: 20 })
+    const runP = app.run()
+    await tty!.ready()
+    await tty!.waitForOutput((o) => o.includes("00.00.00"))
+
+    const lines9 = Array.from(
+      { length: 9 },
+      (_, i) => `✦ 1 sub agent · ${20 + i} tool · 0 failed`,
+    ).join("\n")
+    await tty!.send(KEY.paste(lines9))
+    expect(tty!.screen().join("\n")).toContain("{paste text 9 lines}")
+
+    await tty!.send(KEY.enter)
+    await waitForCall(calls, lines9)
+    expect(calls).toEqual([lines9])
+
+    await tty!.waitForScreen((f) =>
+      f.some((l) => l.includes("minicode › ✦ 1 sub agent · 20 tool · 0 failed")),
+    )
+    const screen = tty!.screen().join("\n")
+    expect(screen).toContain("28 tool · 0 failed")
+    expect(screen).not.toContain("{paste text 9 lines}")
+    const log = stripAnsi(transcript.view(80, 20, 0).join("\n"))
+    expect(log).toContain("minicode › ✦ 1 sub agent · 20 tool · 0 failed")
+    expect(log).toContain("28 tool · 0 failed")
+
     await tty!.send(KEY.ctrlD)
     await runP
   })

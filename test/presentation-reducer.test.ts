@@ -74,6 +74,7 @@ function toolStarted(
   opts: {
     qualified?: string
     target?: string
+    intent?: string
     turnId?: number
     sessionId?: string
     startSeq?: number
@@ -100,6 +101,7 @@ function toolStarted(
     identity,
     argsSummary: {
       ...(opts.target ? { target: opts.target } : {}),
+      ...(opts.intent ? { intent: opts.intent } : {}),
       text: opts.target ? `path=${opts.target}` : "",
     },
     ...(opts.sessionId ? { sessionId: opts.sessionId } : {}),
@@ -753,6 +755,22 @@ describe("deriveSupersedes", () => {
       startSeq: 1,
     })
     expect(id).toBeUndefined()
+  })
+
+  test("delegate_task berbeda tugas dengan target undefined tidak dianggap retry, intent sama dianggap retry", () => {
+    seq = 0
+    const state = createInitialState("s1")
+    feed(state, [
+      turnStarted(1),
+      toolStarted("d1", { qualified: "delegate_task", intent: "Audit tema" }),
+      toolTerminal("d1", "failed"),
+      toolStarted("d2", { qualified: "delegate_task", intent: "Audit popup" }),
+      toolStarted("d3", { qualified: "delegate_task" }),
+      toolStarted("d4", { qualified: "delegate_task", intent: "Audit tema" }),
+    ])
+    expect(state.activities.get(activityKey("s1", "d2"))?.supersedes).toBeUndefined()
+    expect(state.activities.get(activityKey("s1", "d3"))?.supersedes).toBeUndefined()
+    expect(state.activities.get(activityKey("s1", "d4"))?.supersedes).toBe("d1")
   })
 })
 

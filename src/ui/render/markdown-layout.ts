@@ -124,7 +124,21 @@ export function computeAssistantLineLayout(
   return { firstLead, hangingIndent }
 }
 
-export type FlowLineKind = "none" | "heading" | "list" | "blockquote" | "fenceClose" | "prose"
+const HORIZONTAL_RULE_RE = /^\s*(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/
+
+/** Deteksi garis pemisah horizontal markdown (`***`, `---`, `___`, `* * *`). */
+export function isHorizontalRule(line: string): boolean {
+  return HORIZONTAL_RULE_RE.test(line)
+}
+
+export type FlowLineKind =
+  | "none"
+  | "heading"
+  | "list"
+  | "blockquote"
+  | "fenceClose"
+  | "hr"
+  | "prose"
 
 export interface MarkdownFlowState {
   prevKind: FlowLineKind
@@ -138,10 +152,12 @@ export interface MarkdownFlowState {
 }
 
 function classifyNonFenceLine(line: string): {
-  kind: "heading" | "list" | "blockquote" | "prose"
+  kind: "heading" | "list" | "blockquote" | "hr" | "prose"
   indentCols: number
 } {
-  if (/^#{1,6}\s/.test(line)) return { kind: "heading", indentCols: 0 }
+  const heading = /^(\s*)#{1,6}\s/.exec(line)
+  if (heading) return { kind: "heading", indentCols: displayWidth(heading[1]!) }
+  if (isHorizontalRule(line)) return { kind: "hr", indentCols: 0 }
   const listItem = /^(\s*)([-*+]|\d+[.)])\s+/.exec(line)
   if (listItem) return { kind: "list", indentCols: displayWidth(listItem[1]!) }
   if (/^\s*>/.test(line)) return { kind: "blockquote", indentCols: 0 }
@@ -222,9 +238,13 @@ export class MarkdownFlowStepper {
     let needSpacer = false
 
     if (this.state.hasContent && !this.state.prevWasBlank) {
-      if (curr.kind === "heading") {
+      if (curr.kind === "heading" || curr.kind === "hr") {
         needSpacer = true
-      } else if (this.state.prevKind === "heading" || this.state.prevKind === "fenceClose") {
+      } else if (
+        this.state.prevKind === "heading" ||
+        this.state.prevKind === "fenceClose" ||
+        this.state.prevKind === "hr"
+      ) {
         needSpacer = true
       } else if (curr.kind === "blockquote") {
         needSpacer = this.state.prevKind !== "blockquote"
@@ -308,7 +328,7 @@ export function formatAssistantSpacing(text: string): string {
     const needSpacer = flow.onLine(line)
     // Hanya bab/poin utama (#..###) yang dapat dua baris; `####` ke bawah
     // tetap satu agar sub-bab tak seluas bab induknya.
-    if (/^#{1,3}\s/.test(line) && out.length > 0) {
+    if (/^\s*#{1,3}\s/.test(line) && out.length > 0) {
       // v0.33: antar BAB/poin utama (`### 6)`, `### 7)`, …) beri DUA baris
       // kosong supaya terlihat sebagai pemisah bab. Sub-poin bullet tetap rapat
       // (blank di dalam daftar ditelan oleh `onBlank`).

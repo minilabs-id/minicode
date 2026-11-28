@@ -8,7 +8,7 @@
 // Refresh token disimpan karena itu inti dari nilai OAuth: user login sekali,
 // lalu access token diperbarui otomatis tanpa interaksi.
 
-import { readFile } from "node:fs/promises"
+import { readFile, stat } from "node:fs/promises"
 import { join } from "node:path"
 import { atomicWriteText } from "../lib/atomic-write.ts"
 import { homeDir } from "../lib/db-path.ts"
@@ -63,9 +63,45 @@ async function withAuthLock<T>(path: string, fn: () => Promise<T>): Promise<T> {
   }
 }
 
+const authStoreCache = new Map<
+  string,
+  { ino: bigint; mtimeNs: bigint; ctimeNs: bigint; size: bigint; store: AuthStore }
+>()
+
+function cloneAuthStore(store: AuthStore): AuthStore {
+  const copy: AuthStore = {}
+  for (const [k, v] of Object.entries(store)) copy[k] = { ...v }
+  return copy
+}
+
 export async function loadAuthStore(): Promise<AuthStore> {
+  const path = authFilePath()
+  let fileStat: { ino: bigint; mtimeNs: bigint; ctimeNs: bigint; size: bigint } | null = null
   try {
-    const raw = await readFile(authFilePath(), "utf8")
+    fileStat = (await stat(path, { bigint: true })) as unknown as {
+      ino: bigint
+      mtimeNs: bigint
+      ctimeNs: bigint
+      size: bigint
+    }
+    const hit = authStoreCache.get(path)
+    if (
+      hit &&
+      hit.ino === fileStat.ino &&
+      hit.mtimeNs === fileStat.mtimeNs &&
+      hit.ctimeNs === fileStat.ctimeNs &&
+      hit.size === fileStat.size
+    ) {
+      return cloneAuthStore(hit.store)
+    }
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") {
+      authStoreCache.delete(path)
+      return {}
+    }
+  }
+  try {
+    const raw = await readFile(path, "utf8")
     const parsed = JSON.parse(raw) as unknown
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {}
     const out: AuthStore = {}
@@ -85,9 +121,20 @@ export async function loadAuthStore(): Promise<AuthStore> {
         }
       }
     }
+    if (fileStat) {
+      if (authStoreCache.size >= 16) authStoreCache.clear()
+      authStoreCache.set(path, {
+        ino: fileStat.ino,
+        mtimeNs: fileStat.mtimeNs,
+        ctimeNs: fileStat.ctimeNs,
+        size: fileStat.size,
+        store: cloneAuthStore(out),
+      })
+    }
     return out
   } catch {
     // Tidak ada file / JSON rusak = belum login. Bukan kondisi error.
+    authStoreCache.delete(path)
     return {}
   }
 }
@@ -97,6 +144,7 @@ export async function saveAuth(providerId: string, creds: AuthCredentials): Prom
   return withAuthLock(path, async () => {
     const store = await loadAuthStore()
     store[providerId] = creds
+    authStoreCache.delete(path)
     // atomicWriteText sudah chmod 600 + O_EXCL tmp; tak perlu perlakuan khusus.
     await atomicWriteText(path, JSON.stringify(store, null, 2))
   })
@@ -108,6 +156,7 @@ export async function removeAuth(providerId: string): Promise<boolean> {
     const store = await loadAuthStore()
     if (!store[providerId]) return false
     delete store[providerId]
+    authStoreCache.delete(path)
     await atomicWriteText(path, JSON.stringify(store, null, 2))
     return true
   })

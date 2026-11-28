@@ -1,4 +1,4 @@
-import { rmSync } from "node:fs"
+import { readFileSync, rmSync } from "node:fs"
 import { mkdir, readFile } from "node:fs/promises"
 import { resolve } from "node:path"
 import type { Tool } from "#minicore"
@@ -537,6 +537,24 @@ async function readTodoFile(p: string): Promise<TodoItem[] | null> {
 }
 
 /**
+ * Baca & format daftar todo tersimpan secara sinkron tanpa menerapkan kebijakan
+ * completion — dipakai compaction saat pesan `todo_write` lama telah terlipat
+ * pasca `--resume` (ketika WeakSet provenance in-memory kosong).
+ */
+export function readPersistedTaskStateSync(sessionId: string, cwd: string): string | null {
+  for (const p of [todoPath(sessionId, cwd), legacyTodoPath(sessionId, cwd)]) {
+    try {
+      const raw = readFileSync(p, "utf8")
+      const parsed = JSON.parse(raw) as { todos?: unknown }
+      if (!Array.isArray(parsed.todos)) continue
+      const items = normalizeTodos(parsed.todos, UNVERIFIED)
+      return items.length > 0 ? renderTodos(items) : null
+    } catch {}
+  }
+  return null
+}
+
+/**
  * Rekonsiliasi completion SETELAH verify selesai.
  *
  * Menutup gap PF-01: `todo_write` berjalan sebelum verify sebuah turn, jadi
@@ -604,7 +622,7 @@ export async function reconcileCompletionEvidence(
             canonicalChanged = true
           }
         }
-      })
+      }, true)
     }
     if (canonicalChanged) {
       return await syncTodoViewsFromTaskStore(sessionId, cwd)
@@ -776,22 +794,19 @@ export const todoWriteTool: Tool = {
   name: "todo_write",
   // v7.33 (wire contract): tag PLAN (todo = rencana, bukan file/memori).
   description:
-    "PLAN: Write/replace the entire todo list (send the full list, never a delta). Use for 3+ steps: keep exactly one item in_progress. A full list with no taskId is auto-repaired ONLY when every item's content exactly matches an existing task (count included); any mismatch is REJECTED — call todo_read and echo every item's taskId (ids are never invented; omit taskId only for genuinely new items). Completed/cancelled tasks are terminal (never reopen them to pending/in_progress); to start a new topic in the same session, keep existing terminal taskId(s) unchanged and append new items without taskId. Claiming completed while verification is failing/stale is REFUSED — it returns blocked with the reason; fix the check or re-verify first.",
+    "PLAN: Write or patch the todo list (use updates:[{taskId,status}] for delta status updates, or todos as a full list, never a delta). Keep one item in_progress. New items: OMIT `taskId` (auto-assigned). Updating existing items via todos: call `todo_read` and echo exact `taskId` (ids are never invented; id-less full list auto-repairs only on exact content+count match, else REJECTED). Never reopen completed/cancelled tasks; claim completed only with passing verification (otherwise REFUSED → blocked).",
   parameters: {
     type: "object",
     properties: {
       todos: {
         type: "array",
-        description: "non-empty full todo list (replace, not delta)",
+        description: "full todo list (replace, not delta); use when creating/reordering items",
         items: {
           type: "object",
           properties: {
             content: { type: "string", description: "short, actionable task item" },
             // `blocked` SENGAJA tidak ada di enum model: itu status yang
             // ditegakkan runtime (verifikasi merah) dan selalu membawa alasan.
-            // Jika model boleh memilihnya, `blocked` berubah menjadi generic
-            // non-completed state - tercampur "verify merah" dengan "agen
-            // menyerah" (PF-04).
             status: {
               type: "string",
               enum: ["pending", "in_progress", "completed", "cancelled"],
@@ -803,45 +818,132 @@ export const todoWriteTool: Tool = {
             taskId: {
               type: "string",
               description:
-                "Canonical task id (e.g. t1) of an EXISTING task, as returned by todo_read. Omit for a new task. Never invent one.",
+                "OMIT for new items (auto-assigned); echo canonical id from todo_read for existing items, never invent.",
             },
           },
           required: ["content", "status"],
           additionalProperties: false,
         },
       },
+      updates: {
+        type: "array",
+        description: "incremental status updates by canonical taskId (avoids resending full todos)",
+        items: {
+          type: "object",
+          properties: {
+            taskId: {
+              type: "string",
+              description: "canonical id returned by todo_read/todo_write",
+            },
+            status: {
+              type: "string",
+              enum: ["pending", "in_progress", "completed", "cancelled"],
+            },
+          },
+          required: ["taskId", "status"],
+          additionalProperties: false,
+        },
+      },
     },
-    required: ["todos"],
+    required: [],
     additionalProperties: false,
   },
-  async execute({ todos }, ctx) {
+  async execute({ todos, updates }, ctx) {
     ctx.signal.throwIfAborted()
+    if ((todos !== undefined) === (updates !== undefined)) {
+      throw new Error(
+        "provide either todos (full list) or updates (delta status patches), not both or neither",
+      )
+    }
     // PHASE 4A.4B - bind ONCE, before the first await. `sessionId` and `cwd` are
     // immutable for the rest of this operation, so no later request can redirect
     // the JSON write, the TaskStore namespace, the assignment stamp or the plan
     // snapshot to another session.
-    //
-    // cwd resolution order is unchanged: ToolContext first (--cwd / sub-agent),
-    // then the composition-root global, then the process cwd.
     const { sessionId, cwd } = todoOperationContext(ctx)
     // P10.1.1: bukti diselesaikan terhadap kesegaran mutasi (async) SEBELUM
     // gate murni — `normalizeTodos` tetap sync tanpa I/O.
     const evidence = await resolveFreshEvidence(sessionId, cwd)
-    // Indeks item valid (setelah pemangkasan content kosong, persis urutan
-    // `normalizeTodos`) yang diajukan `completed` oleh model. Dipakai saat
-    // `requireVerified && unverified` agar TaskStore menahan baris di VERIFYING.
     const rawDeclaredCompleted = new Set<number>()
-    if (Array.isArray(todos)) {
-      let validIdx = 0
-      for (const raw of todos.slice(0, LIMITS.TODO_MAX_ITEMS)) {
-        if (!raw || typeof raw !== "object") continue
-        const r = raw as { content?: unknown; status?: unknown }
-        if (!String(r.content ?? "").trim()) continue
-        if (r.status === "completed") rawDeclaredCompleted.add(validIdx)
-        validIdx += 1
+    let list: TodoItem[]
+
+    if (updates !== undefined) {
+      if (!Array.isArray(updates) || updates.length === 0) {
+        throw new Error("updates must be a non-empty array")
       }
+      const patchById = new Map<string, TodoStatus>()
+      for (const raw of updates) {
+        if (!raw || typeof raw !== "object") continue
+        const u = raw as { taskId?: unknown; status?: unknown }
+        if (!isTaskId(u.taskId)) {
+          throw new Error(`todo item has a non-canonical taskId: ${String(u.taskId)}`)
+        }
+        if (patchById.has(u.taskId)) {
+          throw new Error(`duplicate taskId in updates: ${u.taskId}`)
+        }
+        if (typeof u.status !== "string" || !STATUSES.includes(u.status as TodoStatus)) {
+          throw new Error(`invalid status for taskId ${u.taskId}: ${String(u.status)}`)
+        }
+        patchById.set(u.taskId, u.status as TodoStatus)
+      }
+      if (patchById.size === 0) throw new Error("updates must be a non-empty array")
+
+      const existing = await loadTodos(sessionId, cwd)
+      if (existing.length === 0) {
+        const msg = hasCanonicalTasks(cwd, sessionId)
+          ? "canonical tasks exist on disk; call todo_read first to fetch their taskIds."
+          : "no existing todos yet; provide initial items via `todos` first."
+        throw new TaskError("TASK_IDENTITY_REQUIRED", msg)
+      }
+      const knownIds = new Set(
+        existing.map((t) => t.taskId).filter((id): id is string => Boolean(id)),
+      )
+      for (const id of patchById.keys()) {
+        if (!knownIds.has(id)) {
+          const valid = [...knownIds].join(", ") || "none"
+          throw new TaskError(
+            "TASK_IDENTITY_REQUIRED",
+            `unknown taskId ${id} in updates (valid: ${valid}). Call todo_read and use exact existing ids.`,
+          )
+        }
+      }
+      // Hanya klaim `completed` BARU di `updates` yang diuji kebijakan completion
+      // agar task yang sudah verified sebelumnya tidak ter-downgrade saat update item lain.
+      let newlyActivatedId: string | undefined
+      list = existing.map((item, idx) => {
+        const nextStatus = item.taskId ? patchById.get(item.taskId) : undefined
+        if (!nextStatus) return item
+        if (nextStatus === "in_progress") newlyActivatedId = item.taskId
+        if (nextStatus === "completed") {
+          rawDeclaredCompleted.add(idx)
+          const checked = applyCompletionPolicy([{ ...item, status: "completed" }], evidence)
+          if (checked) return checked[0]!
+        }
+        const { blockedReason: _oldReason, ...clean } = item
+        return { ...clean, status: nextStatus }
+      })
+      if (newlyActivatedId) {
+        list = list.map((item) =>
+          item.status === "in_progress" && item.taskId !== newlyActivatedId
+            ? { ...item, status: "pending" as const }
+            : item,
+        )
+      }
+    } else {
+      // Indeks item valid (setelah pemangkasan content kosong, persis urutan
+      // `normalizeTodos`) yang diajukan `completed` oleh model. Dipakai saat
+      // `requireVerified && unverified` agar TaskStore menahan baris di VERIFYING.
+      if (Array.isArray(todos)) {
+        let validIdx = 0
+        for (const raw of todos.slice(0, LIMITS.TODO_MAX_ITEMS)) {
+          if (!raw || typeof raw !== "object") continue
+          const r = raw as { content?: unknown; status?: unknown }
+          if (!String(r.content ?? "").trim()) continue
+          if (r.status === "completed") rawDeclaredCompleted.add(validIdx)
+          validIdx += 1
+        }
+      }
+      list = normalizeTodos(todos, evidence)
     }
-    let list = normalizeTodos(todos, evidence)
 
     // PHASE 4A.5 + [AUDIT-FIX / stale todo] — identitas untuk deklarasi penuh.
     //

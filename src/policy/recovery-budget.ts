@@ -67,6 +67,11 @@ export const RECOVERY_BUDGET_MS = 45_000
  * cepat (≈10–15 dtk) begitu polanya jelas "gagal terus". */
 export const RECOVERY_ATTEMPT_QUOTA = 6
 
+/** Batas percobaan retry untuk kegagalan timeout/stall koneksi per episode
+ * (persetujuan pemilik 2026-11-27: 2× retry agar stall sementara bisa pulih
+ * tanpa mengembalikan anti-pattern 6 × 60-90 dtk pada endpoint yang mati total). */
+export const RECOVERY_STALL_RETRY_CAP = 2
+
 /** Backoff dasar dan plafon per percobaan (ms).
  *
  * KENAPA 500 dan 8 dtk: AWS memakai base 50 ms untuk transient (sangat cepat
@@ -109,12 +114,14 @@ export type RecoveryDecision =
 
 /** Keadaan anggaran pada satu titik waktu. */
 export interface RecoveryState {
-  /** Waktu mulai percobaan pertama (epoch ms). */
+  /** Waktu mulai episode kegagalan (epoch ms). */
   startedAtMs: number
   /** Waktu sekarang (epoch ms) — diberikan pemanggil, bukan diambil sendiri. */
   nowMs: number
   /** Percobaan yang SUDAH dipakai dari kuota. */
   attemptsUsed: number
+  /** Percobaan retry stall/timeout yang SUDAH dipakai di episode aktif. */
+  stallAttemptsUsed?: number
 }
 
 /** Sinyal kegagalan minimum, dipisah dari kelas error konkret agar murni. */
@@ -127,6 +134,8 @@ export interface FailureSignal {
   abortedByUser?: boolean
   /** Petunjuk tunggu dari provider (`Retry-After`), ms. */
   retryAfterMs?: number
+  /** True bila kegagalan dipicu timeout/stall koneksi (tunggu >= idle/request timeout). */
+  stalled?: boolean
 }
 
 /** Kategori provider yang layak dicoba ulang: gangguan di sisi penyedia/jaringan.
@@ -247,6 +256,84 @@ export function recoveryDelay(
  *   4. Kuota percobaan (fail fast saat pola sudah jelas).
  *   5. Anggaran waktu total (pagar terakhir).
  */
+/** Batas waktu total menunggu gangguan penyedia berkelanjutan di mode `--autonomous` (4 jam). */
+export const AUTONOMOUS_OUTAGE_MAX_WAIT_MS = 14_400_000
+/** Tangga jeda cooldown bertahap untuk gangguan panjang tanpa thundering herd (maks 15 mnt). */
+export const AUTONOMOUS_COOLDOWN_STEPS_MS: readonly number[] = [
+  15_000, 30_000, 60_000, 120_000, 300_000, 600_000, 900_000,
+]
+
+export function isPermanentQuotaMessage(message?: string): boolean {
+  if (!message) return false
+  return (
+    /\b402\b/.test(message) ||
+    /quota[\s_]?exceeded|insufficient[\s_]?quota|exceeded (?:its|your) quota|credit[\s_]?balance[\s_]?exhausted/i.test(
+      message,
+    )
+  )
+}
+
+/**
+ * Tier-2 pemulihan untuk mode otonom multi-jam/hari: ketika kuota cepat 45 dtk
+ * habis pada gangguan server/jaringan/rate-limit sementara, tunggu terukur hingga
+ * batas `maxWaitMs` alih-alih mematikan eksekusi semalam suntuk.
+ */
+export function planAutonomousOutageCooldown(input: {
+  failure: FailureSignal & { message?: string }
+  elapsedOutageMs: number
+  cooldownAttempt: number
+  hasPrompt: boolean
+  costBudgetExhausted?: boolean
+  maxWaitMs?: number
+  random?: () => number
+}): RecoveryDecision {
+  const { failure } = input
+  if (!input.hasPrompt) return { action: "stop", reason: "no-prompt" }
+  if (failure.abortedByUser === true || failure.kind === "aborted")
+    return { action: "stop", reason: "user-abort" }
+  if (input.costBudgetExhausted === true) return { action: "stop", reason: "cost-budget" }
+  if (failure.kind !== undefined && TERMINAL_KINDS.has(failure.kind))
+    return { action: "stop", reason: "not-transient" }
+  if (failure.category !== undefined && TERMINAL_CATEGORIES.has(failure.category))
+    return { action: "stop", reason: "not-transient" }
+  if (isPermanentQuotaMessage(failure.message)) return { action: "stop", reason: "not-transient" }
+
+  const recoverable =
+    failure.category === "server" ||
+    failure.category === "network" ||
+    failure.category === "rate_limit" ||
+    failure.kind === "provider"
+  if (!recoverable) return { action: "stop", reason: "not-transient" }
+
+  const maxWaitMs =
+    input.maxWaitMs !== undefined && Number.isFinite(input.maxWaitMs) && input.maxWaitMs > 0
+      ? input.maxWaitMs
+      : AUTONOMOUS_OUTAGE_MAX_WAIT_MS
+  const remainingMs = maxWaitMs - Math.max(0, input.elapsedOutageMs)
+  if (remainingMs <= 1_000) return { action: "stop", reason: "budget-exhausted" }
+
+  const idx = Math.min(Math.max(0, input.cooldownAttempt), AUTONOMOUS_COOLDOWN_STEPS_MS.length - 1)
+  const baseStep = AUTONOMOUS_COOLDOWN_STEPS_MS[idx] ?? 900_000
+  const maxStep = Math.max(baseStep, 900_000)
+  const retryFloor =
+    failure.retryAfterMs !== undefined &&
+    Number.isFinite(failure.retryAfterMs) &&
+    failure.retryAfterMs > 0
+      ? Math.min(failure.retryAfterMs, maxStep)
+      : 0
+  const target = Math.max(baseStep, retryFloor)
+  const r = Math.min(1, Math.max(0, (input.random ?? Math.random)()))
+  // Jitter separuh bawah menjaga jeda tidak pernah turun menjadi spam hot-retry.
+  const delayMs = Math.min(remainingMs, Math.round(target * (0.5 + 0.5 * r)))
+  if (delayMs >= remainingMs) return { action: "stop", reason: "budget-exhausted" }
+  return {
+    action: "retry",
+    attempt: input.cooldownAttempt + 1,
+    delayMs,
+    remainingMs: remainingMs - delayMs,
+  }
+}
+
 export function planRecovery(
   failure: FailureSignal,
   state: RecoveryState,
@@ -275,13 +362,28 @@ export function planRecovery(
     return { action: "stop", reason: "attempts-exhausted" }
 
   const elapsed = state.nowMs - state.startedAtMs
-  const budgetMs =
+  const hasExplicitBudget =
     opts.budgetMs !== undefined && Number.isFinite(opts.budgetMs) && opts.budgetMs > 0
-      ? opts.budgetMs
-      : RECOVERY_BUDGET_MS
+  const budgetMs = hasExplicitBudget ? opts.budgetMs! : RECOVERY_BUDGET_MS
   const remainingMs = budgetMs - elapsed
   const attempt = state.attemptsUsed + 1
   const delayMs = recoveryDelay(attempt, failure.retryAfterMs, opts.random)
+  if (failure.stalled === true) {
+    // Stall/timeout baru terdeteksi setelah menunggu >= 60–90 dtk, jadi jam
+    // 45 dtk untuk gangguan cepat tidak boleh memblokir retry ke-1..2; pagarnya
+    // adalah RECOVERY_STALL_RETRY_CAP (2×) + kuota bersama (6).
+    const stallUsed = state.stallAttemptsUsed ?? 0
+    if (stallUsed >= RECOVERY_STALL_RETRY_CAP)
+      return { action: "stop", reason: "attempts-exhausted" }
+    if (hasExplicitBudget && delayMs >= remainingMs)
+      return { action: "stop", reason: "budget-exhausted" }
+    return {
+      action: "retry",
+      attempt,
+      delayMs,
+      remainingMs: Math.max(0, remainingMs - delayMs),
+    }
+  }
   // Perlu sisa untuk jeda ini DAN untuk percobaan sesudahnya. Kalau jeda saja
   // sudah melebihi sisa anggaran, menunggu lalu mencoba lagi hanya membuat user
   // menunggu tanpa kesempatan berhasil.

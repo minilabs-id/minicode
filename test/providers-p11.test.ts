@@ -74,6 +74,7 @@ test("responses: reasoning summary delta menjadi extension reasoning", async () 
         sseBody([
           JSON.stringify({ type: "response.reasoning_summary_text.delta", delta: "memeriksa" }),
           JSON.stringify({ type: "response.output_text.delta", delta: "jawaban" }),
+          "[DONE]",
         ]),
         { headers: { "content-type": "text/event-stream" } },
       ),
@@ -100,17 +101,19 @@ test("responses: reasoning summary delta menjadi extension reasoning", async () 
   }
 })
 
-test("responses: previous_response_id dirantai dari completed id", async () => {
+test("responses: previous_response_id mengirim hanya delta pasca-response dan reset saat kompaksi", async () => {
   clearResponsesChain()
   const bodies: string[] = []
+  let seq = 0
   const srv = Bun.serve({
     port: 0,
     fetch: async (req) => {
       bodies.push(await req.text())
+      seq += 1
       return new Response(
         sseBody([
           JSON.stringify({ type: "response.output_text.delta", delta: "ok" }),
-          JSON.stringify({ type: "response.completed", response: { id: "resp_abc123" } }),
+          JSON.stringify({ type: "response.completed", response: { id: `resp_abc${seq}` } }),
         ]),
         { headers: { "content-type": "text/event-stream" } },
       )
@@ -121,17 +124,81 @@ test("responses: previous_response_id dirantai dari completed id", async () => {
       baseUrl: `http://127.0.0.1:${srv.port}/v1`,
       models: ["m"],
     })
-    await collect(p)
-    await collect(p)
-    expect(bodies.length).toBe(2)
+    const u0 = { role: "user" as const, content: "hi" }
+    const a0 = { role: "assistant" as const, content: "ok" }
+    const u1 = { role: "user" as const, content: "follow up" }
+    for await (const _ of p.stream({ messages: [u0], model: "m" }, new AbortController().signal)) {
+    }
+    for await (const _ of p.stream(
+      { messages: [u0, a0, u1], model: "m" },
+      new AbortController().signal,
+    )) {
+    }
+    // Simulasi kompaksi / reset cabang: histori berubah → wajib reset chain & kirim penuh.
+    for await (const _ of p.stream(
+      { messages: [{ role: "user", content: "compacted summary" }], model: "m" },
+      new AbortController().signal,
+    )) {
+    }
+    expect(bodies.length).toBe(3)
     const first = JSON.parse(bodies[0]!) as Record<string, unknown>
-    const second = JSON.parse(bodies[1]!) as Record<string, unknown>
-    expect(second.previous_response_id).toBe("resp_abc123")
-    // v7.31: endpoint ketat menolak `store:false` + `previous_response_id`.
-    // Karena id turn pertama disimpan untuk chaining, turn pertama pun store:true.
+    const second = JSON.parse(bodies[1]!) as {
+      previous_response_id?: string
+      store?: boolean
+      input?: { role?: string; content?: string }[]
+    }
+    const third = JSON.parse(bodies[2]!) as Record<string, unknown>
     expect(first.store).toBe(true)
     expect("previous_response_id" in first).toBe(false)
     expect(second.store).toBe(true)
+    expect(second.previous_response_id).toBe("resp_abc1")
+    // Delta saja: hanya user baru `follow up`, tanpa duplikasi `hi` / `ok`.
+    expect(second.input).toEqual([{ role: "user", content: "follow up" }])
+    expect("previous_response_id" in third).toBe(false)
+  } finally {
+    srv.stop(true)
+  }
+})
+
+test("responses: response.incomplete menghapus jangkar chain agar turn berikut kirim penuh", async () => {
+  clearResponsesChain()
+  const bodies: string[] = []
+  let seq = 0
+  const srv = Bun.serve({
+    port: 0,
+    fetch: async (req) => {
+      bodies.push(await req.text())
+      seq += 1
+      return new Response(
+        sseBody([
+          seq === 1
+            ? JSON.stringify({
+                type: "response.incomplete",
+                response: { id: "resp_inc_1", incomplete_details: { reason: "max_output_tokens" } },
+              })
+            : JSON.stringify({ type: "response.completed", response: { id: "resp_ok_2" } }),
+        ]),
+        { headers: { "content-type": "text/event-stream" } },
+      )
+    },
+  })
+  try {
+    const p = createResponsesProvider({
+      baseUrl: `http://127.0.0.1:${srv.port}/v1`,
+      models: ["m"],
+    })
+    const u0 = { role: "user" as const, content: "hi" }
+    const a0 = { role: "assistant" as const, content: "partial" }
+    const u1 = { role: "user" as const, content: "continue" }
+    for await (const _ of p.stream({ messages: [u0], model: "m" }, new AbortController().signal)) {
+    }
+    for await (const _ of p.stream(
+      { messages: [u0, a0, u1], model: "m" },
+      new AbortController().signal,
+    )) {
+    }
+    const second = JSON.parse(bodies[1]!) as Record<string, unknown>
+    expect("previous_response_id" in second).toBe(false)
   } finally {
     srv.stop(true)
   }
@@ -169,7 +236,7 @@ test("responses: effort hanya untuk keluarga openai-reasoning", async () => {
     fetch: async (req) => {
       bodies.push(await req.text())
       return new Response(
-        sseBody([JSON.stringify({ type: "response.output_text.delta", delta: "ok" })]),
+        sseBody([JSON.stringify({ type: "response.output_text.delta", delta: "ok" }), "[DONE]"]),
         { headers: { "content-type": "text/event-stream" } },
       )
     },

@@ -416,6 +416,36 @@ test("audit: system final (base + hint live) tetap ≤ 8000 char", async () => {
   }
 })
 
+test("Wave 4: repo dengan AGENTS.md & MEMORY.md besar tetap menyisakan # Repo map di dalam batas 8000", async () => {
+  const dir = tmpRoot()
+  try {
+    mkdirSync(join(dir, ".minicode"), { recursive: true })
+    mkdirSync(join(dir, "src"), { recursive: true })
+    writeFileSync(join(dir, "AGENTS.md"), `# Rules\n${"Panduan proyek penting.\n".repeat(400)}`)
+    writeFileSync(
+      join(dir, ".minicode", "MEMORY.md"),
+      `fakta arsitektur ${"detail ".repeat(150)}\n`,
+    )
+    writeFileSync(
+      join(dir, "src", "core.ts"),
+      "export const CORE = 1\nexport function initCore() {}\n",
+    )
+    writeFileSync(
+      join(dir, "src", "app.ts"),
+      "import { CORE, initCore } from './core.ts'\nexport const run = () => CORE + Number(Boolean(initCore))\n",
+    )
+
+    const base = await buildSystemPrompt({ cwd: dir, reserveForLiveHints: 1200 })
+    expect(base.length).toBeLessThanOrEqual(6800)
+    expect(base).toContain("# Repo map (symbols)")
+    expect(base).toContain("src/core.ts")
+    expect(base).toContain("# MEMORY")
+    expect(base).toContain("# AGENTS.md")
+  } finally {
+    await cleanup(dir)
+  }
+})
+
 test("audit: summary bertahan save/load (resume merekonstruksi sama)", async () => {
   const dir = tmpRoot()
   try {

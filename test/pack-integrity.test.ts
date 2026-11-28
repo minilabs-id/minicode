@@ -176,11 +176,11 @@ describe("audit #11: permukaan pack tepat", () => {
 //   3. gate `pack-check` memakai budget yang sama (tak ada angka liar di
 //      dua tempat).
 describe("budget ukuran paket", () => {
-  test("budget = 5.250 KiB (5,13 MiB) sesuai keputusan owner 2026-11-25", () => {
-    // v0.50.0: re-baseline 5.000 -> 5.250 KiB disetujui pemilik pasca hardening
-    // & UI/compaction (paket aktual 5.013 KiB / 342 file). Sumber angka tetap pack-budget.ts.
-    expect(PACK_SIZE_BUDGET_KIB).toBe(5250)
-    expect(PACK_SIZE_BUDGET_KIB / 1024).toBeCloseTo(5.126953125, 6)
+  test("budget = 5.500 KiB (5,37 MiB) sesuai keputusan owner 2026-11-28", () => {
+    // Re-baseline 5.250 -> 5.500 KiB disetujui pemilik via Gate G2 (2026-11-28;
+    // pra-Wave 1 sudah 5.324 KiB, pasca Wave 1-5 ~5.379 KiB / 348 file).
+    expect(PACK_SIZE_BUDGET_KIB).toBe(5500)
+    expect(PACK_SIZE_BUDGET_KIB / 1024).toBeCloseTo(5.37109375, 6)
   })
 
   test("ukuran tepat di bawah budget lolos; di atas budget GAGAL", () => {

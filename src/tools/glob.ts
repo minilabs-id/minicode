@@ -5,18 +5,32 @@ import { loadIgnoreMatchers } from "../lib/ignore.ts"
 import { resolveSearchRoot, walkWorkspaceFiles } from "./context.ts"
 
 export function globToRegExp(glob: string): RegExp {
+  // Sentinel brace/rekursif dulu memakai NUL byte (`\0`); karakter NUL literal
+  // dari input JSON bisa menabrak sentinel dan menyuntik sintaks RegExp. Tolak
+  // NUL upfront lalu pakai pemindaian karakter sederhana agar bebas benturan.
+  if (glob.includes("\0")) {
+    throw new Error("glob pattern must not contain NUL bytes")
+  }
   // Lipat rantai `**` / `**/` berulang agar tidak memicu catastrophic backtracking
   // pada regex hasil kompilasi (mis. `**/**/**/**/**/**/**/**/**/x`).
   const collapsed = glob.replace(/\*{2,}/g, "**").replace(/(?:\*\*\/){2,}/g, "**/")
-  // Tangani brace expansion {a,b} tanpa double-escape
-  const str = collapsed.replace(/\{([^{}]+)\}/g, (_m, inner: string) => {
+  // Tangani brace expansion {a,b} tanpa sentinel NUL
+  const BRACE_START = "\uE000"
+  const BRACE_OR = "\uE001"
+  const BRACE_END = "\uE002"
+  const REC_MARK = "\uE003"
+  const cleanCollapsed = collapsed.replace(
+    /[\uE000-\uE003]/g,
+    (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  )
+  const str = cleanCollapsed.replace(/\{([^{}]+)\}/g, (_m, inner: string) => {
     const alts = inner.split(",").map((s) => s.trim())
-    return `\0BRACE_START\0${alts.join("\0BRACE_OR\0")}\0BRACE_END\0`
+    return `${BRACE_START}${alts.join(BRACE_OR)}${BRACE_END}`
   })
   let esc = str.replace(/[.+^${}()|[\]\\]/g, "\\$&")
-  esc = esc.replace(/\0BRACE_START\0/g, "(")
-  esc = esc.replace(/\0BRACE_OR\0/g, "|")
-  esc = esc.replace(/\0BRACE_END\0/g, ")")
+  esc = esc.replaceAll(BRACE_START, "(")
+  esc = esc.replaceAll(BRACE_OR, "|")
+  esc = esc.replaceAll(BRACE_END, ")")
   esc = esc.replace(/\*\*/g, "§§")
   // **/ di awal/pola rekursif harus cocok file root juga: **/* sekarang jadi
   // (?:.*/)?[^/]*, bukan .*/[^/]* yang butuh slash dan membuat root kosong.
@@ -28,11 +42,11 @@ export function globToRegExp(glob: string): RegExp {
   // `**/*.ts` tak lagi cocok file di root maupun direktori depth >= 2, dan
   // `src/**/*.ts` tak lagi cocok file langsung di `src/`. Placeholder yang
   // sama seperti brace expansion di atas.
-  esc = esc.replace(/§§\//g, "\0REC\0")
+  esc = esc.replace(/§§\//g, REC_MARK)
   esc = esc.replace(/\*/g, "[^/]*")
   esc = esc.replace(/§§/g, ".*")
   esc = esc.replace(/\?/g, ".")
-  esc = esc.replace(/\0REC\0/g, "(?:.*/)?")
+  esc = esc.replaceAll(REC_MARK, "(?:.*/)?")
   return new RegExp(`^${esc}$`)
 }
 
@@ -75,9 +89,10 @@ export const globTool: Tool = {
         relaxed,
         includeDotfiles: includeDotfiles === true,
         shouldStop: () => out.length >= lim,
+        preFilter: ({ rel, name }) => re.test(rel) || re.test(name),
       },
-      ({ rel, name }) => {
-        if (re.test(rel) || re.test(name)) out.push(rel)
+      ({ rel }) => {
+        out.push(rel)
       },
     )
     // v7.33 (wire contract): beri langkah lanjutan saat kosong, jangan biarkan

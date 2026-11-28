@@ -13,7 +13,7 @@ import type {
   UiPresentationSnapshot,
 } from "../src/ui/contract.ts"
 import { resetLocaleState, setSessionLocale } from "../src/ui/i18n/locale.ts"
-import { glyphs } from "../src/ui/render/theme.ts"
+import { glyphs, stripAnsi } from "../src/ui/render/theme.ts"
 import { humanToolLabel } from "../src/ui/render/tool-label.ts"
 import { TRANSCRIPT_CAP, Transcript, type TranscriptMeta } from "../src/ui/tui/transcript.ts"
 import { createFakeBus, installFakeTty } from "./helpers/tui-harness.ts"
@@ -187,9 +187,9 @@ describe("P5 transcript projection", () => {
     expect(out).not.toContain("explore-auth")
   })
 
-  // Self-title: judul baru menimpa label di snapshot LIVE. Tiga anak paralel
-  // tetap terbedakan — hanya anak yang dituju yang berubah markernya.
-  test("activity.label: judul baru tampil di baris anak, anak lain tak berubah", () => {
+  // Self-title: judul baru menimpa label di snapshot LIVE pada baris root
+  // `delegate_task` (tool anak tidak lagi merender baris `↳` di tail live).
+  test("activity.label: judul baru tampil di baris live root delegate_task", () => {
     setSessionLocale("en")
     const { transcript, setSnapshot, emitPresentation } = setup()
     const parent = activity({
@@ -209,37 +209,27 @@ describe("P5 transcript projection", () => {
       status: "running",
       tsStart: Date.now(),
     })
-    const other = activity({
-      toolCallId: "child-m",
-      name: "grep",
-      target: "auth.ts",
-      parentToolCallId: parent.toolCallId,
-      childSessionId: "sub_2",
-      label: "explore-2",
-      status: "running",
-      tsStart: Date.now(),
-    })
-    setSnapshot({ activities: [parent, target, other], turns: [] })
+    setSnapshot({ activities: [parent, target], turns: [] })
     const before = transcript.size()
-    // Eventnya sengaja NO-OP di transkrip: label di-read dari snapshot, bukan
-    // dari event. Menambah baris di sini akan menduplikasi childLedger.
+    // Eventnya sengaja NO-OP di transkrip: label dibaca dari snapshot.
     emitPresentation({
       type: "activity.label",
       seq: 5,
       turnId: 1,
-      toolCallId: "dt_1",
-      label: "audit·allowlist",
+      toolCallId: parent.toolCallId,
+      label: "audit allowlist",
     })
     expect(transcript.size()).toBe(before)
-    // Simulasikan reducer yang menimpa label activity target di snapshot.
     setSnapshot({
-      activities: [parent, { ...target, label: "audit·allowlist" }, other],
+      activities: [
+        { ...parent, label: "audit allowlist" },
+        { ...target, label: "audit allowlist" },
+      ],
       turns: [],
     })
     const out = transcript.view(120, 20, 0).join("\n")
-    expect(out).toContain(`↳ audit·allowlist ${humanToolLabel("read_file")} config.ts`)
-    expect(out).not.toContain("↳ explore-1")
-    expect(out).toContain(`↳ explore-2 ${humanToolLabel("grep")} auth.ts`)
+    expect(out).toContain("audit allowlist")
+    expect(out).not.toContain("↳")
   })
 
   // FALLBACK sengaja dipertahankan: event lama / jalur tanpa label tak boleh
@@ -268,35 +258,38 @@ describe("P5 transcript projection", () => {
     expect(out).not.toContain("sub_fedcba98")
   })
 
-  test("F-AGENT-1: tiga anak paralel = tiga baris run terpisah, bukan hitungan", () => {
+  test("F-AGENT-1: paralel sub-agent live menampilkan baris root per tugas, bukan ↳ tool anak", () => {
     setSessionLocale("en")
     const { transcript, setSnapshot } = setup()
-    const parent = activity({
-      toolCallId: "parent-3",
-      name: "delegate_task",
-      target: undefined,
-      status: "running",
-      tsStart: Date.now(),
-    })
+    const parents = (["a", "b", "c"] as const).map((ch) =>
+      activity({
+        toolCallId: `parent-${ch}`,
+        name: "delegate_task",
+        intent: `Audit area ${ch}`,
+        target: undefined,
+        status: "running",
+        tsStart: Date.now(),
+      }),
+    )
     const kids = (["a", "b", "c"] as const).map((ch, i) =>
       activity({
         toolCallId: `child-${ch}`,
         name: "read_file",
         target: `${ch}.ts`,
-        parentToolCallId: parent.toolCallId,
+        parentToolCallId: `parent-${ch}`,
         childSessionId: `sub_${ch.repeat(8)}${i}`,
         runId: `run_${ch.repeat(8)}${i}`,
-        // Label unik per anak → 5/3 fan-out tetap bisa dibedakan di layar.
         label: `explore-${ch}`,
         status: "running",
         tsStart: Date.now(),
       }),
     )
-    setSnapshot({ activities: [parent, ...kids], turns: [] })
+    setSnapshot({ activities: [...parents, ...kids], turns: [] })
     const out = transcript.view(120, 30, 0).join("\n")
-    // Tiap run punya baris sendiri keyed label-nya — bukan "n child tools".
     for (const ch of ["a", "b", "c"] as const) {
-      expect(out).toContain(`↳ explore-${ch} ${humanToolLabel("read_file")} ${ch}.ts … running`)
+      expect(out).toContain(`${glyphs.arrow} Audit area ${ch}`)
+      expect(out).not.toContain("… running")
+      expect(out).not.toContain(`↳`)
       expect(out).not.toContain(`run_${ch.repeat(8)}`)
     }
     expect(out).not.toContain("child tools")
@@ -324,7 +317,7 @@ describe("P5 transcript projection", () => {
     expect(out).not.toContain("evil")
   })
 
-  test("turn summary tidak dirender di renderer flat (ckpt/ringkasan hilang)", () => {
+  test("turn summary verbose tetap dibuang di renderer flat, tapi durasi turn tampil di akhir", () => {
     setSessionLocale("en")
     const { transcript, setSnapshot, emitPresentation } = setup()
     const summary = {
@@ -340,14 +333,14 @@ describe("P5 transcript projection", () => {
     setSnapshot({ activities: [], turns: [{ turnId: 7, status: "completed", summary }] })
     emitPresentation({ type: "turn.completed", seq: 20, turnId: 7, summary })
     const out = transcript.view(120, 4, 0).join("\n")
-    // Renderer flat: ringkasan turn (`turn N · ok/failed · files · ckpt`) sengaja
-    // dibuang; event tetap dikonsumsi, tapi tak ada baris transkrip.
+    // Renderer flat: metadata detail turn (`turn N · ok/failed · files · ckpt`)
+    // tetap dibuang, sedangkan durasi turn (`41s`) tetap tampil independen dari
+    // ada-tidaknya tool.
     expect(out).not.toContain("turn 7")
     expect(out).not.toContain("5 ok")
     expect(out).not.toContain("ckpt t7")
-    expect(out).not.toContain("41s")
-    // Positif: tidak ada phantom row dari event turn.completed.
-    expect(transcript.size()).toBe(0)
+    expect(stripAnsi(out)).toContain("41s")
+    expect(transcript.size()).toBe(1)
   })
 
   test("evict cap memakai marker dan total tetap monotonik", () => {

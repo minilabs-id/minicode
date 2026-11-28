@@ -102,6 +102,10 @@ export interface CommandContext {
    * absen = child default `off` (fail-closed, perilaku sebelum F1b).
    */
   runtimeMode?: RuntimeProductionMode
+  /** Mode sandbox aktif (untuk diteruskan saat /sessions resume). */
+  sandbox?: string
+  /** Batas biaya sesi USD (untuk diteruskan saat /sessions resume). */
+  budget?: number
 }
 
 /** Dua objek yang dibutuhkan `/scheduler`, disuntik composition root. */
@@ -362,6 +366,10 @@ async function resumeById(
       allowLocalConfig: ctx.allowLocalConfig,
       ask: ctx.permissionMode?.toLowerCase() === "ask",
       schedulerEnabled: ctx.scheduler?.handle.enabled === true,
+      workMode: ctx.workMode,
+      model: ctx.currentModel,
+      sandbox: ctx.sandbox,
+      budget: ctx.budget,
     }),
     { stdio: "inherit", env: { ...process.env, MINICODE_RESUME_NEW: "1", ...opts?.env } },
   )
@@ -384,8 +392,17 @@ export function buildResumeSpawnArgs(
   target: string,
   cwd: string | undefined,
   runtimeMode: RuntimeProductionMode | undefined,
-  opts?: { allowLocalConfig?: boolean; ask?: boolean; schedulerEnabled?: boolean },
+  opts?: {
+    allowLocalConfig?: boolean
+    ask?: boolean
+    schedulerEnabled?: boolean
+    workMode?: string
+    model?: string
+    sandbox?: string
+    budget?: number
+  },
 ): string[] {
+  const workModeArg = opts?.workMode ? opts.workMode.toUpperCase() : undefined
   return [
     entryPath,
     `--resume=${target}`,
@@ -394,6 +411,12 @@ export function buildResumeSpawnArgs(
     ...(opts?.allowLocalConfig ? ["--allow-local-config"] : []),
     ...(opts?.ask ? ["--ask"] : []),
     ...(opts?.schedulerEnabled ? ["--enable-scheduler"] : []),
+    ...(workModeArg ? ["--work-mode", workModeArg] : []),
+    ...(opts?.model ? ["--model", opts.model] : []),
+    ...(opts?.sandbox ? ["--sandbox", opts.sandbox] : []),
+    ...(opts?.budget !== undefined && Number.isFinite(opts.budget)
+      ? ["--budget", String(opts.budget)]
+      : []),
   ]
 }
 

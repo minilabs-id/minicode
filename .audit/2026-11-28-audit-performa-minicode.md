@@ -1,0 +1,72 @@
+# Audit Performa Minicode (2026-11-28)
+
+Evaluasi objektif berbasis inspeksi kode aktual dan pengukuran runtime non-mutatif pada tree kerja saat ini (`v0.52.1`).
+
+## 1. Pengukuran Dasar yang Diverifikasi Langsung
+
+- **Startup CLI (non-mutating):**
+  - `bun cli/entry.ts --version` = **`46 ms`** (keluar lebih awal di [entry.ts](file:///d:/Github/minicode/cli/entry.ts#L14-L43)).
+  - `bun cli/entry.ts config --help` = **`178.6 ms`** (~3.9× lebih lambat karena jalur non-meta memuat [index.ts](file:///d:/Github/minicode/cli/index.ts#L240-L270) yang mengeksekusi static import tingkat atas — termasuk `cli/setup.ts` — sebelum `await dispatch(args, getArg, HELP)` pada baris 255).
+- **Regresi perf existing (`bun test`):** `15 pass, 0 fail, 834 expect() calls` (`176.00ms`) pada [perf-no-quadratic.test.ts](file:///d:/Github/minicode/test/perf-no-quadratic.test.ts), [perf-instrumentation.test.ts](file:///d:/Github/minicode/test/perf-instrumentation.test.ts), dan [perf-status-snapshot.test.ts](file:///d:/Github/minicode/test/perf-status-snapshot.test.ts) (termasuk skenario `5000` baris × `120` frame dengan `0` rebuild proyeksi committed).
+- **Instrumentasi perf ([perf-debug.ts](file:///d:/Github/minicode/src/lib/perf-debug.ts#L57-L96)):** Guard `MINICODE_DEBUG_PERF === "1"` (`MAX_SAMPLES = 256`), `perfEnabled()`, dan `perfCount()` sudah tersedia di codebase, **namun `perfReport()` memiliki 0 pemanggil runtime** di `cli`, `src`, `scripts`, dan `bench` (hanya komentar + definisi di `src/lib/perf-debug.ts`).
+
+---
+
+## 2. Kekuatan yang Sudah Baik
+
+1. **Pipa Output TUI & Coalescing Frame ([screen.ts](file:///d:/Github/minicode/src/ui/runtime/screen.ts#L219-L269), [app.ts](file:///d:/Github/minicode/src/ui/tui/app.ts), [transcript.ts](file:///d:/Github/minicode/src/ui/tui/transcript.ts)):**
+   - `paint()` menulis satu string gabungan (`SYNC_START`..`SYNC_END`) lewat satu `process.stdout.write(out)` per frame, melewati baris identik (`line === lastFrame[r]`), dan hanya melakukan `diffCellLine()` untuk baris yang berubah.
+   - Coalescing `paintBatchDepth` ([app.ts](file:///d:/Github/minicode/src/ui/tui/app.ts#L1088-L1102)), repaint bus `30 ms` ([app.ts](file:///d:/Github/minicode/src/ui/tui/app.ts#L738-L744)), wheel repaint `16 ms` ([app.ts](file:///d:/Github/minicode/src/ui/tui/app.ts#L2413-L2422)), `paintCursorOnly()` ([app.ts](file:///d:/Github/minicode/src/ui/tui/app.ts#L1596)), serta cache proyeksi `LRU 3` (`committedByWidth`, `projectedBaseByWidth` di [transcript.ts](file:///d:/Github/minicode/src/ui/tui/transcript.ts#L232-L240)) menjaga scrolling riwayat berkomit tetap ringan.
+2. **Optimasi Kernel, Estimasi Token Streaming, & Resource Reuse:**
+   - `microcompact` berjalan sebelum kompaksi penuh ([loop.ts](file:///d:/Github/minicode/vendor/minicore/src/core/loop.ts#L122-L136), [compaction.ts](file:///d:/Github/minicode/src/policy/compaction.ts#L667-L689)); `createIncrementalTokenCounter()` ([context.ts](file:///d:/Github/minicode/src/policy/context.ts#L60-L91)) menghitung estimasi token delta secara inkremental.
+   - `dep-graph.ts` ([dep-graph.ts](file:///d:/Github/minicode/src/repo/dep-graph.ts#L69-L79)) me-lazy-init instance `Bun.Transpiler`; [grep.ts](file:///d:/Github/minicode/src/tools/grep.ts#L524-L527) menyimpan cache `rgPath`; [vector.ts](file:///d:/Github/minicode/src/memory/vector.ts#L1397) melewati scan vektor saat tidak ada kandidat BLOB; dan `TaskStore` ([task/db/schema.ts](file:///d:/Github/minicode/src/task/db/schema.ts#L98-L100)) memelihara `handles` Map SQLite.
+
+---
+
+## 3. Kritik Objektif & Hambatan Nyata (Berdasarkan Kode Aktual)
+
+### A. Churn SQLite & I/O Sinkron per Tool / per Turn (Dampak Tertinggi)
+1. **`openSessionHandle` tidak melakukan pooling handle & menjalankan `chmodSessionDbSync` di `finally` ([db/schema.ts](file:///d:/Github/minicode/src/session/db/schema.ts)):**
+   Berbeda dari `TaskStore`, setiap panggilan membuka koneksi baru `new Database(p)`, menjalankan `PRAGMA busy_timeout` + `dbSchemaStamp(p, db)`, lalu di blok `finally` memanggil `chmodSessionDbSync(p)` sebelum menutup handle. Lewat [pending-tools.ts](file:///d:/Github/minicode/src/session/pending-tools.ts#L56-L94) (`beginToolInFlight` / `endToolInFlight`), [setRunPendingTools](file:///d:/Github/minicode/src/session/db/runs.ts#L353-L375) membuka-menutup-chmod `sessions.db` pada setiap mulai dan selesai pemanggilan tool.
+2. **Pembacaan ulang penuh `loadJournal` JSONL & retensi tanpa batas:**
+   `findIdempotentInvocation` ([verification.ts](file:///d:/Github/minicode/src/session/verification.ts#L686-L725)), `persistEffectReceipt` ([verification.ts](file:///d:/Github/minicode/src/session/verification.ts#L534-L558)), observer `execution:completed` ([setup.ts](file:///d:/Github/minicode/cli/setup.ts#L2776-L2819)), dan sapuan `turn:completed` ([setup.ts](file:///d:/Github/minicode/cli/setup.ts#L2820-L2845)) sama-sama memanggil `loadJournal(...)` (baca/parse penuh file JSONL sesi). Karena `sweepJournal` ([journal.ts](file:///d:/Github/minicode/src/session/journal.ts#L1010-L1017)) mempertahankan seluruh record `r.kind === "verification"` dan record terminal mutasi `r.dedup === true`, biaya baca kumulatif meningkat seiring panjang sesi.
+3. **Verifikasi `spawnSync("git", ...)` & loop I/O sekuensial ([verification.ts](file:///d:/Github/minicode/src/session/verification.ts#L1716-L1915)):**
+   `listDirtyEvaluationPathsResult` dan `gitBaselineContent` mengeksekusi `spawnSync("git", ...)` secara sinkron, sementara `collectSessionModifiedFiles` melakukan `await loadJournal(cid, root)` untuk child session dan `await hashWorkspaceRel(root, rel)` untuk tiap dirty path secara berurutan.
+4. **Pembandingan & baca-ulang seluruh histori pada `saveSession` & proyeksi:**
+   `saveSession` ([persistence.ts](file:///d:/Github/minicode/src/session/persistence.ts#L741-L780)) meng-query seluruh baris `messages` (`ORDER BY seq`) lalu menjalankan `normalizeMessageTupleForDedup(messages[i])` untuk seluruh prefix tersimpan tiap save; `produceSummaryProjection` ([context-projection.ts](file:///d:/Github/minicode/src/session/context-projection.ts#L187-L203)) juga memuat ulang seluruh histori thread lewat `loadThreadHistoryWithSeq`.
+
+### B. Loop Inti, Cache Tokenisasi, & Discovery Workspace
+1. **`WeakMap` token cache meleset pada `visibleWireToolSchemas` & alokasi di `buildRequest` ([tokens.ts](file:///d:/Github/minicode/vendor/minicore/src/core/tokens.ts), [session.ts](file:///d:/Github/minicode/src/app/session.ts#L477-L490), [loop.ts](file:///d:/Github/minicode/vendor/minicore/src/core/loop.ts#L452-L464)):**
+   `toolTokenCache` ([tokens.ts](file:///d:/Github/minicode/vendor/minicore/src/core/tokens.ts#L147-L163)) memakai `WeakMap<ToolSchema, ...>` berbasis identitas objek. Namun `visibleWireToolSchemas` mengalokasikan array objek `{ name, description, parameters }` baru di tiap panggilan `liveToolSchemas()` ([session.ts](file:///d:/Github/minicode/src/app/session.ts#L1285-L1415)), sehingga `estimateTools(liveToolSchemas(), minicodeEstimator)` dan `wireTools` selalu miss cache dan mengulang `safeStringify(tool.parameters)` seluruh skema tool terdaftar. Di kernel, `buildRequest()` juga membuat ulang array `tools` lalu memanggil `snapshotMessages(s.store.messages)` dan `snapshotToolSchemas(tools)` sebelum tiap `s.provider.stream`.
+2. **Deep-clone penuh `snapshotState` 2× per tool call ([executor.ts](file:///d:/Github/minicode/vendor/minicore/src/core/executor.ts#L66-L94)):**
+   `runCall()` memanggil `snapshotState(deps.state)` dua kali untuk tiap pemanggilan tool (sekali untuk `permissionDeps`, sekali untuk `ToolContext`).
+3. **Syscall stat/realpath mendahului filter nama pada walk & `repomap` ([tools/context.ts](file:///d:/Github/minicode/src/tools/context.ts#L120-L152), [glob.ts](file:///d:/Github/minicode/src/tools/glob.ts#L65-L103), [repomap.ts](file:///d:/Github/minicode/src/repo/repomap.ts#L310-L345)):**
+   - `walkWorkspaceFiles` menjalankan `await realpath(full)` dan `3× isSensitive(...)` untuk seluruh berkas workspace sebelum `globTool` menguji `re.test(rel) || re.test(name)`.
+   - `walkForFiles` menjalankan `isRealPathOutsideRoot` sinkron pada tiap entri sebelum mengecek `e.isDirectory()` / `isSourceFile(e.name)`.
+4. **Vector search meng-box `number[]` & double open/close SQLite; auth membaca disk per request ([vector.ts](file:///d:/Github/minicode/src/memory/vector.ts#L419-L428), [oauth.ts](file:///d:/Github/minicode/src/providers/oauth.ts#L355-L395)):**
+   - `searchHybrid` ([vector.ts](file:///d:/Github/minicode/src/memory/vector.ts#L1365-L1480)) membuka-menutup SQLite pertama (`L1367-L1390`), memanggil `fromBlob(r.embedding)` yang menyalin `Float32Array` ke `number[]` JS via `Array.from`, memanggil `keywordScore(query, r.text)` dan `Date.now()` per kandidat, lalu membuka-menutup koneksi kedua `db2` hanya untuk menaikkan `access_count`.
+   - `getValidAccessToken` ([oauth.ts](file:///d:/Github/minicode/src/providers/oauth.ts#L355-L395)) memanggil `getAuth(providerId)` (baca disk) dan `await import("./auth-store.ts")` pada tiap pemanggilan.
+
+### C. Pipeline Render TUI, Streaming & Presentasi
+1. **Scan ulang penuh `this.pending` ($O(N^2)$) & memo FIFO ([transcript.ts](file:///d:/Github/minicode/src/ui/tui/transcript.ts#L2040-L2138)):**
+   Setiap perubahan `pendingVersion` membuat `pendingRows()` mengulang `normalizeAssistantOutput(sanitizeAnsi(this.pending))`, `parseMarkdownBlocks(pending)`, dan `JSON.stringify(block.table)` atas `this.pending` (hingga `TRANSCRIPT_TEXT_MAX_CHARS = 1_000_000`, `L283`). `pendingRowMemo` (`PENDING_MEMO_MAX_ENTRIES = 4000`, `L287`) memakai eviksi FIFO yang membuang `1.000` kunci tertua saat penuh.
+2. **Duplikasi kalkulasi frame, `stripSgr`, & bypass fast-path ASCII ([app.ts](file:///d:/Github/minicode/src/ui/tui/app.ts#L3285-L3345), [sanitize.ts](file:///d:/Github/minicode/src/ui/render/sanitize.ts#L219-L223), [width.ts](file:///d:/Github/minicode/src/ui/render/width.ts#L115-L160)):**
+   - `buildLayout()` memanggil `transcript.wrappedLength(contentCols, viewH)` lalu `transcript.viewport(contentCols, viewH, this.scrollBack)` pada frame yang sama.
+   - `stripSgr()` mengompilasi `new RegExp(...)` baru pada setiap pemanggilan tanpa fast-path `!s.includes("\x1b")`.
+   - Di `displayTokens()`, ketika satu segmen tidak seluruhnya lolos `isAsciiPrintable`, seluruh run tersebut jatuh ke `segmentGraphemes` + `graphemeWidth` daripada memproses ASCII inline dan hanya mendelegasikan cluster non-ASCII.
+3. **Scan linear `activities` di presentation reducer ([reducer.ts](file:///d:/Github/minicode/src/presentation/reducer.ts#L200-L255)):**
+   `deriveSupersedes` dan `deriveTurnSummary` melakukan iterasi atas seluruh `state.activities.values()` (`MAX_STATE_ENTRIES = 4096` di [model.ts](file:///d:/Github/minicode/src/presentation/model.ts#L25)) setiap kali dipanggil.
+4. **Startup subcommand lambat ([index.ts](file:///d:/Github/minicode/cli/index.ts#L240-L270)):**
+   Subcommand ringan seperti `config --help` (`178.6 ms` vs `46 ms` pada `--version`) tetap memuat penuh modul sesi/TUI statis sebelum masuk `dispatch()`.
+
+---
+
+## 4. Saran Perbaikan Konkret (Prioritas)
+
+| Prioritas | Target | Perbaikan Konkret | Dampak Utama |
+| :--- | :--- | :--- | :--- |
+| **P0** | [db/schema.ts](file:///d:/Github/minicode/src/session/db/schema.ts), [runs.ts](file:///d:/Github/minicode/src/session/db/runs.ts), [journal.ts](file:///d:/Github/minicode/src/session/journal.ts), [verification.ts](file:///d:/Github/minicode/src/session/verification.ts), [setup.ts](file:///d:/Github/minicode/cli/setup.ts) | Pool handle `sessions.db` (pola `TaskStore`), jalankan `chmodSessionDbSync` hanya saat inisialisasi/WAL baru, cache indeks in-memory `journal.ts` agar `execution:completed` / `findIdempotentInvocation` / `persistEffectReceipt` tak membaca ulang JSONL per tool, dan gantikan `spawnSync("git")` + `await` loop sekuensial dengan `spawn` async paralel. | Menghapus bottleneck IO utama per-tool & per-turn. |
+| **P0** | [session.ts](file:///d:/Github/minicode/src/app/session.ts), [tokens.ts](file:///d:/Github/minicode/vendor/minicore/src/core/tokens.ts), [loop.ts](file:///d:/Github/minicode/vendor/minicore/src/core/loop.ts), [executor.ts](file:///d:/Github/minicode/vendor/minicore/src/core/executor.ts) | Memoisasi array objek keluaran `visibleWireToolSchemas()` (invalidasi hanya saat `registeredTools` / `hiddenWireTools` berubah) agar `toolTokenCache` hit; hindari `snapshotToolSchemas` penuh saat skema immutable per step; ganti `snapshotState` 2× per tool di `runCall` dengan snapshot/read-only view per batch. | Menghilangkan miss `WeakMap` skema tool & clone penuh 2× per tool. |
+| **P0** | [transcript.ts](file:///d:/Github/minicode/src/ui/tui/transcript.ts), [sanitize.ts](file:///d:/Github/minicode/src/ui/render/sanitize.ts), [width.ts](file:///d:/Github/minicode/src/ui/render/width.ts), [reducer.ts](file:///d:/Github/minicode/src/presentation/reducer.ts) | Hoist RegExp `stripSgr` + fast-path `!includes("\x1b")`; tangani ASCII byte inline di `displayTokens()`; ubah `pendingRows()` menjadi inkremental per blok/paragrafer selesai + key `block.table` stabil + eviksi LRU; indeks `activities` per `(sessionId, turnId)` di `reducer.ts`. | Menjaga responsivitas TUI saat streaming panjang & ratusan tool call. |
+| **P1** | [tools/context.ts](file:///d:/Github/minicode/src/tools/context.ts), [glob.ts](file:///d:/Github/minicode/src/tools/glob.ts), [repomap.ts](file:///d:/Github/minicode/src/repo/repomap.ts), [vector.ts](file:///d:/Github/minicode/src/memory/vector.ts), [oauth.ts](file:///d:/Github/minicode/src/providers/oauth.ts) | Jalankan filter regex/ekstensi berkas **sebelum** `realpath`/`isRealPathOutsideRoot`/`isSensitive`; pakai view `Float32Array` langsung tanpa `Array.from` + hoist tokenisasi query/`Date.now()` di `searchHybrid` dan gabung update `access_count` ke handle `db` yang sama; cache pembacaan auth per `(path, mtimeMs)` di `oauth.ts`. | Mengurangi syscall I/O walk repo besar & alokasi vektor. |
+| **P1** | [index.ts](file:///d:/Github/minicode/cli/index.ts), [app.ts](file:///d:/Github/minicode/src/ui/tui/app.ts), [perf-debug.ts](file:///d:/Github/minicode/src/lib/perf-debug.ts) | Lazy-import `cli/setup.ts` sesudah `dispatch()` di `cli/index.ts`; gabungkan kalkulasi `wrappedLength`+`viewport` per frame di `buildLayout()`; panggil `perfReport()` saat shutdown ketika `MINICODE_DEBUG_PERF=1`. | Mengurangi biaya startup subcommand, kerja ganda frame, & mengaktifkan observabilitas perf. |

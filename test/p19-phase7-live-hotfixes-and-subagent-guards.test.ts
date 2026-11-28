@@ -253,9 +253,11 @@ describe("7.3 Subagent ACE verdict — envelope.aceVerdict pada sukses & error",
         ctxFor(dir),
       )) as string
       expect(out).toBe("sub-agent (explore) done: ringkasan anak [steps 2]")
-      // Spec membawa noProgress EKSPLISIT (LOOP-INV-15): ambang turun ke 8.
+      // Spec membawa noProgress EKSPLISIT dengan ambang read anak sesuai konstanta.
       expect(seen[0]!.noProgress).toBeDefined()
-      expect(seen[0]!.noProgress!.maxConsecutiveReadCalls).toBe(8)
+      expect(seen[0]!.noProgress!.maxConsecutiveReadCalls).toBe(
+        LIMITS.SUB_AGENT_CONSECUTIVE_READ_LIMIT,
+      )
       // Amplop hasil anak membawa ACE verdict deterministik.
       const rec = await delegateTerminal(parentId, dir)
       const env = rec.outcome?.childResult as ChildResultEnvelope | undefined

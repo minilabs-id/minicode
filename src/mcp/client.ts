@@ -124,8 +124,27 @@ function isRecoverableMcpError(e: Error): boolean {
   )
 }
 
+function readPinsFromDisk(filePath: string): Map<string, string> | "corrupt" | null {
+  if (!existsSync(filePath)) return null
+  try {
+    const raw = readFileSync(filePath, "utf8")
+    const clean = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw
+    const parsed = JSON.parse(clean) as unknown
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return "corrupt"
+    const out = new Map<string, string>()
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof value === "string" && /^[0-9a-f]{64}$/.test(value)) out.set(key, value)
+    }
+    return out
+  } catch {
+    return "corrupt"
+  }
+}
+
 export class McpSchemaPinRegistry {
   private readonly pins = new Map<string, string>()
+  private readonly touchedKeys = new Set<string>()
+  private resetRequested = false
   /**
    * P2.3: pin HARUS bertahan lintas restart. Tanpa persistensi, proses baru
    * mem-pin ulang skema yang sudah berubah dan drift diterima diam-diam.
@@ -142,30 +161,26 @@ export class McpSchemaPinRegistry {
     this.path = path
     this.loaded = false
     this.corrupt = false
+    this.resetRequested = false
     this.pins.clear()
+    this.touchedKeys.clear()
     this.load()
   }
 
   private load(): void {
     if (this.loaded) return
     this.loaded = true
-    if (!this.path || !existsSync(this.path)) return
-    try {
-      const parsed = JSON.parse(readFileSync(this.path, "utf8")) as unknown
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        this.corrupt = true
-        this.pins.clear()
-        return
-      }
-      for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-        if (typeof value === "string" && /^[0-9a-f]{64}$/.test(value)) this.pins.set(key, value)
-      }
-    } catch {
+    if (!this.path) return
+    const disk = readPinsFromDisk(this.path)
+    if (disk === null) return
+    if (disk === "corrupt") {
       // File rusak = fail-closed: tandai corrupt sehingga verify/pinMany
       // mengembalikan drift dan persist tidak menimpa bukti kerusakan.
       this.corrupt = true
       this.pins.clear()
+      return
     }
+    for (const [key, value] of disk) this.pins.set(key, value)
   }
 
   /** Seam uji: hitung pemanggilan persist (tanpa mengganti implementasi FS). */
@@ -174,6 +189,20 @@ export class McpSchemaPinRegistry {
     if (!this.path || this.corrupt) return
     const tmp = `${this.path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`
     try {
+      if (!this.resetRequested) {
+        const disk = readPinsFromDisk(this.path)
+        if (disk === "corrupt") {
+          this.corrupt = true
+          return
+        }
+        if (disk) {
+          for (const [k, v] of disk) {
+            if (!this.touchedKeys.has(k) && !this.pins.has(k)) {
+              this.pins.set(k, v)
+            }
+          }
+        }
+      }
       mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 })
       const sorted = [...this.pins.entries()].sort(([a], [b]) => a.localeCompare(b))
       writeFileSync(tmp, `${JSON.stringify(Object.fromEntries(sorted), null, 2)}\n`, {
@@ -182,6 +211,7 @@ export class McpSchemaPinRegistry {
         flag: "wx",
       })
       renameSync(tmp, this.path)
+      this.resetRequested = false
     } catch {
       try {
         unlinkSync(tmp)
@@ -208,6 +238,7 @@ export class McpSchemaPinRegistry {
     const key = `${serverId}:${toolName}`
     if (!this.pins.has(key)) {
       this.pins.set(key, hash)
+      this.touchedKeys.add(key)
       this.persist()
     }
   }
@@ -228,6 +259,7 @@ export class McpSchemaPinRegistry {
       const pinned = this.pins.get(key)
       if (pinned === undefined) {
         this.pins.set(key, hash)
+        this.touchedKeys.add(key)
         return "pinned" as const
       }
       return pinned === hash ? ("ok" as const) : ("drift" as const)
@@ -239,7 +271,9 @@ export class McpSchemaPinRegistry {
   /** Approve eksplisit: ganti pin dengan hash baru (persetujuan pengguna). */
   approveMcpSchemaUpdate(serverId: string, toolName: string, newHash: string): void {
     this.load()
-    this.pins.set(`${serverId}:${toolName}`, newHash)
+    const key = `${serverId}:${toolName}`
+    this.pins.set(key, newHash)
+    this.touchedKeys.add(key)
     this.persist()
   }
 
@@ -251,6 +285,7 @@ export class McpSchemaPinRegistry {
     const pinned = this.pins.get(key)
     if (pinned === undefined) {
       this.pins.set(key, hash)
+      this.touchedKeys.add(key)
       this.persist()
       return "pinned"
     }
@@ -265,6 +300,8 @@ export class McpSchemaPinRegistry {
   /** Reset seluruh pin (uji hermetik); file hanya ditulis bila path terpasang. */
   reset(): void {
     this.pins.clear()
+    this.touchedKeys.clear()
+    this.resetRequested = true
     this.corrupt = false
     this.loaded = true
     this.persist()
@@ -653,7 +690,9 @@ class McpConnection {
       const content = Array.isArray(result.content)
         ? result.content.map((c: any) => c.text ?? JSON.stringify(c)).join("\n")
         : String(result.content)
-      throw new Error(`MCP tool ${name}: ${content}`)
+      throw new Error(
+        `MCP tool ${sanitizeIncoming(name)}: ${scrubSecrets(sanitizeIncoming(content))}`,
+      )
     }
     return result
   }

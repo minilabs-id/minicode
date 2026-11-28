@@ -1,6 +1,7 @@
 import { existsSync, statSync } from "node:fs"
-import { resolve } from "node:path"
+import { isAbsolute, resolve } from "node:path"
 import { globalConfigPath, loadConfig } from "../../src/config.ts"
+import { resolveTrustedExecutable } from "../../src/lib/trusted-exec.ts"
 import { getMemoryStats } from "../../src/memory/vector.ts"
 import { inspectBashCommand } from "../../src/policy/bash-guard.ts"
 import { isPathOutsideRoot, isSensitive } from "../../src/policy/jail.ts"
@@ -33,6 +34,7 @@ interface DoctorReport {
   configError?: string
   memoryError?: string
   hardening: { bashGuard: boolean; jail: boolean; scrub: boolean; perms: boolean }
+  lsp?: { configured: number; available: number; exts: string[] }
 }
 
 // Agregasi status yang sebelumnya tersebar di providers/pricing/memory —
@@ -73,6 +75,10 @@ export async function buildDoctorReport(cwd?: string, allowLocal?: boolean): Pro
   } catch {
     perms = true
   }
+  const lspServers = "lspServers" in cfg && Array.isArray(cfg.lspServers) ? cfg.lspServers : []
+  const lspAvailable = lspServers.filter((s) =>
+    isAbsolute(resolveTrustedExecutable(s.command)),
+  ).length
   return {
     bun: process.version,
     platform: process.platform,
@@ -101,6 +107,11 @@ export async function buildDoctorReport(cwd?: string, allowLocal?: boolean): Pro
     ...(configError ? { configError } : {}),
     ...(memoryError ? { memoryError } : {}),
     hardening: { bashGuard, jail, scrub, perms },
+    lsp: {
+      configured: lspServers.length,
+      available: lspAvailable,
+      exts: lspServers.map((s) => s.ext),
+    },
   }
 }
 
@@ -136,6 +147,11 @@ export function renderDoctorText(r: DoctorReport): string {
     `  memory     ${r.memoryError ? `${warn} (${r.memoryError})` : `${r.memoryRows} rows`}`,
     `  sandbox    os=${r.sandboxOs} docker=${r.sandboxDocker ? "yes" : "no"} — ${r.fallbackNote}`,
     `  config     global=${r.configGlobal ? "yes" : "no"} ~/.minicode/config.json local=${r.configLocal ? "yes" : "no"}${r.configError ? ` ${warn} (${r.configError})` : ""}`,
+    ...(r.lsp
+      ? [
+          `  lsp        ${r.lsp.configured === 0 ? "none configured (use: minicode config lsp add)" : `${r.lsp.configured} configured (${r.lsp.available} ready: ${r.lsp.exts.join(", ")}) ${r.lsp.available === r.lsp.configured ? ok : warn}`}`,
+        ]
+      : []),
     `  hardening  bash-guard:${hk.bashGuard ? ok : warn} jail:${hk.jail ? ok : warn} scrub:${hk.scrub ? ok : warn} perms:${hk.perms ? ok : warn} ${hardOk ? ok : warn}`,
   ]
   return lines.join("\n")

@@ -151,6 +151,22 @@ export interface ProductionSchedulerDeps {
    * that a fresh attempt cannot repeat unsafe external effects.
    */
   readonly continuity?: ContinuityGate
+  readonly maxDrainCycles?: number
+  /**
+   * Verifier eksternal opsional pasca-attempt. Scheduler tetap tidak pernah menulis
+   * COMPLETED; verifier di luar siklus memvalidasi output dan mentransisikan task.
+   */
+  readonly verifier?: (work: {
+    sessionId: string
+    taskId: string
+    title: string
+    cwd: string
+  }) => Promise<{
+    ok: boolean
+    verdict: "passed" | "failed" | "stale"
+    summary?: string
+    requeueOnFail?: boolean
+  }>
   readonly onSchedulerEvent?: (e: SchedulerEvent) => void
   readonly onTriggerEvent?: (e: TriggerEvent) => void
 }
@@ -217,8 +233,13 @@ export async function createProductionScheduler(
   // here would create a THIRD copy of one policy, furthest from the tests that
   // justify it and therefore most likely to drift.
 
+  let lastClaimed: { taskId: string; title: string } | null = null
   const onEvent = (e: SchedulerEvent): void => {
     try {
+      if (e.kind === "task:claimed") {
+        const claimedTask = d.store.getTask(d.sessionId, e.taskId)
+        lastClaimed = { taskId: e.taskId, title: claimedTask?.title ?? e.taskId }
+      }
       d.onSchedulerEvent?.(e)
     } finally {
       if (e.kind === "task:claimed" || e.kind === "task:recovered") {
@@ -240,9 +261,91 @@ export async function createProductionScheduler(
     onEvent,
   })
 
+  let activeTriggerSource: TriggerSource = "manual"
+  const runVerifiedCycle = async () => {
+    lastClaimed = null
+    const res = await scheduler.cycle()
+    const claimedTarget = lastClaimed as { taskId: string; title: string } | null
+    if (
+      d.verifier &&
+      res.dispatched?.ok &&
+      res.dispatched.lineage === "RECORDED" &&
+      claimedTarget
+    ) {
+      lastClaimed = null
+      try {
+        const cur = d.store.getTask(d.sessionId, claimedTarget.taskId)
+        if (cur && cur.status === "IN_PROGRESS") {
+          const patchOpts = d.authorityToken
+            ? { authorityToken: d.authorityToken, expectedRevision: cur.revision }
+            : { expectedRevision: cur.revision }
+          const v = await d.verifier({
+            sessionId: d.sessionId,
+            taskId: claimedTarget.taskId,
+            title: claimedTarget.title,
+            cwd: d.cwd,
+          })
+          const done = d.store.completeTaskVerification(
+            d.sessionId,
+            claimedTarget.taskId,
+            {
+              ok: v.ok,
+              verdict: v.verdict,
+              ...(v.summary ? { summary: v.summary } : {}),
+              timestamp: new Date().toISOString(),
+            },
+            patchOpts,
+          )
+          if (!v.ok && v.requeueOnFail && done.status === "BLOCKED") {
+            d.store.patchTask(
+              d.sessionId,
+              claimedTarget.taskId,
+              { status: "PENDING" },
+              d.authorityToken
+                ? { authorityToken: d.authorityToken, expectedRevision: done.revision }
+                : { expectedRevision: done.revision },
+            )
+          }
+        }
+      } catch (err) {
+        // Kegagalan hook verifikasi tidak boleh menghentikan loop trigger, tetapi
+        // WAJIB terobservasi dan menutup celah task IN_PROGRESS tanpa sinyal.
+        const msg = err instanceof Error ? err.message : String(err)
+        d.onTriggerEvent?.({
+          kind: "trigger:cycle_failed",
+          source: activeTriggerSource,
+          detail: `verifier failed for ${claimedTarget.taskId}: ${msg}`.slice(0, 200),
+        })
+        try {
+          const curAfter = d.store.getTask(d.sessionId, claimedTarget.taskId)
+          if (curAfter && curAfter.status === "IN_PROGRESS") {
+            const failPatchOpts = d.authorityToken
+              ? { authorityToken: d.authorityToken, expectedRevision: curAfter.revision }
+              : { expectedRevision: curAfter.revision }
+            d.store.completeTaskVerification(
+              d.sessionId,
+              claimedTarget.taskId,
+              {
+                ok: false,
+                verdict: "failed",
+                summary: `verifier hook failed: ${msg}`.slice(0, 200),
+                timestamp: new Date().toISOString(),
+              },
+              failPatchOpts,
+            )
+          }
+        } catch {
+          // Kegagalan sekunder persistensi tetap dilaporkan via trigger:cycle_failed.
+        }
+      }
+    }
+    return res
+  }
+
   const trigger = new TriggerCoordinator({
-    runCycle: () => scheduler.cycle(),
+    runCycle: runVerifiedCycle,
     isRunning: () => scheduler.getLifecycle() === "RUNNING" || scheduler.getLifecycle() === "IDLE",
+    ...(d.maxDrainCycles !== undefined ? { maxDrainCycles: d.maxDrainCycles } : {}),
     ...(d.onTriggerEvent ? { onEvent: d.onTriggerEvent } : {}),
   })
 
@@ -280,7 +383,11 @@ export async function createProductionScheduler(
     enabled: true,
     constructed: true,
     isActive: () => active && !stopping,
-    fire: (source) => (handle.isActive() ? trigger.fire(source) : Promise.resolve(null)),
+    fire: (source) => {
+      if (!handle.isActive()) return Promise.resolve(null)
+      activeTriggerSource = source
+      return trigger.fire(source)
+    },
     async stop(reason) {
       if (stopping) return
       stopping = true

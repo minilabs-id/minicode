@@ -44,6 +44,8 @@ export interface AssistantMessage {
   readonly toolCalls?: readonly ToolCall[];
   /** DeepSeek-style thinking content (reasoning), di-preservasi untuk multi-turn. */
   readonly reasoning?: string;
+  /** Blok thinking terotentikasi (mis. Anthropic `thinking`+`signature` / `redacted_thinking`). */
+  readonly reasoningBlocks?: readonly Record<string, unknown>[];
 }
 
 /** Everything the context store can hold, discriminated by `role`. */

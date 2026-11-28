@@ -206,3 +206,114 @@ test("empat delegate_task paralel dalam 1 turn diringkas menjadi 1 baris agregat
   expect(sparkleLines).toHaveLength(1)
   expect(sparkleLines[0]).toContain(`${glyphs.sparkle} 4 sub agent · 97 tool · 0 failed`)
 })
+
+test("multi-putaran dalam 1 turn: putaran lama tertinggal di atas, putaran baru bikin blok ✦ + live root baru", () => {
+  setSessionLocale("en")
+  const { setSnapshot, emit, screen } = setup()
+
+  // Putaran 1: 2 sub agent mulai & selesai (1 kena step limit).
+  const p1 = [
+    {
+      toolCallId: "d1",
+      name: "delegate_task",
+      intent: "Audit modul tema",
+      status: "running" as const,
+      tsStart: 1,
+    },
+    {
+      toolCallId: "d2",
+      name: "delegate_task",
+      intent: "Audit popup kustom",
+      status: "running" as const,
+      tsStart: 2,
+    },
+    {
+      toolCallId: "c1",
+      name: "read_file",
+      target: "theme.ts",
+      status: "completed" as const,
+      tsStart: 3,
+      parentToolCallId: "d1",
+      childSessionId: "sub_1",
+      runId: "run_1",
+    },
+    {
+      toolCallId: "c2",
+      name: "read_file",
+      target: "modal.ts",
+      status: "failed" as const,
+      tsStart: 4,
+      parentToolCallId: "d2",
+      childSessionId: "sub_2",
+      runId: "run_2",
+    },
+  ]
+  setSnapshot({ activities: p1, turns: [] })
+  emit({ type: "turn.started", seq: 1, turnId: 1 })
+  emit({ type: "tool.started", seq: 2, turnId: 1, toolCallId: "d1", name: "delegate_task" })
+  emit({ type: "tool.started", seq: 3, turnId: 1, toolCallId: "d2", name: "delegate_task" })
+  emit({ type: "tool.completed", seq: 4, turnId: 1, toolCallId: "c1", status: "completed" })
+  emit({
+    type: "tool.failed",
+    seq: 5,
+    turnId: 1,
+    toolCallId: "c2",
+    status: "failed",
+    message: "step limit reached (40/40)",
+  })
+
+  // Selama Putaran 1 hidup: ✦ tampil di atas live root d1/d2, tanpa ↳ child.
+  const midWave1 = screen()
+  expect(midWave1).toContain(`${glyphs.sparkle} 2 sub agent · 2 tool · 1 failed (1 step limit)`)
+  expect(midWave1).toContain("Audit modul tema")
+  expect(midWave1).not.toContain("↳")
+
+  // Putaran 1 selesai (d1 sukses, d2 gagal step limit).
+  p1[0] = { ...p1[0]!, status: "completed" as never }
+  p1[1] = { ...p1[1]!, status: "failed" as never }
+  setSnapshot({ activities: [...p1], turns: [] })
+  emit({ type: "tool.completed", seq: 6, turnId: 1, toolCallId: "d1", status: "completed" })
+  emit({
+    type: "tool.failed",
+    seq: 7,
+    turnId: 1,
+    toolCallId: "d2",
+    status: "failed",
+    message: "[sub-agent explore error] step limit reached (40/40)",
+  })
+
+  // Putaran 2: 1 sub agent baru dimulai di turn yang SAMA.
+  const d3 = {
+    toolCallId: "d3",
+    name: "delegate_task",
+    intent: "Verifikasi alur render lanjutan",
+    status: "running" as const,
+    tsStart: 10,
+  }
+  const c3 = {
+    toolCallId: "c3",
+    name: "grep",
+    target: "transcript.ts",
+    status: "running" as const,
+    tsStart: 11,
+    parentToolCallId: "d3",
+    childSessionId: "sub_3",
+    runId: "run_3",
+  }
+  setSnapshot({ activities: [...p1, d3, c3], turns: [] })
+  emit({ type: "step.started", seq: 8, turnId: 1, step: 1 })
+  emit({ type: "tool.started", seq: 9, turnId: 1, toolCallId: "d3", name: "delegate_task" })
+
+  const midWave2 = screen()
+  const sparkleLines = midWave2.split("\n").filter((l) => l.includes(glyphs.sparkle))
+  expect(sparkleLines).toHaveLength(2)
+  // Putaran 1 tetap tertinggal di atas sebagai riwayat beserta failure berlabel tugasnya.
+  expect(sparkleLines[0]).toContain(
+    `${glyphs.sparkle} 2 sub agent · 2 tool · 1 failed (1 step limit)`,
+  )
+  expect(midWave2).toContain("Audit popup kustom failed (step limit)")
+  // Putaran 2 menampilkan hitungan putaran aktif + baris live root tanpa ↳ child.
+  expect(sparkleLines[1]).toContain(`${glyphs.sparkle} 1 sub agent · 0 tool · 0 failed`)
+  expect(midWave2).toContain("Verifikasi alur render lanjutan")
+  expect(midWave2).not.toContain("grep transcript.ts")
+})

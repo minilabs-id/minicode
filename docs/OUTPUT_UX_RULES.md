@@ -147,8 +147,9 @@ live — bukan baris ledger, bukan durasi backoff, dan bukan envelope machine.
 statis**, bukan state live: footer tiap narasi
 `tool → narasi → rekap(tool sebelum narasi)`, format
 `2 command · 118 read · 1 other` (sejak v0.41 tanpa prefix simbol). Rekap akhir
-turn kumulatif seluruh tool
-selama turn. Klausa lama (rekap dua baris saat live, `flushActivityFold`
+turn kumulatif seluruh tool selama turn disertai lama turn berjalan
+(`2 command · 118 read · 14s` atau `1m 05s` dengan spasi antar unit, dan tetap
+menampilkan durasi saja bila turn tanpa tool). Klausa lama (rekap dua baris saat live, `flushActivityFold`
 net-nol, `liveSummaryRows` mengikuti ekor, jeda antar narasi melayang) adalah
 arsip v0.33/v7.x yang ditimpa v0.35. Label aktivitas `› …` memakai **locale OS**
 lewat `Intl` (id/en) di semua permukaan (TUI, one-shot/`exec`, ACP via
@@ -334,13 +335,15 @@ Untuk batch besar:
 Analyzed 11 files
 ```
 
-### Rekap tool (v0.35)
+### Rekap tool & durasi turn (v0.35 + amandemen durasi turn)
 
 Satu baris rekap per narasi, committed dan statis: `tool → narasi → rekap(tool
 sebelum narasi)`. Contoh `2 command · 118 read · 1 other` (sejak v0.41 tanpa
-prefix simbol). Rekap akhir turn =
-kumulatif semua tool turn (bukan per segmen). Label `› …` pada baris tool
-memakai locale OS (`Intl`, id/en), berbeda dari narasi yang memakai `/lang`.
+prefix simbol). Rekap akhir turn = kumulatif semua tool turn ditambah durasi
+turn berjalan (`2 command · 118 read · 14s` atau `1m 05s` dengan spasi antar
+menit dan detik); turn tanpa tool tetap menuliskan durasinya (`14s`). Label
+`› …` pada baris tool memakai locale OS (`Intl`, id/en), berbeda dari narasi
+yang memakai `/lang`.
 
 ### Retry
 

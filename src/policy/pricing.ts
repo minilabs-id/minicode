@@ -95,6 +95,38 @@ export function __resetPricingOverlay(): void {
   overlayMeta = null
 }
 
+function stripBom(raw: string): string {
+  return raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw
+}
+
+async function readCappedResponseText(res: Response, maxBytes: number): Promise<string> {
+  if (!res.body) return res.text()
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let out = ""
+  let totalBytes = 0
+  let reachedEof = false
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) {
+        reachedEof = true
+        out += decoder.decode()
+        break
+      }
+      totalBytes += value.byteLength
+      if (totalBytes > maxBytes) {
+        throw new Error(`models.dev payload exceeded ${maxBytes} bytes`)
+      }
+      out += decoder.decode(value, { stream: true })
+    }
+    return out
+  } finally {
+    if (!reachedEof) await reader.cancel().catch(() => {})
+    reader.releaseLock()
+  }
+}
+
 /**
  * Muat cache dari disk bila ada dan belum kedaluwarsa.
  *
@@ -106,7 +138,7 @@ export async function loadPricingOverlay(): Promise<Record<string, ModelPrice>> 
   if (overlay) return overlay
   try {
     const raw = await readFile(pricingCachePath(), "utf8")
-    const parsed = JSON.parse(raw) as PricingCache
+    const parsed = JSON.parse(stripBom(raw)) as PricingCache
     if (parsed && typeof parsed.models === "object" && parsed.models) {
       overlay = normalizePriceMap(parsed.models)
       overlayMeta = { fetchedAt: parsed.fetchedAt ?? 0, count: Object.keys(overlay).length }
@@ -151,9 +183,10 @@ function toModelPrice(
   }
 }
 
-function normalizePriceMap(src: Record<string, unknown>): Record<string, ModelPrice> {
+export function normalizePriceMap(src: Record<string, unknown>): Record<string, ModelPrice> {
   const out: Record<string, ModelPrice> = {}
   for (const [k, v] of Object.entries(src)) {
+    if (!v || typeof v !== "object" || Array.isArray(v)) continue
     const p = v as Partial<ModelPrice>
     const parsed = toModelPrice(p.input, p.output, p.cacheRead, p.cacheWrite)
     if (!parsed) continue
@@ -299,17 +332,10 @@ export async function syncPricing(url: string = MODELS_DEV_URL): Promise<SyncRes
     throw new Error(`models.dev → redirect ${res.status} not followed`)
   }
   if (!res.ok) throw new Error(`models.dev → HTTP ${res.status}`)
-  // Hard-cap agar payload spoof tidak OOM (asli 4.4 MB, cap 2 MB cukup)
-  const text = await res
-    .text()
-    .then((t) =>
-      t.length > LIMITS.WEB_FETCH_BODY_HARD_CAP_CHARS
-        ? t.slice(0, LIMITS.WEB_FETCH_BODY_HARD_CAP_CHARS)
-        : t,
-    )
+  const text = await readCappedResponseText(res, LIMITS.PRICING_FETCH_MAX_BYTES)
   let payload: ModelsDevPayload
   try {
-    payload = JSON.parse(text) as ModelsDevPayload
+    payload = JSON.parse(stripBom(text)) as ModelsDevPayload
   } catch {
     throw new Error("models.dev membalas non-JSON")
   }

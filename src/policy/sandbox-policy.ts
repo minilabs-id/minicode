@@ -85,7 +85,10 @@ export function resolveSandbox(
     return {
       mode: "none",
       explicit: false,
-      notice: `[sandbox] unknown mode "${requested}" — use docker|os|none`,
+      fallbackPermission: explicitPermission ? undefined : "allowlist",
+      notice:
+        `[sandbox] unknown mode "${requested}" — use docker|os|none` +
+        (explicitPermission ? "" : "; permission lowered to allowlist"),
     }
   }
 

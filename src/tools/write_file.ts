@@ -13,7 +13,7 @@ export const writeFileTool: Tool = {
   // contract). Catatan jail/cap dipertahankan — hanya aturan pilih-tool yang
   // disatukan supaya model tak melihat tiga nasihat yang saling bertentangan.
   description:
-    "FILE EDIT: Create or overwrite a file with full text content (atomic, creates parent dirs, max 5M chars). 1 change → edit; ≥2 changes in one file → apply_patch; full rewrite/new file → write_file. Every search block must match exactly once — add surrounding lines if ambiguous. Cannot write outside the workspace or to secrets (.env, .ssh, node_modules). Writing .minicode/ state is ALLOWED by owner decision (2026-11-23) — be careful not to overwrite sessions.db or config; .minicode/hooks/ stays blocked.",
+    "FILE EDIT: Create or overwrite a file (atomic, max 5M chars). 1 change → edit; ≥2 changes in one file → apply_patch; full rewrite/new file → write_file. Every search block must match exactly once — add surrounding lines if ambiguous. Workspace-only; secrets (.env, .ssh, node_modules, .minicode/hooks/) blocked (.minicode/ state allowed except sessions.db/config).",
   parameters: {
     type: "object",
     properties: {

@@ -71,6 +71,8 @@ export interface OsSandboxOptions {
   network?: "none" | "bridge"
   /** v7.31: samakan dengan Docker — kiи kredensial git saat unrestricted. */
   allowGitCredentials?: boolean
+  /** Callback heartbeat ringan saat sandbox mengeluarkan stdout/stderr. */
+  onActivity?: () => void
 }
 
 function escapeSeatbelt(s: string): string {
@@ -203,11 +205,18 @@ export function runInOsSandbox(
   >
   const timeout = opts.timeoutMs ?? LIMITS.DOCKER_TIMEOUT_MS
   const targets = discoverSandboxMaskTargets(abs)
+  if (targets.truncated) {
+    return Promise.reject(
+      new Error(
+        `[os-sandbox] refusing to start: .env* mask discovery truncated (${targets.truncationReason ?? "limit"})`,
+      ),
+    )
+  }
 
   if (type === "seatbelt") {
     const profile = buildSeatbeltProfile(abs, targets.envFiles, { network: opts.network })
     const args = ["-p", profile, "sh", "-c", command]
-    return runSpawn("sandbox-exec", args, abs, sanitizedEnv, timeout, opts.signal)
+    return runSpawn("sandbox-exec", args, abs, sanitizedEnv, timeout, opts.signal, opts.onActivity)
   }
   if (type === "bwrap") {
     const emptyMask = allocateEmptyMaskFile(targets.envFiles.length > 0)
@@ -216,9 +225,15 @@ export function runInOsSandbox(
       envFiles: targets.envFiles,
       emptyMaskPath: emptyMask.path,
     })
-    return runSpawn("bwrap", args, abs, sanitizedEnv, timeout, opts.signal).finally(() =>
-      emptyMask.cleanup(),
-    )
+    return runSpawn(
+      "bwrap",
+      args,
+      abs,
+      sanitizedEnv,
+      timeout,
+      opts.signal,
+      opts.onActivity,
+    ).finally(() => emptyMask.cleanup())
   }
   return Promise.resolve({ code: null, output: "[os-sandbox] unknown type" })
 }
@@ -230,6 +245,7 @@ function runSpawn(
   env: Record<string, string>,
   timeoutMs: number,
   signal?: AbortSignal,
+  onActivity?: () => void,
 ): Promise<{ code: number | null; output: string }> {
   return new Promise((resolveResult, reject) => {
     signal?.throwIfAborted()
@@ -248,8 +264,18 @@ function runSpawn(
       detached: true,
     })
     const collector = createCappedOutputCollector(LIMITS.DOCKER_OUTPUT_MAX_CHARS)
-    p.stdout.on("data", (d) => collector.append("out", d))
-    p.stderr.on("data", (d) => collector.append("err", d))
+    let lastBeatAt = 0
+    const onChunk = (stream: "out" | "err", d: Buffer) => {
+      collector.append(stream, d)
+      if (onActivity && Date.now() - lastBeatAt >= 2_000) {
+        lastBeatAt = Date.now()
+        try {
+          onActivity()
+        } catch {}
+      }
+    }
+    p.stdout.on("data", (d) => onChunk("out", d))
+    p.stderr.on("data", (d) => onChunk("err", d))
     let aborted = false
     let timedOut = false
     let settled = false

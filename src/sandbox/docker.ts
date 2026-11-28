@@ -58,6 +58,8 @@ export interface DockerRunOptions {
    * push via token/SSH jadi gagal diam-diam di sandbox docker.
    */
   allowGitCredentials?: boolean
+  /** Callback heartbeat ringan saat proses container mengeluarkan stdout/stderr. */
+  onActivity?: () => void
 }
 
 let dockerSpawnForTest: typeof spawn | null = null
@@ -185,6 +187,13 @@ export function runInDocker(
   }
   const containerName = `minicode-${randomUUID()}`
   const targets = discoverSandboxMaskTargets(cwd)
+  if (targets.truncated) {
+    return Promise.reject(
+      new Error(
+        `[docker] refusing to start: .env* mask discovery truncated (${targets.truncationReason ?? "limit"})`,
+      ),
+    )
+  }
   const emptyMask = allocateEmptyMaskFile(targets.envFiles.length > 0)
   const args = buildDockerRunArgs(command, cwd, opts, {
     containerName,
@@ -205,8 +214,6 @@ export function runInDocker(
     })
     // Cap buffer saat streaming — output container raksasa tidak menumpuk di RAM.
     const collector = createCappedOutputCollector(LIMITS.DOCKER_OUTPUT_MAX_CHARS)
-    p.stdout.on("data", (d) => collector.append("out", d))
-    p.stderr.on("data", (d) => collector.append("err", d))
     const timeout =
       typeof opts.timeoutMs === "number" && Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0
         ? opts.timeoutMs
@@ -241,8 +248,30 @@ export function runInDocker(
         }
       })
     }
+    const startedMono = performance.now()
+    const maxActiveMs = Math.max(timeout * 8, timeout)
+    const armTimer = () => {
+      clearTimeout(t)
+      if (settled || stopReason) return
+      const elapsed = Math.max(0, performance.now() - startedMono)
+      const remaining = Math.max(1, maxActiveMs - Math.floor(elapsed))
+      t = setTimeout(() => requestStop("timeout"), Math.min(timeout, remaining))
+    }
+    let lastBeatAt = 0
+    const onDockerChunk = (stream: "out" | "err", d: Buffer) => {
+      collector.append(stream, d)
+      if (opts.onActivity && Date.now() - lastBeatAt >= 2_000) {
+        lastBeatAt = Date.now()
+        try {
+          opts.onActivity()
+        } catch {}
+      }
+      if (opts.timeoutMs && opts.timeoutMs > LIMITS.DOCKER_TIMEOUT_MS) armTimer()
+    }
+    p.stdout.on("data", (d) => onDockerChunk("out", d))
+    p.stderr.on("data", (d) => onDockerChunk("err", d))
     const onAbort = () => requestStop("abort")
-    t = setTimeout(() => requestStop("timeout"), timeout)
+    armTimer()
     if (signal) {
       signal.addEventListener("abort", onAbort, { once: true })
       if (signal.aborted) requestStop("abort")

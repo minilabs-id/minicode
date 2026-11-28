@@ -39,7 +39,10 @@ function testSleepCmd(): string {
   return process.platform === "win32" ? "ping -n 20 127.0.0.1 >NUL" : "sleep 20"
 }
 
-async function startServer(args: string[] = []): Promise<RpcClient> {
+async function startServer(
+  args: string[] = [],
+  extraEnv?: Record<string, string>,
+): Promise<RpcClient> {
   // process.execPath tak selalu ada sebagai file (mis. layout setup-bun di
   // CI) — fallback ke `bun` di PATH. cwd JANGAN hardcode path mesin dev;
   // repo root = parent direktori file test ini.
@@ -49,6 +52,7 @@ async function startServer(args: string[] = []): Promise<RpcClient> {
     stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",
+    ...(extraEnv ? { env: { ...process.env, ...extraEnv } } : {}),
   })
   let errBuf = ""
   ;(async () => {
@@ -157,6 +161,42 @@ test("mcp-server: selectTools kurasi vs all", () => {
   expect(all).toContain("delegate_task")
   expect(all).toContain("mcp_call")
   expect(new Set(all).size).toBe(all.length)
+  const filtered = selectTools({
+    hiddenWireTools: new Set(["lsp_diagnostics", "lsp_definition", "ask_user"]),
+  }).map((t) => t.name)
+  expect(filtered).not.toContain("lsp_diagnostics")
+  expect(filtered).not.toContain("lsp_definition")
+  expect(filtered).not.toContain("ask_user")
+  expect(filtered).toContain("read_file")
+})
+
+test("mcp-server: tools/list menyembunyikan tool ber-kapabilitas mati kecuali --all-tools", async () => {
+  const dir = tmpRoot()
+  const emptyHome = join(dir, "home")
+  const env = { HOME: emptyHome, USERPROFILE: emptyHome, MINICODE_HOME: emptyHome }
+  const curated = await startServer(["--cwd", dir], env)
+  try {
+    curated.send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} })
+    const list = (await curated.next()).result as { tools: { name: string }[] }
+    const names = list.tools.map((t) => t.name)
+    expect(names).toContain("read_file")
+    expect(names).not.toContain("lsp_diagnostics")
+    expect(names).not.toContain("lsp_references")
+    expect(names).not.toContain("ask_user")
+  } finally {
+    curated.kill()
+  }
+  const full = await startServer(["--cwd", dir, "--all-tools"], env)
+  try {
+    full.send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })
+    const list = (await full.next()).result as { tools: { name: string }[] }
+    const names = list.tools.map((t) => t.name)
+    expect(names).toContain("lsp_diagnostics")
+    expect(names).toContain("delegate_task")
+  } finally {
+    full.kill()
+    await cleanup(dir)
+  }
 })
 
 test("mcp-server: tools/list + initialize + ping", async () => {

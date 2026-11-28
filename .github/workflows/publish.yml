@@ -41,14 +41,30 @@ jobs:
         run: bun x tsc --noEmit
       - name: Lint
         run: bun run lint
-      - name: Test
-        run: bun test
+      # `gate:coverage` sudah menjalankan `bun test --coverage` penuh; jangan duplikasi step `bun test`.
       - name: Coverage gate
         run: bun run gate:coverage
       - name: Pack check
         run: bun run gate:pack
+      - name: Bash bypass gate
+        run: bun run gate:bash
+      - name: Benchmark smoke
+        run: bun run bench:smoke
       - name: Harness evaluation
         run: bun run audit:harness
+      - name: Telemetry gate (--allow-missing + strict self-test)
+        shell: bash
+        run: |
+          bun run gate:telemetry -- --allow-missing
+          tmp="$(mktemp -d)"
+          mkdir -p "$tmp/.minicode"
+          printf '%s\n' '{"ok":true}' '{"ok":true}' '{"ok":false}' > "$tmp/.minicode/traces.jsonl"
+          bun scripts/telemetry-gate.ts "$tmp"
+          printf '%s\n' '{"ok":true}' > "$tmp/.minicode/traces.jsonl"
+          if bun scripts/telemetry-gate.ts "$tmp"; then
+            echo "strict telemetry gate unexpectedly passed on sparse artifact"
+            exit 1
+          fi
       - name: Publish to npm
         run: npm publish --access public --provenance
         env:

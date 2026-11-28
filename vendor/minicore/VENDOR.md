@@ -28,9 +28,15 @@ Dicatat agar saat vendor di-upgrade dari upstream, perubahan ini tidak hilang:
 - `src/core/session.ts` — seam `Session.steer()` + antrean `pendingSteers`
   (steering disisipkan di batas step, bukan tengah stream). Antrean dibersihkan
   di `finally` `run()` supaya turn tetap transaksional; `safeTurnBoundary` juga
-  membuang `user` yang belum dibalas dari histori turn yang terputus.
-- `src/core/loop.ts` — `drainSteers()` di awal turn/awal step, dan penagihan
-  `stepIndex` untuk request lanjutan hasil steering (`usage.steps`/`maxSteps`).
+  membuang `user` yang belum dibalas dari histori turn yang terputus; serta
+  opsi `wireTools` untuk meneruskan filter tool aktif ke `Session.contextTokens`.
+- `src/core/loop.ts` — `drainSteers()` di awal turn/awal step, penagihan
+  `stepIndex` untuk request lanjutan hasil steering (`usage.steps`/`maxSteps`),
+  akumulasi `reasoning_blocks` ke `AssistantMessage.reasoningBlocks`,
+  serta `wireTools` opsional di `contextTokens()`/`fixedContextTokens()` agar estimasi sinkron dengan wire filter.
+- `src/core/types.ts` — kolom opsional aditif `AssistantMessage.reasoningBlocks` untuk replay blok thinking terotentikasi.
+- `src/core/tokens.ts` — memo `WeakMap` berbasis `TokenEstimator.cacheKey` pada `estimateMessage`,
+  `estimateMessages`, `estimateTools`, dan `estimateSystem` (`O(1)` per pesan/tool).
 
 Kontrak seam: steering hanya diterima saat turn aktif (`steer()` = `false` saat
 idle); pesan yang belum tersalur ketika turn gagal hilang bersama turn itu.

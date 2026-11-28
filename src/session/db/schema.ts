@@ -484,6 +484,97 @@ export function openSessionHandle(cwd?: string, local = false): Database {
   }
 }
 
+// Scoped handle pooling (hanya aktif selama scope sesi CLI berlangsung agar
+// pemanggil ad-hoc / test temp-dir di Windows tidak pernah memicu EBUSY saat rmSync).
+const scopedSessionRefs = new Map<string, number>()
+const scopedSessionHandles = new Map<string, { db: Database; ino: bigint | null }>()
+
+export function beginSessionDbScope(cwd?: string, local = false): void {
+  const p = dbPath(cwd, local)
+  scopedSessionRefs.set(p, (scopedSessionRefs.get(p) ?? 0) + 1)
+}
+
+export function endSessionDbScope(cwd?: string, local = false): void {
+  const p = dbPath(cwd, local)
+  const cur = scopedSessionRefs.get(p) ?? 0
+  if (cur <= 1) {
+    scopedSessionRefs.delete(p)
+    const held = scopedSessionHandles.get(p)
+    if (held) {
+      scopedSessionHandles.delete(p)
+      try {
+        held.db.close()
+      } catch {}
+      chmodSessionDbSync(p)
+    }
+  } else {
+    scopedSessionRefs.set(p, cur - 1)
+  }
+}
+
+function acquireSessionDb(
+  cwd: string | undefined,
+  local: boolean,
+): { db: Database; owned: boolean } {
+  const p = dbPath(cwd, local)
+  if ((scopedSessionRefs.get(p) ?? 0) > 0) {
+    let held = scopedSessionHandles.get(p)
+    if (held) {
+      let sameInode = false
+      try {
+        const st = statSync(p, { bigint: true })
+        sameInode = held.ino !== null && st.ino === held.ino
+      } catch {}
+      if (!sameInode) {
+        scopedSessionHandles.delete(p)
+        try {
+          held.db.close()
+        } catch {}
+        held = undefined
+      }
+    }
+    if (!held) {
+      const db = openSessionHandle(cwd, local)
+      let ino: bigint | null = null
+      try {
+        ino = statSync(p, { bigint: true }).ino
+      } catch {}
+      held = { db, ino }
+      scopedSessionHandles.set(p, held)
+    }
+    return { db: held.db, owned: false }
+  }
+  return { db: openSessionHandle(cwd, local), owned: true }
+}
+
+/** Jalankan operasi SQLite menggunakan handle ter-pool bila scope aktif, else buka-tutup. */
+export function withSessionDb<T>(
+  cwd: string | undefined,
+  fn: (db: Database) => T,
+  local = false,
+): T {
+  const { db, owned } = acquireSessionDb(cwd, local)
+  try {
+    return fn(db)
+  } finally {
+    if (owned) db.close()
+  }
+}
+
+/** Varian async dari `withSessionDb` untuk transaksi dengan retry async (`withBusyRetry`). */
+export async function withSessionDbAsync<T>(
+  cwd: string | undefined,
+  fn: (db: Database) => Promise<T>,
+  local = false,
+): Promise<T> {
+  const { db, owned } = acquireSessionDb(cwd, local)
+  try {
+    return await fn(db)
+  } finally {
+    if (owned) db.close()
+  }
+}
+
 export function openSessionDb(cwd?: string): Database {
   return openSessionHandle(cwd)
 }
@@ -509,15 +600,12 @@ export class StaleWriterError extends Error {
 }
 
 export function readWriterEpoch(id: string, cwd?: string): number {
-  const db = openSessionHandle(cwd)
-  try {
+  return withSessionDb(cwd, (db) => {
     const row = db.prepare("SELECT writer_epoch AS epoch FROM sessions WHERE id = ?").get(id) as {
       epoch: number | null
     } | null
     return row?.epoch ?? 0
-  } finally {
-    db.close()
-  }
+  })
 }
 
 export function assertWriterEpochInTxn(db: Database, id: string, expectedEpoch: number): void {

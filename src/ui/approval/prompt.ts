@@ -481,7 +481,7 @@ export async function promptAsk(call: ApprovalRequest): Promise<"allow" | "deny"
       ...(alwaysAvailable
         ? [{ label: t("appr.always"), keys: ["a", "l"], value: "always" as const }]
         : []),
-      { label: t("appr.deny"), keys: ["n", "i"], value: "deny" },
+      { label: t("appr.deny"), keys: ["n"], value: "deny" },
     ]
     const quickMap: Record<string, number> = {}
     for (const [i, ch] of choices.entries()) for (const k of ch.keys) quickMap[k] = i

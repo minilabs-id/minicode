@@ -536,6 +536,7 @@ test("EXPLORE list vs READONLY permission: over-hiding terdokumentasi", async ()
     "read_file",
     "glob",
     "grep",
+    "dep_graph",
     "git_status",
     "git_diff",
     "git_log",

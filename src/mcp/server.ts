@@ -16,6 +16,8 @@ export interface McpServeOptions {
   allowAll?: boolean
   allTools?: boolean
   root?: string
+  /** Sembunyikan tool ber-kapabilitas mati (mis. LSP kosong) dari `tools/list`. */
+  hiddenWireTools?: ReadonlySet<string>
 }
 
 // tool internal minicode — tidak relevan/berbahaya jika dipanggil dari agent eksternal
@@ -62,8 +64,12 @@ const CODE_INTERNAL = -32603
 
 export function selectTools(opts: McpServeOptions): Tool[] {
   const base = opts.allTools ? allTools : allTools.filter((t) => !INTERNAL_TOOLS.has(t.name))
+  const filtered =
+    opts.hiddenWireTools && opts.hiddenWireTools.size > 0
+      ? base.filter((t) => !opts.hiddenWireTools!.has(t.name))
+      : base
   const seen = new Set<string>()
-  return base.filter((t) => (seen.has(t.name) ? false : (seen.add(t.name), true)))
+  return filtered.filter((t) => (seen.has(t.name) ? false : (seen.add(t.name), true)))
 }
 
 async function invokeTool(
@@ -411,6 +417,8 @@ export async function serveMcp(opts: McpServeOptions = {}): Promise<void> {
 
   // Pengganti readline: batasi panjang baris stdin (8 MiB) agar klien nakal /
   // baris tanpa `\n` tidak memicu OOM.
+  // Pembacaan ini tidak membuat DB/jurnal tak perlu — cukup lacak request aktif saat shutdown.
+  const pendingHandles = new Set<Promise<void>>()
   const MAX_STDIN_LINE_BYTES = 8 * 1024 * 1024
   let stdinBuf = ""
   let droppingOversizedLine = false
@@ -425,10 +433,15 @@ export async function serveMcp(opts: McpServeOptions = {}): Promise<void> {
       return
     }
 
-    void handle(msg).catch((e) => {
-      if (msg.id !== undefined && msg.id !== null)
-        replyError(msg.id, CODE_INTERNAL, String((e as Error).message ?? e))
-    })
+    const p = handle(msg)
+      .catch((e) => {
+        if (msg.id !== undefined && msg.id !== null)
+          replyError(msg.id, CODE_INTERNAL, String((e as Error).message ?? e))
+      })
+      .finally(() => {
+        pendingHandles.delete(p)
+      })
+    pendingHandles.add(p)
   }
   const onStdinData = (chunk: Buffer | string) => {
     const text = typeof chunk === "string" ? chunk : chunk.toString("utf8")
@@ -579,7 +592,7 @@ export async function serveMcp(opts: McpServeOptions = {}): Promise<void> {
               }
             }
           }
-          // 2. Hasil selesai (proses ini): replay persis, tanpa eksekusi ulang.
+          // 2. Hasil selesai (proses ini): replay persis berdasarkan idKey per kontrak JSON-RPC in-process.
           const cached = completedCache.get(idKey)
           if (cached) return { kind: "reply", result: cached }
           // 3. Bukti durable (restart/crash di tengah): jangan eksekusi ulang
@@ -689,6 +702,7 @@ export async function serveMcp(opts: McpServeOptions = {}): Promise<void> {
   // dan bunuh job background agar klien putus tak meninggalkan proses yatim.
   await new Promise<void>((resolve) => {
     let finished = false
+    let drainingEnd = false
     const done = () => {
       if (finished) return
       finished = true
@@ -696,23 +710,32 @@ export async function serveMcp(opts: McpServeOptions = {}): Promise<void> {
       cleanup()
       resolve()
     }
+    const onClose = () => {
+      // Stdin EOF normal memicu `end` lalu `close`: tunggu request aktif selesai drain dulu.
+      if (!drainingEnd || pendingHandles.size === 0) done()
+    }
     const onEnd = () => {
       if (!droppingOversizedLine && stdinBuf.trim()) {
         handleLine(stdinBuf.replace(/\r$/, ""))
         stdinBuf = ""
       }
-      done()
+      if (pendingHandles.size === 0) {
+        done()
+        return
+      }
+      drainingEnd = true
+      void Promise.allSettled([...pendingHandles]).then(() => done())
     }
     const cleanup = () => {
       process.stdin.off("data", onStdinData)
       process.stdin.off("end", onEnd)
-      process.stdin.off("close", done)
+      process.stdin.off("close", onClose)
       process.stdout.off("error", done)
       process.off("SIGINT", done)
       process.off("SIGTERM", done)
     }
     process.stdin.once("end", onEnd)
-    process.stdin.once("close", done)
+    process.stdin.once("close", onClose)
     process.stdout.on("error", done)
     process.once("SIGINT", done)
     process.once("SIGTERM", done)

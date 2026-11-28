@@ -1533,3 +1533,40 @@ describe("cli: notice sandbox", () => {
     expect(r.stderr).toContain("docker|os|none")
   })
 })
+
+test("F3: turn non-mutasi pada --verify --work-mode BUILD melewati verify ulang & self-heal", async () => {
+  const ws = makeWorkspace()
+  const verifyScript = `require("node:fs").appendFileSync("verify.log", "run\\n"); process.exit(0)`
+  const provider = startFakeProvider([
+    { kind: "tool", id: "glob_ro", name: "glob", args: { pattern: "*.ts" } },
+    { kind: "text", text: "hanya membaca struktur" },
+  ])
+  try {
+    writeProviderConfig(ws, provider.baseUrl)
+    const r = await run(
+      ws,
+      [
+        "jelaskan struktur",
+        "--verify",
+        "--work-mode",
+        "BUILD",
+        "--cwd",
+        ws.dir,
+        "--model",
+        "gpt-4o-mini",
+        "--allow-local-config",
+      ],
+      { MINICODE_VERIFY_CMD: `${process.execPath} -e ${JSON.stringify(verifyScript)}` },
+    )
+    expect(r.code).toBe(0)
+    expect(provider.requestCount()).toBe(2)
+    const runs = readFileSync(join(ws.dir, "verify.log"), "utf8")
+      .trim()
+      .split(/\r?\n/)
+      .filter(Boolean)
+    // Hanya baseline pre-turn yang jalan (1x); verify pasca-turn dilewati karena 0 mutasi.
+    expect(runs).toHaveLength(1)
+  } finally {
+    provider.close()
+  }
+})

@@ -199,6 +199,44 @@ function extractTarget(args: unknown): string | undefined {
   return undefined
 }
 
+function summarizeDelegatePrompt(rawPrompt: string): string | undefined {
+  let clean = ""
+  for (const ch of rawPrompt.slice(0, 320)) {
+    const code = ch.codePointAt(0) ?? 0
+    if (
+      code === 0x1b ||
+      code === 0x7f ||
+      (code < 0x20 && ch !== "\t" && ch !== "\n" && ch !== "\r") ||
+      (code >= 0x80 && code <= 0x9f)
+    )
+      continue
+    clean += ch === "\n" || ch === "\r" ? "\n" : ch
+  }
+  const firstLine =
+    clean
+      .split("\n")
+      .map((l) => l.replace(/^[\s>*#\-+\d.)\]]+/, "").trim())
+      .find((l) => l.length > 0) ?? ""
+  let text = firstLine
+    .replace(/`/g, "")
+    .replace(/^(?:please|tolong|mohon)\s+/i, "")
+    .replace(
+      /^(?:delegat(?:e|ing)(?:\s+task)?|delegasi(?:\s+tugas)?|sub[\s_-]*agents?|agen\s+sub)\s*(?:[:·\-–—]\s*|\s+)/i,
+      "",
+    )
+    .replace(/\s+/g, " ")
+    .trim()
+  const cut = text.search(/[.!?](?:\s|$)|;\s/)
+  if (cut >= 12) text = text.slice(0, cut).trim()
+  // Prompt sintetis ultra-pendek ("x") dibiarkan tanpa intent supaya fallback lama aman.
+  if (Array.from(text).length < 3) return undefined
+  const chars = Array.from(text)
+  if (chars.length <= 56) return text
+  const clipped = chars.slice(0, 55).join("")
+  const sp = clipped.lastIndexOf(" ")
+  return `${(sp >= 24 ? clipped.slice(0, sp) : clipped).trimEnd()}…`
+}
+
 function extractIntent(args: unknown, toolName?: string): string | undefined {
   if (typeof args !== "object" || args === null) return undefined
   const a = args as Record<string, unknown>
@@ -208,7 +246,9 @@ function extractIntent(args: unknown, toolName?: string): string | undefined {
         ? a.name
         : typeof a.role === "string" && a.role.trim()
           ? a.role
-          : undefined
+          : typeof a.prompt === "string" && a.prompt.trim()
+            ? summarizeDelegatePrompt(a.prompt)
+            : undefined
       : undefined
   const raw = typeof a.label === "string" && a.label.trim() ? a.label : delegateName
   if (!raw) return undefined
@@ -702,6 +742,13 @@ export function createPresentationAdapter(
     // supaya sesi panjang tak bocor memori. Dedup untuk id yang masih relevan
     // tetap benar (id lama yang ter-eviksi tak mungkin muncul lagi).
     const CAP = 4096
+    const trimMap = <K, V>(map: Map<K, V>) => {
+      while (map.size > CAP) {
+        const k = map.keys().next().value
+        if (k === undefined) break
+        map.delete(k)
+      }
+    }
     if (terminalTools.size >= CAP) {
       const oldest = terminalTools.values().next().value
       if (oldest !== undefined) terminalTools.delete(oldest)
@@ -709,6 +756,9 @@ export function createPresentationAdapter(
     terminalTools.add(id)
     openTools.delete(id)
     toolStarts.delete(id)
+    trimMap(childLinks)
+    trimMap(delegateChildren)
+    trimMap(childFindingSeq)
     return true
   }
 
@@ -1245,6 +1295,20 @@ export function createPresentationAdapter(
     })
   })
 
+  const PLACEHOLDER_CHILD_LABEL_RE = /^(?:explore|plan|sub_[a-z0-9]+)(?:-\d+)?$/i
+  const publishChildActivityLabel = (
+    childId: string,
+    link: ChildSessionLink,
+    label: string,
+  ): void => {
+    publish({
+      ...childBase(currentTurn, childId, link),
+      type: "activity.label",
+      toolCallId: link.parentToolCallId,
+      label,
+    })
+  }
+
   sub("provider:extension", (e: { kind?: unknown; data?: unknown }) => {
     if (e?.kind === "minicode:child-link") {
       // Ikatan eksplisit delegate_task → anak, dikirim tool saat sesi anak
@@ -1268,7 +1332,14 @@ export function createPresentationAdapter(
       if (!childId || !parentToolCallId) return
       const runId = typeof data?.childRunId === "string" ? data.childRunId : undefined
       const label = typeof data?.childLabel === "string" ? data.childLabel : undefined
-      registerExplicitChildLink(childId, parentToolCallId, runId, label)
+      const prevLabel = childLinks.get(childId)?.label
+      const link = registerExplicitChildLink(childId, parentToolCallId, runId, label)
+      // Ketika model sudah mengirim `name` eksplisit, side-call `minicode:child-label`
+      // sengaja dilewati — teruskan label peran nyata dari `child-link` agar `entry.label`
+      // induk ikut terisi sejak awal (selaras jalur auto-title).
+      if (label && label !== prevLabel && !PLACEHOLDER_CHILD_LABEL_RE.test(label)) {
+        publishChildActivityLabel(childId, link, label)
+      }
       return
     }
     if (e?.kind === "minicode:child-label") {
@@ -1287,12 +1358,7 @@ export function createPresentationAdapter(
       // Taut yang sudah ada (dibuat tool.started anak) ikut diperbarui supaya
       // forward berikutnya memakai judul, bukan label sementara `explore-N`.
       link.label = label
-      publish({
-        ...childBase(currentTurn, childId, link),
-        type: "activity.label",
-        toolCallId: link.parentToolCallId,
-        label,
-      })
+      publishChildActivityLabel(childId, link, label)
       return
     }
     if (e?.kind === "minicode:child-report") {

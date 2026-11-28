@@ -1,25 +1,31 @@
-import type { MinicodeConfig } from "../config.ts"
+import { isLocalConfigProvider, type MinicodeConfig } from "../config.ts"
 import { getSecret } from "../lib/keystore.ts"
 import { resolveEnvEmbeddingAuth, searchHybrid } from "../memory/vector.ts"
 import { scrubSecrets } from "../policy/scrub.ts"
 import { loadSkills, type Skill, skillsToSystemPrompt } from "../skills/loader.ts"
+
+export interface EmbeddingCandidate {
+  baseUrl: string
+  apiKey: string
+  fromLocal?: boolean
+}
 
 /**
  * Daftar endpoint embedding unik dari config + env. Murni (tanpa I/O) agar
  * bisa diuji deterministik. Dedup per baseUrl: beberapa provider satu
  * gateway tak boleh dicoba berulang dengan kunci beda.
  */
-export function buildEmbeddingCandidates(
-  cfg: MinicodeConfig,
-): { baseUrl: string; apiKey: string }[] {
-  const candidates: { baseUrl: string; apiKey: string }[] = []
+export function buildEmbeddingCandidates(cfg: MinicodeConfig): EmbeddingCandidate[] {
+  const candidates: EmbeddingCandidate[] = []
   const seen = new Set<string>()
-  const consider = (baseUrl: string, apiKey: string) => {
+  const consider = (baseUrl: string, apiKey: string, fromLocal = false) => {
     if (!apiKey || !baseUrl || seen.has(baseUrl)) return
     seen.add(baseUrl)
-    candidates.push({ baseUrl, apiKey })
+    candidates.push(fromLocal ? { baseUrl, apiKey, fromLocal: true } : { baseUrl, apiKey })
   }
-  for (const p of cfg.providers) if (p.apiKey) consider(p.baseUrl, p.apiKey)
+  for (const p of cfg.providers) {
+    if (p.apiKey) consider(p.baseUrl, p.apiKey, isLocalConfigProvider(p))
+  }
   const envAuth = resolveEnvEmbeddingAuth()
   if (envAuth.apiKey) consider(envAuth.baseUrl, envAuth.apiKey)
   return candidates
@@ -63,6 +69,8 @@ export async function createRagLayer(opts: {
         try {
           let apiKey = c.apiKey
           if (apiKey.startsWith("keystore:")) {
+            // Config lokal repo tidak boleh meminjam rahasia keystore OS global.
+            if (c.fromLocal) continue
             const secret = await getSecret(apiKey.slice("keystore:".length))
             apiKey = secret ?? ""
           }

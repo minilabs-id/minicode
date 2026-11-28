@@ -22,13 +22,8 @@ import {
   friendlyToolErrorCanonical,
 } from "../render/errors.ts"
 import { highlightCode } from "../render/highlight.ts"
-import { paintLedger, runMarker, statusWord } from "../render/ledger.ts"
-import {
-  paintMarkdownBlockquote,
-  paintMarkdownHeading,
-  parseFence,
-  renderInline,
-} from "../render/markdown.ts"
+import { paintLedger, statusWord } from "../render/ledger.ts"
+import { parseFence, renderInline, renderMarkdownContentLine } from "../render/markdown.ts"
 import { computeAssistantLineLayout, formatAssistantSpacing } from "../render/markdown-layout.ts"
 import { type MarkdownTable, parseMarkdownBlocks } from "../render/markdown-table.ts"
 import { sanitizeAnsi, sanitizeAnsiLine, stripSgr } from "../render/sanitize.ts"
@@ -36,6 +31,7 @@ import { renderMarkdownTable } from "../render/table-grid.ts"
 import { c, glyphs } from "../render/theme.ts"
 import { formatActivityLabel, humanToolLabel, tSystem } from "../render/tool-label.ts"
 import { displayWidth, padToWidth, truncateToWidth, wrapByWidth } from "../render/width.ts"
+import { motionReduced } from "../runtime/motion.ts"
 import { defaultUiState, MAX_COPY_TURNS, type UiSessionState } from "../session-state.ts"
 
 // Renderer flat: semua dekorasi non-esensial (panel, lipatan, ringkasan turn,
@@ -502,8 +498,8 @@ function formatElapsed(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000))
   if (seconds < 60) return `${seconds}s`
   const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}m${String(seconds % 60).padStart(2, "0")}s`
-  return `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, "0")}m`
+  if (minutes < 60) return `${minutes}m ${String(seconds % 60).padStart(2, "0")}s`
+  return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m`
 }
 
 type FenceState = "outside" | "inside" | `inside:${string}` | "boundary" | `open:${string}`
@@ -529,19 +525,17 @@ function renderAssistantLine(line: string, fenceState: FenceState): string | nul
     const lang = fenceState.startsWith("inside:") ? fenceState.slice(7) : ""
     return lang ? highlightCode(line, lang) : line
   }
-  // v0.33: `__bold__` & kutipan `>` juga markdown — jangan bypass fast-path agar kutipan tetap terwarnai.
-  if (!/(?:\*{1,2}|_{2}|`|^#{1,6}\s|^\s*>|~~|\[[^\]]+\]\()/.test(line)) return line
-  const heading = /^(#{1,6})\s+(.*)$/.exec(line)
-  if (heading) {
-    return paintMarkdownHeading(heading[1]!.length, renderInline(heading[2] ?? ""))
+  // v0.33+: lewati pipeline markdown hanya bila baris benar-benar polos dari
+  // penekanan, code span, tautan, heading (termasuk berindentasi), kutipan,
+  // maupun garis pemisah horizontal (`***`/`---`/`___`).
+  if (
+    !/(?:(?:^|\s)#{1,6}\s|^\s*(?:>|(?:\*[ \t]*){3,}$|(?:-[ \t]*){3,}$|(?:_[ \t]*){3,}$)|[*`_~]|\[[^\]]+\]\()/.test(
+      line,
+    )
+  ) {
+    return line
   }
-  const listItem = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/.exec(line)
-  if (listItem) return `${listItem[1]}${listItem[2]} ${renderInline(listItem[3] ?? "")}`
-  const blockquote = /^(\s*(?:>\s*)+)(.*)$/.exec(line)
-  if (blockquote) {
-    return paintMarkdownBlockquote(blockquote[1] ?? "", renderInline(blockquote[2] ?? ""))
-  }
-  return renderInline(line)
+  return renderMarkdownContentLine(line)
 }
 
 /**
@@ -577,6 +571,13 @@ function offsetAtColumn(text: string, start: number, end: number, column: number
     }
   }
   return to
+}
+
+interface FrameMetrics {
+  proj: WidthProjection
+  tail: TranscriptRow[]
+  total: number
+  maxBack: number
 }
 
 export class Transcript {
@@ -659,18 +660,23 @@ export class Transcript {
    * bukan di-append: `read_file` yang sama 22× = retry anak, bukan 22 langkah.
    */
   /**
-   * Satu baris agregat per turn untuk seluruh delegasi `delegate_task` dalam turn
-   * yang sama; child ditimpa di baris SAMA. `✦` chat & rekap memakai satu sumber angka.
+   * Satu baris agregat per putaran (`wave`) delegasi `delegate_task`. Putaran
+   * lama tetap tertinggal di transkrip atas sebagai riwayat saat putaran baru
+   * berjalan; child ditimpa di gelombang miliknya sendiri.
    */
-  private agentProgress = new Map<
-    string,
-    {
-      id: number
-      agents: Set<string>
-      tools: Set<string>
-      failures: Map<AgentFailureReason, number>
-    }
-  >()
+  private agentWaves: {
+    id: number
+    turnId: number | undefined
+    rootIds: Set<string>
+    openRootIds: Set<string>
+    agents: Set<string>
+    tools: Set<string>
+    failedToolReasons: Map<string, AgentFailureReason>
+    rootsWithChildFailure: Set<string>
+    failures: Map<AgentFailureReason, number>
+    settled: boolean
+  }[] = []
+  private agentWaveByParent = new Map<string, number>()
   private delegateRowIds = new Map<string, number>()
   /**
    * v0.43 retry: id baris ledger terminal per toolCallId. Retry sukses
@@ -779,6 +785,7 @@ export class Transcript {
   private turnRetryCount = 0
   private turnRetryReason = ""
   private turnDisruptionFlushed = false
+  private turnEndRecapFlushed = false
   private turnActive = false
   private turnStartTs = 0
   private currentStepNumber = 0
@@ -822,6 +829,7 @@ export class Transcript {
         this.lastRecapText = ""
         this.recapRowId = null
         this.recapJustWritten = false
+        this.turnEndRecapFlushed = false
         this.narrationSinceFlush = false
         // Turn baru = event kompaksi baru; jangan sambung hitungan lama.
         this.compactionTrimRow = null
@@ -839,15 +847,14 @@ export class Transcript {
         // yang belum sempat di-flush (hitungan jadi kurang dari kenyataan).
         this.commitThinking(true)
         this.commit()
+        const durationMs = this.resolveTurnDurationMs()
         // v7.40: komentar lama menjanjikan "flush sisa segmen" tapi tak pernah
         // memanggilnya — jalur bus (non-presentasi) menggugurkan hitungan
         // segmen terakhir. flush() mengosongkan fold, jadi aman/idempoten bila
         // presentation path `turn.completed` juga memanggilnya.
         this.flushActivityFold()
-        // Rekap AKHIR TURN kumulatif (dari akumulator, bukan fold yang baru
-        // dikosongkan). Idempoten: akumulator dikosongkan setelah emit, jadi
-        // jalur bus + presentation yang sama tak menulis dua kali.
-        this.flushTurnTotal()
+        // Rekap AKHIR TURN kumulatif + durasi turn (idempoten via turnEndRecapFlushed).
+        this.flushTurnTotal(durationMs)
         this.flushProviderDisruption()
         this.turnActive = false
         this.turnStartTs = 0
@@ -855,6 +862,7 @@ export class Transcript {
         this.liveRetryState = null
       }),
       bus.on("execution:started", () => {
+        this.turnEndRecapFlushed = false
         this.liveRetryState = null
         this.commit()
         this.commitThinking()
@@ -908,6 +916,7 @@ export class Transcript {
   /** Teks model mengalir — ditahan sebagai ekor hidup sampai commit. */
   stream(text: string): void {
     if (!text) return
+    this.turnEndRecapFlushed = false
     this.liveRetryState = null
     this.commitThinking()
     // Footer narasi: `tool → narasi → rekap → tool`. Teks model menandai
@@ -1295,7 +1304,8 @@ export class Transcript {
     this.pendingProjection = null
     this.pendingVersion = 0
     this.presentedTerminals.clear()
-    this.agentProgress.clear()
+    this.agentWaves = []
+    this.agentWaveByParent.clear()
     this.delegateRowIds.clear()
     this.ledgerRowIds.clear()
     this.agentFailureById.clear()
@@ -1316,6 +1326,7 @@ export class Transcript {
     this.turnRetryCount = 0
     this.turnRetryReason = ""
     this.turnDisruptionFlushed = false
+    this.turnEndRecapFlushed = false
     this.turnActive = false
     this.turnStartTs = 0
     this.currentStepNumber = 0
@@ -2030,24 +2041,148 @@ export class Transcript {
    * Baris sangat panjang tidak dimemo (kuncinya akan sebesar barisnya sendiri).
    */
   private pendingRowMemo = new Map<string, TranscriptRow[]>()
+  private pendingPrefixCache: {
+    width: number
+    rawPrefix: string
+    rows: TranscriptRow[]
+  } | null = null
 
-  /** Buang seperempat entri tertua (FIFO Map) agar jawaban streaming panjang
-   * tidak memicu cache-miss storm penuh setiap kali batas memo tercapai. */
-  private evictPendingMemoIfNeeded(): void {
-    if (this.pendingRowMemo.size < PENDING_MEMO_MAX_ENTRIES) return
-    let drop = Math.max(1, PENDING_MEMO_MAX_ENTRIES >>> 2)
-    for (const key of this.pendingRowMemo.keys()) {
+  private touchPendingMemo(key: string): TranscriptRow[] | undefined {
+    const hit = this.pendingRowMemo.get(key)
+    if (hit !== undefined) {
+      // Sentuh MRU agar baris aktif bertahan di atas eviksi FIFO lama.
       this.pendingRowMemo.delete(key)
-      if (--drop <= 0) break
+      this.pendingRowMemo.set(key, hit)
+    }
+    return hit
+  }
+
+  private putPendingMemo(key: string, rows: TranscriptRow[]): void {
+    if (this.pendingRowMemo.has(key)) this.pendingRowMemo.delete(key)
+    while (this.pendingRowMemo.size >= PENDING_MEMO_MAX_ENTRIES) {
+      const oldest = this.pendingRowMemo.keys().next().value
+      if (oldest === undefined) break
+      this.pendingRowMemo.delete(oldest)
+    }
+    this.pendingRowMemo.set(key, rows)
+  }
+
+  private renderNormalizedPending(normalized: string, w: number, out: TranscriptRow[]): void {
+    const pendingFence = this.fenceTracker()
+    for (const block of parseMarkdownBlocks(normalized)) {
+      if (block.type === "table") {
+        if (out.length > 0 && out[out.length - 1]!.text !== "") {
+          out.push({
+            text: "",
+            sourceId: -1,
+            sourceStart: 0,
+            sourceEnd: 0,
+            displayStart: 0,
+            displayEnd: 0,
+            selectable: false,
+          })
+        }
+        // Gunakan `block.table.raw` mentah alih-alih `JSON.stringify(block.table)`
+        // di setiap frame 30ms.
+        const tableSig = block.table.raw
+        const tableKey =
+          tableSig.length <= PENDING_MEMO_LINE_MAX * 4 ? `${w}\u0000T\u0000${tableSig}` : null
+        const cachedTable = tableKey === null ? undefined : this.touchPendingMemo(tableKey)
+        if (cachedTable) {
+          out.push(...cachedTable)
+        } else {
+          const tableRows = this.projectTable(block.table, -1, w)
+          if (tableKey !== null) this.putPendingMemo(tableKey, tableRows)
+          out.push(...tableRows)
+        }
+      } else {
+        const lineList = block.text.split("\n")
+        if (out.length > 0 && lineList[0] !== "" && out[out.length - 1]!.text !== "") {
+          out.push({
+            text: "",
+            sourceId: -1,
+            sourceStart: 0,
+            sourceEnd: 0,
+            displayStart: 0,
+            displayEnd: 0,
+            selectable: false,
+          })
+        }
+        for (const line of lineList) {
+          const fenceState = pendingFence(line)
+          const memoKey =
+            line.length <= PENDING_MEMO_LINE_MAX ? `${w}\u0000${fenceState}\u0000${line}` : null
+          const memo = memoKey === null ? undefined : this.touchPendingMemo(memoKey)
+          if (memo) {
+            out.push(...memo)
+            continue
+          }
+          const clean = stripSgr(sanitizeAnsi(line))
+          const produced = this.projectText(line, clean, -1, w, false, "", true, fenceState)
+          if (memoKey !== null) this.putPendingMemo(memoKey, produced)
+          out.push(...produced)
+        }
+      }
     }
   }
 
+  private findSafePendingSplit(raw: string, startFrom: number): number {
+    // Cari pemisah `\n\n` paling akhir sebelum ekor (~512 char) yang berada di
+    // luar fence dan tidak diikuti heading H1-H3 (yang menyisipkan 2 baris kosong).
+    const limit = raw.length - 256
+    if (limit <= startFrom + 512) return -1
+    const cleanText = raw.replace(/\r\n?/g, "\n")
+    const lines = cleanText.split("\n")
+    let openFence: { char: string; len: number } | null = null
+    let inList = false
+    let offset = 0
+    let lastSafeOffset = -1
+    for (let i = 0; i + 1 < lines.length; i++) {
+      const line = lines[i]!
+      offset += line.length + 1
+      if (offset > limit) break
+      const fence = parseFence(line)
+      if (openFence) {
+        if (fence && fence.char === openFence.char && fence.len >= openFence.len) {
+          openFence = null
+        }
+        continue
+      }
+      if (fence) {
+        openFence = fence
+        inList = false
+        continue
+      }
+      if (line.trim() === "") {
+        // Sebelum `\n\n`, cek baris sebelumnya tidak kosong & bukan dalam list;
+        // setelah blank ini, pastikan baris berikutnya non-kosong dan bukan H1-H3.
+        const nextLine = lines[i + 1] ?? ""
+        if (
+          offset >= startFrom &&
+          !inList &&
+          i > 0 &&
+          lines[i - 1]!.trim() !== "" &&
+          nextLine.trim() !== "" &&
+          !/^\s*#{1,3}\s/.test(nextLine) &&
+          !parseFence(nextLine) &&
+          raw.slice(Math.max(0, offset - 2), offset) === "\n\n"
+        ) {
+          lastSafeOffset = offset
+        }
+        continue
+      }
+      inList = /^\s*(?:[-*+]|\d+[.)])\s+/.test(line) || (inList && /^\s+/.test(line))
+    }
+    return lastSafeOffset
+  }
+
   /** Proyeksi `pending` (jawaban streaming) + marker truncasi. Di-cache per
-   * (width, pendingVersion, truncated) untuk hasil total; proyeksi per baris
-   * dimemo terpisah agar delta baru tidak memaksa kerja ulang penuh. */
+   * (width, pendingVersion, truncated) untuk hasil total; prefiks blok mapan
+   * di-cache inkremental agar delta streaming hanya mem-parse ekor aktif. */
   private pendingRows(w: number): TranscriptRow[] {
     if (!this.pending) {
       this.pendingProjection = null
+      this.pendingPrefixCache = null
       this.pendingRowMemo.clear()
       return []
     }
@@ -2060,67 +2195,63 @@ export class Transcript {
       return this.pendingProjection.rows
     }
     const rows: TranscriptRow[] = []
-    const pendingFence = this.fenceTracker()
-    const pending = normalizeAssistantOutput(sanitizeAnsi(this.pending))
-    if (pending) {
-      for (const block of parseMarkdownBlocks(pending)) {
-        if (block.type === "table") {
-          if (rows.length > 0 && rows[rows.length - 1]!.text !== "") {
-            rows.push({
-              text: "",
-              sourceId: -1,
-              sourceStart: 0,
-              sourceEnd: 0,
-              displayStart: 0,
-              displayEnd: 0,
-              selectable: false,
-            })
-          }
-          // Memoize tabel markdown yang sudah lengkap agar tidak dirender ulang
-          // pada setiap delta streaming teks di bawahnya.
-          const tableSig = JSON.stringify(block.table)
-          const tableKey =
-            tableSig.length <= PENDING_MEMO_LINE_MAX * 4 ? `${w}\u0000T\u0000${tableSig}` : null
-          const cachedTable = tableKey === null ? undefined : this.pendingRowMemo.get(tableKey)
-          if (cachedTable) {
-            rows.push(...cachedTable)
-          } else {
-            const tableRows = this.projectTable(block.table, -1, w)
-            if (tableKey !== null) {
-              this.evictPendingMemoIfNeeded()
-              this.pendingRowMemo.set(tableKey, tableRows)
+    if (
+      this.pendingPrefixCache &&
+      this.pendingPrefixCache.width === w &&
+      this.pending.startsWith(this.pendingPrefixCache.rawPrefix)
+    ) {
+      const tailRaw = this.pending.slice(this.pendingPrefixCache.rawPrefix.length)
+      const firstTailLine = tailRaw.split("\n", 1)[0] ?? ""
+      if (
+        tailRaw.length > 0 &&
+        firstTailLine.trim() !== "" &&
+        !/^\s*#{1,3}\s/.test(firstTailLine)
+      ) {
+        rows.push(...this.pendingPrefixCache.rows)
+        const tailNorm = normalizeAssistantOutput(sanitizeAnsi(tailRaw))
+        if (tailNorm) {
+          this.renderNormalizedPending(tailNorm, w, rows)
+        }
+      }
+    }
+    if (rows.length === 0) {
+      this.pendingPrefixCache = null
+      const pending = normalizeAssistantOutput(sanitizeAnsi(this.pending))
+      if (pending) {
+        this.renderNormalizedPending(pending, w, rows)
+      }
+      if (this.pending.length >= 4096) {
+        const splitAt = this.findSafePendingSplit(this.pending, 0)
+        if (splitAt > 0) {
+          const prefixNorm = normalizeAssistantOutput(sanitizeAnsi(this.pending.slice(0, splitAt)))
+          if (prefixNorm) {
+            const prefixRows: TranscriptRow[] = []
+            this.renderNormalizedPending(prefixNorm, w, prefixRows)
+            this.pendingPrefixCache = {
+              width: w,
+              rawPrefix: this.pending.slice(0, splitAt),
+              rows: prefixRows,
             }
-            rows.push(...tableRows)
           }
-        } else {
-          const lineList = block.text.split("\n")
-          if (rows.length > 0 && lineList[0] !== "" && rows[rows.length - 1]!.text !== "") {
-            rows.push({
-              text: "",
-              sourceId: -1,
-              sourceStart: 0,
-              sourceEnd: 0,
-              displayStart: 0,
-              displayEnd: 0,
-              selectable: false,
-            })
-          }
-          for (const line of lineList) {
-            const fenceState = pendingFence(line)
-            const memoKey =
-              line.length <= PENDING_MEMO_LINE_MAX ? `${w}\u0000${fenceState}\u0000${line}` : null
-            const memo = memoKey === null ? undefined : this.pendingRowMemo.get(memoKey)
-            if (memo) {
-              rows.push(...memo)
-              continue
-            }
-            const clean = stripSgr(sanitizeAnsi(line))
-            const produced = this.projectText(line, clean, -1, w, false, "", true, fenceState)
-            if (memoKey !== null) {
-              this.evictPendingMemoIfNeeded()
-              this.pendingRowMemo.set(memoKey, produced)
-            }
-            rows.push(...produced)
+        }
+      }
+    } else if (
+      this.pendingPrefixCache &&
+      this.pending.length - this.pendingPrefixCache.rawPrefix.length >= 4096
+    ) {
+      const nextSplit = this.findSafePendingSplit(
+        this.pending,
+        this.pendingPrefixCache.rawPrefix.length + 1024,
+      )
+      if (nextSplit > this.pendingPrefixCache.rawPrefix.length) {
+        const prefixNorm = normalizeAssistantOutput(sanitizeAnsi(this.pending.slice(0, nextSplit)))
+        if (prefixNorm) {
+          const prefixRows: TranscriptRow[] = []
+          this.renderNormalizedPending(prefixNorm, w, prefixRows)
+          this.pendingPrefixCache = {
+            width: w,
+            rawPrefix: this.pending.slice(0, nextSplit),
+            rows: prefixRows,
           }
         }
       }
@@ -2155,6 +2286,17 @@ export class Transcript {
     return DEFAULT_MAX_LIVE_TAIL_ROWS
   }
 
+  /** Snapshot metrik frame agar `buildLayout()` tidak memanggil `tailRows` 2× per frame. */
+  viewportMetrics(width: number, height: number): FrameMetrics {
+    const safeHeight = Math.max(1, Math.floor(height))
+    this.lastViewportHeight = safeHeight
+    const proj = this.projection(width)
+    const tail = this.tailRows(width, this.maxLiveTailRows(safeHeight))
+    const total = proj.rows.length + tail.length
+    const maxBack = Math.max(0, total - safeHeight)
+    return { proj, tail, total, maxBack }
+  }
+
   /** O(1) setelah proyeksi lebar ini tersedia. */
   wrappedLength(width: number, height?: number): number {
     return (
@@ -2162,23 +2304,11 @@ export class Transcript {
     )
   }
 
-  viewport(width: number, height: number, scrollBack: number): TranscriptViewport {
-    const safeHeight = Math.max(1, Math.floor(height))
-    this.lastViewportHeight = safeHeight
-    const proj = this.projection(width)
-    const tail = this.tailRows(width, this.maxLiveTailRows(safeHeight))
+  viewport(width: number, h: number, backPos: number, pre?: FrameMetrics): TranscriptViewport {
+    const safeHeight = Math.max(1, Math.floor(h))
+    const { proj, tail, total, maxBack } = pre ?? this.viewportMetrics(width, safeHeight)
     const committedCount = proj.rows.length
-    const total = committedCount + tail.length
-    // v7.28: anchor ATAS. `scrollBack = 0` = kepala, nilai besar = ekor.
-    // Konten lebih pendek dari viewport → baris kosong ditaruh DI BAWAH.
-    const maxBack = Math.max(0, total - safeHeight)
-    // v0.43: baris live tool adalah tail transien. Saat ia hilang, `total`
-    // menyusut dan `maxBack` ikut turun, tetapi scrollBack yang dipakai App
-    // belum tentu ikut rebase. Jangan clamp ke maxBack: pakai scrollBack apa
-    // adanya supaya baris committed tetap di indeks layar yang sama. Baris
-    // bawah yang tak terisi diisi kosong oleh padding di bawah. Clamp bawah
-    // tetap dijaga agar nilai negatif tak menggeser jendela ke sebelum kepala.
-    const back = Math.max(0, scrollBack)
+    const back = Math.max(0, backPos)
     const firstIndex = back
     const rows: TranscriptRow[] = []
     if (back < committedCount) {
@@ -2189,7 +2319,6 @@ export class Transcript {
       const tailStart = Math.max(0, back - committedCount)
       rows.push(...tail.slice(tailStart, tailStart + safeHeight - rows.length))
     }
-    // Normalisasi jeda hanya pada jendela (O(height)), bukan seluruh transkrip.
     const normalized = normalizeBlankRuns(rows)
     while (normalized.length < safeHeight) {
       normalized.push({
@@ -2395,7 +2524,12 @@ export class Transcript {
     // ini dikonsumsi `appendEntry()` saat blank/entri berikutnya ditulis,
     // sehingga tepat satu blank (normalizeBlankRunsFrom membatasi maks 2).
     const last = this.lines[this.lines.length - 1]
-    if ((this.lastKind() === "diagnostic" || this.recapJustWritten) && last !== "") {
+    if (
+      (this.lastKind() === "diagnostic" ||
+        this.lastKind() === "activity" ||
+        this.recapJustWritten) &&
+      last !== ""
+    ) {
       this.append("", { kind: "system" })
       this.recapJustWritten = false
     }
@@ -2474,12 +2608,14 @@ export class Transcript {
       this.lastRecapText = ""
       this.recapRowId = null
       this.recapJustWritten = false
+      this.turnEndRecapFlushed = false
       this.narrationSinceFlush = false
       this.compactionTrimRow = null
       // Dedup baris anak dan terminal lama tak boleh membungkam
       // toolCallId yang dipakai ulang di turn berikutnya (replay/test).
       this.presentedTerminals.clear()
-      this.agentProgress.clear()
+      this.agentWaves = []
+      this.agentWaveByParent.clear()
       this.delegateRowIds.clear()
       this.ledgerRowIds.clear()
       this.agentFailureById.clear()
@@ -2497,14 +2633,16 @@ export class Transcript {
     }
     if (event.type === "turn.completed") {
       this.commitThinking(true)
+      this.settleActiveWaves(event.turnId)
       // Ringkasan ditutup SETELAH jawaban terakhir di-commit supaya baris ini
       // benar-benar berada di ekor turn (separator), bukan di tengah narasi.
       // Dulu flush dilakukan sebelum commit demi urutan panel live — kini panel
       // mati, jadi alasan itu tak berlaku lagi.
       this.commit()
+      const durationMs = this.resolveTurnDurationMs(event.summary)
       this.flushActivityFold()
-      // Rekap kumulatif seluruh tool turn ini (lihat bus `turn:completed`).
-      this.flushTurnTotal()
+      // Rekap kumulatif seluruh tool turn ini + durasi turn (lihat bus `turn:completed`).
+      this.flushTurnTotal(durationMs)
       this.flushProviderDisruption()
       // minimizeActivity ON / activityPanel ON → fold meringkas sendiri; baris
       // ringkas itu sudah cukup, turnSummary (turn · files · durasi) dilewati.
@@ -2521,8 +2659,9 @@ export class Transcript {
     if (event.type === "turn.failed" || event.type === "turn.cancelled") {
       this.commitThinking(true)
       this.commit()
+      const durationMs = this.resolveTurnDurationMs(event.summary)
       this.flushActivityFold()
-      this.flushTurnTotal()
+      this.flushTurnTotal(durationMs)
       this.flushProviderDisruption()
       if (event.type === "turn.cancelled" && event.reason === "budget") {
         this.push(c.warning(tSystem("msg.budgetStopped")))
@@ -2533,8 +2672,10 @@ export class Transcript {
       }
       // Turn gagal diikuti turn baru tanpa `turn.started` bisa terjadi saat
       // resume; tutup akumulator agar ringkasan lama tak menumpuk.
+      this.settleActiveWaves(event.turnId)
       this.compactionTrimRow = null
-      this.agentProgress.clear()
+      this.agentWaves = []
+      this.agentWaveByParent.clear()
       this.delegateRowIds.clear()
       this.ledgerRowIds.clear()
       this.agentFailureById.clear()
@@ -2581,6 +2722,11 @@ export class Transcript {
             ? t("progress.step", { n, total: Math.floor(event.total) })
             : t("progress.stepNoTotal", { n })
       }
+      const lastWave = this.agentWaves[this.agentWaves.length - 1]
+      if (lastWave && !lastWave.settled && lastWave.openRootIds.size === 0) {
+        lastWave.settled = true
+        if (lastWave.id >= 0) this.renderAgentWave(lastWave, event.turnId ?? lastWave.turnId)
+      }
       return
     }
     if (event.type === "plan.updated") {
@@ -2607,6 +2753,7 @@ export class Transcript {
     }
     if (!event.type.startsWith("tool.")) return
     if (event.type === "tool.started") {
+      this.turnEndRecapFlushed = false
       this.liveRetryState = null
       // Tutup narasi/think yang masih menggantung supaya baris tool terminal
       // berikutnya muncul di bawahnya, bukan menempel di ekor jawaban.
@@ -2620,6 +2767,12 @@ export class Transcript {
       if (this.narrationSinceFlush && !event.parentToolCallId) {
         this.narrationSinceFlush = false
         this.flushActivityFold()
+      }
+      const startedName = sanitizeAnsiLine(
+        event.qualified ?? event.name ?? this.snapshotActivity(event.toolCallId)?.name ?? "",
+      )
+      if (!event.parentToolCallId && startedName === "delegate_task" && event.toolCallId) {
+        this.startDelegateWave(event.toolCallId, event.turnId)
       }
       return
     }
@@ -2711,13 +2864,14 @@ export class Transcript {
       if (activity.childSessionId || activity.runId) this.aggregateAgent(event, activity)
       return
     }
-    // v7.29: satu baris kosong MEMISAHKAN narasi (yang baru saja di-commit)
-    // dari baris tool — seperti `marginTop=1` OpenCode. Hanya sekali per
-    // transisi, bukan tiap tool: consecutive tools tetap rapat. `normalizeBlankRuns`
-    // menjamin maksimal satu blank walau jalur lain menyisipkan juga.
-    // Retry tidak memerlukan pemisah baru: ia menimpa baris attempt lama,
-    // bukan membuka grup tool baru di bawahnya.
-    if (!supersedesId && this.lines.length > 0 && this.lines[this.lines.length - 1] !== "") {
+    // v7.29: satu baris kosong MEMISAHKAN narasi/rekap dari baris tool, bukan
+    // antar-baris aktivitas berurutan (`lastKind() === "activity"`).
+    if (
+      !supersedesId &&
+      this.lines.length > 0 &&
+      this.lines[this.lines.length - 1] !== "" &&
+      this.lastKind() !== "activity"
+    ) {
       this.append("", { kind: "assistant" })
     }
     this.commit()
@@ -2758,6 +2912,7 @@ export class Transcript {
     // Akumulator turn menyimpan rawName SETIAP tool terminal (jalur dedup &
     // child sudah return lebih awal di atas), bukan fold per-segmen. Retry
     // sukses mengganti slot attempt gagal — bukan menambah nama kedua.
+    this.turnEndRecapFlushed = false
     this.pushTurnToolName(toolId, supersedesId, rawName)
     const targetText =
       !isIntent && target ? ` ${truncateToWidth(sanitizeAnsiLine(target), 120, "")}` : ""
@@ -2792,6 +2947,14 @@ export class Transcript {
         : ""
     const errorMessage = event.message ?? desc?.message ?? activity?.error?.message
     const firstLine = String(errorMessage ?? "").split(/[\r\n]/)[0] ?? ""
+    if (rawName === "delegate_task" && !activity?.parentToolCallId && toolId) {
+      this.settleDelegateRoot(
+        toolId,
+        status,
+        String(errorMessage ?? denyReason ?? ""),
+        event.turnId,
+      )
+    }
     let line: string
     const useUnifiedFailureLabel =
       status !== "completed" &&
@@ -2887,67 +3050,160 @@ export class Transcript {
   /** Golongkan alasan kegagalan anak ke kategori ringkas (fail-closed: error). */
   private agentFailureReason(status: string, message: string): AgentFailureReason {
     const s = `${status} ${message}`.toLowerCase()
+    if (/step limit reached|\bmax[_ ]?steps(?:_exceeded)?\b|\bexceeded \d+ steps\b/.test(s)) {
+      return "stepLimit"
+    }
     if (s.includes("timeout") || s.includes("exceeded") || s.includes("180000ms")) return "timeout"
     if (s.includes("abort") || s.includes("cancel")) return "aborted"
-    if (s.includes("denied") || s.includes("permission")) return "denied"
+    if (status === "denied" || s.includes("denied") || s.includes("permission")) return "denied"
     return "error"
   }
 
+  private ensureWave(turnId: number | undefined, parentToolCallId?: string) {
+    if (parentToolCallId) {
+      const idx = this.agentWaveByParent.get(parentToolCallId)
+      if (idx !== undefined && this.agentWaves[idx]) return this.agentWaves[idx]!
+    }
+    const last = this.agentWaves[this.agentWaves.length - 1]
+    if (
+      last &&
+      !last.settled &&
+      (turnId === undefined || last.turnId === undefined || last.turnId === turnId)
+    ) {
+      if (parentToolCallId) this.agentWaveByParent.set(parentToolCallId, this.agentWaves.length - 1)
+      return last
+    }
+    const wave = {
+      id: -1,
+      turnId,
+      rootIds: new Set<string>(),
+      openRootIds: new Set<string>(),
+      agents: new Set<string>(),
+      tools: new Set<string>(),
+      failedToolReasons: new Map<string, AgentFailureReason>(),
+      rootsWithChildFailure: new Set<string>(),
+      failures: new Map<AgentFailureReason, number>(),
+      settled: false,
+    }
+    const idx = this.agentWaves.length
+    this.agentWaves.push(wave)
+    if (parentToolCallId) this.agentWaveByParent.set(parentToolCallId, idx)
+    return wave
+  }
+
+  private settleActiveWaves(turnId?: number): void {
+    for (const w of this.agentWaves) {
+      const wasActive = !w.settled && w.openRootIds.size > 0
+      w.openRootIds.clear()
+      w.settled = true
+      if (wasActive && w.id >= 0) this.renderAgentWave(w, turnId ?? w.turnId)
+    }
+  }
+
+  private renderAgentWave(
+    wave: (typeof this.agentWaves)[number],
+    turnId: number | undefined,
+  ): void {
+    const failed = { ...EMPTY_AGENT_PROGRESS.failures }
+    for (const [k, v] of wave.failures) failed[k] = v
+    const line = formatAgentProgress({
+      agents: wave.agents.size,
+      tools: wave.tools.size,
+      failures: failed,
+    })
+    if (wave.id < 0 || !this.replaceEntry(wave.id, c.info(line))) {
+      // Putaran baru di transkrip dipisahkan 1 baris kosong dari narasi/rekap atau
+      // putaran lama di atasnya, sementara kegagalan/live di bawahnya tetap rapat.
+      const hasPrevWave = this.agentWaves.length > 1
+      if (
+        this.lines.length > 0 &&
+        this.lines[this.lines.length - 1] !== "" &&
+        (this.lastKind() !== "activity" || hasPrevWave)
+      ) {
+        this.append("", { kind: "assistant" })
+      }
+      wave.id = this.appendWithId(c.info(line), {
+        kind: "activity",
+        rekap: true,
+        ...(turnId !== undefined ? { turnId } : {}),
+      })
+    }
+  }
+
+  /** Daftarkan root `delegate_task` pada putaran (`wave`) aktif saat mulai berjalan. */
+  private startDelegateWave(toolCallId: string, turnId: number | undefined): void {
+    const wave = this.ensureWave(turnId, toolCallId)
+    const isNewRoot = !wave.rootIds.has(toolCallId)
+    wave.rootIds.add(toolCallId)
+    wave.openRootIds.add(toolCallId)
+    if (isNewRoot && !wave.agents.has(`pending:${toolCallId}`)) {
+      wave.agents.add(`pending:${toolCallId}`)
+    }
+    this.renderAgentWave(wave, turnId)
+  }
+
+  /** Tutup satu root `delegate_task` dalam gelombangnya; bila semua selesai, kunci gelombang. */
+  private settleDelegateRoot(
+    toolCallId: string,
+    status: string = "completed",
+    rawReason = "",
+    turnId?: number,
+  ): void {
+    const idx = this.agentWaveByParent.get(toolCallId)
+    if (idx === undefined) return
+    const wave = this.agentWaves[idx]
+    if (!wave) return
+    const wasOpen = wave.openRootIds.delete(toolCallId)
+    let dirty = wasOpen
+    if (status !== "completed" && !wave.rootsWithChildFailure.has(toolCallId)) {
+      wave.failedToolReasons.set(`root:${toolCallId}`, this.agentFailureReason(status, rawReason))
+      this.recomputeWaveFailures(wave)
+      dirty = true
+    }
+    if (wave.openRootIds.size === 0) wave.settled = true
+    if (dirty) this.renderAgentWave(wave, turnId ?? wave.turnId)
+  }
+
+  private recomputeWaveFailures(wave: (typeof this.agentWaves)[number]): void {
+    wave.failures.clear()
+    for (const r of wave.failedToolReasons.values()) {
+      wave.failures.set(r, (wave.failures.get(r) ?? 0) + 1)
+    }
+  }
+
   /**
-   * Satu baris agregat `✦` per turn — menggabungkan seluruh delegasi sub-agent
-   * dalam turn yang sama agar eksekusi paralel tidak menumpuk N baris `1 sub agent`.
-   * Angka dihitung dari id unik supaya retry/replay tak menggandakan.
+   * Satu baris agregat `✦` per putaran delegasi (`wave`) — putaran lama
+   * tertinggal di atas sebagai riwayat saat putaran baru berjalan di bawah.
    */
   private aggregateAgent(event: UiPresentationEvent, activity: UiPresentationActivity): void {
     const parent = activity.parentToolCallId ?? ""
-    const turnKey = event.turnId !== undefined ? `turn:${event.turnId}` : "turn:current"
-    let row = this.agentProgress.get(turnKey)
-    if (!row) {
-      const existing = parent ? this.delegateRowIds.get(parent) : undefined
-      row = {
-        id: existing ?? -1,
-        agents: new Set(),
-        tools: new Set(),
-        failures: new Map(),
-      }
-      this.agentProgress.set(turnKey, row)
-    } else if (row.id < 0 && parent) {
-      const existing = this.delegateRowIds.get(parent)
-      if (existing !== undefined) row.id = existing
+    const wave = this.ensureWave(event.turnId, parent || undefined)
+    if (parent) {
+      wave.rootIds.add(parent)
+      wave.agents.delete(`pending:${parent}`)
     }
-    row.agents.add(
-      activity.childSessionId ??
-        activity.runId ??
-        activity.parentToolCallId ??
-        activity.toolCallId ??
-        "",
+    wave.agents.add(
+      activity.childSessionId ?? activity.runId ?? (parent || activity.toolCallId || ""),
     )
-    row.tools.add(event.toolCallId ?? `${activity.name}:${activity.target ?? ""}`)
+    const toolKey = event.toolCallId ?? `${activity.name}:${activity.target ?? ""}`
+    wave.tools.add(toolKey)
     const status = activity.status ?? event.status ?? "completed"
     const rawReason = String(event.message ?? (event as { reason?: unknown }).reason ?? "")
     const toolId = activity.toolCallId || event.toolCallId
+    if (activity.supersedes) {
+      wave.failedToolReasons.delete(activity.supersedes)
+      this.agentFailureById.delete(activity.supersedes)
+    }
     if (status !== "completed") {
       const reason = this.agentFailureReason(status, rawReason)
-      row.failures.set(reason, (row.failures.get(reason) ?? 0) + 1)
-      // Simpan alasan per attempt: saat retry sukses datang, kita harus tahu
-      // kategori mana yang dikurangi (bukan asal mengurangi hitungan pertama).
+      if (parent) wave.rootsWithChildFailure.add(parent)
+      wave.failedToolReasons.set(toolId || toolKey, reason)
       if (toolId) this.agentFailureById.set(toolId, reason)
-    } else if (activity.supersedes) {
-      // Retry sukses mencabut kegagalan attempt lama dari agregat ✦. Tanpa ini
-      // baris tetap bilang `1 gagal (timeout)` padahal usaha kedua berhasil.
-      const oldReason = this.agentFailureById.get(activity.supersedes)
-      // Hapus dulu: event replay tak boleh mengurangi dua kali.
-      this.agentFailureById.delete(activity.supersedes)
-      if (oldReason) {
-        const next = Math.max(0, (row.failures.get(oldReason) ?? 0) - 1)
-        if (next === 0) row.failures.delete(oldReason)
-        else row.failures.set(oldReason, next)
-      }
+    } else if (toolId) {
+      wave.failedToolReasons.delete(toolId)
+      this.agentFailureById.delete(toolId)
     }
-    // Tool anak ikut rekap kategori di chat: jalur ini return lebih awal dari
-    // `presentationLedger`, jadi tanpa ini nama tool anak tak pernah masuk
-    // `activityFold` / akumulator turn dan rekap `1 read` hilang dari chat.
-    // rawName = NAMA INTERNAL (bukan label manusiawi) agar kategori tak geser.
+    this.recomputeWaveFailures(wave)
     const rawName = sanitizeAnsiLine(activity.name ?? event.name ?? "tool")
     this.pushFoldActivity(
       {
@@ -2960,25 +3216,7 @@ export class Transcript {
       activity.supersedes,
     )
     this.pushTurnToolName(toolId, activity.supersedes, rawName)
-    const failed = { ...EMPTY_AGENT_PROGRESS.failures }
-    for (const [k, v] of row.failures) failed[k] = v
-    const line = formatAgentProgress({
-      agents: row.agents.size,
-      tools: row.tools.size,
-      failures: failed,
-    })
-    // `replaceEntry` memakai SGR dari argumen; bungkus dengan c.info supaya
-    // agregat tetap biru/normal setelah retry sukses (sebelumnya replace
-    // menulis teks polos, warnanya hilang dari baris yang sama).
-    if (row.id < 0 || !this.replaceEntry(row.id, c.info(line))) {
-      // Agregat `✦` adalah laporan ringkas, bukan ledger tool mentah: ikut
-      // tersalin sebagai rekap oleh `copyTurnTexts()`.
-      row.id = this.appendWithId(c.info(line), {
-        kind: "activity",
-        rekap: true,
-        ...(event.turnId !== undefined ? { turnId: event.turnId } : {}),
-      })
-    }
+    this.renderAgentWave(wave, event.turnId)
   }
 
   private verificationLedger(event: UiPresentationEvent): void {
@@ -3215,32 +3453,58 @@ export class Transcript {
     this.recapJustWritten = true
   }
 
+  /** Hitung durasi turn (ms) dari summary durable/event, atau jam turn aktif. */
+  private resolveTurnDurationMs(summary?: UiPresentationEvent["summary"]): number | undefined {
+    if (typeof summary?.durationMs === "number" && Number.isFinite(summary.durationMs)) {
+      return Math.max(0, summary.durationMs)
+    }
+    // Replay durable tanpa summary.durationMs tak boleh memakai clock replay (~0ms).
+    if (this.replaying) return undefined
+    // Harness/test yang langsung emit turn:completed tanpa memulai turn tidak diberi durasi sintetis.
+    if (this.turnStartTs <= 0) return undefined
+    return Math.max(0, this.nowFn() - this.turnStartTs)
+  }
+
   /**
-   * Rekap AKHIR TURN = KUMULATIF semua tool selama turn. Sumbernya
-   * `turnToolNames` (bukan `activityFold` yang sudah dikosongkan flush segmen
-   * terakhir), supaya angka akhir tetap mencakup tool yang sudah terpotong
-   * oleh narasi di tengah turn. Akumulator dikosongkan setelah emit agar jalur
-   * turn-end ganda (bus `turn:completed` + presentation `turn.completed`)
-   * idempoten — satu baris, bukan dua.
+   * Rekap AKHIR TURN = KUMULATIF semua tool selama turn + durasi turn berjalan.
+   * Sumbernya `turnToolNames` (bukan `activityFold` yang sudah dikosongkan flush
+   * segmen terakhir), supaya angka akhir tetap mencakup tool yang terpotong
+   * narasi di tengah turn. Turn tanpa tool (`0` tool) tetap menuliskan durasi
+   * bila tersedia. Idempoten lewat `turnEndRecapFlushed` agar jalur ganda
+   * (`turn:completed` + `turn.completed`) tidak menulis dua kali.
    */
-  private flushTurnTotal(): void {
-    if (this.turnToolNames.length === 0) return
-    const summary = this.formatFoldSummary(this.turnToolNames.map((rawName) => ({ rawName })))
+  private flushTurnTotal(durationMs?: number): void {
+    if (this.turnEndRecapFlushed) return
+    const toolSummary =
+      this.turnToolNames.length > 0
+        ? this.formatFoldSummary(this.turnToolNames.map((rawName) => ({ rawName })))
+        : ""
     this.turnToolNames = []
     this.turnToolNameIds = []
-    if (!summary) return
-    // Bila segmen terakhir sudah menulis rekap yang sama persis, jangan ulangi —
-    // rekap kumulatif tetap benar (sudah tertera), hanya tanpa baris ganda.
-    if (summary === this.lastRecapText) return
+    const durationPart = durationMs !== undefined ? c.gray(formatElapsed(durationMs)) : ""
+    if (!toolSummary && !durationPart) return
+    this.turnEndRecapFlushed = true
+    const summary =
+      toolSummary && durationPart
+        ? `${toolSummary} ${c.faint(glyphs.dot)} ${durationPart}`
+        : toolSummary || durationPart
+    // Bila segmen terakhir sudah menulis rekap yang sama persis, jangan ulangi.
+    if (summary === this.lastRecapText) {
+      this.recapRowId = null
+      return
+    }
     this.lastRecapText = summary
-    // Timpa rekap SEGMEN terakhir dengan angka kumulatif — jangan append baris
-    // baru. Kalau baris itu sudah ter-evict (TRANSCRIPT_CAP), fallback append.
-    if (this.recapRowId === null || !this.replaceEntry(this.recapRowId, summary)) {
-      // Fallback saat baris rekap lama sudah ter-evict: meta HARUS ikut
-      // `rekap:true` supaya `copyTurnTexts()` tetap mengenalinya sebagai laporan.
-      this.append(summary, { kind: "system", rekap: true })
+    // Timpa rekap SEGMEN terakhir dengan rekap+durasi kumulatif — jangan append
+    // baris baru. Kalau baris itu sudah ter-evict (TRANSCRIPT_CAP), fallback append.
+    if (toolSummary && this.recapRowId !== null && this.replaceEntry(this.recapRowId, summary)) {
+      this.recapRowId = null
+      this.recapJustWritten = true
+      return
     }
     this.recapRowId = null
+    // Baris dengan rekap tool tetap ber-`rekap:true` agar `/copy` ikut menyalin
+    // laporan alat; baris durasi murni (0 tool) hanya penanda waktu turn di chat.
+    this.append(summary, toolSummary ? { kind: "system", rekap: true } : { kind: "system" })
     this.recapJustWritten = true
   }
 
@@ -3264,6 +3528,18 @@ export class Transcript {
     return this.liveAnimating
   }
 
+  /** Format durasi live sub-agent menjadi `MM:SS` (`HH:MM:SS` bila ≥ 1 jam). */
+  private formatSubAgentTimer(ms: number): string {
+    const totalSec = Math.max(0, Math.floor(ms / 1000))
+    const hours = Math.floor(totalSec / 3600)
+    const mins = Math.floor((totalSec % 3600) / 60)
+    const secs = totalSec % 60
+    if (hours > 0) {
+      return `${String(hours).padStart(2, "0")}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+    }
+    return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+  }
+
   /** Satu baris live untuk activity running — memakai label niat / auto-label
    *  manusiawi, dengan jeda anti-kedip 120 ms & reveal per kata saat `animateLive`. */
   private runningLine(
@@ -3274,16 +3550,20 @@ export class Transcript {
   ): string {
     const rawName = sanitizeAnsiLine(activity.name)
     const now = this.nowFn()
-    const elapsed = now - activity.tsStart
+    const elapsed = Math.max(0, now - activity.tsStart)
     const showElapsed = this.policy
       ? this.policy.elapsedVisible(activity.tsStart, now)
       : elapsed >= 2000
-    const elapsedText = showElapsed ? ` (${formatElapsed(elapsed)})` : ""
+    const isSubAgent = rawName === "delegate_task"
     const retry = activity.supersedes ? ` ${t("ts.retry")}` : ""
     const markerText = marker ? `${marker} ` : ""
     // v0.43: margin 3 milik FRAME. Indent 2 kolom anak tetap jadi hierarki.
     const prefix = child ? `  ↳ ` : `${glyphs.arrow} `
-    const suffix = ` … ${t("ts.statusRunning")}${elapsedText}${retry}`
+    const subAgentTimer = isSubAgent && showElapsed ? this.formatSubAgentTimer(elapsed) : ""
+    const elapsedText = !isSubAgent && showElapsed ? ` (${formatElapsed(elapsed)})` : ""
+    const plainSuffix = isSubAgent
+      ? `${subAgentTimer ? ` ${subAgentTimer}` : ""}${retry}`
+      : ` … ${t("ts.statusRunning")}${elapsedText}${retry}`
     // Anggaran label proporsional terhadap lebar kolom chat agar suffix status
     // & timer tetap terbaca tanpa bungkus di lebar ter-centre (U3).
     const maxLabelCols =
@@ -3292,7 +3572,7 @@ export class Transcript {
             72,
             Math.max(
               12,
-              width - displayWidth(prefix) - displayWidth(markerText) - displayWidth(suffix),
+              width - displayWidth(prefix) - displayWidth(markerText) - displayWidth(plainSuffix),
             ),
           )
         : 72
@@ -3304,6 +3584,9 @@ export class Transcript {
       maxCols: maxLabelCols,
     })
     const bodyTitle = isIntent ? titleLabel : autoText
+    // Pulse lembut khusus baris live sub-agent: redup-nyala tiap 600ms (statis bila MINICODE_MOTION=0).
+    const subAgentDim = isSubAgent && !motionReduced() && Math.floor(elapsed / 600) % 2 === 1
+    const paintMain = subAgentDim ? c.gray : c.info
     if (this.animateLive) {
       const key = activity.toolCallId || `${rawName}:${activity.tsStart}`
       let startTs = this.liveRevealStart.get(key)
@@ -3323,38 +3606,42 @@ export class Transcript {
       if (!complete) {
         this.liveAnimating = true
         const partial = `${prefix}${markerText}${shown} …`
-        return c.info(
+        return paintMain(
           width !== undefined ? truncateToWidth(partial, width, glyphs.ellipsis) : partial,
         )
       }
     }
-    const line = `${prefix}${markerText}${bodyTitle}${suffix}`
+    if (isSubAgent) {
+      const rawHead = `${prefix}${markerText}${bodyTitle}`
+      const head =
+        width !== undefined
+          ? truncateToWidth(
+              rawHead,
+              Math.max(1, width - displayWidth(plainSuffix)),
+              glyphs.ellipsis,
+            )
+          : rawHead
+      const timerStyled = subAgentTimer ? ` ${c.faint(subAgentTimer)}` : ""
+      const retryStyled = retry ? paintMain(retry) : ""
+      const composed = `${paintMain(head)}${timerStyled}${retryStyled}`
+      return width !== undefined && displayWidth(plainSuffix) >= width
+        ? truncateToWidth(composed, width, "")
+        : composed
+    }
+    const line = `${prefix}${markerText}${bodyTitle}${plainSuffix}`
     return c.info(width !== undefined ? truncateToWidth(line, width, glyphs.ellipsis) : line)
   }
 
-  /** Urutan baris live: root + anaknya, lalu anak yatim (sama seperti dulu). */
+  /** Urutan baris live: hanya aktivitas root (`!parentToolCallId`) — sub-agent
+   *  tampil sejajar dengan tool biasa tanpa baris `↳` tool anak di tail. */
   private orderedRunning(snapshot: UiPresentationSnapshot): {
     activity: UiPresentationActivity
     child: boolean
     marker: string
   }[] {
-    const running = this.runningActivities(snapshot)
-    const roots = running.filter((a) => !a.parentToolCallId)
-    const out: { activity: UiPresentationActivity; child: boolean; marker: string }[] = []
-    for (const activity of roots) {
-      out.push({ activity, child: false, marker: "" })
-      for (const child of running.filter((a) => a.parentToolCallId === activity.toolCallId))
-        out.push({ activity: child, child: true, marker: runMarker(child) })
-    }
-    for (const activity of running) {
-      if (
-        !activity.parentToolCallId ||
-        roots.some((r) => r.toolCallId === activity.parentToolCallId)
-      )
-        continue
-      out.push({ activity, child: true, marker: runMarker(activity) })
-    }
-    return out
+    return this.runningActivities(snapshot)
+      .filter((a) => !a.parentToolCallId)
+      .map((activity) => ({ activity, child: false, marker: "" }))
   }
 
   /** Total aktivitas tool yang sedang berjalan saat ini (untuk indikator +N footer). */
@@ -3572,6 +3859,7 @@ export class Transcript {
       this.sourcePrefixes.unshift("")
       this.meta.unshift({ kind: "system" })
       this.hasEvictMarker = true
+      this.pruneTrackingCaches()
       this.applyEvict(overflow, true)
     }
     if (this.hasEvictMarker && this.lines.length > TRANSCRIPT_CAP + 1) {
@@ -3592,9 +3880,41 @@ export class Transcript {
       // Marker ikut tumbuh digit (9→10): sinkronkan proyeksi di lebar mana pun,
       // kalau tidak counts/rows basi saat marker melebar.
       this.replaceAt(this.ids[0] ?? -1)
+      this.pruneTrackingCaches()
       this.applyEvict(overflow, false)
     }
     // Baris baru selalu masuk ke UJUNG proyeksi — O(1) per lebar, tanpa rebuild.
     this.applyAppend()
+  }
+
+  private pruneTrackingCaches(): void {
+    const CAP = 2048
+    const trimSet = <T>(s: Set<T>) => {
+      while (s.size > CAP) {
+        const k = s.values().next().value
+        if (k === undefined) break
+        s.delete(k)
+      }
+    }
+    const trimMap = <K, V>(m: Map<K, V>) => {
+      while (m.size > CAP) {
+        const k = m.keys().next().value
+        if (k === undefined) break
+        m.delete(k)
+      }
+    }
+    trimSet(this.presentedTerminals)
+    trimMap(this.agentWaveByParent)
+    trimMap(this.delegateRowIds)
+    trimMap(this.ledgerRowIds)
+    trimMap(this.agentFailureById)
+    trimSet(this.presentedVerifications)
+    trimSet(this.summarizedTurns)
+    if (this.agentWaves.length > 256) {
+      const removedWaves = this.agentWaves.splice(0, this.agentWaves.length - 256)
+      for (const w of removedWaves) {
+        for (const pid of w.rootIds) this.agentWaveByParent.delete(pid)
+      }
+    }
   }
 }

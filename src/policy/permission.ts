@@ -506,13 +506,18 @@ function matchBashAllowlist(cmd: string, pattern: string): boolean {
   return re.test(trimmed)
 }
 
-// Redirection NETRAL: hanya memindahkan/menduplikasi output (`2>&1`,
-// `2>/dev/null`, `>NUL`). Tidak mengubah perintah dan tidak menyentuh berkas
-// baru; `> file` dan `>> file` TIDAK termasuk — itu efek tulis.
-const NEUTRAL_REDIRECT_RE = /(?:^|\s)\d?>>?\s*(?:&\d|\/dev\/null\b|NUL\b)/gi
+// Redirection NETRAL: hanya memindahkan/menduplikasi output (`2>&1`, `2>/dev/null`,
+// dan `>NUL` khusus win32 — di POSIX `NUL` adalah berkas biasa di workspace).
+const NEUTRAL_REDIRECT_POSIX_RE = /(?:^|\s)\d?>>?\s*(?:&\d|\/dev\/null(?:$|(?=\s|[;|&])))/gi
+const NEUTRAL_REDIRECT_WIN_RE =
+  /(?:^|\s)\d?>>?\s*(?:&\d|\/dev\/null(?:$|(?=\s|[;|&]))|NUL(?:$|(?=\s|[;|&])))/gi
 
-function stripNeutralRedirections(cmd: string): string {
-  return cmd.replace(NEUTRAL_REDIRECT_RE, " ").replace(/\s+/g, " ").trim()
+function stripNeutralRedirections(
+  cmd: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const re = platform === "win32" ? NEUTRAL_REDIRECT_WIN_RE : NEUTRAL_REDIRECT_POSIX_RE
+  return cmd.replace(re, " ").replace(/\s+/g, " ").trim()
 }
 
 /**
@@ -618,8 +623,13 @@ function isDangerousSed(seg: string): boolean {
   return false
 }
 
-function decideBashCommand(cmd: string, list: readonly string[], root: string): BashListDecision {
-  const cleaned = stripNeutralRedirections(cmd)
+function decideBashCommand(
+  cmd: string,
+  list: readonly string[],
+  root: string,
+  platform: NodeJS.Platform = process.platform,
+): BashListDecision {
+  const cleaned = stripNeutralRedirections(cmd, platform)
   if (!cleaned) return { ok: false, reason: "empty command", command: cmd }
   // Substitusi perintah / backtick = eksekusi kode di dalam argumen; tak pernah
   // lolos di mode ini (bash-guard juga menolaknya lebih dulu).
@@ -672,6 +682,11 @@ function decideBashCommand(cmd: string, list: readonly string[], root: string): 
       return { ok: false, reason: "mutating verb not allowed", command: cmd }
   }
   for (const seg of segments) {
+    // Subshell/grup `(...)`/`{...}` & perintah stack direktori bisa mengubah cwd
+    // tanpa melewati pemeriksaan jail `cd` di bawah.
+    if (/^[({]/.test(seg) || /^(?:pushd|popd|chdir|set-location|sl)\b/i.test(seg)) {
+      return { ok: false, reason: "subshell/directory stack not allowed", command: cmd }
+    }
     // `cd` di dalam workspace sah (model memakainya untuk monorepo); target di
     // luar root atau mengandung ekspansi env/tilde ditolak agar segmen berikutnya
     // tidak berjalan di luar jail.
@@ -900,9 +915,12 @@ export function createPermissionHandler(
      * tool gated (delegate_task, git_commit, MCP) tetap menuntut TTY (fail-closed).
      */
     allowNonTtyAsk?: boolean
+    /** Platform target evaluasi bash (`NUL` null-sink hanya di `win32`). */
+    platform?: NodeJS.Platform
   } = {},
 ): PermissionHandler {
   const state = { mode: (opts.mode ?? "auto") as PermissionMode }
+  const targetPlatform = opts.platform ?? process.platform
   const restrictBash = opts.restrictBash === true
   const allowNonTtyAsk = opts.allowNonTtyAsk === true
   const root = resolve(opts.root ?? cwd())
@@ -1128,7 +1146,7 @@ export function createPermissionHandler(
     if (isAgentBrowserAutoConnect(cmd))
       return "agent-browser --auto-connect is not allowed (use a fresh browser profile)"
     try {
-      const v = inspectBashCommand(cmd, effectiveCwd, root)
+      const v = inspectBashCommand(cmd, effectiveCwd, root, { platform: targetPlatform })
       return v.denied ? (v.reason ?? "blocked command") : null
     } catch {
       // Fail-closed: guard melempar = bukan bukti aman; `return null` dulu
@@ -1227,7 +1245,7 @@ export function createPermissionHandler(
         const cmd = (args?.cmd as string) ?? ""
         const br = bashDenyReason(cmd, bashEffectiveCwd(args))
         if (br) return deny(call, `bash-guard: ${br}`)
-        const decision = decideBashCommand(cmd, bashAllowlist, root)
+        const decision = decideBashCommand(cmd, bashAllowlist, root, targetPlatform)
         if (decision.ok) return "allow"
         // Alasan actionable (keluhan eval: "no matching pattern" tanpa jalan
         // keluar membuat model retry buta): tulis/baca file = pakai tool file
@@ -1333,7 +1351,7 @@ export function createPermissionHandler(
         // Pakai daftar DEVELOPER (lebih luas) — sesi trusted di mesin sendiri,
         // bukan task tak-terpercaya (yang memakai daftar narrow via --allowlist).
         if (restrictBash) {
-          const decision = decideBashCommand(cmd, devBashAllowlist, root)
+          const decision = decideBashCommand(cmd, devBashAllowlist, root, targetPlatform)
           if (!decision.ok) {
             if (decision.reason === "no matching pattern")
               // [AUDIT-FIX #3] Sama seperti cabang allowlist: secret di command
@@ -1387,8 +1405,8 @@ export function createPermissionHandler(
           if (isSensitive(p) || isSensitiveReal(p, root)) return deny(call, "jail: sensitive file")
         }
       }
-      if (LSP_FILE_JAIL_TOOL_NAMES.has(call.name)) {
-        // Semua tool LSP (termasuk lsp_rename) memakai `path`.
+      if (LSP_FILE_JAIL_TOOL_NAMES.has(call.name) || call.name === "dep_graph") {
+        // Semua tool LSP (termasuk lsp_rename) + dep_graph menerima `path` opsional.
         const f = (earlyArgs?.path as string) ?? (earlyArgs?.file as string) ?? ""
         if (f && isRealPathOutsideRoot(f, root)) return deny(call, "jail: outside workspace")
         if (f && (isSensitive(f) || isSensitiveReal(f, root)))

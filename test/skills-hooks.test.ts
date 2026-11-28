@@ -81,6 +81,29 @@ test("allowlist load empty when missing", async () => {
   expect(l.allowed).toEqual([])
 })
 
+test("P1-4: allowlist mengabaikan entri non-string yang rusak tanpa melempar saat match", async () => {
+  const { mkdtempSync, mkdirSync, rmSync, writeFileSync } = await import("node:fs")
+  const { tmpdir } = await import("node:os")
+  const { join } = await import("node:path")
+  const d = mkdtempSync(join(tmpdir(), "mc-allowlist-corrupt-"))
+  try {
+    mkdirSync(join(d, ".minicode"), { recursive: true })
+    writeFileSync(
+      join(d, ".minicode", "allowlist.json"),
+      JSON.stringify({ allowed: [123, null, "", { bad: true }, "bash"] }),
+      "utf8",
+    )
+    const loaded = await loadAllowlist(d, { allowLocal: true })
+    expect(loaded.allowed).toContain("bash")
+    expect(loaded.allowed.every((x) => typeof x === "string" && x.length > 0)).toBe(true)
+    expect(() =>
+      matchAllowlist({ id: "1", name: "bash", args: { cmd: "ls" } } as never, loaded.allowed),
+    ).not.toThrow()
+  } finally {
+    rmSync(d, { recursive: true, force: true })
+  }
+})
+
 test("permission readonly denies delegate/mcp/lsp write tools", async () => {
   const h = createPermissionHandler({ mode: "readonly" })
   expect(

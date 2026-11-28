@@ -14,6 +14,7 @@ import { ProviderError } from "#minicore/core/errors.ts"
 import type { ProviderEvent } from "#minicore/core/provider.ts"
 import {
   createMinicodeSession,
+  createRecoveryLedger,
   RECOVERY_RETRY_EVENT_KIND,
   recoveryQuotaFor,
   stalledMsFromMessage,
@@ -100,6 +101,93 @@ describe("retry telemetry (session.ts)", () => {
           category: "server",
           stalledMs: 60_000,
         })
+      } finally {
+        off()
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => {})
+    }
+  })
+
+  test("turn dengan step sebelumnya >120 dtk tetap bisa 2x retry saat stall dan reset di step berikut", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "retry-episode-"))
+    try {
+      let clock = 10_000
+      const ledger = createRecoveryLedger(() => clock)
+      let calls = 0
+      const provider = {
+        id: "episode-test",
+        models: ["episode-test"],
+        async *stream(): AsyncGenerator<ProviderEvent> {
+          calls++
+          if (calls === 1) {
+            // Step 1 sukses dan simulasikan waktu berjalan jauh melewati 45 dtk sebelum Step 2.
+            yield { type: "tool_call", id: "tc1", name: "noop_probe", args: {} }
+            yield { type: "finish", reason: "tool_calls" }
+            clock += 120_000
+            return
+          }
+          if (calls === 2 || calls === 3) {
+            // Step 2 stall 2× berturut-turut (60s + 60s), lalu pulih pada attempt ke-3.
+            clock += 60_000
+            throw new ProviderError(
+              "server",
+              "provider sent nothing for 60000ms (connection stalled)",
+            )
+          }
+          if (calls === 4) {
+            yield { type: "tool_call", id: "tc2", name: "noop_probe", args: {} }
+            yield { type: "finish", reason: "tool_calls" }
+            clock += 90_000
+            return
+          }
+          if (calls === 5) {
+            // Step 3 (setelah resetEpisode di step:completed) kembali punya jatah stall baru.
+            clock += 60_000
+            throw new ProviderError(
+              "server",
+              "provider sent nothing for 60000ms (connection stalled)",
+            )
+          }
+          yield { type: "text", text: "tuntas setelah pemulihan episode" }
+          yield { type: "finish", reason: "stop" }
+        },
+      } as never
+      const session = await createMinicodeSession({
+        provider,
+        permissionMode: "allow-all",
+        cwd: dir,
+        tools: [
+          {
+            name: "noop_probe",
+            description: "read probe",
+            parameters: { type: "object", properties: {} },
+            async execute() {
+              return "ok"
+            },
+          },
+        ],
+      })
+      const retries: Array<{ attempt: number; stalledMs: number }> = []
+      const off = session.events.on(
+        "provider:extension",
+        (e: { kind?: unknown; data?: unknown }) => {
+          if (e?.kind === RECOVERY_RETRY_EVENT_KIND && e.data) {
+            retries.push(e.data as { attempt: number; stalledMs: number })
+          }
+        },
+      )
+      try {
+        const result = await (
+          session.run as (
+            input: string,
+            opts?: { recoveryLedger?: ReturnType<typeof createRecoveryLedger> },
+          ) => ReturnType<typeof session.run>
+        )("uji multi-step", { recoveryLedger: ledger })
+        expect(result.finalText).toBe("tuntas setelah pemulihan episode")
+        expect(calls).toBe(6)
+        expect(retries).toHaveLength(3)
+        expect(retries.map((r) => r.attempt)).toEqual([1, 2, 1])
       } finally {
         off()
       }

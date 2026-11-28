@@ -5,10 +5,12 @@
 import { t } from "../i18n/locale.ts"
 import { glyphs } from "./theme.ts"
 
-export type AgentFailureReason = "aborted" | "timeout" | "denied" | "error"
+export type AgentFailureReason = "stepLimit" | "aborted" | "timeout" | "denied" | "error"
 
 export interface AgentProgressSnapshot {
   readonly agents: number
+  readonly running?: number
+  readonly done?: number
   readonly tools: number
   readonly failures: Readonly<Record<AgentFailureReason, number>>
 }
@@ -16,24 +18,24 @@ export interface AgentProgressSnapshot {
 export const EMPTY_AGENT_PROGRESS: AgentProgressSnapshot = {
   agents: 0,
   tools: 0,
-  failures: { aborted: 0, timeout: 0, denied: 0, error: 0 },
+  failures: { stepLimit: 0, aborted: 0, timeout: 0, denied: 0, error: 0 },
 }
 
 function failureDetail(failures: AgentProgressSnapshot["failures"]): string {
   const parts: string[] = []
-  for (const reason of ["aborted", "timeout", "denied", "error"] as const) {
+  for (const reason of ["stepLimit", "aborted", "timeout", "denied", "error"] as const) {
     const n = failures[reason] ?? 0
     if (n > 0) parts.push(`${n} ${t(`ts.agentReason.${reason}`)}`)
   }
   return parts.length ? ` (${parts.join(" · ")})` : ""
 }
 
-/** Satu baris ringkas: `✦ 4 sub agent · 25 tool · 3 gagal (2 abort · 1 timeout)`. */
+/** Satu baris ringkas konsisten tanpa jumlah live di kurung:
+ *  `✦ 3 sub agent · 245 tool · 2 failed (2 error)`. */
 export function formatAgentProgress(s: AgentProgressSnapshot): string {
+  const agents = Math.max(0, Math.floor(s.agents))
+  const tools = Math.max(0, Math.floor(s.tools))
   const failed = Object.values(s.failures).reduce((a, b) => a + b, 0)
-  return `${glyphs.agentIcon} ${t("ts.agentSummary", {
-    agents: Math.max(0, Math.floor(s.agents)),
-    tools: Math.max(0, Math.floor(s.tools)),
-    failed,
-  })}${failed > 0 ? failureDetail(s.failures) : ""}`
+  const base = t("ts.agentSummary", { agents, tools, failed })
+  return `${glyphs.agentIcon} ${base}${failed > 0 ? failureDetail(s.failures) : ""}`
 }

@@ -96,14 +96,12 @@ test("delegate: explore = 12 read-only tepat; plan = 32 tanpa denylist", async (
     await delegateTaskTool.execute({ prompt: "x" }, ctxFor(dir, "auto"))
     const exploreNames = seen[0]!.tools.map((t) => t.name).sort()
     expect(exploreNames).toEqual([...EXPLORE_TOOL_NAMES].sort())
-    expect(EXPLORE_TOOL_NAMES).toHaveLength(16)
+    expect(EXPLORE_TOOL_NAMES).toHaveLength(17)
     seen.length = 0
     await delegateTaskTool.execute({ prompt: "x", mode: "plan" }, ctxFor(dir, "auto"))
     const planNames = new Set(seen[0]!.tools.map((t) => t.name))
-    // v7.38: 32 = 29 lama + git_restore/git_checkout/lsp_rename. Ketiganya
-    // workspace-mutation sekelas write_file/edit (working tree), BUKAN
-    // keputusan riwayat bersama seperti git_commit/git_push yang tetap dibuang.
-    expect(planNames.size).toBe(32)
+    // v7.38+: 33 = 32 lama + dep_graph.
+    expect(planNames.size).toBe(33)
     for (const banned of [
       "delegate_task",
       "write_memory",
@@ -236,10 +234,10 @@ test("delegate: budget/timeout/cwd/journal plumbing", async () => {
     // P2.9: id anak kini 128-bit (identitas Session KANONIK). Bentuk lama
     // `sub_<8hex>` hanya 32-bit — terlalu lemah untuk durable authority.
     expect(spec.journal?.sessionId).toMatch(/^sub_[0-9a-f]{32}$/)
-    // Default tanpa maxSteps: explore=5.
+    // Default tanpa scope: inferScope("x") -> "dir" (40 langkah) agar kerja nyata tak mentok.
     seen.length = 0
     await delegateTaskTool.execute({ prompt: "x" }, ctxFor(dir, "auto"))
-    expect(seen[0]!.maxSteps).toBe(LIMITS.SUB_AGENT_BUDGET_EXPLORE)
+    expect(seen[0]!.maxSteps).toBe(40)
   } finally {
     todoSession.id = prevTodo
     clearSubAgentSessionFactory()

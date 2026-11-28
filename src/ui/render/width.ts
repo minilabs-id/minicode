@@ -118,6 +118,10 @@ function isAsciiPrintable(s: string): boolean {
   return true
 }
 
+function isPlainAsciiCode(code: number): boolean {
+  return code >= 0x20 && code <= 0x7e
+}
+
 /** Token terminal: escape utuh atau grapheme utuh dengan lebar display yang sama. */
 function* displayTokens(s: string): Generator<DisplayToken> {
   let i = 0
@@ -133,16 +137,31 @@ function* displayTokens(s: string): Generator<DisplayToken> {
     let end = s.indexOf("\x1b", i)
     if (end < 0) end = s.length
     if (end === i) end = i + 1
-    const run = s.slice(i, end)
-    if (isAsciiPrintable(run)) {
-      // ASCII printable = satu kolom per code unit: tak perlu Intl.Segmenter,
-      // tak perlu regex graphemeWidth. Token per karakter tetap dipertahankan
-      // agar batas potong di truncate/chunk identik dengan jalur lambat.
-      for (let j = 0; j < run.length; j++) {
-        yield { text: run[j]!, width: 1, escape: false }
+    // Jalur cepat ASCII inline: setiap byte printable yang TIDAK tepat diikuti
+    // karakter non-printable/combining adalah grapheme 1-kolom tunggal, sehingga
+    // run campuran seperti `› src/foo.ts (10ms)` tak melempar seluruh string ke
+    // Intl.Segmenter + graphemeWidth().
+    let j = i
+    while (j < end) {
+      const code = s.charCodeAt(j)!
+      if (isPlainAsciiCode(code) && (j + 1 >= end || isPlainAsciiCode(s.charCodeAt(j + 1)!))) {
+        yield { text: s[j]!, width: 1, escape: false }
+        j++
+        continue
       }
-    } else {
-      for (const text of segmentGraphemes(run)) {
+      const segStart = j
+      if (isPlainAsciiCode(code)) {
+        // Base ASCII tepat sebelum potensi combining mark / CRLF: serahkan bersama ekor non-ASCII.
+        j++
+      }
+      while (j < end && !isPlainAsciiCode(s.charCodeAt(j)!)) {
+        j++
+      }
+      // Jika non-ASCII disusul ASCII printable + combining lagi atau berakhir,
+      // hentikan tepat di batas ASCII aman supaya loop luar mengambil alih cepat.
+      if (j === segStart) j++
+      const nonAsciiSlice = s.slice(segStart, j)
+      for (const text of segmentGraphemes(nonAsciiSlice)) {
         yield { text, width: graphemeWidth(text), escape: false }
       }
     }

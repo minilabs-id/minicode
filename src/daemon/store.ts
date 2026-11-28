@@ -50,25 +50,27 @@ export function writeConsumerOffset(
   const db = openWorkspaceSessionDb(cwd)
   try {
     const now = Date.now()
-    return db.transaction(() => {
-      const cur = db
-        .prepare(
-          "SELECT last_acked_seq AS seq FROM consumer_offsets WHERE consumer_id = ? AND session_id = ?",
-        )
-        .get(consumerId, sid) as { seq: number | null } | null
-      const prev = cur?.seq ?? -1
-      const next = Math.max(prev, seq)
-      if (cur === null) {
-        db.prepare(
-          "INSERT INTO consumer_offsets(consumer_id, session_id, last_acked_seq, updated_at) VALUES(?,?,?,?)",
-        ).run(consumerId, sid, next, now)
-      } else if (next !== prev) {
-        db.prepare(
-          "UPDATE consumer_offsets SET last_acked_seq = ?, updated_at = ? WHERE consumer_id = ? AND session_id = ?",
-        ).run(next, now, consumerId, sid)
-      }
-      return next
-    })()
+    return db
+      .transaction(() => {
+        const cur = db
+          .prepare(
+            "SELECT last_acked_seq AS seq FROM consumer_offsets WHERE consumer_id = ? AND session_id = ?",
+          )
+          .get(consumerId, sid) as { seq: number | null } | null
+        const prev = cur?.seq ?? -1
+        const next = Math.max(prev, seq)
+        if (cur === null) {
+          db.prepare(
+            "INSERT INTO consumer_offsets(consumer_id, session_id, last_acked_seq, updated_at) VALUES(?,?,?,?)",
+          ).run(consumerId, sid, next, now)
+        } else if (next !== prev) {
+          db.prepare(
+            "UPDATE consumer_offsets SET last_acked_seq = ?, updated_at = ? WHERE consumer_id = ? AND session_id = ?",
+          ).run(next, now, consumerId, sid)
+        }
+        return next
+      })
+      .immediate()
   } finally {
     db.close()
   }
@@ -264,20 +266,22 @@ export function transitionApproval(
 ): ApprovalRow {
   const db = openWorkspaceSessionDb(cwd)
   try {
-    return db.transaction(() => {
-      const r = db
-        .prepare("SELECT * FROM daemon_approvals WHERE approval_id = ?")
-        .get(id) as Record<string, unknown> | null
-      if (!r) throw new Error(`approval ${id} tidak ditemukan`)
-      const cur = toRow(r)
-      if (!canTransition(cur.state, to)) throw new ApprovalTransitionError(id, cur.state, to)
-      const decidedAt = opts.decidedAt ?? (to === "pending" ? null : Date.now())
-      const decision = to === "pending" ? null : (opts.decision ?? null)
-      db.prepare(
-        "UPDATE daemon_approvals SET state = ?, decided_at = ?, decision = ? WHERE approval_id = ?",
-      ).run(to, decidedAt, decision, id)
-      return { ...cur, state: to, decidedAt, decision }
-    })()
+    return db
+      .transaction(() => {
+        const r = db
+          .prepare("SELECT * FROM daemon_approvals WHERE approval_id = ?")
+          .get(id) as Record<string, unknown> | null
+        if (!r) throw new Error(`approval ${id} tidak ditemukan`)
+        const cur = toRow(r)
+        if (!canTransition(cur.state, to)) throw new ApprovalTransitionError(id, cur.state, to)
+        const decidedAt = opts.decidedAt ?? (to === "pending" ? null : Date.now())
+        const decision = to === "pending" ? null : (opts.decision ?? null)
+        db.prepare(
+          "UPDATE daemon_approvals SET state = ?, decided_at = ?, decision = ? WHERE approval_id = ?",
+        ).run(to, decidedAt, decision, id)
+        return { ...cur, state: to, decidedAt, decision }
+      })
+      .immediate()
   } finally {
     db.close()
   }

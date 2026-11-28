@@ -53,7 +53,7 @@ Subcommand di-route di `cli/router.ts` (`stats`, `sessions`, `mcp`, `config`, `s
 | `--timeout <ms>` | Hard deadline per prompt (default 3600000 = 1 jam; `0` = Infinity; jalur `exec` tetap 15 menit). Sesi yang idle tidak menghabiskan deadline prompt berikutnya. |
 | `--cwd <path>` | Workspace root untuk tool file & jail |
 | `--allow-local-config` | Percayai `.minicode/config.json` + allowlist lokal (default: diabaikan) |
-| `--max-steps <n>` | Batas langkah tool (default 200; angka 50 adalah hard-cap langkah sub-agent, bukan default global) |
+| `--max-steps <n>` | Batas langkah tool (default 200; angka 600 adalah hard-cap langkah sub-agent, bukan default global) |
 | `--context-window <n>` | Ukuran jendela konteks (token) |
 | `--session <id>` | ID sesi (default random, disanitasi) |
 | `--work-mode <m>` | `DISCUSS` \| `BUILD` (default: `DISCUSS`). **Work Mode**: `DISCUSS` = investigasi & perencanaan read-only, `BUILD` = implementasi. Persetujuan hanya `AUTO`/`ASK` (default `AUTO`). Lihat [TUI](repl.md) untuk `/mode` |

@@ -136,6 +136,14 @@ test("sandbox masking E-9: hasil identik + symlink .env terdeteksi", () => {
       expect([...first.envFiles]).toEqual([".env", "apps/a/.env.local"])
       void e
     }
+
+    // P1-7: scan terpotong mengembalikan truncated:true dan runner sandbox menolak fail-closed.
+    const trunc = discoverSandboxMaskTargets(dir, { maxDirs: 1 })
+    expect(trunc.truncated).toBe(true)
+    expect(trunc.truncationReason).toBe("max-dirs")
+    const deepTrunc = discoverSandboxMaskTargets(dir, { maxDepth: 0 })
+    expect(deepTrunc.truncated).toBe(true)
+    expect(deepTrunc.truncationReason).toBe("max-depth")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

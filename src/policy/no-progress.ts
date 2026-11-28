@@ -54,12 +54,19 @@ export class NoProgressError extends Error {
 export interface NoProgressOptions {
   /** Maksimum kegagalan identik berturut-turut sebelum panggilan berikutnya diblokir (default 3). */
   readonly maxRepeatedErrors?: number
+  /**
+   * Maksimum kegagalan dengan tool + headline error sama berturut-turut meski
+   * argumen sedikit bervariasi sebelum memicu REPEATED_ACTION_ERROR (default 5).
+   */
+  readonly maxSimilarErrors?: number
   /** Maksimum siklus kembali ke hash file lama tanpa verifikasi hijau (default 2). */
   readonly maxOscillations?: number
   /** Maksimum panggilan PURE_READ berturut-turut di postur aktif (default 30). */
   readonly maxConsecutiveReadCalls?: number
   /** Postur sesi saat ini; non-"active" menonaktifkan detektor read-only thrashing. */
   readonly getPosture?: () => NoProgressPosture
+  /** Apakah tool `todo_write` tersedia; memengaruhi petunjuk pemulihan pesan guard. */
+  readonly hasTodoWrite?: boolean
   /**
    * [Fase 6A / ACE-04] Maksimum retry terjustifikasi setelah bukti baru
    * (default 1). Hard cap absolut: tidak pernah menambah budget tanpa batas.
@@ -239,6 +246,12 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
     options.maxRepeatedErrors >= 1
       ? Math.floor(options.maxRepeatedErrors)
       : 3
+  const maxSimilarErrors =
+    typeof options.maxSimilarErrors === "number" &&
+    Number.isFinite(options.maxSimilarErrors) &&
+    options.maxSimilarErrors >= 1
+      ? Math.floor(options.maxSimilarErrors)
+      : Math.max(5, maxRepeatedErrors)
   const maxOscillations =
     typeof options.maxOscillations === "number" &&
     Number.isFinite(options.maxOscillations) &&
@@ -252,6 +265,7 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
       ? Math.floor(options.maxConsecutiveReadCalls)
       : 30
   const getPosture = options.getPosture ?? (() => "active" as const)
+  const hasTodoWrite = options.hasTodoWrite ?? true
   const maxNewEvidenceRetries =
     typeof options.maxNewEvidenceRetries === "number" &&
     Number.isFinite(options.maxNewEvidenceRetries) &&
@@ -272,11 +286,14 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
   let lastErrorFingerprint: string | null = null
   let lastErrorActionKey: string | null = null
   let repeatedErrorStreak = 0
+  let lastErrorHeadlineKey: string | null = null
+  let headlineErrorStreak = 0
 
   // [Fase 6A / ACE-04] Blokir REPEATED_ACTION_ERROR bersifat PERSISTEN sampai
   // ada bukti baru — sukses yang tidak relevan tidak boleh membuka jalan
   // mengulang perintah yang sama secara buta.
   let activeBlock: { fingerprint: string; actionKey: string; streak: number } | null = null
+  let activeHeadlineBlock: { headlineKey: string; tool: string; streak: number } | null = null
   let newEvidenceAfterBlock = false
   let justifiedRetries = 0
   // Sidik jari observasi baca `(tool + canonicalArgs + hash(content))` berbatas
@@ -295,6 +312,7 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
   }
 
   let consecutiveReadCalls = 0
+  let lastTodoArgsHash: string | null = null
 
   const fileTrackers = new Map<string, FileHashTracker>()
   const inflightPreHash = new Map<string, { relPath: string; preHash: string | null }>()
@@ -308,19 +326,49 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
       if (candidates.size >= 32) break
       candidates.add(tracked)
     }
+    const addWorkspaceCandidate = (tok: string): boolean => {
+      if (!tok || tok.startsWith("-") || tok.startsWith("&") || tok.includes("://")) return false
+      const abs = isAbsolute(tok) ? resolve(tok) : resolve(workspaceRoot, tok)
+      const rel = normalizeTrackPath(relative(workspaceRoot, abs))
+      if (!rel || rel.startsWith("..") || isAbsolute(rel)) return false
+      const sizeBefore = candidates.size
+      candidates.add(rel)
+      return candidates.size > sizeBefore
+    }
     const a = (call.args ?? {}) as Record<string, unknown>
     const rawText = typeof a.cmd === "string" ? a.cmd : typeof a.code === "string" ? a.code : ""
     if (rawText) {
       let addedFromCmd = 0
+      // [Wave 5 / G4] Tangkap target redirection (`>`, `>>`, `tee`) dan tujuan
+      // `mv`/`cp`/`touch`/`sed -i` meskipun nama berkas di root tanpa ekstensi/slash (mis. Makefile).
+      for (const m of rawText.matchAll(/(?:>>?|\btee(?:\s+-[^\s]+)*)\s+["']?([^\s"'`;|&<>()]+)/g)) {
+        if (addedFromCmd >= 12) break
+        if (addWorkspaceCandidate(m[1] ?? "")) addedFromCmd++
+      }
+      for (const seg of rawText.split(/[;&|\r\n]+/)) {
+        if (addedFromCmd >= 12) break
+        const rawParts = seg
+          .trim()
+          .split(/\s+/)
+          .map((p) => p.replace(/^["']|["']$/g, ""))
+          .filter(Boolean)
+        const redirIdx = rawParts.findIndex((p) => /^(?:\d*>>?|<<?)/.test(p))
+        const parts = redirIdx >= 0 ? rawParts.slice(0, redirIdx) : rawParts
+        const head = parts[0]?.toLowerCase()
+        if (head === "mv" || head === "cp" || head === "touch" || head === "rm" || head === "sed") {
+          for (let i = parts.length - 1; i >= 1; i--) {
+            const p = parts[i]!
+            if (!p || p.startsWith("-")) continue
+            if (addWorkspaceCandidate(p)) addedFromCmd++
+            if (head === "mv" || head === "cp" || head === "sed") break
+          }
+        }
+      }
       for (const tok of rawText.split(/[\s"'`;|&<>()]+/)) {
-        if (addedFromCmd >= 8) break
+        if (addedFromCmd >= 12) break
         if (!tok || tok.startsWith("-") || tok.includes("://")) continue
         if (!/[./\\]/.test(tok)) continue
-        const abs = isAbsolute(tok) ? resolve(tok) : resolve(workspaceRoot, tok)
-        const rel = normalizeTrackPath(relative(workspaceRoot, abs))
-        if (!rel || rel.startsWith("..") || isAbsolute(rel)) continue
-        candidates.add(rel)
-        addedFromCmd++
+        if (addWorkspaceCandidate(tok)) addedFromCmd++
       }
     }
     return [...candidates]
@@ -355,6 +403,31 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
       }
     }
 
+    // Sinyal 1a-sim [Wave 5 / G4]: tool yang sama gagal berulang dengan headline
+    // error sama meski argumen sedikit bervariasi (mis. offset baris / flag kecil).
+    if (activeHeadlineBlock !== null && name === activeHeadlineBlock.tool) {
+      if (newEvidenceAfterBlock && justifiedRetries < maxNewEvidenceRetries) {
+        justifiedRetries += 1
+        newEvidenceAfterBlock = false
+        return { allowed: true }
+      }
+      emitGuard({
+        kind: "NO_PROGRESS",
+        reason: "REPEATED_ACTION_ERROR",
+        tool: name,
+        detail: `blocked similar headline streak=${activeHeadlineBlock.streak}`,
+      })
+      return {
+        allowed: false,
+        kind: "NO_PROGRESS",
+        reason: "REPEATED_ACTION_ERROR",
+        message:
+          `[LOOP_GUARD kind=NO_PROGRESS reason=REPEATED_ACTION_ERROR count=${activeHeadlineBlock.streak}] ` +
+          `Tool '${name}' failed ${activeHeadlineBlock.streak} times consecutively with the same error headline. ` +
+          `Inspect fresh diagnostic evidence or change your approach before retrying.`,
+      }
+    }
+
     // Sinyal 1b: panggilan identik yang sudah gagal N kali berturut-turut.
     if (
       repeatedErrorStreak >= maxRepeatedErrors &&
@@ -375,6 +448,29 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
           `[LOOP_GUARD kind=NO_PROGRESS reason=REPEATED_ACTION_ERROR count=${repeatedErrorStreak}] ` +
           `Identical tool call failed ${repeatedErrorStreak} times consecutively with the same error. ` +
           `Stop repeating this command and revise your approach.`,
+      }
+    }
+
+    // Sinyal 1b-sim [Wave 5 / G4]: headline error identik pada tool yang sama mencapai ambang sekunder.
+    if (
+      headlineErrorStreak >= maxSimilarErrors &&
+      lastErrorHeadlineKey !== null &&
+      lastErrorHeadlineKey.startsWith(`${name}\0`)
+    ) {
+      emitGuard({
+        kind: "NO_PROGRESS",
+        reason: "REPEATED_ACTION_ERROR",
+        tool: name,
+        detail: `headlineStreak=${headlineErrorStreak}`,
+      })
+      return {
+        allowed: false,
+        kind: "NO_PROGRESS",
+        reason: "REPEATED_ACTION_ERROR",
+        message:
+          `[LOOP_GUARD kind=NO_PROGRESS reason=REPEATED_ACTION_ERROR count=${headlineErrorStreak}] ` +
+          `Tool '${name}' failed ${headlineErrorStreak} times consecutively with the same error headline. ` +
+          `Inspect fresh diagnostic evidence or change your approach before retrying.`,
       }
     }
 
@@ -457,21 +553,30 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
             tool: name,
             detail: `count=${observedCount}`,
           })
+          const guidance = hasTodoWrite
+            ? "without updating the plan, mutating workspace state, or responding to the user. Formulate a plan (todo_write) or act on what you have read."
+            : "without mutating workspace state or synthesizing findings. Summarize what you found or act on what you have read."
           return {
             allowed: false,
             kind: "NO_PROGRESS",
             reason: "READ_ONLY_THRASHING",
             message:
               `[LOOP_GUARD kind=NO_PROGRESS reason=READ_ONLY_THRASHING count=${observedCount}] ` +
-              `Exceeded ${maxConsecutiveReadCalls} consecutive read-only tool calls without updating the plan, ` +
-              `mutating workspace state, or responding to the user. Formulate a plan (todo_write) or act on what you have read.`,
+              `Exceeded ${maxConsecutiveReadCalls} consecutive read-only tool calls ${guidance}`,
           }
         }
         consecutiveReadCalls += 1
       }
+    } else if (name === "todo_write") {
+      // [Wave 5 / G4] Hanya pembaruan rencana yang benar-benar berubah yang
+      // memutus rentetan baca murni; pengulangan payload identik diabaikan.
+      const todoHash = canonicalArgsHash(call.args)
+      if (lastTodoArgsHash !== todoHash) {
+        lastTodoArgsHash = todoHash
+        consecutiveReadCalls = 0
+      }
     } else if (isResetsStreakImmediately) {
-      // Pembaruan rencana (`todo_write`), mutasi file, delegasi, atau ask_user
-      // memutus rentetan baca murni.
+      // Pembaruan file, delegasi, submit_result, atau ask_user memutus rentetan baca murni.
       consecutiveReadCalls = 0
     }
 
@@ -585,14 +690,29 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
         name === "delegate_task" &&
         /^\[sub-agent (?:skipped|[^\]\n]*error)\]/.test(content.trimStart())
       if (input.isError === true || isSubAgentFail) {
+        const headline = normalizeErrorHeadline(content)
         const fp = computeActionErrorFingerprint(name, input.args, content)
         const actionKey = `${name}\0${canonicalArgsHash(input.args)}`
+        const headlineKey = `${name}\0${headline}`
         if (fp === lastErrorFingerprint && actionKey === lastErrorActionKey) {
           repeatedErrorStreak += 1
         } else {
           lastErrorFingerprint = fp
           lastErrorActionKey = actionKey
           repeatedErrorStreak = 1
+        }
+        if (headlineKey === lastErrorHeadlineKey) {
+          headlineErrorStreak += 1
+        } else {
+          lastErrorHeadlineKey = headlineKey
+          headlineErrorStreak = 1
+          if (activeHeadlineBlock !== null && activeHeadlineBlock.headlineKey !== headlineKey) {
+            activeHeadlineBlock = null
+            if (activeBlock === null) {
+              justifiedRetries = 0
+              newEvidenceAfterBlock = false
+            }
+          }
         }
         if (repeatedErrorStreak >= maxRepeatedErrors) {
           if (activeBlock === null || activeBlock.actionKey !== actionKey) {
@@ -615,6 +735,24 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
               `Stop repeating this command and revise your approach.`,
           }
         }
+        if (headlineErrorStreak >= maxSimilarErrors) {
+          if (activeHeadlineBlock === null || activeHeadlineBlock.headlineKey !== headlineKey) {
+            activeHeadlineBlock = { headlineKey, tool: name, streak: headlineErrorStreak }
+            justifiedRetries = 0
+          } else {
+            activeHeadlineBlock = { ...activeHeadlineBlock, streak: headlineErrorStreak }
+          }
+          newEvidenceAfterBlock = false
+          return {
+            allowed: false,
+            kind: "NO_PROGRESS",
+            reason: "REPEATED_ACTION_ERROR",
+            message:
+              `[LOOP_GUARD kind=NO_PROGRESS reason=REPEATED_ACTION_ERROR count=${headlineErrorStreak}] ` +
+              `Tool '${name}' failed ${headlineErrorStreak} times consecutively with the same error headline. ` +
+              `Inspect fresh diagnostic evidence or change your approach before retrying.`,
+          }
+        }
         return { allowed: true }
       }
       // Eksekusi sukses memutus streak error berulang. [Fase 6A / ACE-04]
@@ -627,12 +765,19 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
         const contentHash = createHash("sha256").update(content, "utf8").digest("hex")
         const evKey = `${name}\0${canonicalArgsHash(input.args)}\0${contentHash}`
         const isNovelObservation = rememberReadEvidence(evKey)
-        if (activeBlock !== null && isNovelObservation) {
+        if ((activeBlock !== null || activeHeadlineBlock !== null) && isNovelObservation) {
           newEvidenceAfterBlock = true
         }
       } else if (tier === "WORKSPACE_MUTATION") {
         seenReadEvidence.clear()
-        if (activeBlock !== null) {
+        lastTodoArgsHash = null
+        // Batasi ukuran tracker file hash FIFO agar sesi berhari-hari tidak membengkak di RAM.
+        while (fileTrackers.size > 512) {
+          const oldest = fileTrackers.keys().next().value
+          if (oldest === undefined) break
+          fileTrackers.delete(oldest)
+        }
+        if (activeBlock !== null || activeHeadlineBlock !== null) {
           newEvidenceAfterBlock = true
         }
       } else if (tier === "LOCAL_ENV_MUTATION") {
@@ -644,11 +789,21 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
       if (name !== "web_search" && name !== "web_fetch") {
         if (tier === "LOCAL_ENV_MUTATION" || tier === "WORKSPACE_MUTATION") {
           consecutiveReadCalls = 0
+          lastTodoArgsHash = null
+        }
+      }
+      if (activeHeadlineBlock !== null && activeHeadlineBlock.tool === name) {
+        activeHeadlineBlock = null
+        if (activeBlock === null) {
+          justifiedRetries = 0
+          newEvidenceAfterBlock = false
         }
       }
       lastErrorFingerprint = null
       lastErrorActionKey = null
       repeatedErrorStreak = 0
+      lastErrorHeadlineKey = null
+      headlineErrorStreak = 0
       return { allowed: true }
     },
     recordFileMutation,
@@ -702,22 +857,32 @@ export function createNoProgressDetector(options: NoProgressOptions = {}): NoPro
       // [Fase 6A / ACE-04] Verifikasi hijau adalah kemajuan nyata: blokir
       // repeated-error tidak lagi relevan.
       activeBlock = null
+      activeHeadlineBlock = null
       newEvidenceAfterBlock = false
       justifiedRetries = 0
       seenReadEvidence.clear()
       lastErrorFingerprint = null
       lastErrorActionKey = null
       repeatedErrorStreak = 0
+      lastErrorHeadlineKey = null
+      headlineErrorStreak = 0
+      lastTodoArgsHash = null
     },
     noteAssistantResponse() {
-      consecutiveReadCalls = 0
+      // [Wave 5 / G4] Narasi teks polos tidak boleh diam-diam mereset rentetan
+      // PURE_READ lintas jeda antar-respons; reset hanya lewat mutasi nyata,
+      // pembaruan todo_write yang berubah, noteVerificationPassed(), atau reset().
     },
     reset() {
       lastErrorFingerprint = null
       lastErrorActionKey = null
       repeatedErrorStreak = 0
+      lastErrorHeadlineKey = null
+      headlineErrorStreak = 0
       consecutiveReadCalls = 0
+      lastTodoArgsHash = null
       activeBlock = null
+      activeHeadlineBlock = null
       newEvidenceAfterBlock = false
       justifiedRetries = 0
       seenReadEvidence.clear()

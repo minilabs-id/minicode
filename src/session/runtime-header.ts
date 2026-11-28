@@ -38,6 +38,10 @@ export interface OperationalStateSnapshot {
    * tanpa verifikasi tidak memiliki baris `ace_state`.
    */
   readonly aceDecision?: ConsequenceDecision | null
+  /** Ringkasan tujuan, milestone selesai, dan pendekatan gagal untuk mencegah context rot. */
+  readonly goalSummary?: string
+  readonly completedMilestones?: readonly string[]
+  readonly failedApproaches?: readonly string[]
 }
 
 /**
@@ -104,6 +108,15 @@ export function buildRuntimeStateHeader(state: OperationalStateSnapshot): string
     lines.push(
       `ace_state: verdict=${d.verdict} | failure_class=${d.failureClass} | next_action=${d.nextAction} | new_evidence=${d.newEvidenceSinceLastAttempt === true}`,
     )
+  }
+  if (state.goalSummary?.trim()) {
+    lines.push(`goal_summary: ${state.goalSummary.trim().slice(0, 240)}`)
+  }
+  if (state.completedMilestones && state.completedMilestones.length > 0) {
+    lines.push(`completed_milestones: [${state.completedMilestones.slice(-8).join(" ; ")}]`)
+  }
+  if (state.failedApproaches && state.failedApproaches.length > 0) {
+    lines.push(`failed_approaches: [${state.failedApproaches.slice(-8).join(" ; ")}]`)
   }
 
   lines.push("[END_RUNTIME_STATE_HEADER]")

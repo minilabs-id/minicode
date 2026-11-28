@@ -94,8 +94,8 @@ test("dua delegasi kunci sama: sukses cepat → timeout kedua lebih pendek (prio
     // Kedua: kunci sama, prior sukses+steps>0+cepat → policy memotong pagu.
     expect(seen[1]!.timeoutMs).toBeLessThan(seen[0]!.timeoutMs)
     expect(seen[1]!.timeoutMs).toBeGreaterThanOrEqual(SUB_AGENT_TIMEOUT_MIN_MS)
-    // Tanpa kegagalan, cap TIDAK naik (no failure → no raise).
-    expect(seen[1]!.maxSteps).toBe(LIMITS.SUB_AGENT_BUDGET_EXPLORE)
+    // Tanpa kegagalan, cap TIDAK naik (tetap mengikuti inferScope dir = 40).
+    expect(seen[1]!.maxSteps).toBe(40)
   } finally {
     todoSession.id = prevTodo
     clearSubAgentSessionFactory()
@@ -128,16 +128,19 @@ test("max_steps_exceeded → cap naik di delegasi berikutnya; di ceiling berhent
     })
 
     await delegateTaskTool.execute({ prompt: "steps-key" }, ctxFor(dir))
-    expect(seen[0]!.maxSteps).toBe(LIMITS.SUB_AGENT_BUDGET_EXPLORE) // 5 (default)
+    expect(seen[0]!.maxSteps).toBe(40) // inferScope dir default
 
     await delegateTaskTool.execute({ prompt: "steps-key" }, ctxFor(dir))
-    // Tangga KHUSUS sub-agent [8,12,20,32,50,75,100,150,250,400,600] — bertahap,
-    // bukan loncat 5 → ceiling seperti tangga sesi utama [200,400,...].
-    expect(seen[1]!.maxSteps).toBe(8)
+    // Tangga KHUSUS sub-agent [24,40,64,100,150,250,400,600] — naik ke 64 lalu 100.
+    expect(seen[1]!.maxSteps).toBe(64)
     expect(seen[1]!.maxSteps).toBeGreaterThan(seen[0]!.maxSteps)
 
     await delegateTaskTool.execute({ prompt: "steps-key" }, ctxFor(dir))
-    expect(seen[2]!.maxSteps).toBe(12)
+    expect(seen[2]!.maxSteps).toBe(100)
+
+    // Parafrase prompt di scope sama tetap naik tangga (tidak reset ke 40).
+    await delegateTaskTool.execute({ prompt: "steps-key-lanjutan-putaran-2" }, ctxFor(dir))
+    expect(seen[3]!.maxSteps).toBe(150)
 
     // Terus naik sampai hard-cap 600, lalu BERHENTI (tak naik lagi).
     let last = seen[2]!.maxSteps
@@ -212,7 +215,7 @@ test("riwayat absen atau korup → fallback ke timeout/cap default, tanpa throw"
     clearSubAgentHistory()
     await delegateTaskTool.execute({ prompt: "absen-key" }, ctxFor(dir))
     expect(seen[0]!.timeoutMs).toBe(resolveSubAgentTimeout({ promptLength: "absen-key".length }))
-    expect(seen[0]!.maxSteps).toBe(LIMITS.SUB_AGENT_BUDGET_EXPLORE)
+    expect(seen[0]!.maxSteps).toBe(40)
 
     // Korup: steps = NaN ditolak readSubAgentHistory → anggap tak ada riwayat.
     clearSubAgentHistory()
@@ -224,7 +227,7 @@ test("riwayat absen atau korup → fallback ke timeout/cap default, tanpa throw"
     expect(readSubAgentHistory("explore:korup-key")).toBeUndefined()
     await delegateTaskTool.execute({ prompt: "korup-key" }, ctxFor(dir))
     expect(seen[1]!.timeoutMs).toBe(resolveSubAgentTimeout({ promptLength: "korup-key".length }))
-    expect(seen[1]!.maxSteps).toBe(LIMITS.SUB_AGENT_BUDGET_EXPLORE)
+    expect(seen[1]!.maxSteps).toBe(40)
   } finally {
     todoSession.id = prevTodo
     clearSubAgentSessionFactory()

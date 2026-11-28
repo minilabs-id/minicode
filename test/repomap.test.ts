@@ -90,3 +90,8 @@ test("loadRepoMap excludes tracked symlinks whose target is outside the workspac
     await rm(outside, { recursive: true, force: true }).catch(() => {})
   }
 })
+
+test("loadRepoMap memprioritaskan hub src/ di atas bench/scripts meskipun indeks awal > 60 berkas", async () => {
+  const map = await loadRepoMap(process.cwd())
+  expect(map).toContain("src/")
+})

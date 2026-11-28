@@ -25,6 +25,10 @@ import { type Dirent, readdirSync, readFileSync } from "node:fs"
 import { join as joinPath, relative as relativePath, resolve as resolvePath } from "node:path"
 import { expandMentions } from "../src/app/mentions.ts"
 import { writeNativeClipboard } from "../src/lib/clipboard.ts"
+import {
+  type AutonomousLoopController,
+  createAutonomousLoopController,
+} from "../src/policy/autonomous-loop.ts"
 import { budgetStatus } from "../src/policy/usage.ts"
 import {
   describeActivity,
@@ -48,6 +52,7 @@ import type { UiBus } from "../src/ui/contract.ts"
 import { t } from "../src/ui/i18n/locale.ts"
 import { loadHistory } from "../src/ui/input/input.ts"
 import { createDecoderState, createKeyStreamPump } from "../src/ui/input/prompt-engine.ts"
+import { parseSlashCommand } from "../src/ui/render/composer-wrap.ts"
 import { renderLogoRows } from "../src/ui/render/logo.ts"
 import { formatUsd } from "../src/ui/render/money.ts"
 import { sanitizeAnsiLine, stripSgr } from "../src/ui/render/sanitize.ts"
@@ -1026,6 +1031,11 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
   // meninggalkan prompt nyangkut di queuedPrompts.
   let turnLoopActive = false
   let turnGen = 0
+  let activeAutonomousLoop: {
+    rootPrompt: string
+    lastCostUsd: number
+    ctl: AutonomousLoopController
+  } | null = null
   // Hitung ekspansi @mention asinkron yang belum mendarat di steer/runTurn agar
   // job background yang selesai di celah await tidak membuka turn paralel (T2).
   let pendingMentionSteers = 0
@@ -1255,6 +1265,8 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
     get permissionMode() {
       return livePermissionMode().toUpperCase()
     },
+    sandbox: process.env.MINICODE_SANDBOX,
+    budget,
     get providerHint() {
       const cur = modelRef.current
       const pid = cur?.includes("::") ? cur.slice(0, cur.indexOf("::")) : undefined
@@ -1641,6 +1653,7 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
     // membuka runTurn kedua yang menguras antrean/flag yang sama.
     let turnPausedOnMaxSteps = false
     try {
+      let turnError: unknown = null
       try {
         await runPromptWithVerify(finalPrompt, ctrl.signal)
         // v7.30: kwitansi abort/antrean/budget = status UI, bukan giliran bicara.
@@ -1652,6 +1665,7 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
         // pernah tercapai. Abort = status UI, bukan giliran bicara.
         const errKind = (error as { kind?: unknown } | null)?.kind
         if (ctrl.signal.aborted || errKind === "aborted") {
+          activeAutonomousLoop = null
           app.showToast(t("tui.stopped"))
         } else if (errKind === "max_steps_exceeded") {
           turnPausedOnMaxSteps = true
@@ -1674,9 +1688,43 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
             ),
           ])
           childRecap.clear()
+          if (ctx.autonomous && activeAutonomousLoop !== null && !ctrl.signal.aborted) {
+            const liveWm = workModeControl?.getWorkMode() ?? ctx.workMode ?? "DISCUSS"
+            const curCost = usage.getSession(modelRef.current).cost ?? 0
+            const costDelta = Math.max(0, curCost - activeAutonomousLoop.lastCostUsd)
+            activeAutonomousLoop.lastCostUsd = curCost
+            const rec = activeAutonomousLoop.ctl.recordEpoch({
+              progressed: true,
+              costUsd: costDelta,
+              completed: false,
+            })
+            const gate = !rec.stopped
+              ? activeAutonomousLoop.ctl.canStartNextEpoch(Date.now(), ctrl.signal)
+              : ({ allow: false, reason: rec.reason, message: rec.message ?? "stopped" } as const)
+            if (liveWm === "EXECUTE" && gate.allow) {
+              const nextText = activeAutonomousLoop.ctl.formatEpochPrompt(
+                activeAutonomousLoop.rootPrompt,
+                "Previous turn reached max steps; continue cleanly from preserved state.",
+              )
+              queuedPrompts.push({ text: nextText, needsEcho: false })
+              app.showToast(`Autonomous epoch ${gate.nextEpoch}...`)
+            } else {
+              const reasonMsg =
+                liveWm !== "EXECUTE"
+                  ? "Autonomous multi-epoch paused (requires BUILD mode)"
+                  : gate.allow
+                    ? ""
+                    : gate.message
+              if (reasonMsg) {
+                pushSessionLog(`[autonomous] ${reasonMsg}`)
+                app.showToast(reasonMsg)
+              }
+              activeAutonomousLoop = null
+            }
+          }
         } else {
           pushSessionLog(`[turn] ${formatMachineError(error)}`)
-          throw error
+          turnError = error
         }
       } finally {
         // Kernel hanya emit `turn:interrupted` bila ada partial commit. Abort/error
@@ -1709,17 +1757,20 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
 
       const u = usage.get(modelRef.current)
       try {
-        await persistCurrent(u)
-        // P2.2: histori yang tak durable = error transkrip eksplisit (bukan diam).
-        // Detail teknis (epoch/bootId/catatan) tetap di jurnal & log; layar hanya
-        // pesan pendek bahasa sistem — bukan prefix teknis yang tak berarti
-        // bagi user. Lihat test/tui-lang.test.ts (P03-B).
-        if (ctx.isWriterStale()) transcript.pushError(tSystem("msg.staleWriter"))
+        if (turnError === null) {
+          await persistCurrent(u)
+          // P2.2: histori yang tak durable = error transkrip eksplisit (bukan diam).
+          // Detail teknis (epoch/bootId/catatan) tetap di jurnal & log; layar hanya
+          // pesan pendek bahasa sistem — bukan prefix teknis yang tak berarti
+          // bagi user. Lihat test/tui-lang.test.ts (P03-B).
+          if (ctx.isWriterStale()) transcript.pushError(tSystem("msg.staleWriter"))
+        }
       } finally {
-        // Reset usage per-turn bahkan bila persistCurrent melempar agar angka
-        // turn gagal tidak bocor ke turn berikutnya.
+        // Reset usage per-turn bahkan bila runPromptWithVerify / persistCurrent
+        // melempar agar angka turn gagal tidak bocor ke turn berikutnya.
         usage.reset()
       }
+      if (turnError !== null) throw turnError
       const sess = usage.getSession(modelRef.current)
       if (
         budget != null &&
@@ -1781,6 +1832,10 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
       if (jobs.length) disarmAbortQuitIfAvailable(app)
       for (const job of jobs) {
         if (resumedJobs.has(job.id)) continue
+        if (resumedJobs.size >= 2048) {
+          const oldest = resumedJobs.values().next().value
+          if (oldest !== undefined) resumedJobs.delete(oldest)
+        }
         resumedJobs.add(job.id)
         queuedPrompts.push({
           text: t("tui.bgFinishedAuto", { id: job.id, code: job.code ?? "?" }),
@@ -1805,7 +1860,22 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
    */
   async function runTurn(prompt: string): Promise<{ quit?: boolean } | undefined> {
     const isOuterTurn = !turnLoopActive
-    if (isOuterTurn) turnLoopActive = true
+    if (isOuterTurn) {
+      turnLoopActive = true
+      if (ctx.autonomous && activeAutonomousLoop === null) {
+        const wm = workModeControl?.getWorkMode() ?? ctx.workMode ?? "DISCUSS"
+        activeAutonomousLoop = {
+          rootPrompt: prompt,
+          lastCostUsd: usage.getSession(modelRef.current).cost ?? 0,
+          ctl: createAutonomousLoopController({
+            workMode: wm,
+            maxEpochs: ctx.maxEpochs,
+            maxCostUsd: budget,
+            maxCostPerHourUsd: ctx.maxCostHour,
+          }),
+        }
+      }
+    }
     try {
       let next: string | undefined = prompt
       while (next !== undefined) {
@@ -1850,7 +1920,10 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
       }
       return undefined
     } finally {
-      if (isOuterTurn) turnLoopActive = false
+      if (isOuterTurn) {
+        turnLoopActive = false
+        activeAutonomousLoop = null
+      }
     }
   }
 
@@ -1917,14 +1990,14 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
     // Flag abort sengaja TIDAK dihapus di sini: satu-satunya titik clear ada di
     // runTurnOnce saat AbortController turn baru dibuat. Kalau tidak, auto-resume
     // job background (yang tak lewat submit) akan mewarisi niat abort lama.
-    if (!line.startsWith("/")) {
+    const parsedCmd = parseSlashCommand(line)
+    if (!parsedCmd) {
       // Teruskan hasil runTurn: command yang ditunda bisa saja mengembalikan
       // quit, dan App perlu melihatnya lewat nilai balik submit ini.
       return runTurn(line)
     }
-    const spaceIdx = line.indexOf(" ")
-    const name = (spaceIdx === -1 ? line.slice(1) : line.slice(1, spaceIdx)).toLowerCase()
-    let args = spaceIdx === -1 ? "" : line.slice(spaceIdx + 1).trim()
+    const name = parsedCmd.name
+    let args = parsedCmd.args
 
     if (name === "") {
       await helpConcise()
@@ -2387,8 +2460,9 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
         app.showToast(t("tui.queueAborted"))
         return false
       }
-      if (line.startsWith("/")) {
-        const name = (line.split(/\s+/)[0] ?? line).slice(1).toLowerCase()
+      const parsedCmd = parseSlashCommand(line)
+      if (parsedCmd) {
+        const name = parsedCmd.name
         if (BUSY_REJECTED_COMMANDS.has(name)) {
           app.showToast(t("tui.busyCmd", { cmd: `/${name}` }))
           return false
@@ -2593,6 +2667,10 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
       // Audit #4: auto-resume memanggil runTurn langsung (bukan doSubmit), jadi
       // jendela "Esc lagi = quit" wajib dimatikan di sini secara eksplisit.
       disarmAbortQuitIfAvailable(app)
+      if (resumedJobs.size >= 2048) {
+        const oldest = resumedJobs.values().next().value
+        if (oldest !== undefined) resumedJobs.delete(oldest)
+      }
       resumedJobs.add(id)
       void runTurn(t("tui.bgFinishedAuto", { id, code: code ?? "?" }))
         .then((res) => {
@@ -2672,6 +2750,10 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
             if (!id || loggedFindings.has(id)) return
             const text = sanitizeAnsiLine(event.text ?? "").trim()
             if (!text) return
+            if (loggedFindings.size >= 2048) {
+              const oldest = loggedFindings.values().next().value
+              if (oldest !== undefined) loggedFindings.delete(oldest)
+            }
             loggedFindings.add(id)
             const act = event.parentToolCallId
               ? getPresentationSnapshot?.()?.activities.find(

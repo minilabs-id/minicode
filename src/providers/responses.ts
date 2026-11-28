@@ -12,23 +12,30 @@ export interface ResponsesConfig {
   id?: string
   baseUrl: string
   apiKey?: string
+  /** Optional dynamic token resolver untuk sesi OAuth jangka panjang. */
+  getApiKey?: () => Promise<string | undefined>
+  /** Optional paksa refresh token saat server mengembalikan HTTP 401. */
+  refreshApiKey?: () => Promise<string | undefined>
   models: readonly string[]
   defaultModel?: string
   reasoningEffort?: string
 }
 
-// Minimal Responses API adapter — /v1/responses, previous_response_id chaining.
-// v7.40 (audit): selalu store:true sejak v7.31 karena response.id dipakai untuk
-// chaining — klaim lama "store:false saat replay manual" sudah basi. Catatan:
-// `input` mengirim riwayat penuh DAN `prev` ikut dikirim → konteks terduplikasi
-// di server (optimasi/privasi, butuh ADR — sengaja tak diubah di putaran ini).
-// Untuk P11 P1.1: providerHint "responses" → wire ini, bukan chat/completions.
-// Implementasi streaming SSE mirip openai-compat, tapi endpoint berbeda.
-//
-// Chaining: response id terakhir per model disimpan per-instance provider,
-// bukan global — global bocor antar sesi CLI paralel yang sharing model sama.
-// Instance dibuat per sesi via buildProviderList, jadi isolasi sesi gratis.
-const allChains = new Set<Map<string, string>>()
+// Minimal Responses API adapter — /v1/responses, delta chaining via previous_response_id.
+// ADR (Wave 4 / F1b): ketika `previous_response_id` dikirim dan prefix `messages`
+// + system + tools cocok persis dengan langkah sebelumnya (`msgs[sentCount].role === "assistant"`),
+// hanya delta klien pasca-output assistant (`msgs.slice(sentCount + 1)`) yang dikirim ke server
+// agar konteks tidak terduplikasi di API maupun membebani biaya input. Bila histori menyusut
+// (kompaksi/rewind), cabang berubah, fallback router, atau 4xx chain gagal, rantai di-reset
+// otomatis dan riwayat penuh dikirim ulang tanpa `previous_response_id`.
+interface ResponsesChainEntry {
+  readonly responseId: string
+  readonly sentCount: number
+  readonly prefix: readonly unknown[]
+  readonly systemHash: string
+  readonly toolsHash: string
+}
+const allChains = new Set<Map<string, ResponsesChainEntry>>()
 export function clearResponsesChain(): void {
   // Global clear untuk compat — bersihkan semua instance yang pernah dibuat
   for (const m of allChains) m.clear()
@@ -84,7 +91,7 @@ export function toResponsesInput(
 export function createResponsesProvider(config: ResponsesConfig): ModelProvider {
   const baseUrl = config.baseUrl.replace(/\/+$/, "")
   const endpoint = `${baseUrl}/responses`
-  const lastResponseByModel = new Map<string, string>()
+  const lastResponseByModel = new Map<string, ResponsesChainEntry>()
   allChains.add(lastResponseByModel)
   const provider: ModelProvider & { kind: "responses"; clearResponsesChain?: () => void } = {
     id: config.id ?? "responses",
@@ -95,7 +102,40 @@ export function createResponsesProvider(config: ResponsesConfig): ModelProvider 
     clearResponsesChain: () => lastResponseByModel.clear(),
     async *stream(request: StreamRequest, signal: AbortSignal): AsyncIterable<ProviderEvent> {
       const modelKey = request.model ?? config.defaultModel ?? config.models[0] ?? "default"
-      const prev = lastResponseByModel.get(modelKey)
+      const systemHash = request.system?.trim() ?? ""
+      const toolsHash = request.tools?.length
+        ? JSON.stringify(
+            request.tools.map((t) => ({
+              name: t.name,
+              description: t.description,
+              parameters: t.parameters,
+            })),
+          )
+        : ""
+      const msgs = request.messages
+      const prevEntry = lastResponseByModel.get(modelKey)
+      let prev: string | undefined
+      let inputMessages: readonly {
+        role: string
+        content?: unknown
+        toolCalls?: unknown
+        toolCallId?: string
+        isError?: boolean
+      }[] = msgs
+      if (
+        prevEntry &&
+        prevEntry.systemHash === systemHash &&
+        prevEntry.toolsHash === toolsHash &&
+        msgs.length > prevEntry.sentCount + 1 &&
+        prevEntry.prefix.every((m, idx) => msgs[idx] === m) &&
+        msgs[prevEntry.sentCount]?.role === "assistant"
+      ) {
+        // Lanjutan rantai: kirim HANYA pesan klien baru pasca output assistant `prevEntry.responseId`.
+        prev = prevEntry.responseId
+        inputMessages = msgs.slice(prevEntry.sentCount + 1)
+      } else if (prevEntry) {
+        lastResponseByModel.delete(modelKey)
+      }
       // Effort hanya untuk keluarga OpenAI reasoning dengan level yang
       // didukung model itu (mis. pro = high saja); sisanya omit — default
       // bawaan model yang berlaku. Tanpa ini model non-reasoning 400.
@@ -108,7 +148,7 @@ export function createResponsesProvider(config: ResponsesConfig): ModelProvider 
           : undefined
       const body = JSON.stringify({
         model: request.model ?? config.defaultModel ?? config.models[0],
-        input: toResponsesInput(request.messages),
+        input: toResponsesInput(inputMessages),
         tools: request.tools?.length
           ? request.tools.map((t) => ({
               type: "function",
@@ -133,24 +173,46 @@ export function createResponsesProvider(config: ResponsesConfig): ModelProvider 
         // previous_response_id di turn berikutnya → endpoint ketat menolak 400.
         store: true,
         ...(sendEffort ? { reasoning: { effort: sendEffort } } : {}),
-        // Rantai konteks antar turn; tanpa ini server memperlakukan tiap
-        // request sebagai sesi baru (biaya konteks + hilang ingatan server).
+        // Rantai konteks delta antar turn saat prefix cocok; tanpa duplikasi riwayat.
         ...(prev ? { previous_response_id: prev } : {}),
       })
-      const headers: Record<string, string> = {
+      const resolveKey = async (forceRefresh = false): Promise<string | undefined> => {
+        if (forceRefresh && config.refreshApiKey) {
+          const fresh = await config.refreshApiKey().catch(() => undefined)
+          if (fresh) return fresh
+        }
+        if (config.getApiKey) {
+          const dynamic = await config.getApiKey().catch(() => undefined)
+          if (dynamic) return dynamic
+        }
+        return config.apiKey
+      }
+      const makeHeaders = (key?: string): Record<string, string> => ({
         "content-type": "application/json",
         accept: "text/event-stream",
-        ...(config.apiKey ? { authorization: `Bearer ${config.apiKey}` } : {}),
-      }
+        ...(key ? { authorization: `Bearer ${key}` } : {}),
+      })
       let res: Response
       try {
+        const key = await resolveKey(false)
         res = await fetch(endpoint, {
           method: "POST",
-          headers,
+          headers: makeHeaders(key),
           body,
           signal,
           redirect: "manual",
         })
+        if (res.status === 401 && config.refreshApiKey) {
+          await res.body?.cancel().catch(() => {})
+          const freshKey = await resolveKey(true)
+          res = await fetch(endpoint, {
+            method: "POST",
+            headers: makeHeaders(freshKey),
+            body,
+            signal,
+            redirect: "manual",
+          })
+        }
       } catch (e) {
         if (e instanceof Error && e.name === "AbortError") throw e
         throw new ProviderError("network", e instanceof Error ? e.message : String(e))
@@ -230,6 +292,7 @@ export function createResponsesProvider(config: ResponsesConfig): ModelProvider 
         }
       }
       let reachedEof = false
+      let sawCompletion = false
       try {
         while (true) {
           if (signal.aborted) throw new DOMException("Aborted", "AbortError")
@@ -295,13 +358,28 @@ export function createResponsesProvider(config: ResponsesConfig): ModelProvider 
                         : "server"
                 throw new ProviderError(cat, cat === "unknown" ? `402: ${msg}` : `${cat}: ${msg}`)
               }
-              if (dtype === "response.completed" || dtype === "completed") {
-                const resp = data.response as { id?: unknown; usage?: unknown } | undefined
+              if (
+                dtype === "response.completed" ||
+                dtype === "completed" ||
+                dtype === "response.incomplete"
+              ) {
+                sawCompletion = true
+                const resp = data.response as
+                  | { id?: unknown; usage?: unknown; incomplete_details?: { reason?: unknown } }
+                  | undefined
                 const rid = resp?.id ?? data.id
-                if (typeof rid === "string" && rid) lastResponseByModel.set(modelKey, rid)
-                // Tanpa usage event, Responses tak pernah menyumbang token ke
-                // budget/cost (buta spend). Bentuk shape sama dengan adapter
-                // openai-compat agar kolektor tak perlu tahu provider.
+                if (dtype === "response.incomplete") {
+                  // Respons terpotong/terfilter tidak boleh menjadi jangkar delta turn berikutnya.
+                  lastResponseByModel.delete(modelKey)
+                } else if (typeof rid === "string" && rid) {
+                  lastResponseByModel.set(modelKey, {
+                    responseId: rid,
+                    sentCount: msgs.length,
+                    prefix: [...msgs],
+                    systemHash,
+                    toolsHash,
+                  })
+                }
                 const u = resp?.usage as
                   | {
                       input_tokens?: unknown
@@ -315,7 +393,6 @@ export function createResponsesProvider(config: ResponsesConfig): ModelProvider 
                   u &&
                   (u.input_tokens != null || u.output_tokens != null || u.total_tokens != null)
                 ) {
-                  // Fase 7: cache-hit alias (input_tokens_details.cached_tokens / cached_tokens).
                   const cached =
                     (u.input_tokens_details?.cached_tokens !== undefined
                       ? u.input_tokens_details.cached_tokens
@@ -331,6 +408,33 @@ export function createResponsesProvider(config: ResponsesConfig): ModelProvider 
                       cacheIncluded: true,
                       ...(typeof cached === "number" ? { cacheReadTokens: cached } : {}),
                     },
+                  }
+                }
+                if (dtype === "response.incomplete") {
+                  const incReason = String(resp?.incomplete_details?.reason ?? "")
+                  for (const [, acc] of pendingCalls) {
+                    yield* yieldCall(acc.id, acc.name, acc.args)
+                  }
+                  pendingCalls.clear()
+                  pendingToolArgBytes = 0
+                  if (incReason === "content_filter") {
+                    yield { type: "extension", kind: "content_filter", data: {} }
+                    if (!finished) {
+                      finished = true
+                      yield { type: "finish", reason: "stop" }
+                    }
+                  } else {
+                    if (incReason === "max_output_tokens") {
+                      yield {
+                        type: "extension",
+                        kind: "warning",
+                        data: { text: "⚠ response truncated: hit max_output_tokens" },
+                      }
+                    }
+                    if (!finished) {
+                      finished = true
+                      yield { type: "finish", reason: "length" }
+                    }
                   }
                 }
               }
@@ -392,7 +496,9 @@ export function createResponsesProvider(config: ResponsesConfig): ModelProvider 
                 const key =
                   typeof data.item_id === "string" && data.item_id
                     ? data.item_id
-                    : ([...pendingCalls.keys()].pop() ?? "")
+                    : pendingCalls.size === 1
+                      ? [...pendingCalls.keys()][0]!
+                      : ""
                 const acc = pendingCalls.get(key)
                 if (acc && typeof data.delta === "string") {
                   const boundedArgs = appendToolArgument(
@@ -410,7 +516,9 @@ export function createResponsesProvider(config: ResponsesConfig): ModelProvider 
                 const key =
                   typeof item.id === "string" && pendingCalls.has(item.id)
                     ? item.id
-                    : ([...pendingCalls.keys()].pop() ?? "")
+                    : pendingCalls.size === 1
+                      ? [...pendingCalls.keys()][0]!
+                      : ""
                 const acc = pendingCalls.get(key)
                 const id = (typeof item.call_id === "string" && item.call_id) || acc?.id || key
                 const name = (typeof item.name === "string" && item.name) || acc?.name || ""
@@ -477,8 +585,12 @@ export function createResponsesProvider(config: ResponsesConfig): ModelProvider 
         if (!reachedEof) await reader.cancel().catch(() => {})
         reader.releaseLock()
       }
-      // Gateway yang menyelesaikan stream tanpa output_item.done tetap flush
-      // item tertahan; parser sudah membatasi dan memvalidasi JSON argumennya.
+      if (!finished && !sawCompletion) {
+        throw new ProviderError(
+          "network",
+          "Responses stream ended without completion or finish_reason",
+        )
+      }
       for (const [, acc] of pendingCalls) {
         yield* yieldCall(acc.id, acc.name, acc.args)
       }

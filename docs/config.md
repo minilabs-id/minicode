@@ -120,7 +120,7 @@ lain (tagihan tak terduga). Model bare (tanpa `::`) tetap perilaku lama
 
 Build provider terpusat di `src/providers/build.ts`. Router fallback untuk rate_limit/server/network (clone-error + base64 fix + retryAfter cap). Deteksi wire dari probe path `/responses` → hint `responses`; substring host hanya fallback. `max_tokens` 8192; stop `length` = peringatan eksplisit, bukan teks sunyi.
 
-Responses API: `/v1/responses`, `previous_response_id` chaining per model, `store:false` default.
+Responses API: `/v1/responses`, delta chaining via `previous_response_id` per model+prefix (otomatis reset saat kompaksi/rewind/perubahan cabang), `store:true`.
 
 ## Global vs lokal
 

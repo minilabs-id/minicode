@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.53.0] - 2026-11-28
+
+### Added & Improved — `dep_graph`, otonomi multi-epoch, UX live & markdown, hardening audit, serta optimasi performa
+
+- **Graf dependensi & pemahaman kode (`src/repo/dep-graph.ts`, `src/tools/dep_graph.ts`, `src/policy/context.ts`):**
+  - Tambah tool read-only `dep_graph` (#42) + mesin indeks graf impor/simbol hibrid di `src/repo/dep-graph.ts` (`repomap.ts`), beserta reservasi lantai anggaran `# Repo map (symbols)` pada `buildSystemPrompt()`.
+  - Tutup kebocoran wire LSP ke sub-agent/autonomous/MCP & dukung multi-root LSP, plus hook status move/delete di lifecycle file.
+- **Mode otonom multi-epoch & ketahanan pemulihan (`src/policy/autonomous-loop.ts`, `src/task/autonomous-build-policy.ts`, `src/lib/liveness-clock.ts`):**
+  - Tambah pengendali loop otonom `--autonomous` beserta `--wall-timeout`, `--max-epochs`, `--max-cost-hour`, dan `--takeover` (`cli/commands/exec.ts`, `cli/tui.ts`), kebijakan BUILD terjail per WorkMode di `AutonomousExecutionContext`, serta batas stall/episode pemulihan terkalibrasi (`recovery-budget.ts`, `compaction.ts`, `no-progress.ts`, `verifier.ts`).
+- **Tampilan live TUI, markdown CommonMark, & kekompakan prompt (`docs/TERMINAL_CONTRACT.md`):**
+  - Tampilkan durasi akhir turn bersama rekap tool (`1m 05s` dengan spasi antar unit) pada `flushTurnTotal()`, rapikan baris agregat `✦` sub-agent tanpa jumlah `(R running)`, serta baris live `delegate_task` (`› <nama>` pulse `c.info` ↔ `c.gray` & timer redup `c.faint` `MM:SS`).
+  - Ekspansi penuh token `{paste text N line(s)}` pada gema riwayat chat (`pushUser`) sambil mempertahankan placeholder ringkas di composer.
+  - Perbaiki `renderInline()` (`src/ui/render/markdown.ts`), `markdown-layout.ts`, `Transcript.renderAssistantLine()`, dan `simple.ts` dengan tokenizer stack delimiter ala CommonMark, pencocokan run backtick `N`-panjang, tautan berkurung seimbang + `paintWithRestore()`, heading berindentasi/di list/di kutipan, serta garis pemisah horizontal (`***`/`---`/`___`); dan pulihkan instruksi jawaban ringkas pada `buildSystemPrompt()` (`src/policy/context.ts`).
+- **Keamanan, hard-bounds, & optimasi performa lintas hot-path:**
+  - Perketat `buildEmbeddingCandidates` (blokir `keystore:` di config lokal), tolak redirect lintas-origin / HTTPS→HTTP ber-kredensial di `vector.ts`, perbaiki fuzz test `bash-guard`, isolasi path/env/allowlist sandbox, perkuat parsing SSE / timeout guard (`vendor/minicore/`), serta rapatkan ukuran paket tarball & kepatuhan `env-docs` (`MINICODE_SUBAGENT_LLM_TITLE`).
+  - Optimasi boot subcommand ringan via `cli/entry.ts` + `cli/router.ts`, cache estimasi token `WeakMap` per pesan di kernel (`vendor/minicore/`), fast-path `displayWidth`/`stripSgr`/`scrubSecrets`, memo `runningActivities`, cache prefiks pending `Transcript`, dan pembersihan handle SQLite (`test/p14-full-scope.test.ts`) plus isolasi `TERM` pada test warna TTY.
+
 ## [0.52.1] - 2026-11-27
 
 ### Fixed & Improved — stabilitas UI/UX (`T1`–`T12`, `U1`–`U4`) & keterbacaan tema (`C1`–`C5`)

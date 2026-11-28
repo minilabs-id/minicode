@@ -1,7 +1,8 @@
-import { isAbsolute, resolve as resolvePath } from "node:path"
+import { extname, isAbsolute, relative, resolve as resolvePath } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import type { Tool } from "#minicore"
 import { LIMITS, LSP_SYMBOL_KINDS } from "../constants.ts"
+import { sanitizeIncoming } from "../daemon/sanitize.ts"
 import { atomicWriteText } from "../lib/atomic-write.ts"
 import { assertSafeWriteTarget, resolveSafePath, safeReadFile } from "../lib/safe-open.ts"
 import {
@@ -75,17 +76,31 @@ async function readTarget(
   return { abs, text }
 }
 
-function formatPos(p: unknown): string {
+function formatWorkspaceUri(uri: string, cwd?: string): string {
+  const cleanUri = sanitizeIncoming(uri)
+  if (!cwd || !uri.startsWith("file:")) return cleanUri
+  try {
+    const abs = fileURLToPath(uri)
+    const rel = relative(resolvePath(cwd), abs)
+    if (!rel) return "."
+    if (!rel.startsWith("..") && !isAbsolute(rel)) {
+      return sanitizeIncoming(rel.replace(/\\/g, "/"))
+    }
+  } catch {}
+  return cleanUri
+}
+
+function formatPos(p: unknown, cwd?: string): string {
   const r = p as {
     range?: { start?: { line?: number; character?: number } }
+    targetSelectionRange?: { start?: { line?: number; character?: number } }
+    targetRange?: { start?: { line?: number; character?: number } }
     uri?: string
     targetUri?: string
   }
-  const uri = r.uri ?? r.targetUri ?? "?"
-  const line =
-    r.range?.start?.line != null
-      ? `:${(r.range.start.line ?? 0) + 1}:${(r.range.start.character ?? 0) + 1}`
-      : ""
+  const uri = formatWorkspaceUri(r.uri ?? r.targetUri ?? "?", cwd)
+  const start = r.range?.start ?? r.targetSelectionRange?.start ?? r.targetRange?.start
+  const line = start?.line != null ? `:${(start.line ?? 0) + 1}:${(start.character ?? 0) + 1}` : ""
   return `${uri}${line}`
 }
 
@@ -101,9 +116,14 @@ async function resolvePosition(
   cwd: string,
   relaxed = false,
 ): Promise<{ abs: string; text: string; position: { line: number; character: number } } | string> {
-  if (getConfiguredExts().length === 0)
-    return "(no LSP servers configured — add via minicode config lsp add)"
+  // Baca + cek jail/sensitive lebih dulu agar penolakan path terlarang tetap konsisten meski LSP belum terpasang.
   const { abs, text } = await readTarget(args.path, cwd, relaxed)
+  const configured = getConfiguredExts()
+  if (configured.length === 0)
+    throw new Error("no LSP servers configured — add via minicode config lsp add")
+  const ext = extname(abs).toLowerCase()
+  if (!configured.includes(ext))
+    throw new Error(`no LSP configured for '${ext}' — add via minicode config lsp add`)
   let position: { line: number; character: number } | null = null
   if (args.line != null) position = { line: args.line, character: args.character ?? 0 }
   else if (args.symbol) position = findSymbolPosition(text, args.symbol)
@@ -178,9 +198,16 @@ function posTool(
           ctx.signal,
         )
         if (!result || (Array.isArray(result) && result.length === 0)) return "(not found)"
-        if (method === "textDocument/hover") return scrubSecrets(formatHover(result))
-        if (Array.isArray(result)) return scrubSecrets(capLocations(result.map(formatPos), limit))
-        return scrubSecrets(formatPos(result))
+        if (method === "textDocument/hover")
+          return scrubSecrets(sanitizeIncoming(formatHover(result)))
+        if (Array.isArray(result))
+          return scrubSecrets(
+            capLocations(
+              result.map((item) => formatPos(item, cwd)),
+              limit,
+            ),
+          )
+        return scrubSecrets(formatPos(result, cwd))
       } catch (e) {
         // v7.32: kegagalan (abort/head-of-penjara) WAJIB jadi isError. Dulu
         // setiap catch dibungkus string `[lsp] …` sehingga kernel menandainya
@@ -226,7 +253,9 @@ export const lspDiagnosticsTool: Tool = {
         }
         const sev = SEVERITY[(dd.severity ?? 1) - 1] ?? "?"
         const pos = `${(dd.range?.start?.line ?? 0) + 1}:${(dd.range?.start?.character ?? 0) + 1}`
-        return `${pos} [${sev}] ${dd.message}${dd.source ? ` (${dd.source})` : ""}`
+        const msg = sanitizeIncoming(String(dd.message ?? ""))
+        const src = dd.source ? ` (${sanitizeIncoming(String(dd.source))})` : ""
+        return `${pos} [${sev}] ${msg}${src}`
       })
       // M3: cap seperti def/refs — daftar diagnostik raksasa tak boleh
       // tampak utuh (kontrak cap #02). 50 sejajar batas definitions.
@@ -258,6 +287,45 @@ export const lspHoverTool = posTool(
   "textDocument/hover",
   `LSP: Hover info and type signature for a symbol. ${POSITION_NOTE}`,
 )
+
+type RawLspSymbol = {
+  name?: string
+  detail?: string
+  kind?: number
+  range?: { start?: { line?: number } }
+  selectionRange?: { start?: { line?: number } }
+  location?: { range?: { start?: { line?: number } } }
+  children?: RawLspSymbol[]
+  containerName?: string
+}
+
+/** Dukungan ganda DocumentSymbol (hierarkis .range) dan SymbolInformation (.location.range). */
+function formatDocumentSymbols(
+  items: RawLspSymbol[],
+  KIND: readonly string[],
+  depth = 0,
+): string[] {
+  const out: string[] = []
+  const indent = depth > 0 ? "  ".repeat(Math.min(depth, 4)) : ""
+  for (const sym of items) {
+    if (!sym || typeof sym !== "object") continue
+    const kind = KIND[(sym.kind ?? 1) - 1] ?? "?"
+    const rawLine =
+      sym.selectionRange?.start?.line ?? sym.range?.start?.line ?? sym.location?.range?.start?.line
+    const line = (rawLine ?? 0) + 1
+    const name = sanitizeIncoming(String(sym.name ?? "?"))
+    const extra = sym.detail
+      ? ` — ${sanitizeIncoming(String(sym.detail))}`
+      : sym.containerName
+        ? ` (${sanitizeIncoming(String(sym.containerName))})`
+        : ""
+    out.push(`${line}: ${indent}[${kind}] ${name}${extra}`)
+    if (Array.isArray(sym.children) && sym.children.length > 0) {
+      out.push(...formatDocumentSymbols(sym.children, KIND, depth + 1))
+    }
+  }
+  return out
+}
 
 export const lspSymbolsTool: Tool = {
   name: "lsp_symbols",
@@ -292,13 +360,7 @@ export const lspSymbolsTool: Tool = {
       // v7.33 (wire contract): sentinel kosong dibubuhi langkah lanjutan.
       if (!result || !Array.isArray(result) || result.length === 0)
         return "(no symbols) — confirm an LSP server is configured for this extension; cross-check with project typechecker"
-      const KIND = LSP_SYMBOL_KINDS
-      const lines = result.map((s) => {
-        const sym = s as { name?: string; kind?: number; range?: { start?: { line?: number } } }
-        const kind = KIND[(sym.kind ?? 1) - 1] ?? "?"
-        const line = (sym.range?.start?.line ?? 0) + 1
-        return `${line}: [${kind}] ${sym.name}`
-      })
+      const lines = formatDocumentSymbols(result as RawLspSymbol[], LSP_SYMBOL_KINDS)
       // M3: outline simbol pun ikut cap (100, sejajar references) supaya
       // pemotongan selalu ditandai — bukan join penuh yang tampak lengkap.
       return scrubSecrets(capLocations(lines, 100))
@@ -337,8 +399,10 @@ export const lspWorkspaceSymbolsTool: Tool = {
       const KIND = LSP_SYMBOL_KINDS
       const rows = symbols.map((s) => {
         const kind = KIND[(s.kind ?? 1) - 1] ?? "?"
-        const uri = s.location.uri ?? "?"
-        return `[${kind}] ${s.name}${s.containerName ? ` (${s.containerName})` : ""} — ${uri}`
+        const loc = formatWorkspaceUri(s.location.uri ?? "?", cwd)
+        const name = sanitizeIncoming(s.name)
+        const container = s.containerName ? ` (${sanitizeIncoming(s.containerName)})` : ""
+        return `[${kind}] ${name}${container} — ${loc}`
       })
       return scrubSecrets(capLocations(rows, 50))
     } catch (e) {

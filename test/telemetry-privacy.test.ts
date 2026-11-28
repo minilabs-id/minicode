@@ -76,6 +76,12 @@ describe("audit #10: jalur telemetry lokal-only (tanpa egress)", () => {
       await deleteSession("s-off", cwd)
       expect(scrubSecrets("Authorization: Bearer SECRET123")).not.toContain("SECRET123")
       expect(summarizeArgs({ cmd: "echo hi" })).toBe("cmd=echo hi")
+      // P1-8: secret yang melintasi batas slice 120 char tetap ter-scrub penuh.
+      const prefix = "a".repeat(100)
+      const splitSecret = "sk-1234567890ABCDEFGHIJKLMNOPQRSTUV"
+      const summarized = summarizeArgs({ cmd: `${prefix} ${splitSecret}` })
+      expect(summarized).not.toContain("sk-123456")
+      expect(summarized).toContain("[REDACTED]")
     } finally {
       globalThis.fetch = realFetch
     }

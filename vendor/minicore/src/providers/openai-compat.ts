@@ -46,6 +46,10 @@ export interface OpenAICompatConfig {
   defaultModel?: string;
   /** Bearer token; omitted entirely when absent (e.g. local endpoints). */
   apiKey?: string;
+  /** Optional dynamic token resolver (mis. OAuth refresh pada sesi berhari-hari). */
+  getApiKey?: () => Promise<string | undefined>;
+  /** Optional forced token refresh callback saat HTTP 401 sebelum retry 1x. */
+  refreshApiKey?: () => Promise<string | undefined>;
   /** Extra headers; these override the default content-type/authorization. */
   headers?: Readonly<Record<string, string>>;
   /**
@@ -85,10 +89,8 @@ export function createOpenAICompatProvider(config: OpenAICompatConfig): ModelPro
       if (!first.done) providerMetaByCallId.delete(first.value);
     }
   }
-  function takeProviderMeta(id: string): unknown {
-    const v = providerMetaByCallId.get(id);
-    if (v != null) providerMetaByCallId.delete(id);
-    return v;
+  function peekProviderMeta(id: string): unknown {
+    return providerMetaByCallId.get(id);
   }
 
   const provider: ModelProvider & { readonly kind: "openai-compat" } = {
@@ -97,8 +99,14 @@ export function createOpenAICompatProvider(config: OpenAICompatConfig): ModelPro
     models: config.models,
     async *stream(request: StreamRequest, signal: AbortSignal): AsyncIterable<ProviderEvent> {
       const includeUsage = config.includeUsage ?? true;
+      const consumedMetaIds: string[] = [];
       const buildBody = (withUsage: boolean): string => {
-        const wireMessages = toMessages(request.messages, takeProviderMeta);
+        consumedMetaIds.length = 0;
+        const wireMessages = toMessages(request.messages, (id) => {
+          const meta = peekProviderMeta(id);
+          if (meta != null) consumedMetaIds.push(id);
+          return meta;
+        });
         // Kirim system prompt secara native dengan role "system" (OpenAI Chat Completions),
         // bukan diselipkan sebagai pesan user di router. Hindari duplikasi bila pesan awal
         // sudah membawa role "system".
@@ -130,20 +138,44 @@ export function createOpenAICompatProvider(config: OpenAICompatConfig): ModelPro
           ...(config.reasoningEffort ? { reasoning_effort: config.reasoningEffort } : {}),
         });
       };
+      const resolveHeaders = async (forceRefresh = false): Promise<Record<string, string>> => {
+        let token: string | undefined;
+        if (forceRefresh && config.refreshApiKey) {
+          token = (await config.refreshApiKey().catch(() => undefined)) ?? undefined;
+        }
+        if (!token && config.getApiKey) {
+          token = (await config.getApiKey().catch(() => undefined)) ?? undefined;
+        }
+        token ??= config.apiKey;
+        return {
+          "content-type": "application/json",
+          "accept": "text/event-stream",
+          ...(token ? { authorization: `Bearer ${token}` } : {}),
+          ...config.headers,
+        };
+      };
+      let reqHeaders = config.getApiKey || config.refreshApiKey ? await resolveHeaders(false) : headers;
       let body = buildBody(includeUsage);
-      let response = await fetchOrThrow(endpoint, headers, body, signal);
+      let response = await fetchOrThrow(endpoint, reqHeaders, body, signal);
+      if (!response.ok && response.status === 401 && config.refreshApiKey) {
+        await response.body?.cancel().catch(() => {});
+        reqHeaders = await resolveHeaders(true);
+        response = await fetchOrThrow(endpoint, reqHeaders, body, signal);
+      }
       // P4: strict OpenAI-compat endpoints reject the unknown stream_options
       // field with 400. Retry once without it; a second 400 is a real error.
       if (!response.ok && includeUsage && response.status === 400) {
         await response.body?.cancel().catch(() => {});
         body = buildBody(false);
-        response = await fetchOrThrow(endpoint, headers, body, signal);
+        response = await fetchOrThrow(endpoint, reqHeaders, body, signal);
       }
       if (!response.ok) {
         const text = await readCappedErrorBody(response, 64 * 1024);
         throw toProviderError(response.status, text, response.headers);
       }
       if (!response.body) throw new ProviderError("network", "empty response body");
+      // Konsumsi side-map metadata hanya setelah endpoint menerima payload.
+      for (const id of consumedMetaIds) providerMetaByCallId.delete(id);
 
       const calls = new Map<number, { id: string; name: string; args: string }>();
       const order: number[] = [];
@@ -172,13 +204,23 @@ export function createOpenAICompatProvider(config: OpenAICompatConfig): ModelPro
           yield { type: "tool_call", id: callId, name: acc.name, args };
         }
       };
-      for await (const chunk of sse(response.body, signal)) {
+      const sseState = { sawDone: false };
+      for await (const chunk of sse(response.body, signal, sseState)) {
         if (chunk.error && (typeof chunk.error === "object" || typeof chunk.error === "string")) {
           const e = typeof chunk.error === "object" ? (chunk.error as Record<string, unknown>) : { message: String(chunk.error) };
           const msg = String(e.message ?? e.msg ?? JSON.stringify(chunk.error));
           const c = String(e.code ?? e.type ?? "");
-          const cat = /auth|401|403/i.test(msg + c) ? "auth" : /rate|quota|429/i.test(msg + c) ? "rate_limit" : /context/i.test(msg) ? "context_length_exceeded" : "server";
-          throw new ProviderError(cat, `${cat === "server" ? "server error" : cat}: ${msg}`);
+          const combined = `${msg} ${c}`;
+          const cat = /auth|401|403/i.test(combined)
+            ? "auth"
+            : /quota_exceeded|insufficient_quota|balance/i.test(combined)
+              ? "unknown"
+              : /rate|429/i.test(combined)
+                ? "rate_limit"
+                : /context/i.test(msg)
+                  ? "context_length_exceeded"
+                  : "server";
+          throw new ProviderError(cat, cat === "unknown" ? `402: ${msg}` : `${cat === "server" ? "server error" : cat}: ${msg}`);
         }
         const usage = chunk.usage as {
           prompt_tokens?: number;
@@ -289,6 +331,9 @@ export function createOpenAICompatProvider(config: OpenAICompatConfig): ModelPro
       // Jika sudah ada tool delta terakumulasi, flush dulu + finish("tool_calls")
       // agar tool call tidak hilang diam-diam.
       if (!finished) {
+        if (!sseState.sawDone) {
+          throw new ProviderError("network", "OpenAI-compat SSE stream ended without finish reason or [DONE]");
+        }
         const hasCalls = order.some((index) => Boolean(calls.get(index)?.name));
         yield* flushCalls();
         yield { type: "finish", reason: hasCalls ? "tool_calls" : "stop" };
@@ -441,7 +486,25 @@ async function readCappedErrorBody(response: Response, maxBytes: number): Promis
   }
 }
 
-async function* sse(body: ReadableStream<Uint8Array>, signal: AbortSignal): AsyncGenerator<Record<string, unknown>> {
+const STREAM_ACTIVITY_SYMBOL = Symbol.for("minicode.streamActivity");
+
+function notifyStreamActivity(signal: AbortSignal): void {
+  try {
+    const fn = (signal as unknown as Record<symbol, unknown>)[STREAM_ACTIVITY_SYMBOL];
+    if (typeof fn === "function") (fn as () => void)();
+  } catch {}
+}
+
+const utf8Encoder = new TextEncoder();
+function utf8ByteLength(s: string): number {
+  return s.length * 3 <= MAX_FRAME_BYTES ? s.length : utf8Encoder.encode(s).byteLength;
+}
+
+async function* sse(
+  body: ReadableStream<Uint8Array>,
+  signal: AbortSignal,
+  state?: { sawDone: boolean },
+): AsyncGenerator<Record<string, unknown>> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -467,6 +530,9 @@ async function* sse(body: ReadableStream<Uint8Array>, signal: AbortSignal): Asyn
         reachedEof = true;
         break;
       }
+      // Beritahu guard stream host bahwa koneksi mengirim byte (termasuk
+      // komentar keepalive `: OPENROUTER PROCESSING` / `: ping`).
+      if (value.byteLength > 0) notifyStreamActivity(signal);
       // HOST seam (F2): byte bounds. Sebelumnya stream menumpuk baris tanpa batas
       // sehingga satu `data:` raksasa (upstream rusak/hostil) di-buffer + JSON.parse
       // sebelum guard host sempat memotong event yang sudah ter-decode → OOM.
@@ -483,12 +549,15 @@ async function* sse(body: ReadableStream<Uint8Array>, signal: AbortSignal): Asyn
         const line = buffer.slice(lineStart, index).replace(/\r$/, "");
         lineStart = index + 1;
         scanFrom = lineStart;
-        if (line.length > MAX_FRAME_BYTES) {
+        if (utf8ByteLength(line) > MAX_FRAME_BYTES) {
           throw new ProviderError("invalid_request", "SSE frame exceeds byte limit");
         }
         if (!line.startsWith("data:")) continue;
         const payload = line.slice(5).trim();
-        if (payload === "[DONE]") return;
+        if (payload === "[DONE]") {
+          if (state) state.sawDone = true;
+          return;
+        }
         if (payload) {
           try {
             yield JSON.parse(payload) as Record<string, unknown>;
@@ -499,7 +568,7 @@ async function* sse(body: ReadableStream<Uint8Array>, signal: AbortSignal): Asyn
       }
       if (lineStart > 0) buffer = buffer.slice(lineStart);
       // Satu baris tak-berakhir yang tumbuh melebihi cap frame = runaway buffer.
-      if (buffer.length > MAX_FRAME_BYTES) {
+      if (utf8ByteLength(buffer) > MAX_FRAME_BYTES) {
         throw new ProviderError("invalid_request", "SSE frame exceeds byte limit");
       }
     }

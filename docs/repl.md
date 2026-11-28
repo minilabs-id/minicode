@@ -117,8 +117,8 @@ penuh tetap di jurnal dan bisa ditampilkan sebagai baris `+ thinking` lewat
   memilih seluruh transkrip).
 - **Tanpa prefix di dalam composer:** kotak input tampil bersih tanpa label
   `minicode ›`; gema prompt user di transkrip tetap memakai `minicode › `.
-  Paste multi-baris/panjang diringkas sebagai `{paste text N lines}` dan
-  diekspansi penuh saat submit/enqueue.
+  Paste multi-baris/panjang diringkas di composer sebagai `{paste text N lines}`
+  dan diekspansi penuh saat submit/enqueue serta pada gema transkrip chat.
 - **Dropdown `/` dan `@mention` = overlay dalam frame yang sama** (I19/I1):
   tidak mengurangi `viewH`, menimpa baris transkrip bawah, tanpa
   `paintRegion()` terpisah. Klik di area dropdown memilih item menu; `Tab` atau

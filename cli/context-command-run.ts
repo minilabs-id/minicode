@@ -86,6 +86,22 @@ async function rowsFor(ctx: CommandContext): Promise<string[]> {
       { width: inner },
     ),
     `  ${t("ctx.usage")}`,
+    ...(await (async () => {
+      if (!ctx.cwd) return []
+      try {
+        const { loadDependencyGraph } = await import("../src/repo/repomap.ts")
+        const loaded = await Promise.race([
+          loadDependencyGraph(ctx.cwd),
+          new Promise<null>((r) => setTimeout(() => r(null), 250)),
+        ])
+        if (!loaded || loaded.graph.totalFiles === 0) return []
+        return [
+          `  repo-graph: ${loaded.graph.prodFiles}/${loaded.graph.totalFiles} prod/all files, ${loaded.graph.edges.length} edges, ${loaded.graph.cycles.length} cycles`,
+        ]
+      } catch {
+        return []
+      }
+    })()),
     "",
   ].flatMap((line) => line.split("\n"))
 }

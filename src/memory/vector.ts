@@ -416,18 +416,21 @@ function toBlob(vec: number[]): Buffer {
   const f32 = new Float32Array(vec)
   return Buffer.from(f32.buffer, f32.byteOffset, f32.byteLength)
 }
-function fromBlob(blob: Buffer | Uint8Array): number[] {
-  const buf = blob instanceof Uint8Array ? Buffer.from(blob) : (blob as Buffer)
-  // ensure 4-byte alignment: copy if misaligned
-  if (buf.byteOffset % 4 !== 0) {
-    const copy = Buffer.alloc(buf.byteLength)
-    buf.copy(copy)
-    return Array.from(new Float32Array(copy.buffer, copy.byteOffset, copy.byteLength / 4))
+function fromBlob(blob: Buffer | Uint8Array): Float32Array {
+  const byteOffset = blob.byteOffset
+  const byteLength = blob.byteLength
+  // View Float32Array zero-copy bila offset sudah sejajar 4-byte; salin hanya jika tidak sejajar.
+  if (byteOffset % 4 === 0) {
+    return new Float32Array(blob.buffer, byteOffset, Math.floor(byteLength / 4))
   }
-  return Array.from(new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4))
+  const copy = new Uint8Array(byteLength)
+  copy.set(blob)
+  return new Float32Array(copy.buffer, 0, Math.floor(byteLength / 4))
 }
 
-function cosine(a: number[], b: number[]): number {
+type VectorLike = Float32Array | number[]
+
+function cosine(a: VectorLike, b: VectorLike): number {
   if (a.length !== b.length) return 0
   let dot = 0,
     na = 0,
@@ -440,10 +443,9 @@ function cosine(a: number[], b: number[]): number {
   return dot / (Math.sqrt(na) * Math.sqrt(nb) + 1e-9)
 }
 
-function keywordScore(query: string, text: string): number {
-  const q = query.toLowerCase().split(/\W+/).filter(Boolean)
-  const t = text.toLowerCase()
+function keywordScoreWords(q: readonly string[], text: string): number {
   if (q.length === 0) return 0
+  const t = text.toLowerCase()
   let hits = 0
   for (const w of q) if (t.includes(w)) hits++
   return hits / q.length
@@ -459,9 +461,18 @@ async function fetchEmbeddingsOnce(
   // P1.4: redirect manual max 2 hop, tiap hop dicek SSRF strict (fail-close,
   // tanpa cache agar DNS rebinding tidak lolos via cache basi).
   let current = url
+  let initialOrigin: string
+  try {
+    initialOrigin = new URL(url).origin
+  } catch {
+    return null
+  }
+  const hasAuthHeader = Object.keys(headers).some((k) => /^(?:authorization|x-api-key)$/i.test(k))
   for (let hop = 0; hop <= 2; hop++) {
+    let curUrl: URL
     try {
-      const hostname = new URL(current).hostname
+      curUrl = new URL(current)
+      const hostname = curUrl.hostname
       if (await isPrivateHostWithDns(hostname, { strict: true, timeoutMs: 1000, noCache: true })) {
         process.stderr.write(`[vector] private host rejected: ${hostname}\n`)
         return null
@@ -492,9 +503,13 @@ async function fetchEmbeddingsOnce(
       const loc = res.headers.get("location")
       if (!loc || hop === 2) return null
       try {
-        current = new URL(loc, current).toString()
-        const proto = new URL(current).protocol
+        const nextUrl = new URL(loc, current)
+        const proto = nextUrl.protocol
         if (proto !== "https:" && proto !== "http:") return null
+        // Tolak downgrade HTTPS→HTTP dan redirect lintas-origin yang membawa kredensial.
+        if (curUrl.protocol === "https:" && proto === "http:") return null
+        if (hasAuthHeader && nextUrl.origin !== initialOrigin) return null
+        current = nextUrl.toString()
         continue
       } catch {
         return null
@@ -1203,7 +1218,7 @@ function textSim(a: string, b: string): number {
 
 // P2.1: buang near-duplikat (cosine > MEMORY_DEDUP_COSINE) + MMR λ untuk
 // diversitas. Tanpa vektor hanya dedup teks eksak (Map) + MMR via textSim.
-function mmrRerank<T extends { text: string; score: number; vec: number[] | null }>(
+function mmrRerank<T extends { text: string; score: number; vec: VectorLike | null }>(
   cands: T[],
   topK: number,
 ): T[] {
@@ -1354,118 +1369,114 @@ export async function searchHybrid(
   const db = scope === "global" ? openGlobalDb() : open(opts.cwd)
   if (!db) return []
   try {
-    rows = fetchRows(db, scope === "global" ? "global" : "local")
-    if (scope === "all") {
-      try {
-        const globalPath = globalVectorPath()
-        const localPath = dbPath(opts.cwd)
-        if (globalPath !== localPath && existsSync(globalPath)) {
-          const gdb = openAt(globalPath)
-          try {
-            const gRows = fetchRows(gdb, "global")
-            const merged = new Map<string, SourcedMemoryRow>()
-            for (const r of [...rows, ...gRows]) if (!merged.has(r.text)) merged.set(r.text, r)
-            rows = [...merged.values()].slice(0, LIMITS.VECTOR_SEARCH_LIMIT)
-          } finally {
-            gdb.close()
-          }
-        }
-      } catch {}
-    }
-  } finally {
-    db.close()
-  }
-  if (rows.length === 0) return []
-
-  let queryVec: number[] | null = null
-  // F-07: bila semua kandidat hanya memiliki teks (mis. memori manual atau
-  // fallback provider tanpa embedding), vektor query tidak dapat mengubah
-  // skor satu pun. Jangan melakukan DNS/HTTP embedding yang hasilnya tak dipakai.
-  const hasVectorCandidates = rows.some((row) => row.embedding !== null)
-  if (hasVectorCandidates && opts.baseUrl && opts.apiKey) {
-    const vecs = await embedTexts(opts.baseUrl, opts.apiKey, [query], opts.embeddingModel)
-    if (vecs?.[0]) queryVec = vecs[0]
-  }
-
-  const scored = rows.map((r) => {
-    let vec: number[] | null = null
-    let vecScore = 0
-    if (queryVec && r.embedding) {
-      vec = fromBlob(r.embedding)
-      if (vec.length !== queryVec.length) {
-        // P1.3: dim mismatch (ganti MINICODE_EMBED_MODEL) → vecScore 0 + warn sekali
-        const key = `${r.dim ?? vec.length}->${queryVec.length}`
-        if (!dimMismatchWarned.has(key)) {
-          dimMismatchWarned.add(key)
-          process.stderr.write(
-            `[warn] vector: dim mismatch (stored ${r.dim ?? vec.length} vs query ${queryVec.length}, model ${r.model ?? "?"}) — fallback keyword-only untuk hit ini\n`,
-          )
-        }
-        vec = null
-      } else {
-        vecScore = cosine(queryVec, vec)
-      }
-    }
-    const kw = keywordScore(query, r.text)
-    // hybrid 0.7 vector + 0.3 keyword, if no vector -> keyword only
-    let score = queryVec ? vecScore * 0.7 + kw * 0.3 : kw
-    // Recency decay (paruh-hidup 60 hari); clamp ageDays >= 0 agar timestamp masa depan
-    // tak pernah menginflasikan skor melampaui relevansi dasar.
-    const ageDays = Math.max(0, (Date.now() - r.created_at) / 86_400_000)
-    score *= 0.5 ** (ageDays / 60)
-    // Boost kategori hanya bila hit punya relevansi nyata (> 0), bukan mempromosikan baris 0-skor.
-    if (score > 0) {
-      if (
-        (r as MemoryRow).category === "decision" &&
-        /fix|decide|decision|perbaiki|keputusan|selesaikan/i.test(query)
-      )
-        score += 0.1
-      if (
-        (r as MemoryRow).category === "preference" &&
-        /prefer|like|preference|suka|ingin/i.test(query)
-      )
-        score += 0.05
-    }
-    return { text: r.text, score, vec, createdAt: r.created_at, row: r }
-  })
-  const minScore = queryVec ? LIMITS.MEMORY_MIN_SCORE_HYBRID : LIMITS.MEMORY_MIN_SCORE_KEYWORD
-  const filtered = scored.filter((s) => s.score >= minScore)
-  filtered.sort((a, b) => b.score - a.score)
-  // P2.1: MMR di atas kandidat teratas — bawa objek row utuh agar id/provenance tak hilang saat benturan teks.
-  const pool = filtered.slice(0, LIMITS.MEMORY_MMR_CANDIDATES)
-  const ranked = mmrRerank(pool, opts.topK ?? 5)
-  const hits = ranked.map((h) => ({
-    text: h.text,
-    score: h.score,
-    id: h.row.id,
-    createdAt: h.row.created_at,
-    provenance: {
-      sessionId: h.row.session_id,
-      turnId: h.row.turn_id,
-      sourceKind: h.row.source_kind,
-      sourceRef: h.row.source_ref,
-      validationStatus: h.row.validation_status ?? "validated",
-    },
-  }))
-  // P13 P1 — naikkan access_count hanya untuk baris lokal (berdasarkan id eksak).
-  // Dilewati bila trackAccess === false (mode readonly/plan).
-  const localIds = ranked.filter((h) => h.row._sourceDb === "local").map((h) => h.row.id)
-  if (localIds.length > 0 && opts.trackAccess !== false) {
     try {
-      const db2 = open(opts.cwd)
+      rows = fetchRows(db, scope === "global" ? "global" : "local")
+      if (scope === "all") {
+        try {
+          const globalPath = globalVectorPath()
+          const localPath = dbPath(opts.cwd)
+          if (globalPath !== localPath && existsSync(globalPath)) {
+            const gdb = openAt(globalPath)
+            try {
+              const gRows = fetchRows(gdb, "global")
+              const merged = new Map<string, SourcedMemoryRow>()
+              for (const r of [...rows, ...gRows]) if (!merged.has(r.text)) merged.set(r.text, r)
+              rows = [...merged.values()].slice(0, LIMITS.VECTOR_SEARCH_LIMIT)
+            } finally {
+              gdb.close()
+            }
+          }
+        } catch {}
+      }
+    } catch {
+      return []
+    }
+    if (rows.length === 0) return []
+
+    let queryVec: number[] | null = null
+    // F-07: bila semua kandidat hanya memiliki teks (mis. memori manual atau
+    // fallback provider tanpa embedding), vektor query tidak dapat mengubah
+    // skor satu pun. Jangan melakukan DNS/HTTP embedding yang hasilnya tak dipakai.
+    const hasVectorCandidates = rows.some((row) => row.embedding !== null)
+    if (hasVectorCandidates && opts.baseUrl && opts.apiKey) {
+      const vecs = await embedTexts(opts.baseUrl, opts.apiKey, [query], opts.embeddingModel)
+      if (vecs?.[0]) queryVec = vecs[0]
+    }
+
+    const queryWords = query.toLowerCase().split(/\W+/).filter(Boolean)
+    const nowMs = Date.now()
+    const hasDecisionHint = /fix|decide|decision|perbaiki|keputusan|selesaikan/i.test(query)
+    const hasPreferenceHint = /prefer|like|preference|suka|ingin/i.test(query)
+
+    const scored = rows.map((r) => {
+      let vec: Float32Array | null = null
+      let vecScore = 0
+      if (queryVec && r.embedding) {
+        vec = fromBlob(r.embedding)
+        if (vec.length !== queryVec.length) {
+          // P1.3: dim mismatch (ganti MINICODE_EMBED_MODEL) → vecScore 0 + warn sekali
+          const key = `${r.dim ?? vec.length}->${queryVec.length}`
+          if (!dimMismatchWarned.has(key)) {
+            dimMismatchWarned.add(key)
+            process.stderr.write(
+              `[warn] vector: dim mismatch (stored ${r.dim ?? vec.length} vs query ${queryVec.length}, model ${r.model ?? "?"}) — fallback keyword-only untuk hit ini\n`,
+            )
+          }
+          vec = null
+        } else {
+          vecScore = cosine(queryVec, vec)
+        }
+      }
+      const kw = keywordScoreWords(queryWords, r.text)
+      // hybrid 0.7 vector + 0.3 keyword, if no vector -> keyword only
+      let score = queryVec ? vecScore * 0.7 + kw * 0.3 : kw
+      // Recency decay (paruh-hidup 60 hari); clamp ageDays >= 0 agar timestamp masa depan
+      // tak pernah menginflasikan skor melampaui relevansi dasar.
+      const ageDays = Math.max(0, (nowMs - r.created_at) / 86_400_000)
+      score *= 0.5 ** (ageDays / 60)
+      // Boost kategori hanya bila hit punya relevansi nyata (> 0), bukan mempromosikan baris 0-skor.
+      if (score > 0) {
+        if ((r as MemoryRow).category === "decision" && hasDecisionHint) score += 0.1
+        if ((r as MemoryRow).category === "preference" && hasPreferenceHint) score += 0.05
+      }
+      return { text: r.text, score, vec, createdAt: r.created_at, row: r }
+    })
+    const minScore = queryVec ? LIMITS.MEMORY_MIN_SCORE_HYBRID : LIMITS.MEMORY_MIN_SCORE_KEYWORD
+    const filtered = scored.filter((s) => s.score >= minScore)
+    filtered.sort((a, b) => b.score - a.score)
+    // P2.1: MMR di atas kandidat teratas — bawa objek row utuh agar id/provenance tak hilang saat benturan teks.
+    const pool = filtered.slice(0, LIMITS.MEMORY_MMR_CANDIDATES)
+    const ranked = mmrRerank(pool, opts.topK ?? 5)
+    const hits = ranked.map((h) => ({
+      text: h.text,
+      score: h.score,
+      id: h.row.id,
+      createdAt: h.row.created_at,
+      provenance: {
+        sessionId: h.row.session_id,
+        turnId: h.row.turn_id,
+        sourceKind: h.row.source_kind,
+        sourceRef: h.row.source_ref,
+        validationStatus: h.row.validation_status ?? "validated",
+      },
+    }))
+    // P13 P1 — naikkan access_count hanya untuk baris lokal (berdasarkan id eksak).
+    // Dilewati bila trackAccess === false (mode readonly/plan). Pakai kembali handle `db` lokal.
+    const localIds = ranked.filter((h) => h.row._sourceDb === "local").map((h) => h.row.id)
+    if (localIds.length > 0 && opts.trackAccess !== false) {
       try {
         const ph = localIds.map(() => "?").join(",")
-        db2
-          .prepare(
-            `UPDATE memory SET access_count = COALESCE(access_count, 0) + 1 WHERE id IN (${ph})`,
-          )
-          .run(...localIds)
-      } finally {
-        db2.close()
-      }
+        db.prepare(
+          `UPDATE memory SET access_count = COALESCE(access_count, 0) + 1 WHERE id IN (${ph})`,
+        ).run(...localIds)
+      } catch {}
+    }
+    return hits
+  } finally {
+    try {
+      db.close()
     } catch {}
   }
-  return hits
 }
 
 // [Area E / D9] Prune cap per ENTRI, bukan per baris: memotong offset baris

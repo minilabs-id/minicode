@@ -96,6 +96,11 @@ export const CLI_FLAG_SPECS: Readonly<Record<string, CliFlagSpec>> = {
   "--task": { kind: "value" },
   "--format": { kind: "value" },
   "--out": { kind: "value" },
+  "--autonomous": { kind: "boolean" },
+  "--wall-timeout": { kind: "value" },
+  "--max-epochs": { kind: "value" },
+  "--max-cost-hour": { kind: "value" },
+  "--takeover": { kind: "boolean" },
 }
 
 const VALUE_FLAGS = new Set(
@@ -173,9 +178,12 @@ export function positionalSubArg(argv: readonly string[], index: number): string
   return v && !v.startsWith("-") ? v : undefined
 }
 
-/** Cek apakah argv subcommand meminta `--help` / `-h`. */
+/** Cek apakah argv subcommand meminta `--help` / `-h` (sadar value-flag & batas `--`). */
 export function hasHelpFlag(argv: readonly string[]): boolean {
-  return argv.includes("--help") || argv.includes("-h")
+  let start = 0
+  while (start < argv.length && argv[start] && !argv[start]!.startsWith("-")) start++
+  const tail = argv.slice(start)
+  return hasFlag(tail, "--help") || hasFlag(tail, "-h")
 }
 
 /** Tangani `--help`/`-h` (exit 0) dan positional tak terduga (exit 2) secara seragam. */
@@ -233,6 +241,9 @@ export function parseRuntimeNumericFlags(
     maxSteps: parseNumericFlag(getArg, "--max-steps", "positive", warn),
     contextWindowTokens: parseNumericFlag(getArg, "--context-window", "positive", warn),
     timeoutMs: parseNumericFlag(getArg, "--timeout", "non-negative", warn),
+    wallTimeoutMs: parseNumericFlag(getArg, "--wall-timeout", "non-negative", warn),
+    maxEpochs: parseNumericFlag(getArg, "--max-epochs", "non-negative", warn),
+    maxCostPerHour: parseNumericFlag(getArg, "--max-cost-hour", "usd", warn),
     budget: parseNumericFlag(getArg, "--budget", "usd", warn),
     ratelimitRpm: parseNumericFlag(getArg, "--ratelimit", "positive", warn),
   }
@@ -384,7 +395,9 @@ export function missingValueFlags(argv: string[]): string[] {
     if (a === undefined || a === "--") break
     const fname = flagNameOf(a)
     if (fname === null) {
-      if (a.startsWith("--")) continue
+      if (a.startsWith("--") || (a.startsWith("-") && a.length > 1 && !/^-?\d+(\.\d+)?$/.test(a))) {
+        continue
+      }
       break
     }
     if (!valueFlags.has(fname) || a.includes("=")) continue
@@ -416,6 +429,10 @@ export function unknownFlagsBeforePrompt(argv: string[]): string[] {
     if (a.startsWith("--")) {
       const eq = a.indexOf("=")
       unknown.push(eq === -1 ? a : a.slice(0, eq))
+      continue
+    }
+    if (a.startsWith("-") && a.length > 1 && !/^-?\d+(\.\d+)?$/.test(a)) {
+      unknown.push(a)
       continue
     }
     break

@@ -528,7 +528,7 @@ export class TaskStore {
         },
         nextOpts,
       )
-    })
+    }, true)
   }
 
   // ── PHASE 6B: scheduler substrate ──────────────────────────────────────────
@@ -1752,7 +1752,7 @@ export class TaskStore {
         merge,
         detail: `closed ${req.duplicateId} as duplicate of ${req.survivorId} (CANCELLED, not COMPLETED)`,
       }
-    })
+    }, true)
   }
 
   // ── meta / migration ──────────────────────────────────────────────────────

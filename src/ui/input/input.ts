@@ -1,6 +1,6 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises"
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { createInterface } from "node:readline"
 import { t } from "../i18n/locale.ts"
 import { glyphs, stripAnsi } from "../render/theme.ts"
@@ -65,10 +65,15 @@ export async function appendHistory(entry: string, file = historyFile()): Promis
     const filtered = existing.filter((e) => e !== clean)
     filtered.push(clean)
     const capped = filtered.slice(-MAX_HISTORY)
-    await mkdir(join(process.env.MINICODE_HOME || homedir(), ".minicode"), {
-      recursive: true,
-    }).catch(() => {})
-    await writeFile(file, `${capped.map((e) => JSON.stringify(e)).join("\n")}\n`, "utf8")
+    await mkdir(dirname(file), { recursive: true }).catch(() => {})
+    const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
+    try {
+      await writeFile(tmp, `${capped.map((e) => JSON.stringify(e)).join("\n")}\n`, "utf8")
+      await rename(tmp, file)
+    } catch (err) {
+      await unlink(tmp).catch(() => {})
+      throw err
+    }
   } catch {}
 }
 

@@ -268,3 +268,43 @@ test("F-01: abort menolak prompt untuk batch tanpa kunci pada writeConcurrency >
   g1.open()
   await p.catch(() => {})
 })
+
+test("Wave 3 (F2): todo_write paralel dengan read_file tetapi berseri dengan todo_read dan write_file", async () => {
+  const g1 = makeGate()
+  const g2 = makeGate()
+  const log: string[] = []
+  const exec = parallelExecutor({ concurrency: 6, writeConcurrency: 1 })
+  // 1) [todo_write, read_file] → harus paralel
+  const pPar = exec.execute(
+    [
+      { id: "1", name: "todo_write", args: {} },
+      { id: "2", name: "read_file", args: { path: "a.ts" } },
+    ],
+    depsOf([gatedTool("todo_write", [g1], log), gatedTool("read_file", [g2], log)]),
+  )
+  await Promise.all([g1.entered, g2.entered])
+  expect(enteredCount(log)).toBe(2)
+  g1.open()
+  g2.open()
+  await pPar
+
+  // 2) [todo_write, todo_read] → berbagi lock __minicode_todos__, harus sekuensial
+  const g3 = makeGate()
+  const g4 = makeGate()
+  const log2: string[] = []
+  const pSer = exec.execute(
+    [
+      { id: "1", name: "todo_write", args: {} },
+      { id: "2", name: "todo_read", args: {} },
+    ],
+    depsOf([gatedTool("todo_write", [g3], log2), gatedTool("todo_read", [g4], log2)]),
+  )
+  await g3.entered
+  await quiesce()
+  expect(enteredCount(log2)).toBe(1)
+  g3.open()
+  await g4.entered
+  g4.open()
+  await pSer
+  expect(log2).toEqual(["todo_write:enter", "todo_write:exit", "todo_read:enter", "todo_read:exit"])
+})

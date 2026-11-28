@@ -24,9 +24,11 @@ const SKIP_DIRS: ReadonlySet<string> = new Set([
   ".minicode",
   "dist",
   "build",
+  ".cache",
+  "coverage",
 ])
-const MAX_SCAN_DIRS = 500
-const MAX_SCAN_DEPTH = 3
+const MAX_SCAN_DIRS = 2000
+const MAX_SCAN_DEPTH = 8
 
 /** Apakah nama file termasuk berkas `.env*` sensitif yang wajib dimasking. */
 export function isSensitiveEnvFileName(name: string): boolean {
@@ -39,6 +41,9 @@ export interface SandboxMaskTargets {
   readonly hasMinicode: boolean
   /** Path relatif berformat POSIX terhadap workspace root (`".env"`, `"apps/a/.env.local"`). */
   readonly envFiles: readonly string[]
+  /** True bila pemindaian terhenti oleh batas direktori/kedalaman sebelum seluruh subtree selesai. */
+  readonly truncated: boolean
+  readonly truncationReason?: "max-dirs" | "max-depth"
 }
 
 /**
@@ -46,7 +51,10 @@ export interface SandboxMaskTargets {
  * Hanya mengembalikan path yang sudah eksis agar bind-mount read-only tidak pernah
  * menciptakan entri `.env` kosong di host.
  */
-export function discoverSandboxMaskTargets(cwd: string): SandboxMaskTargets {
+export function discoverSandboxMaskTargets(
+  cwd: string,
+  opts?: { maxDirs?: number; maxDepth?: number },
+): SandboxMaskTargets {
   const abs = resolve(cwd)
   let hasMinicode = false
   try {
@@ -54,11 +62,20 @@ export function discoverSandboxMaskTargets(cwd: string): SandboxMaskTargets {
   } catch {
     hasMinicode = false
   }
+  const maxDirs = opts?.maxDirs ?? MAX_SCAN_DIRS
+  const maxDepth = opts?.maxDepth ?? MAX_SCAN_DEPTH
   const envFiles: string[] = []
   const queue: { dir: string; depth: number }[] = [{ dir: abs, depth: 0 }]
   let visitedDirs = 0
+  let truncated = false
+  let truncationReason: "max-dirs" | "max-depth" | undefined
 
-  while (queue.length > 0 && visitedDirs < MAX_SCAN_DIRS) {
+  while (queue.length > 0) {
+    if (visitedDirs >= maxDirs) {
+      truncated = true
+      truncationReason = "max-dirs"
+      break
+    }
     const { dir, depth } = queue.shift()!
     visitedDirs++
     let entries: Dirent[]
@@ -89,8 +106,13 @@ export function discoverSandboxMaskTargets(cwd: string): SandboxMaskTargets {
         }
       }
       if (isDir) {
-        if (depth < MAX_SCAN_DEPTH && !SKIP_DIRS.has(name)) {
-          queue.push({ dir: full, depth: depth + 1 })
+        if (!SKIP_DIRS.has(name)) {
+          if (depth < maxDepth) {
+            queue.push({ dir: full, depth: depth + 1 })
+          } else {
+            truncated = true
+            truncationReason ??= "max-depth"
+          }
         }
         continue
       }
@@ -101,7 +123,12 @@ export function discoverSandboxMaskTargets(cwd: string): SandboxMaskTargets {
     }
   }
   envFiles.sort()
-  return { hasMinicode, envFiles }
+  return {
+    hasMinicode,
+    envFiles,
+    truncated,
+    ...(truncationReason ? { truncationReason } : {}),
+  }
 }
 
 /**

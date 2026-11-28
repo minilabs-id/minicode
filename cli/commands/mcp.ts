@@ -39,12 +39,35 @@ export async function handleMcp(
     process.exit(2)
   }
   if (sub === "serve") {
+    const root = cwdArg ? resolvePath(cwdArg) : undefined
+    const { loadConfig } = await import("../../src/config.ts")
+    const { computeUnavailableWireTools } = await import("../../src/app/tool-layer.ts")
+    const { configureServers, closeAllLsp } = await import("../../src/lsp/client.ts")
     const { serveMcp } = await import("../../src/mcp/server.ts")
-    await serveMcp({
-      allowAll: args.includes("--allow-all"),
-      allTools: args.includes("--all-tools"),
-      root: cwdArg ? resolvePath(cwdArg) : undefined,
-    })
+    const fallbackCfg: import("../../src/config.ts").MinicodeConfig = { providers: [] }
+    const cfg = await loadConfig(root ?? process.cwd()).catch(() => fallbackCfg)
+    if (cfg.lspServers?.length) {
+      try {
+        configureServers(cfg.lspServers)
+      } catch {}
+    }
+    const allToolsFlag = args.includes("--all-tools")
+    const hiddenWireTools = allToolsFlag
+      ? undefined
+      : computeUnavailableWireTools(cfg, {
+          sandboxMode: process.env.MINICODE_SANDBOX,
+          interactiveAsk: false,
+        })
+    try {
+      await serveMcp({
+        allowAll: args.includes("--allow-all"),
+        allTools: allToolsFlag,
+        root,
+        ...(hiddenWireTools ? { hiddenWireTools } : {}),
+      })
+    } finally {
+      await closeAllLsp().catch(() => {})
+    }
     process.exit(0)
   }
   if (sub === "pins") {

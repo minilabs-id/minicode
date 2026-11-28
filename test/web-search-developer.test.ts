@@ -360,3 +360,29 @@ test("source tidak dikenal ditolak tanpa jaringan", async () => {
   ).rejects.toThrow("unknown source")
   expect(calls).toHaveLength(0)
 })
+
+test("P1-10: source=arxiv mengabaikan entitas XML numerik di luar rentang tanpa RangeError", async () => {
+  mockFetch(
+    () =>
+      new Response(
+        "<feed><entry><id>http://arxiv.org/abs/2501.00001</id><title>Bad &#99999999; &amp; &#x110000; Title</title><summary>Safe &#65; summary</summary><published>2026-01-01T00:00:00Z</published></entry></feed>",
+        { status: 200, headers: { "content-type": "application/atom+xml" } },
+      ),
+  )
+  const out = String(await webSearchTool.execute({ query: "test", count: 1, source: "arxiv" }, ctx))
+  expect(out).toContain("Bad & Title")
+  expect(out).toContain("Safe A summary")
+})
+
+test("P0-6: source=arxiv pada ~2MB dengan ribuan <entry> tak berpasangan tetap linear (<1000ms)", async () => {
+  const payload = `${"<entry>".repeat(10_000)}${"A".repeat(1_500_000)}`
+  mockFetch(
+    () =>
+      new Response(payload, { status: 200, headers: { "content-type": "application/atom+xml" } }),
+  )
+  const t0 = Date.now()
+  await expect(
+    webSearchTool.execute({ query: "arxiv perf", count: 5, source: "arxiv" }, ctx),
+  ).rejects.toThrow("no results for source arxiv")
+  expect(Date.now() - t0).toBeLessThan(1000)
+})

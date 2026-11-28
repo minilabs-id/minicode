@@ -588,6 +588,16 @@ export function friendlyToolFailureTag(message: string): string {
   if (TOOL_DUPLICATE_RE.test(raw)) return tSystem("tag.duplicate")
   if (TOOL_SUBAGENT_RE.test(raw) && !TOOL_NO_PROVIDER_SUBAGENT_RE.test(raw)) {
     const lower = raw.toLowerCase()
+    if (/step limit reached|\bmax[_ ]?steps(?:_exceeded)?\b|\bexceeded \d+ steps\b/.test(lower)) {
+      return tSystem("tag.stepLimit")
+    }
+    if (
+      lower.includes("loop_guard") ||
+      lower.includes("read_only_thrashing") ||
+      lower.includes("repeated_action_error")
+    ) {
+      return tSystem("tag.loopGuard")
+    }
     if (lower.includes("context window") || lower.includes("context length")) {
       return tSystem("tag.contextFull")
     }

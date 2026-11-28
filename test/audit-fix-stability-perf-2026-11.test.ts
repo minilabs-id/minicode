@@ -4,10 +4,12 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createSession } from "#minicore"
+import { estimateMessages, estimateSessionContext, estimateTools } from "#minicore/core/tokens.ts"
 import { normalizeConfig } from "../src/config.ts"
 import { compileIgnoreMatchers, isIgnored } from "../src/lib/ignore.ts"
 import { decodeAnsiCQuotes, inlineSimpleVars } from "../src/policy/bash-guard.ts"
 import { BpeTokenizer } from "../src/policy/bpe.ts"
+import { createCalibratedEstimator, minicodeEstimator } from "../src/policy/context.ts"
 import { dbPath, openSessionDb, setSessionDdlFaultForTest } from "../src/session/db/schema.ts"
 import { TriggerCoordinator } from "../src/task/trigger.ts"
 import { isReDosPronePattern } from "../src/tools/grep.ts"
@@ -322,5 +324,43 @@ describe("Wave 3 performa: cells ASCII fast-path, truncateToWidth, BPE, schema s
     } finally {
       db3.close()
     }
+  })
+
+  test("WeakMap memo estimasi pesan & tool tetap persis setelah kalibrasi berubah dan mengakselerasi 40-step", async () => {
+    const { allTools } = await import("../src/tools/index.ts")
+    const msgs = Array.from({ length: 120 }, (_, i) => ({
+      role:
+        i % 3 === 0 ? ("user" as const) : i % 3 === 1 ? ("assistant" as const) : ("tool" as const),
+      content: `baris ${i} `.repeat(40),
+      ...(i % 3 === 2 ? { toolCallId: `c${i}`, name: "read_file" } : {}),
+    }))
+    const cal = createCalibratedEstimator()
+    const baseUncached = estimateMessages(msgs as never, minicodeEstimator)
+    expect(estimateMessages(msgs as never, cal.estimator)).toBe(baseUncached)
+
+    // Naikkan factor kalibrasi: cacheKey baru memutus cache factor lama tanpa stale hit.
+    cal.recordTokenCalibrationSample(100, 250)
+    const scaledFirst = estimateMessages(msgs as never, cal.estimator)
+    expect(scaledFirst).toBeGreaterThan(baseUncached)
+    expect(estimateMessages(msgs as never, cal.estimator)).toBe(scaledFirst)
+
+    // Closure estimator tanpa cacheKey (stateful) tak pernah tersangkut cache.
+    let mult = 1
+    const stateful = (s: string) => s.length * mult
+    const m1 = estimateMessages([{ role: "user", content: "abcd" }], stateful)
+    mult = 3
+    expect(estimateMessages([{ role: "user", content: "abcd" }], stateful)).toBe(m1 * 3)
+
+    const t0 = performance.now()
+    for (let step = 0; step < 40; step++) {
+      estimateSessionContext(
+        { messages: msgs.slice(0, (step + 1) * 3) as never },
+        "sys".repeat(500),
+        allTools,
+        minicodeEstimator,
+      )
+    }
+    expect(performance.now() - t0).toBeLessThan(150)
+    expect(estimateTools(allTools, minicodeEstimator)).toBeGreaterThan(0)
   })
 })

@@ -13,6 +13,7 @@ Variabel yang paling menentukan perilaku (sisanya referensi di bawah):
 | Variabel | Fungsi |
 |---|---|
 | `MINICODE_TIMEOUT_MS` | Default timeout (ms) bila `--timeout` tidak diset; `0` = Infinity. Ini batas **total** satu prompt (default 1 jam untuk sesi interaktif) |
+| `MINICODE_WALL_TIMEOUT_MS` | Batas keras waktu kalender opsional (`--wall-timeout`, ms) di luar watchdog inaktivitas |
 | `MINICODE_DEBUG` | `1` → tampilkan stack trace lengkap saat proses gagal fatal (default: hanya satu baris sebabnya) |
 | `NO_UPDATE_CHECK` | `1` → lewati pemeriksaan pembaruan saat startup (dihormati sejak v0.41) |
 | `MINICODE_AUTO_UPDATE` | `0`/`false`/`off` → nonaktifkan pemeriksaan dan pemasangan pembaruan otomatis; nilai lain = aktif |
@@ -27,6 +28,7 @@ Variabel yang paling menentukan perilaku (sisanya referensi di bawah):
 | `MINICODE_REWIND_NOTICE` | Internal handoff `/undo`/`/redo`: notice base64 yang ditampilkan sekali di transkrip sesi anak |
 | `MINICODE_SUB_AGENT_TIMEOUT_MS` | Timeout default per turn sub-agent (ms, finite >0; default 300000 / 5 menit). Bisa ditimpa per delegasi lewat argumen `timeoutMs` pada `delegate_task` |
 | `MINICODE_SUB_AGENT_POOL_SIZE` | Jumlah slot eksekusi sub-agent paralel (1..16, default 3). Naikkan bila sering menjalankan fan-out 5+ agen sekaligus |
+| `MINICODE_SUBAGENT_LLM_TITLE` | `1` → aktifkan panggilan LLM paralel singkat untuk membuat judul sub-agent `delegate_task` yang tidak diberi `name`; default mati (memakai ringkasan deterministik dari `prompt`) |
 | `MINICODE_REWIND_LOCK_MAX_AGE_MS` | Batas usia lock `operation.lock` rewind sebelum dianggap stale (default 600000 ms / 10 menit). Operator bisa memperpanjang bila rewind sering terputus di mesin lambat |
 | `MINICODE_BOOT_ID` | Penanda boot mesin untuk validasi lock rewind lintas restart. Bila tidak diset, diturunkan dari `hostname` + `Date.now() - os.uptime()`; set eksplisit untuk determinisme saat clock NTP bergeser |
 | `MINICODE_HOME` | Override home untuk DB lokal/global (sessions + vector); default `~` |

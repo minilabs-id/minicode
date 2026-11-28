@@ -85,6 +85,11 @@ export interface TriggerOptions {
   readonly isRunning?: () => boolean
   /** Optional observation sink. Absence means events are dropped, not queued. */
   readonly onEvent?: (event: TriggerEvent) => void
+  /**
+   * Maksimum siklus drain per pemicu (default 2: mempertahankan koalesensi 6T A4;
+   * mode otonom berkelanjutan dapat menyetel batas lebih tinggi, mis. 64).
+   */
+  readonly maxDrainCycles?: number
 }
 
 export type TriggerEvent =
@@ -124,6 +129,7 @@ export class TriggerCoordinator {
   private readonly runCycle: () => Promise<unknown>
   private readonly isRunning: () => boolean
   private readonly onEvent: ((e: TriggerEvent) => void) | undefined
+  private readonly maxDrainCycles: number
 
   private inFlight: Promise<unknown> | null = null
   private active = false
@@ -137,6 +143,12 @@ export class TriggerCoordinator {
     this.runCycle = opts.runCycle
     this.isRunning = opts.isRunning ?? (() => true)
     this.onEvent = opts.onEvent
+    this.maxDrainCycles =
+      typeof opts.maxDrainCycles === "number" &&
+      Number.isFinite(opts.maxDrainCycles) &&
+      opts.maxDrainCycles >= 1
+        ? Math.floor(opts.maxDrainCycles)
+        : 2
   }
 
   /**
@@ -204,9 +216,8 @@ export class TriggerCoordinator {
         } finally {
           this.inFlight = null
         }
-        // Hormati batas maksimal 1 follow-up (total 2 siklus) dan status isRunning
-        // agar badai trigger berkelanjutan tidak mengunci drain dalam loop tanpa akhir.
-      } while (this.pending && !this.disposed && runs < 2 && this.isRunning())
+        // Hormati batas drain dan status isRunning agar badai trigger berkelanjutan tidak mengunci loop.
+      } while (this.pending && !this.disposed && runs < this.maxDrainCycles && this.isRunning())
       this.pending = false
       return last
     } finally {
@@ -267,5 +278,51 @@ export class TriggerCoordinator {
         // Already reported through the event sink; a shutdown must not throw.
       }
     }
+  }
+}
+
+export interface PeriodicTriggerOptions {
+  readonly intervalMs: number
+  readonly trigger: Pick<TriggerCoordinator, "fire">
+  readonly isRunning?: () => boolean
+  readonly source?: TriggerSource
+}
+
+export interface PeriodicTriggerHandle {
+  start(): void
+  stop(): void
+  isRunning(): boolean
+}
+
+/**
+ * Pompa berkala non-overlapping untuk memicu evaluasi antrean tugas otonom secara aman.
+ */
+export function createPeriodicTrigger(opts: PeriodicTriggerOptions): PeriodicTriggerHandle {
+  const intervalMs = Math.max(100, Math.floor(opts.intervalMs))
+  const source: TriggerSource = opts.source ?? "interval"
+  let timer: ReturnType<typeof setInterval> | null = null
+  let inFlight = false
+  return {
+    start() {
+      if (timer !== null) return
+      timer = setInterval(() => {
+        if (inFlight) return
+        if (opts.isRunning && !opts.isRunning()) return
+        inFlight = true
+        void opts.trigger
+          .fire(source)
+          .catch(() => {})
+          .finally(() => {
+            inFlight = false
+          })
+      }, intervalMs)
+      timer.unref?.()
+    },
+    stop() {
+      if (timer === null) return
+      clearInterval(timer)
+      timer = null
+    },
+    isRunning: () => timer !== null,
   }
 }

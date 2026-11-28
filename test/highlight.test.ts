@@ -14,11 +14,13 @@ import { resetLocaleState, setSessionLocale } from "../src/ui/i18n/locale.ts"
 import { formatCodeBlock, highlightCode } from "../src/ui/render/highlight.ts"
 import { stripAnsi } from "../src/ui/render/theme.ts"
 
+const origTerm = process.env.TERM
 const origColorterm = process.env.COLORTERM
 const origNoColor = process.env.NO_COLOR
 const origMinicodeColor = process.env.MINICODE_COLOR
 
 beforeEach(() => {
+  process.env.TERM = "xterm-256color"
   process.env.COLORTERM = "truecolor"
   delete process.env.NO_COLOR
   // Env bersih = warna aktif (color-by-default). Test mono menyalakan flag
@@ -31,6 +33,8 @@ beforeEach(() => {
 
 afterAll(() => {
   Object.defineProperty(process.stdout, "isTTY", { value: false, configurable: true })
+  if (origTerm == null) delete process.env.TERM
+  else process.env.TERM = origTerm
   if (origColorterm == null) delete process.env.COLORTERM
   else process.env.COLORTERM = origColorterm
   if (origNoColor == null) delete process.env.NO_COLOR

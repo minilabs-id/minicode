@@ -385,3 +385,32 @@ test("activity.label tanpa activity yang cocok = lateEvent, bukan activity phant
   expect(state.activities.size).toBe(0)
   expect(diag.lateEvent).toBe(1)
 })
+
+test("minicode:child-link membawa label peran nyata ke induk, mengabaikan placeholder explore-N", () => {
+  const bus = fakeBus()
+  const a = createPresentationAdapter(bus, { sessionId: "parent-1" })
+  const events = collect(a)
+  bus.emit(
+    "execution:started",
+    startedPayload("dt_named", "delegate_task", { name: "Pemburu Pola", prompt: "scan" }),
+  )
+  bus.emit("execution:started", startedPayload("dt_auto", "delegate_task", { prompt: "scan repo" }))
+
+  bus.emit("provider:extension", {
+    kind: "minicode:child-link",
+    data: { forwardedChild: "sub_named", parentToolCallId: "dt_named", childLabel: "Pemburu Pola" },
+  })
+  bus.emit("provider:extension", {
+    kind: "minicode:child-link",
+    data: { forwardedChild: "sub_auto", parentToolCallId: "dt_auto", childLabel: "explore-1" },
+  })
+
+  let state = createInitialState("parent-1")
+  for (const e of events) state = reduce(state, e)
+  const named = [...state.activities.values()].find((x) => x.toolCallId === "dt_named")
+  const auto = [...state.activities.values()].find((x) => x.toolCallId === "dt_auto")
+  expect(named?.intent).toBe("Pemburu Pola")
+  expect(named?.label).toBe("Pemburu Pola")
+  expect(auto?.label).toBeUndefined()
+  a.dispose()
+})

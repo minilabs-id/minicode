@@ -470,11 +470,23 @@ export async function recordCheckpointFromTrees(
       manifest.checkpoints = manifest.checkpoints.slice(0, manifest.currentIndex + 1)
     }
     manifest.checkpoints.push(cp)
+    let prunedOverflow = false
     if (manifest.checkpoints.length > MAX_CHECKPOINTS) {
       manifest.checkpoints = manifest.checkpoints.slice(-MAX_CHECKPOINTS)
+      prunedOverflow = true
     }
     manifest.currentIndex = manifest.checkpoints.length - 1
     await saveCheckpointManifest(manifest, cwd)
+    if (prunedOverflow) {
+      const retained = new Set<string>()
+      for (const item of manifest.checkpoints) {
+        if (item.treeBefore) retained.add(item.treeBefore)
+        if (item.treeAfter) retained.add(item.treeAfter)
+      }
+      void import("./shadow-git.ts")
+        .then(({ pruneUnlistedSessionRefs }) => pruneUnlistedSessionRefs(cwd, sessionId, retained))
+        .catch(() => {})
+    }
     return cp
   })
 }
@@ -576,10 +588,11 @@ async function applyCheckpoint(
   cp: Checkpoint,
   direction: "undo" | "redo",
   cwd: string,
+  strict = false,
 ): Promise<string[]> {
   const tree = direction === "undo" ? cp.treeBefore : cp.treeAfter
   if (tree) {
-    const res = await restoreTree(cwd, tree)
+    const res = await restoreTree(cwd, tree, strict ? { strict: true } : undefined)
     return [...res.applied, ...res.skipped.map((s) => `${s} (skipped)`)]
   }
   const snaps = direction === "undo" ? cp.snapshots : cp.redoSnapshots
@@ -721,7 +734,7 @@ export async function undoFilesToTurn(
         : { mode: "files", snapshots: pre.snapshots }
     let restoredFiles: string[]
     try {
-      restoredFiles = await applyCheckpoint(checkpoint, "undo", cwd)
+      restoredFiles = await applyCheckpoint(checkpoint, "undo", cwd, true)
     } catch (error) {
       await restoreWorkspaceSafety(safety, cwd).catch(() => {})
       throw error

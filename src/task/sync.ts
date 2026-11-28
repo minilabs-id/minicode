@@ -386,7 +386,7 @@ export function beginSessionTasksVerification(
       out.push(tx.beginTaskVerification(sessionId, id))
     }
     return out
-  })
+  }, true)
 }
 
 /**
@@ -404,5 +404,5 @@ export function settleSessionVerifyingTasks(
   return store.withTransaction((tx) => {
     const verifying = tx.listTasks(sessionId).filter((t) => t.status === "VERIFYING")
     return verifying.map((t) => tx.completeTaskVerification(sessionId, t.id, outcome))
-  })
+  }, true)
 }

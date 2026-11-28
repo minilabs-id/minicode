@@ -116,7 +116,17 @@ export function createContentStore(): ContentStore {
   // Map = insertion order = urutan FIFO untuk evict tertua.
   const entries = new Map<string, ContentEntry>()
   const dead = new Set<string>()
+  const MAX_DEAD_REFS = 16_384
   let totalChars = 0
+
+  const addDeadKey = (key: string): void => {
+    dead.add(key)
+    while (dead.size > MAX_DEAD_REFS) {
+      const oldestDead = dead.values().next().value
+      if (oldestDead === undefined) break
+      dead.delete(oldestDead)
+    }
+  }
 
   const evictIfNeeded = (): void => {
     // Buang tertua sampai total dalam budget — terbaru selalu dipertahankan.
@@ -126,7 +136,7 @@ export function createContentStore(): ContentStore {
       const old = entries.get(oldestKey)
       entries.delete(oldestKey)
       if (old) totalChars -= old.text.length
-      dead.add(oldestKey)
+      addDeadKey(oldestKey)
     }
   }
 
@@ -162,7 +172,7 @@ export function createContentStore(): ContentStore {
         entries.delete(key)
         totalChars -= hit.text.length
       }
-      dead.add(key)
+      addDeadKey(key)
     },
     isDead(ref) {
       return dead.has(contentKey(ref))

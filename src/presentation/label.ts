@@ -72,6 +72,7 @@ export function targetOf(args: unknown): string | undefined {
   if (typeof a.pattern === "string" && a.pattern) return a.pattern
   if (typeof a.query === "string" && a.query) return a.query
   if (typeof a.prompt === "string" && a.prompt) return a.prompt
+  if (typeof a.action === "string" && a.action) return a.action
   if (typeof a.file === "string" && a.file) return a.file
   return undefined
 }

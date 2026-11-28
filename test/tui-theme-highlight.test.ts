@@ -11,9 +11,11 @@ import { displayWidth } from "../src/ui/render/width.ts"
 
 function withTruecolorTty<T>(fn: () => T): T {
   const prevIsTty = process.stdout.isTTY
+  const prevTerm = process.env.TERM
   const prevColorterm = process.env.COLORTERM
   const prevNoColor = process.env.NO_COLOR
   const prevMinicodeColor = process.env.MINICODE_COLOR
+  process.env.TERM = "xterm-256color"
   process.env.COLORTERM = "truecolor"
   delete process.env.NO_COLOR
   delete process.env.MINICODE_COLOR
@@ -22,6 +24,8 @@ function withTruecolorTty<T>(fn: () => T): T {
     return fn()
   } finally {
     Object.defineProperty(process.stdout, "isTTY", { value: prevIsTty, configurable: true })
+    if (prevTerm === undefined) delete process.env.TERM
+    else process.env.TERM = prevTerm
     if (prevColorterm === undefined) delete process.env.COLORTERM
     else process.env.COLORTERM = prevColorterm
     if (prevNoColor === undefined) delete process.env.NO_COLOR
@@ -142,5 +146,17 @@ test("list highlightMatch: kecocokan baris tak terpilih tetap terbaca tanpa c.di
     expect(row).toContain(c.info("dark"))
     expect(row).not.toContain(c.dim(c.info("dark")))
     expect(stripAnsi(row).trim()).toBe("theme-dark")
+  })
+})
+
+test("markdown: bold heading dan tautan memulihkan gaya sesudah SGR reset isi", () => {
+  withTruecolorTty(() => {
+    const h2 = decorateMarkdown("## Bab `kode` Lanjut")
+    expect(h2).toContain(`\x1b[39m${c.info("x").split("x")[0]}`)
+    expect(stripAnsi(h2)).toBe("   Bab kode Lanjut")
+
+    const linkWithCode = decorateMarkdown("Cek [`file.ts` docs](https://example.com) dulu")
+    expect(linkWithCode).toContain(`\x1b[39m${c.accent("x").split("x")[0]}`)
+    expect(stripAnsi(linkWithCode)).toBe("   Cek file.ts docs dulu")
   })
 })

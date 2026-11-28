@@ -12,6 +12,15 @@ export interface ToolArgumentBounds {
   maxPendingBytes?: number
 }
 
+const STREAM_ACTIVITY_SYMBOL = Symbol.for("minicode.streamActivity")
+
+function notifyStreamActivity(signal: AbortSignal): void {
+  try {
+    const fn = (signal as unknown as Record<symbol, unknown>)[STREAM_ACTIVITY_SYMBOL]
+    if (typeof fn === "function") (fn as () => void)()
+  } catch {}
+}
+
 /** Baca stream per chunk dengan batas byte sebelum parser SSE membangun buffer baris. */
 export function boundedSseBody(
   body: ReadableStream<Uint8Array>,
@@ -50,13 +59,14 @@ export function boundedSseBody(
         if (signal.aborted) throw abortError(signal)
         if (done) {
           reachedEof = true
-          if (lineBytes !== 0 || frameBytes !== 0) {
+          if (lineBytes !== 0) {
             throw new ProviderError("network", `${provider} returned an incomplete SSE frame`)
           }
           controller.close()
           release()
           return
         }
+        if (value.byteLength > 0) notifyStreamActivity(signal)
         streamBytes += value.byteLength
         if (streamBytes > maxTotalBytes) {
           throw new ProviderError(
@@ -183,4 +193,20 @@ export function parseProviderToolArguments(raw: string, provider: string): unkno
   } catch {
     throw new ProviderError("invalid_request", `${provider} returned malformed tool arguments`)
   }
+}
+
+/** Parse header `Retry-After` (detik delta atau HTTP-date) dengan batas aman `RETRY_AFTER_MAX_MS`. */
+export function parseRetryAfterMs(value: string | null): number | undefined {
+  if (!value) return undefined
+  const trimmed = value.trim()
+  if (!trimmed) return undefined
+  let ms: number | undefined
+  if (/^\d+(\.\d+)?$/.test(trimmed)) ms = Math.round(Number(trimmed) * 1_000)
+  else {
+    const dt = Date.parse(trimmed)
+    if (!Number.isNaN(dt)) ms = Math.max(0, dt - Date.now())
+  }
+  return ms !== undefined && Number.isFinite(ms)
+    ? Math.min(ms, LIMITS.RETRY_AFTER_MAX_MS)
+    : undefined
 }

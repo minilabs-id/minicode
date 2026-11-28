@@ -167,3 +167,32 @@ test("c2. a fresh session's all-id-less declaration is still adopted", async () 
   expect(rows(dir).map((t) => t.title)).toEqual(["pertama", "kedua"])
   expect(rows(dir).map((t) => t.id)).toEqual(["t1", "t2"])
 })
+
+test("Wave 3 (F2): updates mode patches existing taskId status without rewriting full list", async () => {
+  const dir = await ownedDir()
+  seed(dir, ["Langkah A", "Langkah B", "Langkah C"])
+  // Seed todo JSON first (mirrors production initial todo_write flow)
+  await write(dir, [
+    { taskId: "t1", content: "Langkah A", status: "in_progress" },
+    { taskId: "t2", content: "Langkah B", status: "pending" },
+    { taskId: "t3", content: "Langkah C", status: "pending" },
+  ])
+  const patchOut = (await todoWriteTool.execute(
+    {
+      updates: [
+        { taskId: "t1", status: "cancelled" },
+        { taskId: "t2", status: "in_progress" },
+      ],
+    } as never,
+    ctx(dir),
+  )) as string
+  expect(patchOut).toContain("sekarang: Langkah B")
+  expect(rows(dir).find((t) => t.id === "t1")?.status).toBe("CANCELLED")
+  expect(rows(dir).find((t) => t.id === "t2")?.status).toBe("IN_PROGRESS")
+
+  // Unknown taskId in updates fails closed with TASK_IDENTITY_REQUIRED
+  const unknownErr = (await todoWriteTool
+    .execute({ updates: [{ taskId: "t99", status: "in_progress" }] } as never, ctx(dir))
+    .catch((e) => e)) as TaskError
+  expect(unknownErr.code).toBe("TASK_IDENTITY_REQUIRED")
+})

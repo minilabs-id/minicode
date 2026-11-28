@@ -343,7 +343,29 @@ describe("cli/setup: permissionMode & timeout & budget", () => {
       target: "a.ts",
       status: "completed",
     })
-    expect(seen).toEqual(["turn.started", "tool.started", "tool.completed"])
+    const delCall = {
+      id: "p5-del",
+      name: "delegate_task",
+      args: { name: "Auditor Task & Approval", prompt: "Audit task store and trigger" },
+    }
+    const delResult = {
+      role: "tool" as const,
+      toolCallId: "p5-del",
+      name: "delegate_task",
+      content: "",
+    }
+    s.session.events.emit({
+      type: "execution:started",
+      execution: { call: delCall, result: delResult },
+    })
+    const snapDel = s.getPresentationSnapshot().activities.find((a) => a.toolCallId === "p5-del")
+    expect(snapDel).toMatchObject({
+      toolCallId: "p5-del",
+      name: "delegate_task",
+      intent: "Auditor Task & Approval",
+      status: "running",
+    })
+    expect(seen).toEqual(["turn.started", "tool.started", "tool.completed", "tool.started"])
     unsubscribe()
     await s.close()
   })

@@ -69,6 +69,32 @@ test("detectAndSave mempertahankan reasoningEffort provider yang sudah ada", asy
   expect(saved.find((p) => p.id === "gw")?.reasoningEffort).toBe("high")
 })
 
+test("P1-1: detectAndSave mempertahankan auth oauth provider yang sudah ada", async () => {
+  clearDetectCache()
+  await writeFile(
+    globalPath,
+    JSON.stringify({
+      providers: [
+        {
+          id: "oauthgw",
+          baseUrl: "https://oauth-gw.example/v1",
+          apiKey: "",
+          auth: "oauth",
+          models: ["m1"],
+        },
+      ],
+    }),
+    "utf8",
+  )
+  const entry = await detectAndSave("https://oauth-gw.example/v1", "", "oauthgw", {
+    global: true,
+    fallbackModels: ["fb"],
+  })
+  expect(entry.auth).toBe("oauth")
+  const saved = (await globalProviders()) as { id: string; auth?: string }[]
+  expect(saved.find((p) => p.id === "oauthgw")?.auth).toBe("oauth")
+})
+
 test("detectAndSave provider baru tanpa effort tetap tanpa kunci effort", async () => {
   clearDetectCache()
   await writeFile(globalPath, JSON.stringify({ providers: [] }), "utf8")

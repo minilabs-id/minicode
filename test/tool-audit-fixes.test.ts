@@ -21,7 +21,7 @@ import { sliceSafeChars } from "../src/tools/context.ts"
 import { deleteFileTool } from "../src/tools/delete_file.ts"
 import { editTool, flexibleMatch } from "../src/tools/edit.ts"
 import { gitCommitTool } from "../src/tools/git.ts"
-import { globTool } from "../src/tools/glob.ts"
+import { globTool, globToRegExp } from "../src/tools/glob.ts"
 import { grepTool } from "../src/tools/grep.ts"
 import { findHashlineHunk } from "../src/tools/hashline.ts"
 import { lspWorkspaceSymbolsTool } from "../src/tools/lsp.ts"
@@ -256,6 +256,9 @@ describe("audit fixes — search (glob & grep parity)", () => {
         makeCtx(dir),
       )) as string
       expect(missingCwd).toContain("no matches")
+
+      // TOOL-02: NUL byte di pola glob ditolak upfront alih-alih menyuntik sentinel.
+      expect(() => globToRegExp("a\0BRACE_START\0b")).toThrow(/NUL/)
     } finally {
       if (prevEngine === undefined) delete process.env.MINICODE_GREP_ENGINE
       else process.env.MINICODE_GREP_ENGINE = prevEngine

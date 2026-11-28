@@ -367,33 +367,35 @@ test("A2 autonomous: claim atomik TaskStore tetap ada; M7 tidak dipakai", async 
 // ── B. Kontrak eksekusi berbeda ──────────────────────────────────────────────
 // Invarian: fallback delegate == cap mode M7 (konstanta sama); eksplisit tetap
 // min(req,600); autonomous tetap readonly + default 8; tak ada M7 di autonomous.
-test("B1 delegate fallback cap == konstanta mode (ekuivalen M7 modeStepCap)", async () => {
+test("B1 delegate tanpa scope memakai inferScope (40/60), M7 tetap pakai konstanta mode", async () => {
   const restore = providerEnv()
   try {
     todoSession.id = "p91-b1"
     const explore = await delegate(tmpRoot(), { prompt: "x" })
-    expect(explore.maxSteps).toBe(LIMITS.SUB_AGENT_BUDGET_EXPLORE)
+    expect(explore.maxSteps).toBe(40)
     const plan = await delegate(tmpRoot(), { prompt: "x", mode: "plan" })
-    expect(plan.maxSteps).toBe(LIMITS.SUB_AGENT_BUDGET_PLAN)
+    expect(plan.maxSteps).toBe(60)
   } finally {
     restore()
   }
 })
 
-test("B1b v0.33: scope eksplisit → budget adaptif; fallback tanpa scope tetap 5/15", async () => {
+test("B1b budget adaptif scope eksplisit & fallback inferScope", async () => {
   const restore = providerEnv()
   try {
     todoSession.id = "p91-b1b"
     const file = await delegate(tmpRoot(), { prompt: "x", mode: "explore", scope: "file" })
-    expect(file.maxSteps).toBe(16)
+    expect(file.maxSteps).toBe(24)
     const repo = await delegate(tmpRoot(), { prompt: "x", mode: "explore", scope: "repo" })
-    expect(repo.maxSteps).toBe(64)
+    expect(repo.maxSteps).toBe(100)
     const planRepo = await delegate(tmpRoot(), { prompt: "x", mode: "plan", scope: "repo" })
-    // plan = ceil(64 × 1,5) = 96 — di bawah hard-cap 600, jadi tak di-clamp.
-    expect(planRepo.maxSteps).toBe(96)
-    // Kontrak lama tak berubah bila caller tak mengirim scope.
+    // plan = ceil(100 × 1,5) = 150 — di bawah hard-cap 600.
+    expect(planRepo.maxSteps).toBe(150)
+    // Tanpa scope eksplisit: fallback inferScope ("repo" → 100, umum "dir" → 40).
     const fallback = await delegate(tmpRoot(), { prompt: "x" })
-    expect(fallback.maxSteps).toBe(LIMITS.SUB_AGENT_BUDGET_EXPLORE)
+    expect(fallback.maxSteps).toBe(40)
+    const wideFallback = await delegate(tmpRoot(), { prompt: "audit seluruh repo" })
+    expect(wideFallback.maxSteps).toBe(100)
   } finally {
     restore()
   }
@@ -403,10 +405,8 @@ test("B2 delegate cap eksplisit TIDAK diklamp mode (≠ M7), clamp hard-cap 600"
   const restore = providerEnv()
   try {
     todoSession.id = "p91-b2"
-    // M7 untuk input ini memberi min(40, cap explore=5) = 5. Delegate memberi 40.
-    // Perbedaan yang DISENGAJA — menyamakannya = perubahan perilaku (butuh ADR).
-    const wide = await delegate(tmpRoot(), { prompt: "x", mode: "explore", maxSteps: 40 })
-    expect(wide.maxSteps).toBe(40)
+    const wide = await delegate(tmpRoot(), { prompt: "x", mode: "explore", maxSteps: 80 })
+    expect(wide.maxSteps).toBe(80)
     expect(wide.maxSteps).not.toBe(LIMITS.SUB_AGENT_BUDGET_EXPLORE)
     const over = await delegate(tmpRoot(), { prompt: "x", mode: "plan", maxSteps: 999 })
     // [T-008] clamp memakai cap delegasi SENDIRI (600), bukan default sesi utama

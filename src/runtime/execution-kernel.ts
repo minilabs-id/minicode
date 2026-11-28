@@ -285,6 +285,13 @@ export function createExecutionKernel(): ExecutionKernel {
       terminalAt: terminal ? now : current.terminalAt,
     })
     store.set(current.executionId, next)
+    // Batasi pertumbuhan map record terminal pada sesi otonom ribuan eksekusi.
+    if (terminal && store.size > 4096) {
+      for (const [k, v] of store) {
+        if (store.size <= 4096) break
+        if (isExecutionTerminalState(v.state)) store.delete(k)
+      }
+    }
     m.transitionAccepted++
     if (terminal) m.terminalCommitted++
     emit({

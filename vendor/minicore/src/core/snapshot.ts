@@ -48,6 +48,26 @@ export function snapshotToolSchemas(tools: readonly ToolSchema[]): ToolSchema[] 
   }));
 }
 
+const rawHistoryBySnapshot = new WeakMap<SessionState, () => readonly Message[]>();
+
+export function lazySnapshotState(state: Readonly<SessionState>): SessionState {
+  // Capture shallow boundary of history refs immediately; bypass parent lazy
+  // getter if `state` is already a lazySnapshotState so nesting in executor.ts
+  // doesn't trigger eager structuredClone before a caller reads `.history`.
+  const sourceHistory = rawHistoryBySnapshot.get(state)?.() ?? state.history.slice();
+  let materialized: Message[] | undefined;
+  const out: SessionState = {
+    get history(): Message[] {
+      return (materialized ??= snapshotMessages(sourceHistory));
+    },
+    turnCount: state.turnCount,
+    stepCount: state.stepCount,
+    model: state.model,
+  };
+  rawHistoryBySnapshot.set(out, () => sourceHistory);
+  return out;
+}
+
 export function snapshotState(state: Readonly<SessionState>): SessionState {
   return {
     history: snapshotMessages(state.history),
@@ -106,6 +126,7 @@ function snapshotContentPart(part: ContentPart): ContentPart {
 }
 
 function snapshotValue<T>(value: T): T {
+  if (value === null || typeof value !== "object") return value;
   if (value instanceof Uint8Array) return value.slice() as T;
   try {
     return structuredClone(value);

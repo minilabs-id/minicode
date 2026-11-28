@@ -64,6 +64,8 @@ test("komunikasi: blok Communication memuat direktif narasi utama", async () => 
     expect(comm).toMatch(/NORMAL VISIBLE assistant text/i)
     expect(comm).toMatch(/NEVER put user-facing narration inside reasoning/i)
     expect(comm).toMatch(/tool status and activity separately/i)
+    expect(sys).toMatch(/Be concise in final answers/i)
+    expect(comm).toMatch(/Keep final answers direct and lightweight/i)
     const lang = sectionOf(sys, "# Language")
     expect(lang).toMatch(/EVERY user-visible sentence/i)
     expect(lang).toMatch(/NOT a language cue/i)

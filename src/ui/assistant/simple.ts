@@ -390,7 +390,7 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
       emitAnswer("\n")
       answerBlankRun++
     }
-    if (/^#{1,6}\s/.test(line)) {
+    if (/^\s*#{1,6}\s/.test(line)) {
       // Paritas dengan formatAssistantSpacing(): dua baris kosong sebelum
       // setiap bab/poin utama, bukan satu.
       while (answerBlankRun < 2) {

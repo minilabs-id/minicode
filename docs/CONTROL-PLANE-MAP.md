@@ -37,11 +37,11 @@ Relationship eksplisit:
 | Budget | Collector (usage live) + `budgetStatus` | `budgetStatus` (terpusat, seragam TUI/one-shot/exec) + watcher abort |
 | Backpressure | Producer caps + kernel truncate | Cap di producer (sudah benar); kernel truncate terakhir |
 
-Anggaran sub-agent (v0.33): `scope` `file`/`dir`/`subtree`/`repo` → budget
-12/18/26/36 langkah; `plan` ×1.5 lalu di-clamp ke [8,50]. Bila anak mentok, eskalasi
-bertahap `[8,12,20,32,50]`. Menyetel `maxSteps` secara eksplisit **mematikan**
-eskalasi ini; tanpa `scope`, fallback kontrak lama 5/15 tetap berlaku. Pool default 3
-(`MINICODE_SUB_AGENT_POOL_SIZE` 1..16), `MINICODE_SUB_AGENT_TIMEOUT_MS` 300000, dan
+Anggaran sub-agent (v0.52+): `scope` `file`/`dir`/`subtree`/`repo` → budget
+24/40/64/100 langkah; `plan` ×1.5 lalu di-clamp ke [24,600]. Bila anak mentok, eskalasi
+bertahap `[24,40,64,100,150,250,400,600]`. Menyetel `maxSteps` secara eksplisit **mematikan**
+eskalasi ini; tanpa `scope`, fallback kontrak lama 5/15 tetap berlaku. Pool default 5
+(`MINICODE_SUB_AGENT_POOL_SIZE` 1..16), `MINICODE_SUB_AGENT_TIMEOUT_MS` 3600000, dan
 maksimal 2–3 sub-agent per turn. Anggaran ini adalah kontrol termination yang berbeda
 dari maxSteps/budget turn di atas.
 

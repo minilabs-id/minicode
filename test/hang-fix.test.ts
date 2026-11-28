@@ -249,6 +249,28 @@ describe("hang ronde 2: abort saat verify = batal, bukan gagal", () => {
     expect(runs).toBe(1)
     expect(cycles).toBe(0)
   })
+
+  test("self-heal: shouldVerify=false melewati verify pasca-run dan siklus fix", async () => {
+    let runs = 0
+    let verifications = 0
+    let cycles = 0
+    await runWithSelfHeal("pertanyaan baca", {
+      run: async () => {
+        runs++
+      },
+      shouldVerify: () => false,
+      verify: async () => {
+        verifications++
+        return { ok: false, output: "pre-existing err", command: "t" }
+      },
+      onCycle: () => {
+        cycles++
+      },
+    })
+    expect(runs).toBe(1)
+    expect(verifications).toBe(0)
+    expect(cycles).toBe(0)
+  })
 })
 
 describe("hang ronde 2: waitChildExit mekanisme tunggal", () => {

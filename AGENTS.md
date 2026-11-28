@@ -36,7 +36,7 @@ sub-milestone (`P2.x`), Quality Remediation (`Stage 1`–`10`), dan hotfix
 
 ## Status checkout
 
-HEAD checkout ini adalah kandidat rilis **v0.52.1** (perbaikan stabilitas UI/UX T1–T12 & U1–U4, penyelarasan keterbacaan warna tema/SGR bold reset & hierarki markdown C1–C5, agregat sub-agent 1 baris per turn & label peran langsung, guard `hasPendingLoneEsc` saat `pasteOverflow`, serta inventaris M15 `clipboard.ts`). `package.json` mencatat `0.52.1`; kontrak terminal memakai entri v0.52.1 di atas v0.51
+HEAD checkout ini adalah kandidat rilis **v0.53.0** (penambahan `dep_graph` & graf impor/kompak repomap, controller `--autonomous` + BUILD terjail, amandemen durasi turn & live sub-agent tanpa `(R running)` dengan pulse + `MM:SS` redup, perbaikan parser markdown CommonMark + pemulihan arahan jawaban ringkas, hardening audit pra-rilis, dan optimasi performa boot/loop/render). `package.json` mencatat `0.53.0`; kontrak terminal memakai amandemen **2026-11-28** di atas v0.52.1/v0.51
 (mengamandemen v0.43 pada tail live adaptif, reveal ketikan live, waiting
 indicator, dan kegagalan berbasis label `<label> mengalami kegagalan (<tag>)`
 di atas kotak tipis composer `╭─╮│╰╯`, tinggi 1–2 baris dinamis + scroll, margin

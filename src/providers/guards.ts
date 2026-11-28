@@ -15,11 +15,15 @@ import { abortError, ProviderError } from "#minicore/core/errors.ts"
 import type { ModelProvider, ProviderEvent, StreamRequest } from "#minicore/core/provider.ts"
 import { LIMITS } from "../constants.ts"
 
+const STREAM_ACTIVITY_SYMBOL = Symbol.for("minicode.streamActivity")
+
 export function withStreamGuards(
   provider: ModelProvider,
   opts: {
     timeoutMs?: number
-    /** Batas diam (tanpa byte) sebelum request dianggap mati. 0 = nonaktif. */
+    /** Batas tunggu aktivitas/byte PERTAMA sebelum request dianggap macet (default ikut idleTimeoutMs bila di-override, atau PROVIDER_FIRST_BYTE_TIMEOUT_MS). */
+    firstByteTimeoutMs?: number
+    /** Batas diam (tanpa byte) antar-chunk setelah stream mulai. 0 = nonaktif. */
     idleTimeoutMs?: number
     maxTextChars?: number
     maxReasonChars?: number
@@ -28,17 +32,34 @@ export function withStreamGuards(
   } = {},
 ): ModelProvider {
   const configuredTimeout = opts.timeoutMs
-  const timeoutMs =
+  const hasExplicitTimeout =
     typeof configuredTimeout === "number" &&
     Number.isFinite(configuredTimeout) &&
     configuredTimeout > 0
-      ? Math.min(LIMITS.MAX_TIMER_DELAY_MS, Math.max(1, Math.floor(configuredTimeout)))
-      : LIMITS.PROVIDER_REQUEST_TIMEOUT_MS
+  const timeoutMs = hasExplicitTimeout
+    ? Math.min(LIMITS.MAX_TIMER_DELAY_MS, Math.max(1, Math.floor(configuredTimeout)))
+    : LIMITS.PROVIDER_REQUEST_TIMEOUT_MS
+  // Jika pemanggil tidak memasang hard-cap eksplisit, stream yang aktif
+  // mengirim chunk/keepalive SSE diperpanjang bertahap sampai 1 jam alih-alih
+  // diputus pada detik ke-300 saat model sedang berpikir/coding panjang.
+  const extendOnActivity = !hasExplicitTimeout
+  const maxActiveDurationMs = extendOnActivity
+    ? Math.max(timeoutMs, LIMITS.PROVIDER_STREAM_MAX_ACTIVE_MS)
+    : timeoutMs
   const configuredIdle = opts.idleTimeoutMs
   const idleTimeoutMs =
     typeof configuredIdle === "number" && Number.isFinite(configuredIdle) && configuredIdle >= 0
       ? Math.min(LIMITS.MAX_TIMER_DELAY_MS, Math.floor(configuredIdle))
       : LIMITS.PROVIDER_IDLE_TIMEOUT_MS
+  const configuredFirstByte = opts.firstByteTimeoutMs
+  const firstByteTimeoutMs =
+    typeof configuredFirstByte === "number" &&
+    Number.isFinite(configuredFirstByte) &&
+    configuredFirstByte >= 0
+      ? Math.min(LIMITS.MAX_TIMER_DELAY_MS, Math.floor(configuredFirstByte))
+      : configuredIdle !== undefined
+        ? idleTimeoutMs
+        : LIMITS.PROVIDER_FIRST_BYTE_TIMEOUT_MS
   const maxTextChars = opts.maxTextChars ?? LIMITS.PROVIDER_TEXT_MAX_CHARS
   // Reasoning = bukan bagian jawaban; cap agresif (2MB logis ≈ 500k token —
   // jauh di atas reasoning sah mana pun, jauh di bawah OOM).
@@ -70,29 +91,72 @@ export function withStreamGuards(
       if (signal.aborted) ctl.abort(signal.reason)
       else signal.addEventListener("abort", onParentAbort, { once: true })
       let timedOut = false
-      const timer = setTimeout(() => {
-        timedOut = true
-        ctl.abort(new Error(`provider request timed out after ${timeoutMs}ms`))
-      }, timeoutMs)
-      // Timeout DIAM (audit freeze 2026-11-16): timer total di atas membiarkan
-      // provider yang tak pernah mengirim byte menahan turn sampai 5 menit —
-      // user tak bisa membedakannya dari hang. Timer ini di-reset setiap ada
-      // frame masuk, jadi hanya koneksi yang benar-benar berhenti bicara yang
-      // dipotong; stream panjang (reasoning, output besar) tidak tersentuh.
+      const streamStartMono = performance.now()
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const armTotal = () => {
+        if (timer) {
+          clearTimeout(timer)
+          timer = undefined
+        }
+        const elapsed = Math.max(0, performance.now() - streamStartMono)
+        const remainingMax = Math.max(1, maxActiveDurationMs - Math.floor(elapsed))
+        const windowMs = extendOnActivity ? Math.min(timeoutMs, remainingMax) : timeoutMs
+        if (elapsed >= maxActiveDurationMs && extendOnActivity) {
+          timedOut = true
+          ctl.abort(new Error(`provider request timed out after ${maxActiveDurationMs}ms`))
+          return
+        }
+        timer = setTimeout(() => {
+          timedOut = true
+          ctl.abort(
+            new Error(
+              `provider request timed out after ${extendOnActivity ? Math.round(performance.now() - streamStartMono) : timeoutMs}ms`,
+            ),
+          )
+        }, windowMs)
+        timer.unref?.()
+      }
+      armTotal()
+      // Timeout DIAM (audit freeze 2026-11-16 + amandemen keepalive SSE 2026-11-27):
+      // fase tunggu byte pertama memakai firstByteTimeoutMs (prefill/thinking
+      // awal), lalu turun ke idleTimeoutMs antar-chunk setelah stream/keepalive
+      // masuk. Hook STREAM_ACTIVITY_SYMBOL memungkinkan parser wire mereset
+      // timer saat frame keepalive (: ping / event: ping) tiba tanpa menyuntik
+      // event palsu ke kernel.
+      const firstMs = firstByteTimeoutMs > 0 ? firstByteTimeoutMs : 0
       const idleMs = idleTimeoutMs > 0 ? idleTimeoutMs : 0
+      let receivedActivity = false
+      let currentLimitMs = firstMs
       let idleFired = false
       let idleTimer: ReturnType<typeof setTimeout> | undefined
-      const armIdle = () => {
-        if (!idleMs) return
-        if (idleTimer) clearTimeout(idleTimer)
+      const armIdle = (fromWire = false) => {
+        if (fromWire) {
+          receivedActivity = true
+          if (extendOnActivity) armTotal()
+        }
+        const activeMs = receivedActivity ? idleMs : firstMs
+        currentLimitMs = activeMs
+        if (idleTimer) {
+          clearTimeout(idleTimer)
+          idleTimer = undefined
+        }
+        if (!activeMs) return
         idleTimer = setTimeout(() => {
           idleFired = true
-          ctl.abort(new Error(`provider sent nothing for ${idleMs}ms (connection stalled)`))
-        }, idleMs)
+          ctl.abort(new Error(`provider sent nothing for ${activeMs}ms (connection stalled)`))
+        }, activeMs)
+        idleTimer.unref?.()
       }
-      armIdle()
+      try {
+        Object.defineProperty(ctl.signal, STREAM_ACTIVITY_SYMBOL, {
+          value: () => armIdle(true),
+          configurable: true,
+        })
+      } catch {}
+      armIdle(false)
       const stopTimers = () => {
-        clearTimeout(timer)
+        if (timer) clearTimeout(timer)
+        timer = undefined
         if (idleTimer) clearTimeout(idleTimer)
         idleTimer = undefined
       }
@@ -115,7 +179,7 @@ export function withStreamGuards(
             break
           }
           // Ada frame masuk = koneksi masih hidup; jadwal diam dimulai ulang.
-          armIdle()
+          armIdle(true)
           const ev = next.value
           if (
             finishReason !== undefined &&
@@ -232,11 +296,14 @@ export function withStreamGuards(
         if (idleFired)
           throw new ProviderError(
             "server",
-            `provider sent nothing for ${idleTimeoutMs}ms (connection stalled)`,
+            `provider sent nothing for ${currentLimitMs}ms (connection stalled)`,
           )
         throw e
       } finally {
         stopTimers()
+        try {
+          delete (ctl.signal as unknown as Record<symbol, unknown>)[STREAM_ACTIVITY_SYMBOL]
+        } catch {}
         signal.removeEventListener("abort", onParentAbort)
         if (!streamEnded && !ctl.signal.aborted) {
           ctl.abort(new DOMException("Provider stream closed", "AbortError"))

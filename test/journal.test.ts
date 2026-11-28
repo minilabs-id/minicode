@@ -104,8 +104,8 @@ const completed = (name: string, args: unknown, id = "c1", isError = false) => (
 
 // ── 1. Closed-set classifier vs registry tool ──
 
-test("journal: seluruh 41 tool terklasifikasi; unknown fail-loud di test", () => {
-  expect(allTools.map((t) => t.name).sort()).toHaveLength(41)
+test("journal: seluruh 42 tool terklasifikasi; unknown fail-loud di test", () => {
+  expect(allTools.map((t) => t.name).sort()).toHaveLength(42)
   for (const t of allTools) {
     const c = classifyTool(t.name)
     if (c === "unknown") throw new Error(`tool belum diklasifikasikan: ${t.name}`)

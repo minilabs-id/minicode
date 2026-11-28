@@ -4,6 +4,8 @@ import { expect, test } from "bun:test"
 import * as minicore from "#minicore"
 import { ProviderError } from "#minicore/core/errors.ts"
 import type { ModelProvider, ProviderEvent, StreamRequest } from "#minicore/core/provider.ts"
+import { createOpenAICompatProvider } from "#minicore/providers/openai-compat.ts"
+import { createAnthropicProvider } from "../src/providers/anthropic.ts"
 import { withStreamGuards } from "../src/providers/guards.ts"
 
 function base(over: Partial<ModelProvider> = {}): ModelProvider {
@@ -182,4 +184,123 @@ test("guard mempertahankan kind + id + models + props ekstra", async () => {
     "completed",
   ])
   expect(attempts.every((e) => (e as { kind: string }).kind === "minicode:attempt")).toBe(true)
+})
+
+test("firstByteTimeoutMs longgar sementara idleTimeoutMs antar-chunk tetap ketat", async () => {
+  const slowStart: ModelProvider = base({
+    async *stream(): AsyncIterable<ProviderEvent> {
+      // Prefill/thinking awal lebih lama dari idleTimeoutMs (60ms), masih di bawah firstByte (200ms).
+      await new Promise<void>((r) => setTimeout(r, 100))
+      yield { type: "text", text: "ok" }
+      yield { type: "finish", reason: "stop" }
+    },
+  })
+  const evs = await collect(
+    withStreamGuards(slowStart, { timeoutMs: 5_000, firstByteTimeoutMs: 220, idleTimeoutMs: 55 }),
+  )
+  expect(evs.some((e) => e.type === "text" && e.text === "ok")).toBe(true)
+
+  // Setelah byte pertama keluar, jeda antar-chunk > idleTimeoutMs tetap terpotong.
+  const midStall: ModelProvider = base({
+    async *stream(_req: StreamRequest, signal: AbortSignal): AsyncIterable<ProviderEvent> {
+      await new Promise<void>((r) => setTimeout(r, 25))
+      yield { type: "text", text: "awal" }
+      await new Promise<void>((_res, rej) => {
+        signal.addEventListener("abort", () => rej(new DOMException("Aborted", "AbortError")), {
+          once: true,
+        })
+      })
+    },
+  })
+  let err: unknown = null
+  try {
+    await collect(
+      withStreamGuards(midStall, { timeoutMs: 5_000, firstByteTimeoutMs: 250, idleTimeoutMs: 60 }),
+    )
+  } catch (e) {
+    err = e
+  }
+  expect(err).toBeInstanceOf(ProviderError)
+  expect((err as Error).message).toContain("sent nothing for 60ms")
+})
+
+test("komentar keepalive SSE dan event ping mereset idle timer tanpa membocorkan event palsu", async () => {
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(req) {
+      const url = new URL(req.url)
+      const isAnthropic = url.pathname.endsWith("/messages")
+      const enc = new TextEncoder()
+      const stream = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          for (let i = 0; i < 4; i++) {
+            await new Promise<void>((r) => setTimeout(r, 40))
+            if (isAnthropic) {
+              controller.enqueue(enc.encode('event: ping\ndata: {"type":"ping"}\n\n'))
+            } else {
+              controller.enqueue(enc.encode(": OPENROUTER PROCESSING\n\n"))
+            }
+          }
+          await new Promise<void>((r) => setTimeout(r, 35))
+          if (isAnthropic) {
+            controller.enqueue(
+              enc.encode(
+                'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hidup"}}\n\n',
+              ),
+            )
+            controller.enqueue(
+              enc.encode(
+                'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n',
+              ),
+            )
+          } else {
+            controller.enqueue(
+              enc.encode(
+                'data: {"choices":[{"delta":{"content":"hidup"},"finish_reason":null}]}\n\n',
+              ),
+            )
+            controller.enqueue(
+              enc.encode(
+                'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+              ),
+            )
+          }
+          controller.close()
+        },
+      })
+      return new Response(stream, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      })
+    },
+  })
+  try {
+    const baseUrl = `http://127.0.0.1:${server.port}/v1`
+    // Tanpa keepalive reset, total ~195ms sebelum delta pasti mati di batas 85ms/65ms.
+    const compat = withStreamGuards(
+      createOpenAICompatProvider({ baseUrl, models: ["m"], apiKey: "k" }),
+      { timeoutMs: 5_000, firstByteTimeoutMs: 85, idleTimeoutMs: 65 },
+    )
+    const evsCompat = await collect(compat)
+    expect(
+      evsCompat.filter((e) => e.type === "text").map((e) => (e as { text: string }).text),
+    ).toEqual(["hidup"])
+    expect(
+      evsCompat
+        .filter((e) => e.type === "extension")
+        .every((e) => (e as { kind: string }).kind === "minicode:attempt"),
+    ).toBe(true)
+
+    const anth = withStreamGuards(
+      createAnthropicProvider({ baseUrl, models: ["claude-sonnet-4-5"], apiKey: "k" }),
+      { timeoutMs: 5_000, firstByteTimeoutMs: 85, idleTimeoutMs: 65 },
+    )
+    const evsAnth = await collect(anth)
+    expect(
+      evsAnth.filter((e) => e.type === "text").map((e) => (e as { text: string }).text),
+    ).toEqual(["hidup"])
+  } finally {
+    server.stop(true)
+  }
 })

@@ -94,6 +94,7 @@ describe("humanToolLabel()", () => {
     expect(humanToolLabel("read_file")).toBe(dict()["activity.tool.readFile"])
     expect(humanToolLabel("bash")).toBe(dict()["activity.tool.bash"])
     expect(humanToolLabel("grep")).toBe(dict()["activity.tool.grep"])
+    expect(humanToolLabel("dep_graph")).toBe(dict()["activity.tool.depGraph"])
     expect(humanToolLabel("delegate_task")).toBe(dict()["activity.tool.delegate"])
     expect(humanToolLabel("todo_write")).toBe(dict()["activity.tool.plan"])
   })
@@ -121,6 +122,15 @@ describe("humanToolLabel()", () => {
       "Auditor UI",
     )
     expect(humanToolLabel("delegate_task", { intent: "Subagent Pencari bug" })).toBe("Pencari bug")
+    // Placeholder mentah & string hasil "sub-agent (explore) done: ..." ditolak.
+    expect(humanToolLabel("delegate_task", { summary: "delegate_task" })).toBe(
+      dict()["activity.tool.delegate"],
+    )
+    expect(
+      humanToolLabel("delegate_task", {
+        summary: "sub-agent (explore) done: 5 temuan dari putaran 2 [steps 5]",
+      }),
+    ).toBe(dict()["activity.tool.delegate"])
   })
 
   test("identitas child tak terpercaya disanitasi sebelum disisipkan", () => {

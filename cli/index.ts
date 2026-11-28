@@ -1,32 +1,7 @@
 #!/usr/bin/env bun
 import { resolve as resolvePath } from "node:path"
-import { expandMentions } from "../src/app/mentions.ts"
-import { NoProviderError } from "../src/app/provider-layer.ts"
-import { createMinicodeSession } from "../src/app/session.ts"
-import { parseCompactKeepTurns } from "../src/policy/compaction.ts"
-import { createRateLimiter } from "../src/policy/ratelimit.ts"
-import { resolveSandbox, sandboxRefusalReason } from "../src/policy/sandbox-policy.ts"
-import { budgetStatus } from "../src/policy/usage.ts"
-import { VerifyWorkModeConflictError } from "../src/policy/work-mode.ts"
-import { resolveRuntimeMode } from "../src/runtime/production-execution.ts"
-import { SessionBusyError } from "../src/session/authority.ts"
-import { AdoptionRefusedError, parseAdoptTaskArg } from "../src/session/cross-session-adoption.ts"
-import {
-  mintSessionId,
-  SessionAliasError,
-  SessionKeyCollisionError,
-  SessionNotFoundError,
-} from "../src/session/identity.ts"
-import { attachMutationJournal } from "../src/session/journal.ts"
-import { findSkill, renderSkill } from "../src/skills/loader.ts"
-// [PHASE 6X] SATU resolver gate produksi, diimpor langsung supaya call-site
-// dan test-nya tak bisa melenceng. Lihat catatan di baris `schedulerEnabled`.
-import { GATE_ENABLED, resolveSchedulerGate } from "../src/task/production-scheduler.ts"
-import { writeTrace } from "../src/telemetry/trace.ts"
-import { setSubAgentSessionFactory } from "../src/tools/task.ts"
-import { formatError, formatMachineError } from "../src/ui/assistant/simple.ts"
+import { perfEnabled, perfReport } from "../src/lib/perf-debug.ts"
 import { t } from "../src/ui/i18n/locale.ts"
-import { formatUsd } from "../src/ui/render/money.ts"
 import { c, cErr } from "../src/ui/render/theme.ts"
 import {
   allowLocalConfig,
@@ -44,7 +19,7 @@ import {
 } from "./args.ts"
 import { buildHelpJson, HELP, readVersion } from "./help.ts"
 import { dispatch } from "./router.ts"
-import { createChildCompaction, createCliSession } from "./setup.ts"
+import type { createCliSession as CreateCliSessionFn } from "./setup.ts"
 
 /**
  * [AGENT-CONTROL-1] Baris peringatan `[recovery]` untuk jendela waktu tertentu.
@@ -185,89 +160,105 @@ if (
   }
 }
 
-// DI factory sesi sub-agen untuk delegate_task — dipasang di composition root
-// sebelum dispatch agar semua jalur (REPL, one-shot, mcp serve) tercakup.
-// Sesi anak mendapat wiring jurnal sendiri (childOf = parent) agar efek anak
-// tercatat di jurnal anak, bukan disimpulkan dari finalText parent.
-setSubAgentSessionFactory(async (spec) => {
-  // `journal` hanya untuk wiring app-layer — jangan bocor ke config kernel.
-  const { journal, ...coreSpec } = spec
-  const contextWindowTokensForModel = coreSpec.provider.contextWindowTokensForModel
-  const contextModelIdentity = coreSpec.provider.contextModelIdentity
-  const getContextModel = () => contextModelIdentity?.(coreSpec.model) ?? coreSpec.model
-  let childJournalHandle: ReturnType<typeof attachMutationJournal> | null = null
-  const session = await createMinicodeSession({
-    ...coreSpec,
-    compaction: createChildCompaction({
-      provider: coreSpec.provider,
-      model: coreSpec.model,
-      cwd: coreSpec.cwd,
-      contextWindowTokensForModel,
-      getContextModel,
-    }),
-    ...(journal
-      ? {
-          beforeToolEffect: async (call) => {
-            if (childJournalHandle !== null) await childJournalHandle.preflightIntent(call)
-          },
-        }
-      : {}),
-    ...(contextWindowTokensForModel
-      ? {
-          contextWindowTokens: contextWindowTokensForModel(coreSpec.model),
-          contextWindowTokensForModel,
-          getContextModel,
-        }
-      : {}),
+if (perfEnabled()) {
+  process.once("exit", () => {
+    perfReport()
   })
-  if (journal) {
-    const { createPresentationAdapter, disposeOnTerminal } = await import(
-      "../src/presentation/adapter.ts"
-    )
-    const childPresentation = createPresentationAdapter(session.events, {
-      sessionId: journal.sessionId,
+}
+
+// DI factory sesi sub-agen untuk delegate_task — dipasang malas agar subcommand
+// ringan (`config`, `sessions`, `stats`, `--help`) tidak memuat graf penuh setup/sesi.
+let subAgentFactoryInstalled = false
+const ensureSubAgentFactory = async (): Promise<void> => {
+  if (subAgentFactoryInstalled) return
+  subAgentFactoryInstalled = true
+  const { setSubAgentSessionFactory } = await import("../src/tools/task.ts")
+  setSubAgentSessionFactory(async (spec) => {
+    const [{ createMinicodeSession }, { attachMutationJournal }, { createChildCompaction }] =
+      await Promise.all([
+        import("../src/app/session.ts"),
+        import("../src/session/journal.ts"),
+        import("./setup.ts"),
+      ])
+    // `journal` hanya untuk wiring app-layer — jangan bocor ke config kernel.
+    const { journal, ...coreSpec } = spec
+    const contextWindowTokensForModel = coreSpec.provider.contextWindowTokensForModel
+    const contextModelIdentity = coreSpec.provider.contextModelIdentity
+    const getContextModel = () => contextModelIdentity?.(coreSpec.model) ?? coreSpec.model
+    let childJournalHandle: ReturnType<typeof attachMutationJournal> | null = null
+    const session = await createMinicodeSession({
+      ...coreSpec,
+      compaction: createChildCompaction({
+        provider: coreSpec.provider,
+        model: coreSpec.model,
+        cwd: coreSpec.cwd,
+        contextWindowTokensForModel,
+        getContextModel,
+      }),
+      ...(journal
+        ? {
+            beforeToolEffect: async (call) => {
+              if (childJournalHandle !== null) await childJournalHandle.preflightIntent(call)
+            },
+          }
+        : {}),
+      ...(contextWindowTokensForModel
+        ? {
+            contextWindowTokens: contextWindowTokensForModel(coreSpec.model),
+            contextWindowTokensForModel,
+            getContextModel,
+          }
+        : {}),
     })
-    const { appendPresentationEvents } = await import("../src/session/persistence.ts")
-    let childWrite = Promise.resolve()
-    childPresentation.onEvent((event) => {
-      childWrite = childWrite
-        .then(() => appendPresentationEvents(journal.sessionId, spec.cwd, [event]).then(() => {}))
-        .catch(() => {})
-    })
-    // Anak abort/timeout berakhir di `turn:interrupted` (kernel), bukan
-    // `turn:completed`. Tanpa ini adapter + rantai tulis jurnal bocor setelah
-    // anak mati. Helper idempoten: terminal mana pun yang tiba duluan menang.
-    disposeOnTerminal(session.events, () => {
-      void childWrite.finally(() => childPresentation.dispose())
-    })
-    childJournalHandle = attachMutationJournal(session, {
-      sessionId: journal.sessionId,
-      cwd: spec.cwd,
-      childOf: journal.parentSessionId,
-      evidenceMode: "canonical",
-      onCommitted: (info) => childPresentation.noteFileChanged(info),
-    })
-  }
-  return session
-})
+    if (journal) {
+      const { createPresentationAdapter, disposeOnTerminal } = await import(
+        "../src/presentation/adapter.ts"
+      )
+      const childPresentation = createPresentationAdapter(session.events, {
+        sessionId: journal.sessionId,
+      })
+      const { appendPresentationEvents } = await import("../src/session/persistence.ts")
+      let childWrite = Promise.resolve()
+      childPresentation.onEvent((event) => {
+        childWrite = childWrite
+          .then(() => appendPresentationEvents(journal.sessionId, spec.cwd, [event]).then(() => {}))
+          .catch(() => {})
+      })
+      // Anak abort/timeout berakhir di `turn:interrupted` (kernel), bukan
+      // `turn:completed`. Tanpa ini adapter + rantai tulis jurnal bocor setelah
+      // anak mati. Helper idempoten: terminal mana pun yang tiba duluan menang.
+      disposeOnTerminal(session.events, () => {
+        void childWrite.finally(() => childPresentation.dispose())
+      })
+      childJournalHandle = attachMutationJournal(session, {
+        sessionId: journal.sessionId,
+        cwd: spec.cwd,
+        childOf: journal.parentSessionId,
+        evidenceMode: "canonical",
+        onCommitted: (info) => childPresentation.noteFileChanged(info),
+      })
+    }
+    return session
+  })
+}
 
 // Dispatch subcommand lewat registry (handler memanggil process.exit sendiri).
-await dispatch(args, getArg, HELP)
+await dispatch(args, getArg, HELP, ensureSubAgentFactory)
 
-if (hasFlag(args, "--version") || args.includes("-v")) {
+if (hasFlag(args, "--version") || hasFlag(args, "-v")) {
   console.log(readVersion())
   process.exit(0)
 }
 
-if (args.includes("-h") || args.includes("--help")) {
-  if (args.includes("--tui")) {
+if (hasFlag(args, "-h") || hasFlag(args, "--help")) {
+  if (hasFlag(args, "--tui")) {
     // Peringatan usang TETAP dicetak walau help dicetak: sensitivitas ke
     // urutan argumen = alasan klasik flag "diam" tak ketahuan (audit F8).
     process.stderr.write(
       "[deprecated] --tui is a no-op: interactive mode is always the fullscreen TUI\n",
     )
   }
-  if (args.includes("--json")) {
+  if (hasFlag(args, "--json")) {
     // Bantuan mesin untuk CI (minicode --help --json) — jangan diterjemahkan.
     console.log(JSON.stringify(buildHelpJson()))
     process.exit(0)
@@ -285,6 +276,46 @@ if (missingVals.length > 0 || unknownFlags.length > 0) {
   console.error(`[error] ${msgs.join("; ")} — run 'minicode --help'`)
   process.exit(2)
 }
+
+// Muat modul runtime sesi/provider/TUI hanya setelah dipastikan bukan meta/subcommand.
+const [
+  { expandMentions },
+  { NoProviderError },
+  { parseCompactKeepTurns },
+  { createRateLimiter },
+  { resolveSandbox, sandboxRefusalReason },
+  { budgetStatus },
+  { VerifyWorkModeConflictError },
+  { resolveRuntimeMode },
+  { SessionBusyError },
+  { AdoptionRefusedError, parseAdoptTaskArg },
+  { mintSessionId, SessionAliasError, SessionKeyCollisionError, SessionNotFoundError },
+  { findSkill, renderSkill },
+  { GATE_ENABLED, resolveSchedulerGate },
+  { writeTrace },
+  { formatError, formatMachineError },
+  { formatUsd },
+  { createCliSession },
+] = await Promise.all([
+  import("../src/app/mentions.ts"),
+  import("../src/app/provider-layer.ts"),
+  import("../src/policy/compaction.ts"),
+  import("../src/policy/ratelimit.ts"),
+  import("../src/policy/sandbox-policy.ts"),
+  import("../src/policy/usage.ts"),
+  import("../src/policy/work-mode.ts"),
+  import("../src/runtime/production-execution.ts"),
+  import("../src/session/authority.ts"),
+  import("../src/session/cross-session-adoption.ts"),
+  import("../src/session/identity.ts"),
+  import("../src/skills/loader.ts"),
+  import("../src/task/production-scheduler.ts"),
+  import("../src/telemetry/trace.ts"),
+  import("../src/ui/assistant/simple.ts"),
+  import("../src/ui/render/money.ts"),
+  import("./setup.ts"),
+  ensureSubAgentFactory(),
+])
 
 // -- flag parsing --
 const verbose = hasFlag(args, "--verbose")
@@ -366,10 +397,23 @@ const providerOverride = getArg("--provider")
 const warnStderr = (msg: string): void => {
   process.stderr.write(msg)
 }
-const { maxSteps, contextWindowTokens, timeoutMs, budget, ratelimitRpm } = parseRuntimeNumericFlags(
-  getArg,
-  warnStderr,
-)
+const {
+  maxSteps,
+  contextWindowTokens,
+  timeoutMs,
+  wallTimeoutMs,
+  maxEpochs,
+  maxCostPerHour,
+  budget,
+  ratelimitRpm,
+} = parseRuntimeNumericFlags(getArg, warnStderr)
+const autonomous = hasFlag(args, "--autonomous")
+const takeover = hasFlag(args, "--takeover")
+if (autonomous && workMode !== "EXECUTE") {
+  warnStderr(
+    "[warn] --autonomous in DISCUSS mode stays strictly read-only; pass --work-mode BUILD to allow autonomous workspace changes\n",
+  )
+}
 // `--tui` alias usang (TUI fullscreen kini satu-satunya tampilan interaktif):
 // tetap diterima agar skrip lama tak pecah, tapi TIDAK diam — tanpa peringatan
 // user mengira flag-nya masih mengubah perilaku.
@@ -458,7 +502,7 @@ const startupProgress = (await import("./tui.ts")).createStartupProgress({
 })
 // finally: createCliSession yang melempar (provider/MCP gagal) tak boleh
 // membocorkan painter — tutup angka progres walau sesi gagal dibuat.
-let ctx: Awaited<ReturnType<typeof createCliSession>>
+let ctx: Awaited<ReturnType<typeof CreateCliSessionFn>>
 let setupOk = false
 try {
   ctx = await createCliSession({
@@ -492,6 +536,11 @@ try {
     contextWindowTokens,
     ...(keepRecentTurns !== undefined ? { keepRecentTurns } : {}),
     timeoutMs,
+    ...(wallTimeoutMs !== undefined ? { wallTimeoutMs } : {}),
+    ...(autonomous ? { autonomous: true } : {}),
+    ...(takeover ? { takeover: true } : {}),
+    ...(maxEpochs !== undefined ? { maxEpochs } : {}),
+    ...(maxCostPerHour !== undefined ? { maxCostHour: maxCostPerHour } : {}),
     rateLimiter,
     sandboxNotice: requestedSandbox ? sandbox.notice : undefined,
     // v7.44: angka saja, area sekitar bersih — tidak ada label fase/kalimat.
@@ -621,7 +670,56 @@ if (enterRepl) {
     if (finalPrompt.includes("@")) {
       finalPrompt = (await expandMentions(finalPrompt, wcwd ?? process.cwd())).prompt
     }
-    await runPromptWithVerify(finalPrompt)
+    if (autonomous) {
+      const { createAutonomousLoopController } = await import("../src/policy/autonomous-loop.ts")
+      const isStepLimit = (e: unknown): boolean =>
+        (e as { kind?: string } | undefined)?.kind === "max_steps_exceeded" ||
+        /max.?steps/i.test(String((e as { message?: string } | undefined)?.message ?? ""))
+      const loopCtl = createAutonomousLoopController({
+        workMode: ctx.workMode,
+        maxEpochs: maxEpochs && maxEpochs > 0 ? maxEpochs : undefined,
+        maxCostUsd: b,
+        maxCostPerHourUsd: maxCostPerHour,
+      })
+      const maxLoops = maxEpochs && maxEpochs > 0 ? maxEpochs - 1 : Number.POSITIVE_INFINITY
+      let prevCost = usage.getSession(modelRef.current).cost ?? 0
+      for (let i = 0; i <= maxLoops; i++) {
+        let stepPrompt = finalPrompt
+        if (i > 0) {
+          const gate = loopCtl.canStartNextEpoch()
+          if (!gate.allow) {
+            warnStderr(`[autonomous] stopping: ${gate.message}\n`)
+            break
+          }
+          stepPrompt = loopCtl.formatEpochPrompt(
+            finalPrompt,
+            "Previous turn hit --max-steps; continue cleanly from preserved state.",
+          )
+        }
+        let err: unknown = null
+        try {
+          await runPromptWithVerify(stepPrompt)
+        } catch (e) {
+          err = e
+        }
+        const curCost = usage.getSession(modelRef.current).cost ?? 0
+        const costDelta = Math.max(0, curCost - prevCost)
+        prevCost = curCost
+        const rec = loopCtl.recordEpoch({
+          progressed: err === null || isStepLimit(err),
+          costUsd: costDelta,
+          completed: err === null,
+        })
+        if (err === null) break
+        if (!isStepLimit(err)) throw err
+        if (rec.stopped) {
+          warnStderr(`[autonomous] ${rec.message ?? "stopped"}\n`)
+          break
+        }
+      }
+    } else {
+      await runPromptWithVerify(finalPrompt)
+    }
     // Total SESI, bukan turn: satu one-shot hanya punya satu turn, tapi
     // --verify/self-heal bisa menjalankan beberapa dan reset() di antaranya.
     const u = usage.getSession(modelRef.current)

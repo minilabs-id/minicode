@@ -100,7 +100,7 @@ istilah teknis English — tabel ini mengunci maknanya.
 | **Bracketed paste & select-all (v0.37)** | `?2004h`/`?2004l` di TUI/`askLine`/`askSecret`/output-window, ditulis di luar frame (I1 utuh); CR paste bukan submit. `Ctrl+A` = `selectAll` bila composer kosong & dropdown tertutup (else Home); `Ctrl+C` menyalin juga saat drag aktif; resize merebase anchor walau seleksi aktif |
 | **Dropdown overlay (v0.36)** | Menu `/` digambar di dalam frame `paint()` yang sama (satu `stdout.write`, I1), menimpa baris transkrip bawah tanpa mengurangi `viewH` — bukan `paintRegion()` terpisah; klik di area dropdown memilih item menu |
 | **Micro-toast retry** | Satu notifikasi footer `retry n/total · Ns` (TTL 4 dtk, counter langsung) untuk retry — menggantikan toast panjang |
-| **Delegation scope** | `file`/`dir`/`subtree`/`repo` → budget 12/18/26/36 langkah; `plan` ×1,5 di-clamp ke [8,50] (repo+plan = 50); eskalasi `[8,12,20,32,50]` bila mentok — `maxSteps` eksplisit mematikan eskalasi; tanpa scope fallback 5/15 |
+| **Delegation scope** | `file`/`dir`/`subtree`/`repo` → budget 24/40/64/100 langkah; `plan` ×1,5 di-clamp ke [24,600] (repo+plan = 150); eskalasi `[24,40,64,100,150,250,400,600]` bila mentok — `maxSteps` eksplisit mematikan eskalasi; tanpa scope fallback 5/15 |
 | **Composition root** | `cli/index.ts` + `cli/setup.ts`: satu tempat wiring DI (provider, RAG, session, tools) |
 | **Seam aditif** | Satu-satunya patch yang dibolehkan ke kernel beku: `compactAsync`, `initialMessages`, `cwd` |
 | **Self-contained** | Tanpa clone repo lain — kernel di-vendor, runtime zero-dep, butuh Bun ≥ 1.1.13 |

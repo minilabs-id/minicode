@@ -2,6 +2,7 @@ export { askUserTool } from "./ask_user.ts"
 export { bashKillTool, bashOutputTool, bashTool } from "./bash.ts"
 export { codeRunTool } from "./code_run.ts"
 export { deleteFileTool } from "./delete_file.ts"
+export { depGraphTool } from "./dep_graph.ts"
 export { editTool } from "./edit.ts"
 export {
   gitCheckoutTool,
@@ -41,6 +42,7 @@ import { askUserTool } from "./ask_user.ts"
 import { bashKillTool, bashOutputTool, bashTool } from "./bash.ts"
 import { codeRunTool } from "./code_run.ts"
 import { deleteFileTool } from "./delete_file.ts"
+import { depGraphTool } from "./dep_graph.ts"
 import { editTool } from "./edit.ts"
 import {
   gitCheckoutTool,
@@ -123,6 +125,7 @@ export const allTools: Tool[] = [
   applyPatchTool,
   globTool,
   grepTool,
+  depGraphTool,
   bashTool,
   bashOutputTool,
   bashKillTool,

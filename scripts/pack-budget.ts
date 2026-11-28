@@ -185,7 +185,15 @@
 // 90.89% lines / gate:bash 0/85 bypass / bench:smoke 13/13 / audit:harness
 // 73 pass 0 fail / telemetry 12/15. Naikkan ke 5.250 KiB memberi margin ~237 KiB
 // tanpa melonggarkan pengecekan file sampah/node_modules/test.
-export const PACK_SIZE_BUDGET_KIB = 5250
+// [Re-baseline 5.250 -> 5.500 KiB, disetujui pemilik via Gate G2 2026-11-28]
+// Pra-Wave 1 working tree sudah 5.324 KiB / 346 file (+74 KiB di atas 5.250).
+// Setelah penambahan engine graf & tool dependensi (src/repo/dep-graph.ts +
+// src/tools/dep_graph.ts) serta isolasi LSP multi-root, paket aktual ~5.379
+// KiB / 348 file (src 4.233,3 KiB · cli 656,4 KiB · docs 359,9 KiB terkait
+// check 5b tautan markdown · vendor 115,7 KiB · scripts 5,8 KiB · root 7,7 KiB).
+// Naik ke 5.500 KiB memberi margin ketat ~120 KiB (~2,2%) sambil menjaga alarm
+// regresi node_modules/test.
+export const PACK_SIZE_BUDGET_KIB = 5500
 
 /**
  * True bila ukuran paket (KiB) masih di dalam budget.

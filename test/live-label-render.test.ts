@@ -306,8 +306,34 @@ describe("v0.51 live human-readable tool labels & render", () => {
     expect(afterText).not.toContain("Menyiapkan langkah")
   })
 
-  test("prioritas sub-agent paralel: semua root delegate_task tetap tampil saat child banyak", () => {
+  test("sub-agent paralel: hanya baris root tampil di tail, bebas ↳ child tool, ringkas prompt otomatis", () => {
     __setSystemLocaleForTest("id")
+    const bus = createFakeBus()
+    const published: DomainEvent[] = []
+    const adapter = createPresentationAdapter(bus as never, { sessionId: "sess-prompt" })
+    adapter.onEvent((e) => published.push(e))
+    bus.emit("turn:started", { turn: 1 })
+    bus.emit("execution:started", {
+      execution: {
+        call: {
+          id: "call-p1",
+          name: "delegate_task",
+          args: { prompt: "Memahami arsitektur alur render. Cek juga scrollbar." },
+        },
+      },
+    })
+    const pStarted = published.find((e) => e.type === "tool.started")
+    expect(pStarted?.type === "tool.started" ? pStarted.argsSummary.intent : undefined).toBe(
+      "Memahami arsitektur alur render",
+    )
+
+    expect(
+      formatLabeledToolFailure(
+        "Audit modul auth",
+        "[sub-agent explore error] step limit reached (24/24)",
+      ),
+    ).toBe("Audit modul auth mengalami kegagalan (batas langkah)")
+
     const activities: UiPresentationActivity[] = [
       {
         toolCallId: "root-1",
@@ -327,51 +353,50 @@ describe("v0.51 live human-readable tool labels & render", () => {
         tsStart: 2,
       },
       {
-        toolCallId: "c-1b",
-        parentToolCallId: "root-1",
-        childSessionId: "sub_1",
-        label: "audit-1",
-        name: "grep",
-        target: "b.ts",
-        status: "running",
-        tsStart: 3,
-      },
-      {
         toolCallId: "root-2",
         name: "delegate_task",
         intent: "Subagent audit transcript",
         status: "running",
+        tsStart: 3,
+      },
+      {
+        toolCallId: "root-3",
+        name: "delegate_task",
+        intent: "Audit composer",
+        status: "running",
         tsStart: 4,
       },
       {
-        toolCallId: "c-2a",
-        parentToolCallId: "root-2",
-        childSessionId: "sub_2",
-        label: "audit-2",
-        name: "read_file",
-        target: "c.ts",
+        toolCallId: "root-4",
+        name: "delegate_task",
+        intent: "Audit provider",
         status: "running",
         tsStart: 5,
       },
       {
-        toolCallId: "c-2b",
-        parentToolCallId: "root-2",
-        childSessionId: "sub_2",
-        label: "audit-2",
-        name: "grep",
-        target: "d.ts",
+        toolCallId: "root-5",
+        name: "delegate_task",
+        intent: "Audit reducer",
         status: "running",
         tsStart: 6,
+      },
+      {
+        toolCallId: "root-6",
+        name: "delegate_task",
+        intent: "Audit sandbox",
+        status: "running",
+        tsStart: 7,
       },
     ]
     const t = new Transcript(createFakeBus() as never, {
       getSnapshot: () => ({ activities, turns: [] }),
     })
-    // viewH=8 -> kap adaptif = max(3, floor(8*0.5)) = 4 baris dari 6 item
+    // viewH=8 -> kap adaptif = max(3, floor(8*0.5)) = 4 baris dari 6 root (child c-1a tak ikut).
     const view = stripAnsi(t.view(80, 8, 0).join("\n"))
-    expect(view).toContain("audit footer")
-    expect(view).toContain("audit transcript")
+    expect(view).not.toContain("↳")
+    expect(view).not.toContain("a.ts")
     expect(view).not.toContain("Subagent audit")
+    expect(view).toContain("Audit sandbox")
     expect(t.runningExtraCount(8)).toBe(2)
   })
 })

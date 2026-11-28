@@ -22,7 +22,8 @@ export type EffortLevel = "low" | "medium" | "high"
  * model (daftar membusuk tiap minggu; keluarga stabil tahunan).
  */
 export function thinkingFamily(modelId: string): ThinkingFamily {
-  const m = modelId.toLowerCase()
+  const lower = modelId.toLowerCase()
+  const m = lower.includes("/") ? lower.slice(lower.lastIndexOf("/") + 1) : lower
   // OpenAI reasoning: o-series + gpt-5/6 (reasoning_effort).
   if (/^(o1|o3|o4|gpt-5|gpt-6)([-._]|$)/.test(m)) return "openai-reasoning"
   if (m.startsWith("claude-")) {

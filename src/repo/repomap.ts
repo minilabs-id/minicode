@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
-import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
+import { lstatSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { readdir } from "node:fs/promises"
 import { join, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -9,9 +9,16 @@ import { homeDir } from "../lib/db-path.ts"
 import { GIT_SAFE_BASE } from "../lib/git-hardening.ts"
 // [Audit F-03 2026-11-22] Instrumentasi durasi; nonaktif = no-op O(1).
 import { perfCount, perfEnabled } from "../lib/perf-debug.ts"
-import { safeReadFileCapped } from "../lib/safe-open.ts"
+import { createSafeScanReader } from "../lib/safe-open.ts"
 import { resolveTrustedExecutable } from "../lib/trusted-exec.ts"
 import { isRealPathOutsideRoot } from "../policy/jail.ts"
+import {
+  buildDependencyGraphFromContents,
+  type DependencyGraph,
+  formatCompactGraphForPrompt,
+  isTestFilePath,
+  normalizeRepoPath,
+} from "./dep-graph.ts"
 
 const SOURCE_EXTS = new Set([
   ".ts",
@@ -34,6 +41,13 @@ const SOURCE_EXTS = new Set([
 ])
 const MAX_FILES = LIMITS.REPOMAP_MAX_FILES
 /**
+ * Batas penemuan berkas sebelum perankingan graf dependensi. Dulu `.slice(0, MAX_FILES)`
+ * memotong `git ls-files` di 60 berkas alfabetis pertama sebelum ranking sehingga
+ * seluruh `src/` bisa terlewat; kini seluruh sumber hingga batas aman ini
+ * dianalisis dulu sebelum hasil top-N diringkas.
+ */
+const MAX_DISCOVERY_FILES = 4_000
+/**
  * Batas waktu `git ls-files` untuk repo-map startup.
  *
  * [Audit freeze 2026-11-16] Terukur 31-90 ms di luar TUI tetapi 1000-1150 ms
@@ -43,14 +57,13 @@ const MAX_FILES = LIMITS.REPOMAP_MAX_FILES
  * git yang benar-benar lambat (repo jaringan, index besar) tidak boleh menahan
  * prompt.
  */
-const REPOMAP_GIT_TIMEOUT_MS = 250
+const REPOMAP_GIT_TIMEOUT_MS = 350
 /**
  * Batas waktu walk direktori (jalur cadangan). Terukur 982 ms pada repo ini
  * saat TUI aktif — tanpa batas, kegagalan git berubah menjadi startup lambat
- * yang sama parahnya. Hasil parsial tetap dipakai: peta repo hanya pelengkap
- * prompt, jadi 60 berkas cukup dan jauh lebih baik daripada menahan 1 dtk.
+ * yang sama parahnya.
  */
-const REPOMAP_WALK_DEADLINE_MS = 400
+const REPOMAP_WALK_DEADLINE_MS = 450
 const MAX_FILE_BYTES = LIMITS.REPOMAP_MAX_FILE_BYTES
 const MAX_REPOMAP_CHARS = LIMITS.REPOMAP_MAX_CHARS
 const MAX_SYMBOLS_PER_FILE = LIMITS.REPOMAP_MAX_SYMBOLS_PER_FILE
@@ -242,55 +255,54 @@ function isSourceFile(f: string): boolean {
   return dot !== -1 && SOURCE_EXTS.has(f.slice(dot).toLowerCase())
 }
 
-// Baca konten file sumber (async) — dipakai sekali untuk ranking + ekstraksi simbol.
+// Baca konten file sumber (async, paralel terkendali) via reader yang men-cache realpath direktori.
 async function readSourceContents(
   files: string[],
   cwd: string,
 ): Promise<{ path: string; content: string }[]> {
+  const reader = createSafeScanReader(cwd)
   const out: { path: string; content: string }[] = []
-  for (const f of files) {
-    try {
-      const abs = resolve(cwd, f)
-      const loaded = await safeReadFileCapped(abs, cwd, MAX_FILE_BYTES)
-      if (!loaded.truncated) out.push({ path: f, content: loaded.text })
-    } catch {}
+  const CONCURRENCY = 16
+  for (let i = 0; i < files.length; i += CONCURRENCY) {
+    const batch = files.slice(i, i + CONCURRENCY)
+    const results = await Promise.all(
+      batch.map(async (f) => {
+        try {
+          const abs = resolve(cwd, f)
+          const loaded = await reader.readCapped(abs, MAX_FILE_BYTES)
+          return loaded.truncated ? null : { path: f, content: loaded.text }
+        } catch {
+          return null
+        }
+      }),
+    )
+    for (const item of results) {
+      if (item) out.push(item)
+    }
   }
   return out
 }
 
-// Ekstraksi specifier import/from/require sekali per file (O(N) bukan O(N²)).
-const IMPORT_SPEC_RE = /(?:import|from|require)\s*["'`]([^"'`]*)["'`]/gi
+function sortDiscoveryCandidates(files: string[], cap: number): string[] {
+  // Urutkan berkas produksi di atas berkas test/bench agar jika batas aman tercapai, sumber utama tetap terindeks.
+  const prod: string[] = []
+  const secondary: string[] = []
+  for (const f of files) {
+    if (isTestFilePath(f)) secondary.push(f)
+    else prod.push(f)
+  }
+  return [...prod, ...secondary].slice(0, cap)
+}
 
-// Ranking sederhana ala PageRank: file yang banyak di-import file lain
-// mendapat skor lebih tinggi → tampil lebih awal di repo-map (hemat token).
-function rankByImport(files: { path: string; content: string }[]): string[] {
-  const basenameToFiles = new Map<string, { lower: string; targets: string[] }>()
-  for (const { path: f } of files) {
-    const base = f.slice(f.lastIndexOf("/") + 1).replace(/\.[^.]+$/, "")
-    if (!base) continue
-    const entry = basenameToFiles.get(base)
-    if (entry) entry.targets.push(f)
-    else basenameToFiles.set(base, { lower: base.toLowerCase(), targets: [f] })
+function isSafeTrackedEntry(cwd: string, relFile: string): boolean {
+  try {
+    const abs = resolve(cwd, relFile)
+    const lst = lstatSync(abs)
+    if (lst.isSymbolicLink() && isRealPathOutsideRoot(abs, cwd)) return false
+    return true
+  } catch {
+    return false
   }
-  const scores = new Map<string, number>()
-  for (const { path: f } of files) scores.set(f, 0)
-  for (const { path: f, content } of files) {
-    // Ekstrak seluruh string specifier SEKALI per berkas agar tidak menyusun
-    // ulang RegExp dan memindai ulang isi berkas pada setiap pasangan (O(N²)).
-    const specs: string[] = []
-    for (const match of content.matchAll(IMPORT_SPEC_RE)) {
-      if (match[1]) specs.push(match[1].toLowerCase())
-    }
-    if (specs.length === 0) continue
-    const joined = specs.join("\u0000")
-    for (const { lower, targets } of basenameToFiles.values()) {
-      if (f === targets[0] && targets.length === 1) continue // jangan hit diri sendiri bila unik
-      if (joined.includes(lower)) {
-        for (const t of targets) scores.set(t, (scores.get(t) ?? 0) + 1)
-      }
-    }
-  }
-  return [...files.map((f) => f.path)].sort((a, b) => (scores.get(b) ?? 0) - (scores.get(a) ?? 0))
 }
 
 async function walkForFiles(
@@ -310,13 +322,15 @@ async function walkForFiles(
     if (out.length >= limit) break
     if (deadline && Date.now() > deadline) return
     if (e.name.startsWith(".") || e.name === "node_modules") continue
+    const isDir = e.isDirectory()
+    if (!isDir && !isSourceFile(e.name)) continue
     const r = rel ? `${rel}/${e.name}` : e.name
     // Symlink escape (temuan audit #06): walk fallback mengikuti symlink;
     // tolak yang realpath-nya keluar workspace (simbol saja yang bocor,
     // tetapi tetap data asing tanpa provenance).
     if (isRealPathOutsideRoot(join(root, r), root)) continue
-    if (e.isDirectory()) await walkForFiles(root, r, out, limit, deadline)
-    else if (isSourceFile(e.name)) out.push(r)
+    if (isDir) await walkForFiles(root, r, out, limit, deadline)
+    else out.push(r)
   }
 }
 
@@ -366,7 +380,8 @@ async function gitListFiles(cwd: string, limit: number): Promise<string[] | null
           settled = true
           res(v)
         }
-        const child = spawn(resolveTrustedExecutable("git"), [...GIT_SAFE_BASE, "ls-files"], {
+        const args = [...GIT_SAFE_BASE, "ls-files", "--cached", "--others", "--exclude-standard"]
+        const child = spawn(resolveTrustedExecutable("git"), args, {
           cwd,
           windowsHide: true,
           stdio: ["ignore", "pipe", "ignore"],
@@ -419,12 +434,14 @@ async function gitListFiles(cwd: string, limit: number): Promise<string[] | null
         })
       })
       if (!result) return null
-      const files = String(result)
+      const allFiles = String(result)
         .split(String.fromCharCode(10))
         .map((f) => f.split(String.fromCharCode(92)).join("/"))
         .filter(Boolean)
         .filter(isSourceFile)
-        .slice(0, limit)
+      const files = sortDiscoveryCandidates(allFiles, limit).filter((f) =>
+        isSafeTrackedEntry(cwd, f),
+      )
       // git yang menjawab tapi semuanya terfilter = repon tanpa sumber git-tracked;
       // biarkan null supaya walk memutuskan.
       return files.length ? files : null
@@ -450,29 +467,41 @@ function cachePath(cwd: string): string {
   }
 }
 
-function buildRepoMapFromContents(contents: { path: string; content: string }[]): string {
-  const ranked = rankByImport(contents)
+function buildRepoMapFromGraph(
+  graph: DependencyGraph,
+  contents: { path: string; content: string }[],
+  maxOutputFiles: number,
+  lspExtras?: Map<string, string[]>,
+): string {
   const byPath = new Map(contents.map((c) => [c.path, c.content]))
   const parts: string[] = []
-  for (const f of ranked) {
+  let shown = 0
+  for (const f of graph.rankedPaths) {
+    if (shown >= maxOutputFiles) break
     const content = byPath.get(f)
     if (content == null) continue
-    const symbols = extractSymbols(content, langFor(f))
-    if (symbols.length) parts.push(`${f}:\n${symbols.map((s) => `  ${s}`).join("\n")}`)
+    let symbols = extractSymbols(content, langFor(f))
+    if (symbols.length === 0 && lspExtras?.has(f)) {
+      symbols = lspExtras.get(f)!
+    }
+    if (symbols.length > 0) {
+      parts.push(`${f}:\n${symbols.map((s) => `  ${s}`).join("\n")}`)
+      shown++
+    }
   }
   return parts.join("\n").slice(0, MAX_REPOMAP_CHARS)
 }
 
-// Bangun repo-map compact dari daftar file.
+// Bangun repo-map compact dari seluruh file yang ditemukan (diindeks penuh sebelum dipotong).
 export async function buildRepoMap(
   cwd: string = process.cwd(),
   opts: { limit?: number } = {},
 ): Promise<string> {
-  const limit = opts.limit ?? MAX_FILES
-  const files = await listSourceFiles(cwd, limit)
-  // baca sekali → dipakai untuk ranking DAN simbol (tanpa double-read)
+  const maxOutput = opts.limit ?? MAX_FILES
+  const files = await listSourceFiles(cwd, MAX_DISCOVERY_FILES)
   const contents = await readSourceContents(files, cwd)
-  return buildRepoMapFromContents(contents)
+  const graph = buildDependencyGraphFromContents(cwd, contents)
+  return buildRepoMapFromGraph(graph, contents, maxOutput)
 }
 
 // Signature ISI (audit #10 P1): hash path+konten file terpilih — BUKAN
@@ -495,14 +524,13 @@ function signatureFromContents(contents: { path: string; content: string }[]): s
   }
 }
 
-// Coba bangun repo-map via LSP workspace/symbol (lebih akurat dari regex).
-// Best-effort: timeout cepat, fallback ke regex bila LSP tak tersedia/kosong.
-async function buildRepoMapLsp(cwd: string): Promise<string | null> {
+// Pengayaan simbol LSP tambahan (best-effort & singkat <= 300ms): TIDAK menggantikan graf statis.
+async function fetchLspSymbolExtras(cwd: string): Promise<Map<string, string[]> | undefined> {
   try {
     const { getConfiguredExts, workspaceSymbols } = await import("../lsp/client.ts")
-    if (getConfiguredExts().length === 0) return null
-    const symbols = await workspaceSymbols("", 4000, cwd)
-    if (!symbols.length) return null
+    if (getConfiguredExts().length === 0) return undefined
+    const symbols = await workspaceSymbols("", 300, cwd)
+    if (!symbols.length) return undefined
     const KIND = LSP_SYMBOL_KINDS
     const byFile = new Map<string, string[]>()
     for (const s of symbols.slice(0, 200)) {
@@ -518,64 +546,121 @@ async function buildRepoMapLsp(cwd: string): Promise<string | null> {
       if (list.length < 8 && !list.includes(label)) list.push(label)
       byFile.set(file, list)
     }
-    if (byFile.size === 0) return null
-    const parts: string[] = []
-    for (const [file, syms] of byFile)
-      parts.push(`${file}:\n${syms.map((x) => `  ${x}`).join("\n")}`)
-    const map = parts.join("\n").slice(0, MAX_REPOMAP_CHARS)
-    return map || null
+    return byFile.size > 0 ? byFile : undefined
   } catch {
-    return null
+    return undefined
   }
 }
 
-// Load repo-map, pakai cache di .minicode/repomap.json bila file tak berubah.
-//
-// [Audit freeze 2026-11-16] Tambahan cache DALAM-PROSES: `signature()` membaca
-// isi 80 berkas (~99 ms) dan `git ls-files` (~31 ms) pada SETIAP panggilan,
-// termasuk saat cache disk sudah segar — karena cache disk masih harus
-// divalidasi dengan cara yang sama mahalnya. Sesi hanya butuh satu peta per
-// cwd, jadi hasil per-cwd diingat di memori proses. Invalidasi: TTL pendek
-// ditambah pembanding signature murah (jumlah berkas + mtime direktori kerja
-// tidak dipakai karena bisa palsu) — di sini cukup TTL karena peta hanya
-// memperkaya prompt; sesi panjang yang ingin peta segar memanggil `/context`
-// atau memulai sesi baru.
 const repomapMemo = new Map<string, { map: string; at: number; stamp: string; files: string[] }>()
+const depGraphMemo = new Map<
+  string,
+  {
+    graph: DependencyGraph
+    contentsByPath: Map<string, string>
+    stamp: string
+    files: string[]
+  }
+>()
+
+/** Hapus cache memo per cwd (dipakai setelah move_file / delete_file). */
+export function invalidateRepoGraphCache(cwd?: string): void {
+  if (!cwd) {
+    repomapMemo.clear()
+    depGraphMemo.clear()
+    return
+  }
+  const key = resolve(cwd)
+  repomapMemo.delete(key)
+  depGraphMemo.delete(key)
+}
 
 /**
- * Sidik "murah" untuk mendeteksi perubahan isi repo tanpa membaca 80 berkas.
- *
- * Kenapa bukan TTL saja: TTL akan menyajikan peta BOHONG selama satu menit
- * setelah berkas berubah — regresi nyata yang tertangkap
- * `test/supply-chain.test.ts` ("repomap basi dibangun ulang saat berkas
- * berubah"). Staleness harus tetap menang atas kecepatan.
- *
- * Yang dipakai: (jumlah entry, mtime maksimum) dari direktori kerja. Jauh lebih
- * murah daripada `signature()` (baca isi 80 berkas ≈ 99 ms) dan cukup untuk
- * kasus nyata (menambah/menyunting berkas mengubah mtime direktori). Bila
- * sidik ini cocok, peta lama masih dianggap berlaku; bila tidak, jalur normal
- * (signature + cache disk) yang memutuskan.
+ * Sidik "murah" terstratifikasi: mengecek cwd, `.git/index`, dan hingga 24 berkas
+ * yang diambil merata lintas daftar file (bukan hanya 16 file alfabetis pertama),
+ * sehingga edit pada `src/` atau `cli/` tetap membatalkan cache instan (< 20 ms saat bersih).
  */
 function quickStamp(cwd: string, files: string[]): string {
-  // (mtime direktori kerja, mtime+size berkas teratas). Menyunting ISI berkas
-  // tidak mengubah mtime direktori, jadi mtime berkas ikut disertakan — inilah
-  // yang menjaga `test/supply-chain.test.ts` tetap hijau. Batasnya 16 berkas
-  // teratas: cukup untuk mendeteksi suntingan pada berkas yang masuk peta.
   const parts: string[] = []
   try {
-    parts.push(String(statSync(cwd).mtimeMs))
+    const rootSt = statSync(cwd)
+    parts.push(`${rootSt.mtimeMs}:${files.length}`)
   } catch {
     return ""
   }
-  for (const f of files.slice(0, 16)) {
+  try {
+    const gitIdx = statSync(resolve(cwd, ".git", "index"))
+    parts.push(`g:${gitIdx.mtimeMs}:${gitIdx.size}`)
+  } catch {}
+  const sampleCount = Math.min(24, files.length)
+  for (let i = 0; i < sampleCount; i++) {
+    const idx = sampleCount === files.length ? i : Math.floor((i * files.length) / sampleCount)
+    const f = files[idx]!
     try {
       const st = statSync(resolve(cwd, f))
-      parts.push(`${st.mtimeMs}:${st.size}`)
+      parts.push(`${idx}:${st.mtimeMs}:${st.ctimeMs}:${st.size}`)
     } catch {
-      parts.push("-")
+      parts.push(`${idx}:-`)
     }
   }
   return parts.join("|")
+}
+
+export async function loadDependencyGraph(cwd: string = process.cwd()): Promise<{
+  graph: DependencyGraph
+  contentsByPath: Map<string, string>
+}> {
+  const memoKey = resolve(cwd)
+  const remembered = depGraphMemo.get(memoKey)
+  const rememberedStamp = remembered ? quickStamp(cwd, remembered.files) : ""
+  if (remembered && rememberedStamp && remembered.stamp === rememberedStamp) {
+    return { graph: remembered.graph, contentsByPath: remembered.contentsByPath }
+  }
+  const files = await listSourceFiles(cwd, MAX_DISCOVERY_FILES)
+  const contents = files.length > 0 ? await readSourceContents(files, cwd) : []
+  const graph = buildDependencyGraphFromContents(cwd, contents)
+  const contentsByPath = new Map(contents.map((c) => [c.path, c.content]))
+  const stamp = quickStamp(cwd, files)
+  depGraphMemo.set(memoKey, { graph, contentsByPath, stamp, files })
+  return { graph, contentsByPath }
+}
+
+/** Format ringkasan arsitektur kompak berbasis kluster + hub untuk system prompt. */
+export async function loadCompactRepoMap(
+  cwd: string = process.cwd(),
+  maxChars: number = MAX_REPOMAP_CHARS,
+): Promise<string> {
+  const { graph, contentsByPath } = await loadDependencyGraph(cwd)
+  return formatCompactGraphForPrompt(graph, extractSymbols, contentsByPath, maxChars)
+}
+
+/**
+ * Cek cepat importer yang menunjuk ke berkas target sebelum move/delete (best-effort &
+ * non-blocking <= 150 ms bila belum ter-cache) agar tool mutasi berkas memberi
+ * peringatan impor patah.
+ */
+export async function lookupDependentImporters(
+  cwd: string,
+  absTarget: string,
+  budgetMs = 150,
+): Promise<string[]> {
+  try {
+    const memoKey = resolve(cwd)
+    const targetRel = normalizeRepoPath(relative(memoKey, absTarget))
+    if (!targetRel || targetRel.startsWith("..")) return []
+    const remembered = depGraphMemo.get(memoKey)
+    if (remembered) {
+      return (remembered.graph.nodes.get(targetRel)?.importedBy ?? []).map((e) => e.from)
+    }
+    const loaded = await Promise.race([
+      loadDependencyGraph(cwd),
+      new Promise<null>((r) => setTimeout(() => r(null), budgetMs)),
+    ])
+    if (!loaded) return []
+    return (loaded.graph.nodes.get(targetRel)?.importedBy ?? []).map((e) => e.from)
+  } catch {
+    return []
+  }
 }
 
 export async function loadRepoMap(cwd: string = process.cwd()): Promise<string> {
@@ -584,21 +669,15 @@ export async function loadRepoMap(cwd: string = process.cwd()): Promise<string> 
     const memoKey = resolve(cwd)
     // Env MINICODE_REPOMAP=regex → skip LSP (paksa regex, lebih cepat)
     const forceRegex = process.env.MINICODE_REPOMAP === "regex"
-    // Sidik murah dihitung SEBELUM `git ls-files` (yang justru bagian mahalnya),
-    // dengan berkas yang diingat dari panggilan sebelumnya. Bila cocok, tak ada
-    // git/disk yang disentuh sama sekali.
     const remembered = repomapMemo.get(memoKey)
     const stamp = quickStamp(cwd, remembered?.files ?? [])
     if (remembered && stamp && remembered.stamp === stamp) return remembered.map
-    const files = await listSourceFiles(cwd, MAX_FILES)
+    const files = await listSourceFiles(cwd, MAX_DISCOVERY_FILES)
     if (files.length === 0) return ""
     const freshStamp = quickStamp(cwd, files)
-    // Baca 80 berkas pertama SEKALI: dipakai untuk signature DAN (bila cache miss)
-    // dipakai ulang membangun repo-map tanpa `git ls-files` atau read ulang.
-    const headContents = await readSourceContents(files.slice(0, 80), cwd)
-    const sig = signatureFromContents(headContents)
+    const contents = await readSourceContents(files, cwd)
+    const sig = signatureFromContents(contents)
     const cp = cachePath(cwd)
-    // Cache hit → langsung pakai (tanpa LSP, cepat)
     try {
       const cached = JSON.parse(readFileSync(cp, "utf8")) as {
         sig?: string
@@ -615,23 +694,18 @@ export async function loadRepoMap(cwd: string = process.cwd()): Promise<string> 
         return cached.map
       }
     } catch {}
-    // Cache miss → coba LSP dulu (best-effort), fallback ke regex
-    if (!forceRegex) {
-      const lspMap = await buildRepoMapLsp(cwd)
-      if (lspMap) {
-        try {
-          mkdirSync(join(homeDir(), ".minicode"), { recursive: true })
-          writeFileSync(cp, JSON.stringify({ sig, map: lspMap, lsp: true }))
-        } catch {}
-        repomapMemo.set(memoKey, { map: lspMap, at: Date.now(), stamp: freshStamp || stamp, files })
-        return lspMap
-      }
-    }
-    const tailContents = files.length > 80 ? await readSourceContents(files.slice(80), cwd) : []
-    const map = buildRepoMapFromContents([...headContents, ...tailContents])
+    const graph = buildDependencyGraphFromContents(cwd, contents)
+    depGraphMemo.set(memoKey, {
+      graph,
+      contentsByPath: new Map(contents.map((c) => [c.path, c.content])),
+      stamp: freshStamp || stamp,
+      files,
+    })
+    const lspExtras = !forceRegex ? await fetchLspSymbolExtras(cwd) : undefined
+    const map = buildRepoMapFromGraph(graph, contents, MAX_FILES, lspExtras)
     try {
       mkdirSync(join(homeDir(), ".minicode"), { recursive: true })
-      writeFileSync(cp, JSON.stringify({ sig, map, lsp: false }))
+      writeFileSync(cp, JSON.stringify({ sig, map, lsp: Boolean(lspExtras) }))
     } catch {}
     repomapMemo.set(memoKey, { map, at: Date.now(), stamp: freshStamp || stamp, files })
     return map

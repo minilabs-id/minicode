@@ -39,8 +39,8 @@ test("docs/tools.md mendaftarkan ke-41 tool bawaan (satu baris tabel = satu tool
     const firstCell = row.slice(1).split("|")[0] ?? ""
     for (const m of firstCell.matchAll(/`([a-z][a-z0-9_]*)`/g)) names.add(m[1]!)
   }
-  // 41 = jumlah `allTools` di src/tools/index.ts (v7.38+: 3 tool baru).
-  expect(names.size).toBe(41)
+  // 42 = jumlah `allTools` di src/tools/index.ts (v7.38+: 3 tool baru, +dep_graph).
+  expect(names.size).toBe(42)
 })
 
 test("docs/tools.md memuat git_restore/git_checkout/lsp_rename dan wire `path`", () => {

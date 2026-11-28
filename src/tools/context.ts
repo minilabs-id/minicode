@@ -122,6 +122,7 @@ export async function walkWorkspaceFiles(
     relaxed?: boolean
     includeDotfiles?: boolean
     shouldStop?: () => boolean
+    preFilter?: (info: { rel: string; name: string }) => boolean
   },
   onFile: (info: { full: string; rel: string; name: string; real: string }) => Promise<void> | void,
 ): Promise<void> {
@@ -138,6 +139,7 @@ export async function walkWorkspaceFiles(
     if (e.isDirectory()) {
       await walkWorkspaceFiles({ ...opts, dir: full }, onFile)
     } else {
+      if (opts.preFilter && !opts.preFilter({ rel, name: e.name })) continue
       const real = await realpath(full).catch(() => full)
       if (
         (!opts.relaxed && isPathOutsideRoot(real, resolve(opts.root))) ||

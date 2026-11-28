@@ -49,8 +49,11 @@ Semantik server mode: tiap `tools/call` lewat validateArgs kernel → permission
 minicode config lsp add .ts --command typescript-language-server --args --stdio
 ```
 
-Setelah terdaftar: `lsp_diagnostics`, `lsp_definition`, `lsp_references`, `lsp_hover`, `lsp_symbols`, `lsp_workspace_symbols`, `lsp_rename` (tujuh tool). Diagnostics otomatis di `edit`/`write_file` bila server terkonfigurasi. `didClose` cleanup. Semua tool LSP memakai argumen `path` (v7.38 — dulu `file`).
+Setelah terdaftar: `lsp_diagnostics`, `lsp_definition`, `lsp_references`, `lsp_hover`, `lsp_symbols` (mendukung outline hierarkis `DocumentSymbol` maupun `SymbolInformation`), `lsp_workspace_symbols`, `lsp_rename` (tujuh tool). Diagnostics otomatis di `edit`/`write_file` bila server terkonfigurasi. Semua tool LSP memakai argumen `path` (v7.38 — dulu `file`).
+
+- **Isolasi monorepo & akurasi cache:** instance LSP dipisahkan per `(ext, projectRoot)` dengan deteksi root terdekat (`package.json`, `tsconfig.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, dll.); `childId` memakai `"lsp:" + ext` di root utama dan `"lsp:" + ext + ":" + hash` pada sub-root. Pengiriman `didChange` menghapus diagnostik basi pada isi baru, query baca memakai `waitDiagsMs = 0`, dan bila server untuk ekstensi target tak tersedia seluruh tool posisi/file gagal fail-closed secara simetris.
+- **Lifecycle & wire hiding:** `move_file` dan `delete_file` memicu `didClose` cleanup otomatis (serta mencatat peringatan `[dep-graph] warning:` bila masih diimpor modul lain). Saat tidak ada server LSP terkonfigurasi, ketujuh tool LSP disembunyikan otomatis dari schema wire model (`hiddenWireTools`) pada sesi utama, sub-agent `delegate_task`, scheduler otonom, dan `minicode mcp serve` (kecuali `--all-tools`).
 
 `lsp_rename` (v7.38) adalah **satu-satunya tool LSP yang menulis** workspace (WorkspaceEdit lewat `atomicWriteText`), jadi **di-gate** seperti git-write (TTY minta sekali, non-TTY/permission ketat tolak). Argumennya: `path` + `symbol` (atau `line`/`character` 0-based) + `newName`. Fail-closed bila tak ada server terkonfigurasi, server tak mengembalikan WorkspaceEdit / edit kosong, `newName` kosong/terlalu panjang/berkarakter terlarang, terlalu banyak edit, edit saling overlap, atau target menyasar owned-state / di luar jail.
 
-Bila LSP tidak jalan: pastikan server terinstall dan command benar. Repo-map regex tetap jalan sebagai fallback (`MINICODE_REPOMAP=regex`).
+Bila LSP tidak jalan: pastikan server terinstall dan command benar (jalankan `minicode doctor` untuk cek kesiapan `lsp`). Tanpa LSP aktif, pemetaan dependensi statis tetap berjalan lewat tool `dep_graph` (`src/repo/dep-graph.ts`), dan repo-map regex tetap tersedia sebagai fallback (`MINICODE_REPOMAP=regex`).

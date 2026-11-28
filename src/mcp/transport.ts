@@ -21,10 +21,21 @@ export class McpTransport {
       resolve: (v: unknown) => void
       reject: (e: Error) => void
       timer: ReturnType<typeof setTimeout>
+      /** Reset deadline saat server mengirim notifications/progress. */
+      resetTimer?: () => void
       /** Lepas listener abort saat request settle (RL-5 — anti bocor). */
       unsubscribe?: () => void
     }
   >()
+  private progressListeners = new Set<(params: unknown) => void>()
+
+  /** Subscribe notifikasi progres MCP (untuk menjaga watchdog liveness turn/sub-agent tetap hidup). */
+  onProgress(listener: (params: unknown) => void): () => void {
+    this.progressListeners.add(listener)
+    return () => {
+      this.progressListeners.delete(listener)
+    }
+  }
   private seq = 0
   private closed = false
   // abort HANYA saat close() — bukan timeout, agar server tidak mati sendiri
@@ -98,23 +109,41 @@ export class McpTransport {
     const id = ++this.seq
     this.write({ jsonrpc: "2.0", id, method, params })
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id)
-        unsubscribe()
-        reject(new Error(`MCP request ${method} timed out after ${timeoutMs}ms`))
-      }, timeoutMs)
+      const startedMono = performance.now()
+      const maxActiveMs = Math.max(timeoutMs * 10, timeoutMs)
+      const entry = {
+        resolve,
+        reject,
+        timer: undefined as unknown as ReturnType<typeof setTimeout>,
+        resetTimer: undefined as (() => void) | undefined,
+        unsubscribe: undefined as (() => void) | undefined,
+      }
+      const armTimer = () => {
+        clearTimeout(entry.timer)
+        const elapsed = Math.max(0, performance.now() - startedMono)
+        const remaining = Math.max(1, maxActiveMs - Math.floor(elapsed))
+        const stepMs = Math.min(timeoutMs, remaining)
+        entry.timer = setTimeout(() => {
+          this.pending.delete(id)
+          entry.unsubscribe?.()
+          reject(new Error(`MCP request ${method} timed out after ${timeoutMs}ms`))
+        }, stepMs)
+        entry.timer.unref?.()
+      }
+      entry.resetTimer = armTimer
       const onAbort = () => {
         if (!this.pending.has(id)) return
         this.pending.delete(id)
-        clearTimeout(timer)
+        clearTimeout(entry.timer)
         const reason = signal?.reason
         reject(reason instanceof Error ? reason : new Error(`MCP request ${method} aborted`))
       }
       // [RL-5] Simpan pembersih listener agar request yang settle normal
       // (respon masuk / timeout) melepas `onAbort` dari signal — anti bocor.
-      const unsubscribe = () => signal?.removeEventListener("abort", onAbort)
+      entry.unsubscribe = () => signal?.removeEventListener("abort", onAbort)
       signal?.addEventListener("abort", onAbort, { once: true })
-      this.pending.set(id, { resolve, reject, timer, unsubscribe })
+      armTimer()
+      this.pending.set(id, entry)
     })
   }
 
@@ -251,6 +280,15 @@ export class McpTransport {
         this.pending.delete(msg.id)
         if (msg.error) p.reject(new Error(msg.error.message || "MCP server returned an error"))
         else p.resolve(msg.result)
+      } else if (msg.method === "notifications/progress") {
+        // Server masih melaporkan progres: perpanjang timeout request terkait (atau
+        // semua request aktif bila progressToken tidak menunjuk id spesifik).
+        for (const p of this.pending.values()) p.resetTimer?.()
+        for (const listener of [...this.progressListeners]) {
+          try {
+            listener(msg.params)
+          } catch {}
+        }
       }
     } catch {
       process.stderr.write("[mcp] ignoring invalid JSON from server\n")

@@ -312,16 +312,13 @@ interface HostRecord {
   exitCode: number | null
   error: string | null
   killInitiatedByUs: boolean
-  waiters: Set<(r: BackendWaitResult) => void>
-  timer: ReturnType<typeof setTimeout> | null
+  /** Setiap waiter memegang timer-nya sendiri agar timeout berbeda tak saling menimpa. */
+  waiters: Map<(r: BackendWaitResult) => void, ReturnType<typeof setTimeout>>
 }
 
 function settleHostRecord(rec: HostRecord, result: BackendWaitResult): void {
-  if (rec.timer) {
-    clearTimeout(rec.timer)
-    rec.timer = null
-  }
-  for (const w of [...rec.waiters]) {
+  for (const [w, timer] of [...rec.waiters.entries()]) {
+    clearTimeout(timer)
     rec.waiters.delete(w)
     try {
       w(result)
@@ -391,8 +388,7 @@ export function createHostBackend(): ExecutionBackend {
           exitCode: null,
           error: null,
           killInitiatedByUs: false,
-          waiters: new Set(),
-          timer: null,
+          waiters: new Map(),
         }
         proc.on("error", (e) => {
           rec.error = e.message
@@ -480,15 +476,13 @@ export function createHostBackend(): ExecutionBackend {
       return new Promise((resolveWait) => {
         const onTimeout = (): void => {
           rec.waiters.delete(resolveWait)
-          rec.timer = null
           // Timeout = berhenti menunggu (A). Proses mungkin hidup — tak diklaim mati.
           resolveWait({ status: "timeout" })
         }
-        rec.waiters.add(resolveWait)
-        // [RL-6] bersihkan timer tunggu sebelumnya agar tak bocor saat wait()
-        // dipanggil ulang pada record yang sama.
-        if (rec.timer) clearTimeout(rec.timer)
-        rec.timer = setTimeout(onTimeout, timeoutMs)
+        // Simpan timer per-waiter supaya dua pemanggil konkuren dengan timeout
+        // berbeda (mis. 50 ms vs 5000 ms) tidak saling membatalkan batas waktunya.
+        const timer = setTimeout(onTimeout, timeoutMs)
+        rec.waiters.set(resolveWait, timer)
       })
     },
 

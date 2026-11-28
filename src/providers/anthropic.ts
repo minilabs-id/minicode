@@ -3,18 +3,22 @@ import { ProviderError } from "#minicore/core/errors.ts"
 import type { ModelProvider, ProviderEvent, StreamRequest } from "#minicore/core/provider.ts"
 import type { ToolSchema } from "#minicore/core/tool.ts"
 import type { Content, Message } from "#minicore/core/types.ts"
-import { LIMITS } from "../constants.ts"
 import { thinkingFamily } from "./effort.ts"
 import {
   appendToolArgument,
   boundedSseBody,
   parseProviderToolArguments,
+  parseRetryAfterMs,
   readProviderErrorBody,
 } from "./sse-bounds.ts"
 
 export interface AnthropicConfig {
   id?: string
   apiKey: string
+  /** Optional dynamic token resolver untuk sesi OAuth jangka panjang. */
+  getApiKey?: () => Promise<string | undefined>
+  /** Optional paksa refresh token saat server mengembalikan HTTP 401. */
+  refreshApiKey?: () => Promise<string | undefined>
   baseUrl?: string // default https://api.anthropic.com
   models: readonly string[]
   defaultModel?: string
@@ -42,6 +46,7 @@ interface AnthropicRaw {
     text?: string
     partial_json?: string
     thinking?: string
+    signature?: string
     stop_reason?: string
   }
   usage?: {
@@ -59,7 +64,15 @@ interface AnthropicRaw {
     }
   }
   index?: number
-  content_block?: { type?: string; id?: string; name?: string }
+  content_block?: {
+    type?: string
+    id?: string
+    name?: string
+    thinking?: string
+    signature?: string
+    data?: string
+  }
+  error?: { type?: string; message?: string }
 }
 
 export function createAnthropicProvider(config: AnthropicConfig): ModelProvider {
@@ -80,7 +93,7 @@ export function createAnthropicProvider(config: AnthropicConfig): ModelProvider 
     kind: "anthropic",
     async *stream(request: StreamRequest, signal: AbortSignal): AsyncIterable<ProviderEvent> {
       // System prompt with optional ephemeral cache control for 90% cost savings on long runs
-      const systemPayload = request.system
+      const systemPayload = request.system?.trim()
         ? enableCache
           ? [{ type: "text", text: request.system, cache_control: { type: "ephemeral" } }]
           : request.system
@@ -121,7 +134,7 @@ export function createAnthropicProvider(config: AnthropicConfig): ModelProvider 
             unknown
           >
           lastBlock.cache_control = { type: "ephemeral" }
-        } else if (typeof lastStable.content === "string") {
+        } else if (typeof lastStable.content === "string" && lastStable.content.length > 0) {
           lastStable.content = [
             { type: "text", text: lastStable.content, cache_control: { type: "ephemeral" } },
           ]
@@ -144,23 +157,46 @@ export function createAnthropicProvider(config: AnthropicConfig): ModelProvider 
 
       // Beta thinking hanya untuk mode legacy (adaptive tak butuh header).
       const betaThinking = legacyBudget ? ", thinking-2024-12-16" : ""
-      const headers: Record<string, string> = {
+      const resolveKey = async (forceRefresh = false): Promise<string> => {
+        if (forceRefresh && config.refreshApiKey) {
+          const fresh = await config.refreshApiKey().catch(() => undefined)
+          if (fresh) return fresh
+        }
+        if (config.getApiKey) {
+          const dynamic = await config.getApiKey().catch(() => undefined)
+          if (dynamic) return dynamic
+        }
+        return config.apiKey
+      }
+      const makeHeaders = (key: string): Record<string, string> => ({
         "content-type": "application/json",
-        "x-api-key": config.apiKey,
+        "x-api-key": key,
         "anthropic-version": "2023-06-01",
         "anthropic-beta": `prompt-caching-2024-07-31${betaThinking}`,
         accept: "text/event-stream",
-      }
+      })
 
       let response: Response
       try {
+        const key = await resolveKey(false)
         response = await fetch(endpoint, {
           method: "POST",
-          headers,
+          headers: makeHeaders(key),
           body,
           signal,
           redirect: "manual",
         })
+        if (response.status === 401 && config.refreshApiKey) {
+          await response.body?.cancel().catch(() => {})
+          const freshKey = await resolveKey(true)
+          response = await fetch(endpoint, {
+            method: "POST",
+            headers: makeHeaders(freshKey),
+            body,
+            signal,
+            redirect: "manual",
+          })
+        }
       } catch (e) {
         if (e instanceof Error && e.name === "AbortError") throw e
         throw new ProviderError("network", e instanceof Error ? e.message : String(e))
@@ -175,6 +211,11 @@ export function createAnthropicProvider(config: AnthropicConfig): ModelProvider 
       const pendingTools = new Map<
         number,
         { id: string; name: string; args: string; argsBytes: number }
+      >()
+      const pendingThinking = new Map<
+        number,
+        | { type: "thinking"; thinking: string; signature: string }
+        | { type: "redacted_thinking"; data: string }
       >()
       let pendingToolArgBytes = 0
       // Pertahankan input/cache tokens dari message_start agar message_delta
@@ -248,26 +289,51 @@ export function createAnthropicProvider(config: AnthropicConfig): ModelProvider 
               },
             }
           }
+        } else if (evType === "error") {
+          const err = raw.error
+          const msg = String(err?.message ?? raw.type ?? "Anthropic stream error")
+          const etype = String(err?.type ?? "")
+          const cat = /auth|permission/i.test(etype)
+            ? "auth"
+            : /rate_limit/i.test(etype)
+              ? "rate_limit"
+              : /overloaded|api_error|server/i.test(etype)
+                ? "server"
+                : "unknown"
+          throw new ProviderError(cat, `${cat === "server" ? "server error" : cat}: ${msg}`)
         }
-        // content_block_start for tool_use
+        // content_block_start for tool_use & thinking/redacted_thinking
         if (evType === "content_block_start") {
           const block = raw.content_block
+          const idx = raw.index ?? 0
           if (block?.type === "tool_use") {
             // [ST-5] Non-null guard: blok malformed tanpa id/name dikunci, bukan
             // dipaksa `block.id!`/`block.name!` yang bisa menyimpan undefined.
             if (typeof block.id !== "string" || typeof block.name !== "string") continue
-            pendingTools.set(raw.index ?? 0, {
+            pendingTools.set(idx, {
               id: block.id,
               name: block.name,
               args: "",
               argsBytes: 0,
             })
+          } else if (block?.type === "thinking") {
+            pendingThinking.set(idx, {
+              type: "thinking",
+              thinking: typeof block.thinking === "string" ? block.thinking : "",
+              signature: typeof block.signature === "string" ? block.signature : "",
+            })
+          } else if (
+            block?.type === "redacted_thinking" &&
+            typeof block.data === "string" &&
+            block.data.length > 0
+          ) {
+            pendingThinking.set(idx, { type: "redacted_thinking", data: block.data })
           }
         }
         if (evType === "content_block_delta") {
           const d = raw.delta
+          const idx = raw.index ?? 0
           if (d?.type === "input_json_delta") {
-            const idx = raw.index ?? 0
             const p = pendingTools.get(idx)
             if (p) {
               const next = appendToolArgument(
@@ -283,11 +349,29 @@ export function createAnthropicProvider(config: AnthropicConfig): ModelProvider 
             }
           }
           if (d?.type === "thinking_delta" && typeof d.thinking === "string") {
+            const tb = pendingThinking.get(idx)
+            if (tb?.type === "thinking") tb.thinking += d.thinking
             yield { type: "extension", kind: "reasoning", data: { text: d.thinking } }
+          }
+          if (d?.type === "signature_delta" && typeof d.signature === "string") {
+            const tb = pendingThinking.get(idx)
+            if (tb?.type === "thinking") tb.signature += d.signature
           }
         }
         if (evType === "content_block_stop") {
           const idx = raw.index ?? 0
+          const tb = pendingThinking.get(idx)
+          if (tb) {
+            pendingThinking.delete(idx)
+            // Hanya teruskan blok thinking yang membawa signature utuh atau redacted_thinking;
+            // blok thinking tanpa signature akan ditolak HTTP 400 saat re-play.
+            if (
+              (tb.type === "thinking" && tb.signature.length > 0) ||
+              (tb.type === "redacted_thinking" && tb.data.length > 0)
+            ) {
+              yield { type: "extension", kind: "reasoning_blocks", data: { block: tb } }
+            }
+          }
           const p = pendingTools.get(idx)
           if (p) {
             const args = parseProviderToolArguments(p.args, "Anthropic")
@@ -333,8 +417,8 @@ export function toAnthropicMessages(messages: readonly Message[]): unknown[] {
       // satukan blok kontennya alih-alih melempar dua entri user berturut-turut.
       const toBlocks = (val: unknown): unknown[] => {
         if (Array.isArray(val)) return val
-        if (typeof val === "string") return [{ type: "text", text: val }]
-        return [{ type: "text", text: String(val) }]
+        if (typeof val === "string") return [{ type: "text", text: val || " " }]
+        return [{ type: "text", text: String(val) || " " }]
       }
       last.content = [...toBlocks(last.content), ...toBlocks(content)]
     } else {
@@ -356,6 +440,25 @@ export function toAnthropicMessages(messages: readonly Message[]): unknown[] {
     } else if (m.role === "assistant") {
       flushToolGroup()
       const content: unknown[] = []
+      const blocks = (m as { reasoningBlocks?: readonly Record<string, unknown>[] }).reasoningBlocks
+      if (Array.isArray(blocks)) {
+        for (const b of blocks) {
+          if (
+            b?.type === "thinking" &&
+            typeof b.thinking === "string" &&
+            typeof b.signature === "string" &&
+            b.signature.length > 0
+          ) {
+            content.push({ type: "thinking", thinking: b.thinking, signature: b.signature })
+          } else if (
+            b?.type === "redacted_thinking" &&
+            typeof b.data === "string" &&
+            b.data.length > 0
+          ) {
+            content.push({ type: "redacted_thinking", data: b.data })
+          }
+        }
+      }
       if (typeof m.content === "string" && m.content)
         content.push({ type: "text", text: m.content })
       else if (Array.isArray(m.content))
@@ -402,12 +505,12 @@ export function toAnthropicMessages(messages: readonly Message[]): unknown[] {
 }
 
 function toContent(content: Content): unknown {
-  if (typeof content === "string") return content
+  if (typeof content === "string") return content || " "
   return (
     content as readonly { type: string; text?: string; data?: Uint8Array; mime?: string }[]
   ).map((p) =>
     p.type === "text"
-      ? { type: "text", text: p.text }
+      ? { type: "text", text: p.text || " " }
       : {
           type: "image",
           source: {
@@ -436,13 +539,11 @@ export function toAnthropicTools(
 
 function toAnthropicError(status: number, body: string, headers: Headers): ProviderError {
   const detail = body.slice(0, 500)
-  const retryAfter = headers.get("retry-after")
   if (status === 429) {
-    const ms = retryAfter ? Number(retryAfter) * 1000 : undefined
     return new ProviderError(
       "rate_limit",
       `rate limited (${status}): ${detail}`,
-      Number.isFinite(ms) ? Math.min(ms!, LIMITS.RETRY_AFTER_MAX_MS) : undefined,
+      parseRetryAfterMs(headers.get("retry-after")),
     )
   }
   if (status === 401 || status === 403)

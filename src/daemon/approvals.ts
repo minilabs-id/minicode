@@ -392,13 +392,13 @@ function approvalSummary(
   diffPreview: string | undefined,
   args: unknown,
 ): string {
-  const body = diffPreview?.trim() || scrubSecrets(summarizeArgs(args)).trim()
+  const body = diffPreview?.trim() || summarizeArgs(args).trim()
   const tier = riskTier?.trim() ? riskTier.trim() : ""
   if (!tier) return body
   return body ? `[${tier}] ${body}` : `[${tier}]`
 }
 
-/** Ringkasan args untuk ditampilkan konsumen — dipangkas, dibasuh, dibatasi. */
+/** Ringkasan args untuk ditampilkan konsumen — scrub rahasia dulu sebelum dipangkas. */
 function summarizeArgs(args: unknown): string {
   if (args === undefined || args === null) return ""
   let text: string
@@ -407,5 +407,5 @@ function summarizeArgs(args: unknown): string {
   } catch {
     return ""
   }
-  return sanitizeLabel(text, 300)
+  return sanitizeLabel(scrubSecrets(text), 300)
 }

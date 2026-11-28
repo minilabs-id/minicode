@@ -54,7 +54,7 @@ Subcommands are routed in `cli/router.ts` (`stats`, `sessions`, `mcp`, `config`,
 | `--timeout <ms>` | Hard deadline per prompt (default 3600000 = 1 hour; `0` = Infinity; the `exec` path stays at 15 minutes). An idle session does not consume the next prompt's deadline. |
 | `--cwd <path>` | Workspace root for file tools and the jail |
 | `--allow-local-config` | Trust `.minicode/config.json` + the local allowlist (default: ignored) |
-| `--max-steps <n>` | Tool step limit (default 200; 50 is the sub-agent cap, not the global default) |
+| `--max-steps <n>` | Tool step limit (default 200; 600 is the sub-agent hard-cap, not the global default) |
 | `--context-window <n>` | Context window size (tokens) |
 | `--session <id>` | Session ID (random by default, sanitised) |
 | `--work-mode <m>` | `DISCUSS` \| `BUILD` (default: `DISCUSS`; alias `--mode <m>`). **Work Mode**: `DISCUSS` = read-only investigation & planning, `BUILD` = implementation. Approval is only `AUTO`/`ASK` (default `AUTO`). See [TUI](repl.md) for `/mode` |
@@ -81,7 +81,7 @@ Since v0.34 the right sidebar is gone: the chat is a centred middle column (at m
 | Understand a repo without changes | Default (`DISCUSS` + `AUTO`) — local read-only investigation |
 | Request changes | `--work-mode BUILD` (`AUTO` default for approval) — write/execute tools still obey policy |
 | Unfamiliar repo / commands you do not understand | `--ask` (`BUILD` + `ASK`), answer `always` only for assessed tool+args pairs |
-| Review/analysis without execution | `--work-mode PLAN` (or `--work-mode DISCUSS` for pure read-only investigation) |
+| Review/analysis without execution | `--work-mode DISCUSS` (read-only investigation & planning) |
 | CI without a human | `exec --json` + `--budget`/`--max-steps`; `AUTO` denies `ask_user` deterministically |
 | Full autonomy on your own machine | `--work-mode BUILD` + `AUTO`; extra isolation via `--sandbox docker` (or OS) + `--budget` |
 | Runaway expensive model | `--budget 0.50` + `--budget-strict` + `pricing sync` |
@@ -100,9 +100,10 @@ The full table is in [Environment Variables](environment.md); the most used:
 | `MINICODE_SANDBOX_ALLOW_FALLBACK=1` | Explicitly allow host fallback when the backend is unavailable |
 | `MINICODE_BUDGET_STRICT=1` | Same as `--budget-strict` |
 | `MINICODE_ALLOW_LOCAL_CONFIG=1` | Same as `--allow-local-config` |
-| `MINICODE_WORK_MODE` | `DISCUSS` / `PLAN` / `BUILD` — default WorkMode; precedence in [Environment Variables](environment.md) |
+| `MINICODE_WORK_MODE` | `DISCUSS` / `BUILD` — default WorkMode (legacy `PLAN` -> `DISCUSS`); precedence in [Environment Variables](environment.md) |
 | `MINICODE_TOOL_SCOPE=explore` | Read-only subset |
-| `MINICODE_SUB_AGENT_POOL_SIZE` | Parallel sub-agent execution slots (1..16, default 3); raise for fan-out of 5+ agents |
+| `MINICODE_SUB_AGENT_POOL_SIZE` | Parallel sub-agent execution slots (1..16, default 5); raise for wider fan-out |
+| `MINICODE_SUB_AGENT_TIMEOUT_MS` | Sub-agent per-turn timeout (ms, default 3600000); overridden by `timeoutMs` on `delegate_task` |
 | `MINICODE_GREP_ENGINE=js` | Force the internal walker |
 | `MINICODE_MEMORY_SCOPE` | `cwd` \| `global` \| `all` |
 | `MINICODE_AUTO_MEMORY=0` | Disable auto-saving summaries/snippets |
@@ -148,7 +149,7 @@ Schema, examples, global/local scope, and all data locations are in [Config — 
 
 ## Flag injection defence
 
-`cli/args.ts` (`hasFlag`/`getArg`) stops at the first prompt word: the prompt `"review --allow-all"` does not enable a flag. `--cwd`/value flags after a subcommand name are parsed per subcommand so they cannot cross the prompt boundary.
+`cli/args.ts` (`hasFlag`/`getArg`) stops at the first prompt word: the prompt `"review --allow-all"` does not enable a flag. `--cwd`/value flags after a subcommand name are parsed per subcommand so they cannot cross the prompt boundary. Unknown flags or value flags missing their argument before a prompt (or without `--`) fail closed with exit `2` (use `--` if a prompt starts with `--`).
 
 ## Exit codes
 
@@ -156,6 +157,6 @@ Schema, examples, global/local scope, and all data locations are in [Config — 
 |---|---|
 | `0` | Success, or help that was explicitly requested |
 | `1` | Runtime failure: provider error, budget exceeded, failed turn, failed setup |
-| `2` | Misuse: missing/malformed argument, unknown nested subcommand (an unknown top-level token becomes a one-shot prompt instead) |
+| `2` | Misuse: missing/malformed argument, unknown flag before prompt, unknown nested subcommand |
 
 A failed lookup (unknown provider/skill/session) = `1`: that is an operation failure, not misuse. Scripts can check `!= 0` for failure; check `== 2` for misuse specifically.

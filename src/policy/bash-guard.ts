@@ -594,9 +594,9 @@ export function findRedirectTargets(
   return out
 }
 
-/** Null sink lintas-OS — redirect ke sini selalu aman, jangan dihitung. */
-function isNullSink(t: string): boolean {
-  return t === "/dev/null" || t.toUpperCase() === "NUL"
+/** Null sink sadar platform — `NUL` hanya null device di Windows, di POSIX ia berkas biasa. */
+function isNullSink(t: string, platform: NodeJS.Platform = process.platform): boolean {
+  return t === "/dev/null" || (platform === "win32" && t.toUpperCase() === "NUL")
 }
 
 /** Pencarian rekursif dari root filesystem. */
@@ -730,7 +730,13 @@ const STATIC_DENY: [RegExp, string][] = [
  * menutup bypass, sementara bentuk mentah menangkap pola yang justru hilang
  * saat quote dibuang (mis. `--upload-file "x"`).
  */
-export function inspectBashCommand(rawCmd: string, cwd?: string, root?: string): BashVerdict {
+export function inspectBashCommand(
+  rawCmd: string,
+  cwd?: string,
+  root?: string,
+  opts?: { platform?: NodeJS.Platform },
+): BashVerdict {
+  const targetPlatform = opts?.platform ?? process.platform
   const raw = rawCmd
   const norm = normalizeCommand(rawCmd)
   // `cwd` = direktori tempat shell me-resolve operand relatif; `root` = batas
@@ -888,7 +894,7 @@ export function inspectBashCommand(rawCmd: string, cwd?: string, root?: string):
     // dengan yang dipakai shell: kutip dibuang dulu (tokenisasi yang sudah
     // dipakai modul ini di `stripQuotes`).
     const t = stripQuotes(stripCaretEscapes(tRaw))
-    if (isNullSink(t)) continue
+    if (isNullSink(t, targetPlatform)) continue
     // Ekspansi %VAR% terjadi di cmd.exe SETELAH cek statis: `> "%TEMP%\x"`
     // terlihat di dalam cwd secara literal lalu menulis ke luar. Target dengan
     // pola %NAMA% tak bisa dipastikan aman → tolak; tulis ulang tanpa env var

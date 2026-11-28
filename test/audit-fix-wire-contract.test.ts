@@ -71,9 +71,9 @@ afterEach(() => {
 })
 
 test("setiap deskripsi tool diawali family tag", () => {
-  // 41 = semua tool registry (38 lama + git_restore/git_checkout/lsp_rename);
+  // 42 = semua tool registry (41 lama + dep_graph);
   // jangan diam-diam bertambah tanpa tag.
-  expect(allTools).toHaveLength(41)
+  expect(allTools).toHaveLength(42)
   for (const tool of allTools) {
     expect(
       FAMILY_TAGS.some((tag) => tool.description.startsWith(tag)),
@@ -158,4 +158,23 @@ test("hasil kosong grep/glob memberi langkah lanjutan", async () => {
   const noFiles = (await globTool.execute({ pattern: "**/*.xyz" }, ctx)) as string
   expect(noFiles).toContain("no files match")
   expect(noFiles).toContain("verify pattern and cwd")
+})
+
+test("todo_write & delegate_task: schema tidak memberi umpan t1 dan angka budget sinkron", () => {
+  const todo = toolNamed("todo_write")!
+  const todosSchema = propertiesOf(todo).todos as {
+    items?: { properties?: { taskId?: { description?: string } } }
+  }
+  const taskIdDesc = todosSchema.items?.properties?.taskId?.description ?? ""
+  expect(todo.description).toContain("OMIT")
+  expect(taskIdDesc).toContain("OMIT")
+  expect(taskIdDesc).not.toContain("t1")
+
+  const delegate = toolNamed("delegate_task")!
+  const scopeDesc = propertiesOf(delegate).scope?.description ?? ""
+  expect(scopeDesc).toContain("file 24")
+  expect(scopeDesc).toContain("repo 100")
+  expect(scopeDesc).not.toContain("file 16")
+
+  expect(propertiesOf(grepTool).paths).toBeDefined()
 })

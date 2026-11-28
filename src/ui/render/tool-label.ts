@@ -22,6 +22,7 @@ const TOOL_LABEL_KEYS: Readonly<Record<string, MsgKey>> = {
   bash_kill: "activity.tool.bashKill",
   grep: "activity.tool.grep",
   glob: "activity.tool.glob",
+  dep_graph: "activity.tool.depGraph",
   read_memory: "activity.tool.readMemory",
   write_memory: "activity.tool.writeMemory",
   forget_memory: "activity.tool.forgetMemory",
@@ -97,24 +98,37 @@ export interface HumanToolActivity {
 
 const DELEGATE_PREFIX_RE =
   /^(?:delegat(?:e|ing)(?:\s+task)?|delegasi(?:\s+tugas)?|sub[\s-]*agents?|agen\s+sub)\s*(?:[:·\-–—]\s*|\s+)/i
+const DELEGATE_PLACEHOLDER_RE =
+  /^(?:delegate_task|delegat(?:e|ing)(?:\s+task)?|delegasi(?:\s+tugas)?|sub[\s_-]*agents?|agen\s+sub)$/i
+const DELEGATE_RESULT_SUMMARY_RE = /^\[?sub[- ]?agent(?:\s+\([^)]+\))?\s*(?:done|error)\b/i
 
-/** Rapikan label peran delegasi agar awalan berulang ("Delegasi tugas"/"Subagent") tak memakan kolom. */
+/** Rapikan label peran delegasi agar awalan berulang & placeholder mentah ("delegate_task" /
+ *  "sub-agent (explore) done: ...") tidak tampil alih-alih peran/tugas nyata. */
 function cleanDelegateRole(raw: string): string {
   const clean = sanitizeAnsiLine(raw).replace(/\s+/g, " ").trim()
   if (!clean) return ""
+  if (DELEGATE_PLACEHOLDER_RE.test(clean) || DELEGATE_RESULT_SUMMARY_RE.test(clean)) return ""
   const stripped = clean.replace(DELEGATE_PREFIX_RE, "").trim()
-  return stripped || clean
+  if (!stripped) return clean
+  if (DELEGATE_PLACEHOLDER_RE.test(stripped) || DELEGATE_RESULT_SUMMARY_RE.test(stripped)) return ""
+  return stripped
 }
 
 /** Nama internal → label manusiawi locale OS. `delegate_task` langsung memakai
- *  label peran (intent → label → summary → target) tanpa awalan "sub agent · ". */
+ *  label peran/tugas (intent → label → summary → target) tanpa awalan berulang. */
 export function humanToolLabel(rawName: string, activity?: HumanToolActivity): string {
   const key = TOOL_LABEL_KEYS[rawName]
   const dict = systemLocale() === "id" ? id : en
   if (rawName === "delegate_task") {
-    const extra = activity?.intent ?? activity?.label ?? activity?.summary ?? activity?.target
-    const role = extra ? cleanDelegateRole(extra) : ""
-    if (role) return truncateToWidth(role, 40, "…")
+    for (const candidate of [
+      activity?.intent,
+      activity?.label,
+      activity?.summary,
+      activity?.target,
+    ]) {
+      const role = candidate ? cleanDelegateRole(candidate) : ""
+      if (role) return truncateToWidth(role, 40, "…")
+    }
   }
   const label: string = key ? (dict[key] ?? rawName) : rawName
   return truncateToWidth(sanitizeAnsiLine(label), 40, "…")
@@ -149,6 +163,7 @@ export function cleanAutoTarget(rawName: string, rawTarget?: string): string {
     rawName === "stat" ||
     rawName === "ls" ||
     rawName === "git_restore" ||
+    rawName === "dep_graph" ||
     rawName.startsWith("lsp_")
   ) {
     if (clean.length > 36 && !clean.includes(" → ")) {

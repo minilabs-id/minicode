@@ -21,8 +21,8 @@ bun -e "import {allTools} from './src/tools/index.ts'; console.log(allTools.map(
 | `write_file` | Buat/overwrite, auto-buat parent | Atomic tmp→rename + mkdir. LSP diagnostics otomatis bila server terkonfigurasi |
 | `edit` | Ganti string (harus tepat 1×) | Unique+atomic, fuzzy CRLF/spasi + hashline deterministik (`src/tools/hashline.ts`) |
 | `apply_patch` | Blok SEARCH/REPLACE multi-hunk ala Aider | Satu call banyak patch |
-| `move_file` | Pindah/rename atomik | Dest yang ada dibackup ke trash dulu (catat path). Dijail di permission layer juga |
-| `delete_file` | Soft-delete ke `.minicode/.trash/` | Undo via `move_file`. Cap 100 terbaru, gitignored. Shared helper `src/lib/trash.ts` |
+| `move_file` | Pindah/rename atomik | Dest yang ada dibackup ke trash dulu (catat path). Dijail di permission layer juga; cek pre-mutasi `[dep-graph] warning:`, `didClose` LSP, & invalidasi cache graf |
+| `delete_file` | Soft-delete ke `.minicode/.trash/` | Undo via `move_file`. Cap 100 terbaru, gitignored. Shared helper `src/lib/trash.ts`; cek pre-mutasi `[dep-graph] warning:`, `didClose` LSP, & invalidasi cache graf |
 | `read_image` | Gambar → konteks model | Base64 utuh + lapor `(bytes mime, tokens)` via `estimateImageTokens`. Pembukaan memeriksa target canonical, boundary ulang, identitas handle `dev+ino`, dan hardlink (`safeOpenRead`). Guard file-size 2 MB, tetapi batas efektif lebih ketat: b64 dibatasi anggaran truncate kernel (`toolResultMaxTokens` 4096×4−200 ≈ 16 KB) agar gambar tak terpotong korup |
 
 Contoh paging:
@@ -39,6 +39,7 @@ read_file({ path: "src/big.ts", offset: 500, limit: 50 })
 |---|---|---|
 | `glob` | Cari pola `**/*.ts` | Mendukung `{a,b}`, cwd jail |
 | `grep` | Regex lintas file | `rg --vimgrep --no-follow` bila ada di PATH, fallback walker internal. Keduanya jail + secret-scrub sama, hasil identik. `MINICODE_GREP_ENGINE=js` paksa fallback. Bila `rg` gagal (flavour regex beda), otomatis fallback + warning |
+| `dep_graph` | Peta dependensi modul, hub, impact BFS, siklus | Graf statis hibrid (TS/JS `Bun.Transpiler` + type/reexport pass + polyglot); parameter opsional `action` (`summary\|file\|impact\|cycles`), `path`, `depth`, `includeTests`, `cwd`; jail workspace |
 
 ## Exec
 
@@ -97,7 +98,7 @@ Untuk halaman yang di-render JavaScript atau butuh klik/form/verifikasi UI, ada 
 
 | Tool | Fungsi | Catatan |
 |---|---|---|
-| `delegate_task` | Sub-agen isolasi `explore`/`plan` | Pool 3 (dikonfigurasi `MINICODE_SUB_AGENT_POOL_SIZE`, 1..16), context/memory/signal/budget terpisah, abort-aware; maks 2–3 per turn. Parameter `scope` (`file`\|`dir`\|`subtree`\|`repo`) menurunkan budget 16/24/40/64 langkah (`plan` ×1,5, clamp [8,100]); tanpa `scope` fallback 5/15. Eskalasi bertahap `[8,12,20,32,50,75,100]` bila anak mentok — jangan set `maxSteps` sendiri (nilai eksplisit mematikan eskalasi). Opsi `timeoutMs` (default `MINICODE_SUB_AGENT_TIMEOUT_MS` = 300000) dan `name` (label manusiawi di transkrip) juga diterima. Di ASK, TTY meminta persetujuan dan non-TTY menolak; AUTO berjalan tanpa prompt bila authorized. Parent PermissionMode `ASK`/`plan`/`readonly` memaksa `explore`; WorkMode `DISCUSS` membatasi tool anak ke subset eksplorasi. Anak tidak mendapat commit, memory/todo writes, nesting, atau job background; tool MCP built-in (`mcp_call`/`mcp_read`/`mcp_prompt`) hanya ikut pada mode anak `plan` di bawah `BUILD`. Satu approval mencakup satu delegasi; turn gagal setelah anak committed → warning `[recovery]` |
+| `delegate_task` | Sub-agen isolasi `explore`/`plan` | Pool 5 (dikonfigurasi `MINICODE_SUB_AGENT_POOL_SIZE`, 1..16), context/memory/signal/budget terpisah, abort-aware; maks 2–3 per turn. Parameter `scope` (`file`\|`dir`\|`subtree`\|`repo`) menurunkan budget 24/40/64/100 langkah (`plan` ×1,5, clamp [24,600]); tanpa `scope` fallback 5/15. Eskalasi bertahap `[24,40,64,100,150,250,400,600]` bila anak mentok — jangan set `maxSteps` sendiri (nilai eksplisit mematikan eskalasi). Opsi `timeoutMs` (default `MINICODE_SUB_AGENT_TIMEOUT_MS` = 3600000) dan `name` (label manusiawi di transkrip) juga diterima. Di ASK, TTY meminta persetujuan dan non-TTY menolak; AUTO berjalan tanpa prompt bila authorized. Parent PermissionMode `ASK`/`plan`/`readonly` memaksa `explore`; WorkMode `DISCUSS` membatasi tool anak ke subset eksplorasi. Anak tidak mendapat commit, memory/todo writes, nesting, atau job background; tool MCP built-in (`mcp_call`/`mcp_read`/`mcp_prompt`) hanya ikut pada mode anak `plan` di bawah `BUILD`. Satu approval mencakup satu delegasi; turn gagal setelah anak committed → warning `[recovery]` |
 
 ## MCP
 
@@ -124,7 +125,7 @@ Butuh `minicode config lsp add` dulu. Setelah terdaftar:
 | `lsp_workspace_symbols` | Cari se-workspace; query kosong = populer |
 | `lsp_rename` | Rename simbol via WorkspaceEdit (SATU-SATUNYA tool LSP yang menulis) — argumen `path` + `symbol`/`line`/`character` + `newName`; **di-gate** seperti git-write. Fail-closed: tolak bila tak ada server, WorkspaceEdit tak didukung/kosong, atau edit menyasar owned-state / di luar jail; batas nama & jumlah edit ada di `LIMITS` |
 
-`didClose` cleanup otomatis.
+`didClose` cleanup otomatis (edit/move/delete), isolasi multi-root monorepo `(ext, projectRoot)`, `lsp_symbols` hierarkis (`DocumentSymbol` + fallback), serta penyembunyian wire otomatis (`hiddenWireTools`) di sesi, sub-agent, dan `mcp serve` (kecuali `--all-tools`) bila tak ada server LSP terkonfigurasi.
 
 ## Rantai pemeriksaan
 

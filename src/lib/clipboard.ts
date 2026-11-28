@@ -3,6 +3,9 @@
 // dan tidak pernah menulis ke stdout (inventaris writer tetap utuh).
 
 import { spawnSync } from "node:child_process"
+import { isAbsolute } from "node:path"
+import { sanitizeSpawnEnv } from "../policy/scrub.ts"
+import { resolveSpawnTarget } from "./trusted-exec.ts"
 
 /** Penanda non-enumerable dari test harness (`installFakeTty`) agar test tidak
  * pernah menyentuh clipboard OS asli atau memicu proses eksternal. */
@@ -50,13 +53,35 @@ export function canUseNativeClipboard(opts: NativeClipboardOptions = {}): boolea
   return true
 }
 
-function defaultSpawn(cmd: string, args: string[], input: string): { ok: boolean } {
+/** Resolusi target spawn terpercaya untuk utilitas clipboard; kembalikan null bila bukan path absolut. */
+export function prepareClipboardSpawn(
+  cmd: string,
+  args: readonly string[],
+  opts: { platform?: NodeJS.Platform; resolveExec?: (name: string) => string } = {},
+): { command: string; args: string[]; windowsVerbatimArguments?: boolean } | null {
+  const target = resolveSpawnTarget(cmd, args, opts)
+  // Anti-hijack CWD Windows CreateProcess & PATH relatif: nama telanjang yang gagal
+  // ter-resolve dari PATH terpercaya ditolak sebelum spawnSync.
+  if (!isAbsolute(target.command)) return null
+  return target
+}
+
+function defaultSpawn(
+  cmd: string,
+  args: string[],
+  input: string,
+  platform: NodeJS.Platform = process.platform,
+): { ok: boolean } {
   try {
-    const res = spawnSync(cmd, args, {
+    const target = prepareClipboardSpawn(cmd, args, { platform })
+    if (!target) return { ok: false }
+    const res = spawnSync(target.command, target.args, {
       input,
       encoding: "utf8",
       timeout: CLIPBOARD_TIMEOUT_MS,
       windowsHide: true,
+      env: sanitizeSpawnEnv(process.env),
+      ...(target.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
       stdio: ["pipe", "ignore", "ignore"],
     })
     return { ok: !res.error && res.status === 0 }
@@ -105,7 +130,9 @@ export function writeNativeClipboard(text: string, opts: NativeClipboardOptions 
   if (!opts.force && !canUseNativeClipboard(opts)) return false
   const platform = opts.platform ?? process.platform
   const env = opts.env ?? process.env
-  const run = opts.spawn ?? defaultSpawn
+  const run =
+    opts.spawn ??
+    ((cmd: string, args: string[], input: string) => defaultSpawn(cmd, args, input, platform))
   for (const candidate of nativeClipboardCommands(platform, env)) {
     try {
       if (run(candidate.cmd, candidate.args, text).ok) return true

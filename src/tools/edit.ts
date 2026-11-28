@@ -199,7 +199,7 @@ export const editTool: Tool = {
   // for small", "prefer apply_patch for multiple", "prefer edit for small"),
   // sehingga model tak punya aturan deterministik saat memilih tool.
   description:
-    "FILE EDIT: Replace an exact string with another in one file. 1 change → edit; ≥2 changes in one file → apply_patch; full rewrite/new file → write_file. Every search block must match exactly once — add surrounding lines if ambiguous. Whitespace/indentation mismatch is tolerated (fuzzy). Cannot edit outside the workspace or secrets (.env, .ssh, node_modules). Editing .minicode/ state is ALLOWED by owner decision (2026-11-23) — be careful not to overwrite sessions.db or config; .minicode/hooks/ stays blocked.",
+    "FILE EDIT: Replace text in one file. 1 change → edit; ≥2 changes in one file → apply_patch; full rewrite/new file → write_file. Every search block must match exactly once — add surrounding lines if ambiguous. Whitespace/indentation fuzzy-tolerated. Workspace-only; secrets (.env, .ssh, node_modules, .minicode/hooks/) blocked (.minicode/ state allowed except sessions.db/config).",
   parameters: {
     type: "object",
     properties: {

@@ -30,9 +30,14 @@
 // module-level configuration that another call could mutate.
 
 import { LIMITS } from "../constants.ts"
+import type { WorkMode } from "../policy/work-mode.ts"
 import type { ProductionExecutionRunner } from "../runtime/production-execution.ts"
 import type { OperationalStateSnapshot } from "../session/runtime-header.ts"
 import { buildRuntimeStateHeader } from "../session/runtime-header.ts"
+import {
+  assertModeBoundedAutonomousToolScope,
+  createModeBoundedAutonomousPermissionHandler,
+} from "./autonomous-build-policy.ts"
 import type { TaskStore } from "./store.ts"
 
 // ── identity ─────────────────────────────────────────────────────────────────
@@ -114,9 +119,10 @@ export interface AutonomousSessionSpec {
   readonly provider: unknown
   readonly tools: readonly { name: string }[]
   readonly cwd: string
-  readonly permissionMode: "readonly"
+  readonly permissionMode: "readonly" | "auto"
   readonly maxSteps: number
   readonly timeoutMs: number
+  readonly idleTimeoutMs?: number
   readonly systemExtra: string
   /** The CHILD session id. Metadata only — never the parent. */
   readonly sessionId: string
@@ -195,6 +201,11 @@ export interface AutonomousContextConfig {
   readonly model?: string
   readonly maxSteps?: number
   readonly timeoutMs?: number
+  readonly idleTimeoutMs?: number
+  /** WorkMode membatasi kemampuan konteks otonom (DISCUSS = readonly, EXECUTE = BUILD terjail). */
+  readonly workMode?: WorkMode
+  readonly restrictBash?: boolean
+  readonly bashAllowlist?: readonly string[]
   readonly provider?: unknown
   /**
    * Child-session factory (DI). In production this is `createMinicodeSession`;
@@ -331,31 +342,54 @@ export class AutonomousExecutionContext {
       throw new AutonomousContextError("lifecycle", `cannot initialize from ${this.state}`)
     }
     this.state = "initializing"
-    assertAutonomousToolScope(this.config.tools.map((t) => t.name))
+    const workMode = this.config.workMode ?? "DISCUSS"
+    const isBuild = workMode === "EXECUTE"
+    assertModeBoundedAutonomousToolScope(
+      this.config.tools.map((t) => t.name),
+      workMode,
+    )
     this.emit({ kind: "context:created", childSessionId: this.childSessionId })
 
-    this.session = await this.config.sessionFactory({
+    // Kontrak P9 ADR-25: default non-BUILD mempertahankan readonly + 8 langkah + LIMITS.SUB_AGENT_TIMEOUT_MS.
+    const baseSpec: AutonomousSessionSpec = {
       provider: this.config.provider,
       tools: this.config.tools,
       cwd: this.cwd,
-      // [DESIGN DECISION] `readonly` is fixed, not inherited. An autonomous
-      // executor never receives the user's live permission mode: a human
-      // widening or narrowing interactive permissions mid-session must not
-      // silently change what an unattended executor may do.
       permissionMode: "readonly",
       maxSteps: this.config.maxSteps ?? 8,
-      // [DESIGN DECISION] default mengikuti timeout sub-agent yang sudah dinaikkan
-      // (env-overridable). Angka 120_000 lama terlalu ketat untuk turn otonom di
-      // repo besar; memakai konstanta yang sama dengan delegate_task mencegah
-      // dua jalur sub-agent punya batas berbeda tanpa alasan.
       timeoutMs: this.config.timeoutMs ?? LIMITS.SUB_AGENT_TIMEOUT_MS,
+      ...(this.config.idleTimeoutMs !== undefined
+        ? { idleTimeoutMs: this.config.idleTimeoutMs }
+        : {}),
       systemExtra: this.systemExtra(),
       sessionId: this.childSessionId,
       parentSessionId: this.parentSessionId,
       // [PHASE 6S] the invocation-time gate, built from THIS context's ledger
       permissionHandler: createAutonomousPermissionHandler(this.ledger),
       ...(this.config.model ? { model: this.config.model } : {}),
-    })
+    }
+    const spec: AutonomousSessionSpec = {
+      ...baseSpec,
+      // Bila idleTimeoutMs aktif tanpa --wall-timeout eksplisit, dinding timer default menjadi Infinity.
+      ...(this.config.timeoutMs === undefined && this.config.idleTimeoutMs !== undefined
+        ? { timeoutMs: Number.POSITIVE_INFINITY }
+        : {}),
+      // WorkMode BUILD (`EXECUTE`) memperluas ke `auto` terjail di workspace (tanpa tool human/eksternal).
+      ...(isBuild
+        ? {
+            permissionMode: "auto" as const,
+            maxSteps: this.config.maxSteps ?? 50,
+            permissionHandler: createModeBoundedAutonomousPermissionHandler({
+              ledger: this.ledger,
+              workMode,
+              cwd: this.cwd,
+              restrictBash: this.config.restrictBash,
+              bashAllowlist: this.config.bashAllowlist,
+            }),
+          }
+        : {}),
+    }
+    this.session = await this.config.sessionFactory(spec)
     this.state = "ready"
     this.emit({ kind: "context:ready", childSessionId: this.childSessionId })
   }
@@ -371,12 +405,19 @@ export class AutonomousExecutionContext {
    * an empty conversation rather than a shared one.
    */
   private systemExtra(): string {
+    const isBuild = this.config.workMode === "EXECUTE"
     const base = [
-      "You are an AUTONOMOUS execution context, not an interactive assistant.",
-      "No user is watching this turn. There is no one to answer a question, so " +
-        "never call ask_user; state what you need in your final message instead.",
-      "You have read-only tools. Do not attempt to modify files, run commands, " +
-        "or change any task: you cannot, and trying is a failed run.",
+      isBuild
+        ? "You are an AUTONOMOUS execution context (BUILD mode, workspace-jailed), not an interactive assistant."
+        : "You are an AUTONOMOUS execution context, not an interactive assistant.",
+      isBuild
+        ? "No user is watching this turn. Never call ask_user, todo_write, submit_result, or external/git-push tools; state blockers in your final message."
+        : "No user is watching this turn. There is no one to answer a question, so " +
+          "never call ask_user; state what you need in your final message instead.",
+      isBuild
+        ? "Edit files only inside Workspace and verify your changes with build/test commands before finishing."
+        : "You have read-only tools. Do not attempt to modify files, run commands, " +
+          "or change any task: you cannot, and trying is a failed run.",
       `Workspace: ${this.cwd}`,
       `Task: ${this.config.taskTitle}`,
       `Task instruction: ${this.config.instruction}`,

@@ -173,7 +173,11 @@ function mapEntries(raw: unknown[]): {
     if (typeof id !== "string" || !id) continue
     models.push(id)
     const capacity = extractModelCapacity(entry)
-    if (capacity.contextLength !== undefined || capacity.maxOutputTokens !== undefined) {
+    if (
+      capacity.contextLength !== undefined ||
+      capacity.maxOutputTokens !== undefined ||
+      capacity.promptCaching !== undefined
+    ) {
       metadata ??= {}
       metadata[id] = { id, ...capacity }
     }

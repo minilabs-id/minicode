@@ -22,7 +22,14 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createCliSession } from "../cli/setup.ts"
-import { clearLspServers, lspDiagnostics } from "../src/lsp/client.ts"
+import {
+  clearLspServers,
+  closeAllLsp,
+  configureServers,
+  lspDiagnostics,
+  setLspProcessSupervisor,
+} from "../src/lsp/client.ts"
+import { createProcessSupervision } from "../src/runtime/process-supervision.ts"
 import {
   createProductionRuntime,
   observeProductionRuntime,
@@ -30,6 +37,12 @@ import {
 } from "../src/runtime/production-runtime.ts"
 import { deriveRuntimeView } from "../src/runtime/runtime-status.ts"
 import { currentRuntimeView } from "../src/runtime/runtime-status-provider.ts"
+import {
+  lspDefinitionTool,
+  lspDiagnosticsTool,
+  lspReferencesTool,
+  lspSymbolsTool,
+} from "../src/tools/lsp.ts"
 
 const dirs: string[] = []
 const envBackup = new Map<string, string | undefined>()
@@ -418,5 +431,192 @@ describe("P13.2 — kegagalan establishment supervisi", () => {
     } finally {
       await handle.stop()
     }
+  })
+})
+
+// ── 8. Wave 1: stale diagnostics, symbol lines, fast read, error symmetry, multi-root ──
+
+function richFakeLspScript(logPath: string): string {
+  return `
+const fs = require("node:fs")
+let buf = Buffer.alloc(0)
+let initCaps = null
+function send(msg) {
+  const payload = Buffer.from(JSON.stringify(msg), "utf8")
+  process.stdout.write("Content-Length: " + payload.length + "\\r\\n\\r\\n")
+  process.stdout.write(payload)
+}
+process.stdin.on("data", (chunk) => {
+  buf = Buffer.concat([buf, chunk])
+  for (;;) {
+    const sep = buf.indexOf("\\r\\n\\r\\n")
+    if (sep === -1) break
+    const m = /Content-Length:\\s*(\\d+)/i.exec(buf.slice(0, sep).toString())
+    if (!m) { buf = buf.slice(sep + 4); continue }
+    const len = Number(m[1])
+    if (buf.length < sep + 4 + len) break
+    const body = buf.slice(sep + 4, sep + 4 + len).toString()
+    buf = buf.slice(sep + 4 + len)
+    let msg = null
+    try { msg = JSON.parse(body) } catch {}
+    if (!msg) continue
+    if (msg.method === "initialize") {
+      initCaps = msg.params && msg.params.capabilities
+      fs.appendFileSync(${JSON.stringify(logPath)}, "init root=" + String(msg.params && msg.params.rootUri) + " hier=" + String(Boolean(initCaps && initCaps.textDocument && initCaps.textDocument.documentSymbol && initCaps.textDocument.documentSymbol.hierarchicalDocumentSymbolSupport)) + "\\n")
+      send({ jsonrpc: "2.0", id: msg.id, result: { capabilities: {} } })
+    }
+    if (msg.method === "textDocument/didOpen") {
+      const td = (msg.params && msg.params.textDocument) || {}
+      fs.appendFileSync(${JSON.stringify(logPath)}, "didOpen v=" + td.version + "\\n")
+      if (String(td.text || "").includes("PUSH_DIAGS")) {
+        send({ jsonrpc: "2.0", method: "textDocument/publishDiagnostics", params: { uri: td.uri, diagnostics: [{ range: { start: { line: 0, character: 0 } }, severity: 1, message: "v1-error" }] } })
+      }
+    }
+    if (msg.method === "textDocument/didChange") {
+      const td = (msg.params && msg.params.textDocument) || {}
+      const text = (msg.params && msg.params.contentChanges && msg.params.contentChanges[0] && msg.params.contentChanges[0].text) || ""
+      fs.appendFileSync(${JSON.stringify(logPath)}, "didChange v=" + td.version + "\\n")
+      if (text.includes("PUSH_DIAGS")) {
+        setTimeout(() => {
+          send({ jsonrpc: "2.0", method: "textDocument/publishDiagnostics", params: { uri: td.uri, diagnostics: [{ range: { start: { line: 0, character: 0 } }, severity: 1, message: "v2-updated-error" }] } })
+        }, 220)
+      }
+    }
+    if (msg.method === "textDocument/definition") {
+      const uri = msg.params.textDocument.uri
+      send({ jsonrpc: "2.0", id: msg.id, result: [{ uri, range: { start: { line: 4, character: 2 } } }] })
+    }
+    if (msg.method === "textDocument/documentSymbol") {
+      const uri = msg.params.textDocument.uri
+      if (uri.includes("hier.ts")) {
+        send({ jsonrpc: "2.0", id: msg.id, result: [{ name: "Outer", kind: 5, range: { start: { line: 1, character: 0 } }, selectionRange: { start: { line: 1, character: 6 } }, children: [{ name: "inner", kind: 6, range: { start: { line: 3, character: 2 } }, selectionRange: { start: { line: 3, character: 4 } } }] }] })
+      } else {
+        send({ jsonrpc: "2.0", id: msg.id, result: [{ name: "legacyFn", kind: 12, location: { uri, range: { start: { line: 9, character: 0 } } } }] })
+      }
+    }
+    if (msg.method === "shutdown") send({ jsonrpc: "2.0", id: msg.id, result: null })
+    if (msg.method === "exit") process.exit(0)
+  }
+})
+`
+}
+
+describe("Wave 1 — akurasi, latensi & isolasi multi-root LSP", () => {
+  test("waitForDiagnostics menunggu push terbaru setelah didChange dan tidak menduplikasi didChange bila isi sama", async () => {
+    const dir = tempDir()
+    const log = join(dir, "lsp-rich.log")
+    const file = join(dir, "a.ts")
+    writeFileSync(file, "// PUSH_DIAGS\nconst x = 1\n")
+    configureServers([
+      { ext: ".ts", command: process.execPath, args: ["-e", richFakeLspScript(log)] },
+    ])
+    try {
+      const d1 = await lspDiagnostics(file, "// PUSH_DIAGS\nconst x = 1\n", 2_000, dir)
+      expect(String(d1.items[0]?.message)).toBe("v1-error")
+
+      // Isi identik → tidak mengirim didChange.
+      const dSame = await lspDiagnostics(file, "// PUSH_DIAGS\nconst x = 1\n", 2_000, dir)
+      expect(String(dSame.items[0]?.message)).toBe("v1-error")
+      expect(countLines(log, "didChange")).toBe(0)
+
+      // Isi berubah → cache lama dihapus, menunggu push v2 (220 ms) selesai.
+      const d2 = await lspDiagnostics(file, "// PUSH_DIAGS\nconst x = 2\n", 2_000, dir)
+      expect(countLines(log, "didChange")).toBe(1)
+      expect(String(d2.items[0]?.message)).toBe("v2-updated-error")
+    } finally {
+      await closeAllLsp()
+    }
+  })
+
+  test("lsp_symbols mendukung SymbolInformation & DocumentSymbol dengan nomor baris benar, dan lsp_definition tidak memblokir 3 detik", async () => {
+    const dir = tempDir()
+    const log = join(dir, "lsp-sym.log")
+    writeFileSync(join(dir, "legacy.ts"), "export function legacyFn() {}\n")
+    writeFileSync(join(dir, "hier.ts"), "export class Outer { inner() {} }\n")
+    writeFileSync(join(dir, "def.ts"), "export function targetFn() {}\n")
+    configureServers([
+      { ext: ".ts", command: process.execPath, args: ["-e", richFakeLspScript(log)] },
+    ])
+    const ctx = { signal: new AbortController().signal, cwd: dir } as never
+    try {
+      const legacyOut = (await lspSymbolsTool.execute({ path: "legacy.ts" }, ctx)) as string
+      expect(legacyOut).toContain("10: [Function] legacyFn")
+
+      const hierOut = (await lspSymbolsTool.execute({ path: "hier.ts" }, ctx)) as string
+      expect(hierOut).toContain("2: [Class] Outer")
+      expect(hierOut).toContain("4:   [Method] inner")
+      expect(readFileSync(log, "utf8")).toContain("hier=true")
+
+      const t0 = performance.now()
+      const defOut = (await lspDefinitionTool.execute(
+        { path: "def.ts", symbol: "targetFn" },
+        ctx,
+      )) as string
+      const elapsed = performance.now() - t0
+      expect(elapsed).toBeLessThan(2_000)
+      expect(defOut).toBe("def.ts:5:3")
+    } finally {
+      await closeAllLsp()
+    }
+  })
+
+  test("error simetris (reject) pada 0 server & ekstensi tak terkonfigurasi untuk semua tool LSP per-file", async () => {
+    const dir = tempDir()
+    writeFileSync(join(dir, "a.ts"), "export function foo() {}\n")
+    writeFileSync(join(dir, "a.go"), "package main\nfunc foo() {}\n")
+    const ctx = { signal: new AbortController().signal, cwd: dir } as never
+    clearLspServers()
+
+    await expect(lspDiagnosticsTool.execute({ path: "a.ts" }, ctx)).rejects.toThrow(/no LSP/)
+    await expect(lspSymbolsTool.execute({ path: "a.ts" }, ctx)).rejects.toThrow(/no LSP/)
+    await expect(lspDefinitionTool.execute({ path: "a.ts", symbol: "foo" }, ctx)).rejects.toThrow(
+      /no LSP/,
+    )
+    await expect(lspReferencesTool.execute({ path: "a.ts", symbol: "foo" }, ctx)).rejects.toThrow(
+      /no LSP/,
+    )
+
+    configureServers([
+      {
+        ext: ".ts",
+        command: process.execPath,
+        args: ["-e", richFakeLspScript(join(dir, "dummy.log"))],
+      },
+    ])
+    await expect(lspReferencesTool.execute({ path: "a.go", symbol: "foo" }, ctx)).rejects.toThrow(
+      /\.go/,
+    )
+  })
+
+  test("monorepo multi-root men-spawn koneksi & childId terpisah per sub-proyek", async () => {
+    const dir = tempDir()
+    const log = join(dir, "lsp-multi.log")
+    const pkgA = join(dir, "packages", "a")
+    const pkgB = join(dir, "packages", "b")
+    mkdirSync(pkgA, { recursive: true })
+    mkdirSync(pkgB, { recursive: true })
+    writeFileSync(join(pkgA, "tsconfig.json"), "{}")
+    writeFileSync(join(pkgB, "tsconfig.json"), "{}")
+    writeFileSync(join(pkgA, "index.ts"), "export function aFn() {}\n")
+    writeFileSync(join(pkgB, "index.ts"), "export function bFn() {}\n")
+
+    const sup = createProcessSupervision()
+    setLspProcessSupervisor(sup)
+    configureServers([
+      { ext: ".ts", command: process.execPath, args: ["-e", richFakeLspScript(log)] },
+    ])
+    const ctx = { signal: new AbortController().signal, cwd: dir } as never
+    try {
+      await lspSymbolsTool.execute({ path: "packages/a/index.ts" }, ctx)
+      await lspSymbolsTool.execute({ path: "packages/b/index.ts" }, ctx)
+      expect(sup.status().managed).toBe(2)
+      const logText = readFileSync(log, "utf8")
+      expect(logText).toContain("packages/a")
+      expect(logText).toContain("packages/b")
+    } finally {
+      await closeAllLsp()
+      setLspProcessSupervisor(null)
+    }
+    expect(sup.status().managed).toBe(0)
   })
 })

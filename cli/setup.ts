@@ -19,6 +19,7 @@ import { loadLang, loadLastModel, localConfigNotice } from "../src/config.ts"
 import { LIMITS } from "../src/constants.ts"
 import { runRunHooks, shouldRunHooks } from "../src/hooks/run.ts"
 import { homeDir } from "../src/lib/db-path.ts"
+import { type ActivityDeadline, createActivityDeadline } from "../src/lib/liveness-clock.ts"
 // [Audit F-04 2026-11-22] Catat ukuran batch flush; nonaktif = no-op O(1).
 import { perfCount, perfEnabled } from "../src/lib/perf-debug.ts"
 import { closeAllLsp as lspCloseAll, setLspProcessSupervisor } from "../src/lsp/client.ts"
@@ -39,11 +40,13 @@ import {
 import { minicodeEstimator } from "../src/policy/context.ts"
 import { outputReserveFor } from "../src/policy/context-budget.ts"
 import { loadContextWindowOverlay, resolveContextWindow } from "../src/policy/context-window.ts"
+import { MICROCOMPACT_SENTINEL_PREFIX } from "../src/policy/microcompact.ts"
 import type { NoProgressDetector } from "../src/policy/no-progress.ts"
 import type { PermissionAsk } from "../src/policy/permission.ts"
 import type { RateLimiter } from "../src/policy/ratelimit.ts"
 import {
   type FailureSignal,
+  planAutonomousOutageCooldown,
   planRecovery,
   type RecoveryDecision,
 } from "../src/policy/recovery-budget.ts"
@@ -147,6 +150,7 @@ import {
   type AdoptTaskSpec,
   adoptUnfinishedTask,
 } from "../src/session/cross-session-adoption.ts"
+import { beginSessionDbScope, endSessionDbScope } from "../src/session/db/schema.ts"
 import {
   type CanonicalSessionIdentity,
   formatSessionIdentityLine,
@@ -156,7 +160,9 @@ import {
   attachMutationJournal,
   finalizeJournal,
   hashArgs,
+  isMutationTool,
   loadJournal,
+  loadVerificationJournal,
   planRecoveryForSession,
 } from "../src/session/journal.ts"
 import {
@@ -237,6 +243,7 @@ import {
   setSubAgentWorkMode,
 } from "../src/tools/task.ts"
 import {
+  readPersistedTaskStateSync,
   reconcileCompletionEvidence,
   setCompletionEvidence,
   syncTodoViewsFromTaskStore,
@@ -448,6 +455,16 @@ export interface CliSessionOptions {
    * diabaikan + warn di composition root). */
   keepRecentTurns?: number
   timeoutMs?: number
+  /** Batas keras waktu kalender opsional (`--wall-timeout` / MINICODE_WALL_TIMEOUT_MS). Absen = tak dibatasi (hanya watchdog inaktivitas). */
+  wallTimeoutMs?: number
+  /** Mode otonom jangka panjang (jam/hari): pemulihan outage bertingkat + guardrail biaya/stagnasi + epoch lanjut otomatis. */
+  autonomous?: boolean
+  /** Ambil alih paksa lease bila PID pemilik sebelumnya terbukti mati di OS. */
+  takeover?: boolean
+  /** Maksimum epoch otomatis beruntun di mode otonom (0/undefined = tak dibatasi selain circuit breaker). */
+  maxEpochs?: number
+  /** Plafon belanja per jam (USD) sebagai circuit breaker otonom. */
+  maxCostHour?: number
   rateLimiter?: RateLimiter
   concurrency?: number
   writeConcurrency?: number
@@ -491,6 +508,10 @@ export interface CliSession {
   modelRef: { current?: string }
   effectiveInitialModel: string
   effectiveTimeoutMs: number
+  effectiveWallTimeoutMs?: number
+  autonomous?: boolean
+  maxEpochs?: number
+  maxCostHour?: number
   permissionMode: string
   /** WorkMode efektif sesi ini (default DISCUSS). Dipakai label/
    * readout TUI; diisi composition root dari flag/env. */
@@ -817,6 +838,11 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     contextWindowTokens,
     keepRecentTurns,
     timeoutMs,
+    wallTimeoutMs,
+    autonomous = false,
+    takeover = false,
+    maxEpochs,
+    maxCostHour,
     rateLimiter,
     sandboxNotice,
     onPhase,
@@ -873,9 +899,28 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   // selama hidupnya (token milik boot ini, dibagi dengan scheduler-nya
   // sendiri) dan melepasnya saat close. Penulis asing yang hidup →REFUSED
   // di sini (fail-closed); penulis basi ditolak di tiap mutasi (CAS).
+  let dbScopeReleased = false
+  beginSessionDbScope(cwd)
+  const releaseDbScope = () => {
+    if (dbScopeReleased) return
+    dbScopeReleased = true
+    endSessionDbScope(cwd)
+  }
   const writerToken = writerTokenFor(bootId)
-  const admission = acquireSessionWriter({ sessionId, cwd, bootId, token: writerToken })
-  if (!admission.ok) throw admission.error
+  let admission: ReturnType<typeof acquireSessionWriter>
+  try {
+    admission = acquireSessionWriter({
+      sessionId,
+      cwd,
+      bootId,
+      token: writerToken,
+      ...(takeover ? { allowDeadPidTakeover: true } : {}),
+    })
+    if (!admission.ok) throw admission.error
+  } catch (err) {
+    releaseDbScope()
+    throw err
+  }
   // v7.39 (P0-1): general startup repair untuk mode interaktif. Sebelumnya
   // JSON↔TaskStore hanya diselaraskan saat adoption/verify-settle/scheduler
   // claim — sehingga sesi yang crash di tengah `todo_write` bisa boot dengan
@@ -915,6 +960,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     })
     if (adoption.outcome !== "ADOPTED") {
       releaseSessionWriter(sessionId, writerToken, cwd)
+      releaseDbScope()
       throw new AdoptionRefusedError(adoption)
     }
     const moved = adoption.task
@@ -935,6 +981,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   // WorkMode DISCUSS (baik dari flag/env maupun pulihan `--resume`).
   if (verify && effectiveWorkMode !== "EXECUTE") {
     releaseSessionWriter(sessionId, writerToken, cwd)
+    releaseDbScope()
     throw new VerifyWorkModeConflictError(effectiveWorkMode)
   }
   // P2.6 — kubur residu crash: RUNNING tanpa holder hidup (admission di atas
@@ -975,19 +1022,32 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   const startWriterRenewTimer = () => {
     if (writerClosed || writerRenewTimer !== undefined) return
     renewWarned = false
+    let transientRenewFailures = 0
     writerRenewTimer = setInterval(() => {
-      const out = renewSessionWriter(sessionId, writerToken, cwd)
-      if (out === "AUTHORITY_LOST") {
-        stopWriterRenewTimer()
-        // Lease tanpa pemilik aktif & epoch sama = dilepas bersih `/scheduler stop`; re-acquire di turn berikutnya.
-        const holder = describeSessionHolder(sessionId, cwd)
-        if (!holder.active && readWriterEpoch(sessionId, cwd) === expectedEpoch) {
-          return
+      try {
+        const out = renewSessionWriter(sessionId, writerToken, cwd)
+        transientRenewFailures = 0
+        if (out === "AUTHORITY_LOST") {
+          stopWriterRenewTimer()
+          // Lease tanpa pemilik aktif & epoch sama = dilepas bersih `/scheduler stop`; re-acquire di turn berikutnya.
+          const holder = describeSessionHolder(sessionId, cwd)
+          if (!holder.active && readWriterEpoch(sessionId, cwd) === expectedEpoch) {
+            return
+          }
+          if (!renewWarned) {
+            renewWarned = true
+            startupWrite(
+              `${c.yellow(`[writer] lease lost sid=${sessionId} boot=${bootId} — another writer took over; next mutation will be refused unless re-acquired\n`)}`,
+            )
+          }
         }
-        if (!renewWarned) {
+      } catch (err) {
+        // Kegagalan sementara SQLite I/O/BUSY tak boleh menjatuhkan unhandled error keluar dari timer.
+        transientRenewFailures++
+        if (transientRenewFailures >= 3 && !renewWarned) {
           renewWarned = true
           startupWrite(
-            `${c.yellow(`[writer] lease lost sid=${sessionId} boot=${bootId} — another writer took over; next mutation will be refused unless re-acquired\n`)}`,
+            `${c.yellow(`[writer] lease renew transient error sid=${sessionId}: ${String((err as Error)?.message ?? err)}\n`)}`,
           )
         }
       }
@@ -1016,6 +1076,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       stopRenewTimer: stopWriterRenewTimer,
       release: () => releaseSessionWriter(sessionId, writerToken, cwd),
     })
+    releaseDbScope()
   }
   process.once("exit", cleanupWriterOnStartupFailure)
 
@@ -1132,8 +1193,10 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   }
 
   // Timeout default: --timeout > MINICODE_TIMEOUT_MS env > 1 jam. 0 = Infinity.
-  // Default interaktif 1 jam (audit panjang tak macet di tengah); jalur exec
-  // meneruskan default 15 menit sendiri (lebih konservatif untuk CI).
+  // Sejak desain activity-first, `effectiveTimeoutMs` berlaku sebagai watchdog
+  // INAKTIVITAS (direset oleh delta model, step, dan output/heartbeat tool) —
+  // kerja sehat berjalan berjam-jam/hari tanpa terpotong. `--wall-timeout` (atau
+  // MINICODE_WALL_TIMEOUT_MS) menyediakan batas waktu kalender keras opsional.
   const envTimeout = process.env.MINICODE_TIMEOUT_MS
   let effectiveTimeoutMs =
     timeoutMs ?? (envTimeout != null && envTimeout !== "" ? Number(envTimeout) : 3_600_000)
@@ -1144,22 +1207,42 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     startupWrite(`[warn] timeout exceeds runtime limit; capped at ${LIMITS.MAX_TIMER_DELAY_MS}ms\n`)
     effectiveTimeoutMs = LIMITS.MAX_TIMER_DELAY_MS
   }
-  // `--timeout` adalah deadline satu pemanggilan prompt. Jangan menyalakan
+  const envWallTimeout = process.env.MINICODE_WALL_TIMEOUT_MS
+  let effectiveWallTimeoutMs: number | undefined =
+    wallTimeoutMs ??
+    (envWallTimeout != null && envWallTimeout !== "" ? Number(envWallTimeout) : undefined)
+  if (effectiveWallTimeoutMs !== undefined) {
+    if (!Number.isFinite(effectiveWallTimeoutMs) || effectiveWallTimeoutMs < 0) {
+      startupWrite(`[warn] invalid wall-timeout ${effectiveWallTimeoutMs}, ignoring\n`)
+      effectiveWallTimeoutMs = undefined
+    } else if (effectiveWallTimeoutMs === 0) {
+      effectiveWallTimeoutMs = undefined
+    }
+  }
+  // `--timeout` adalah deadline inaktivitas satu pemanggilan prompt. Jangan menyalakan
   // timer saat sesi dibuat: sesi TUI/REPL bisa idle lama lalu menerima prompt
   // baru, yang harus mendapat jatah waktu baru.
-  const createRunDeadline = () => {
-    if (effectiveTimeoutMs === 0 || effectiveTimeoutMs === Infinity)
-      return { signal: undefined, cancel: () => {} }
-    const controller = new AbortController()
-    const timer = setTimeout(
-      () =>
-        controller.abort(
-          new AgentError("timeout", `run exceeded wall-clock timeout (${effectiveTimeoutMs}ms)`),
-        ),
-      effectiveTimeoutMs,
-    )
-    return { signal: controller.signal, cancel: () => clearTimeout(timer) }
+  const wakeRenewHook: (() => void) | null = () => {
+    if (writerClosed) return
+    try {
+      const out = renewSessionWriter(sessionId, writerToken, cwd)
+      if (out === "AUTHORITY_HELD") startWriterRenewTimer()
+    } catch {}
   }
+  const createRunDeadline = (): ActivityDeadline =>
+    createActivityDeadline({
+      inactivityTimeoutMs: effectiveTimeoutMs === 0 ? Infinity : effectiveTimeoutMs,
+      ...(effectiveWallTimeoutMs !== undefined ? { maxWallClockMs: effectiveWallTimeoutMs } : {}),
+      buildInactivityError: (ms) =>
+        new AgentError("timeout", `run inactive with no model/tool activity for ${ms}ms`),
+      buildWallClockError: (ms) =>
+        new AgentError("timeout", `run exceeded wall-clock timeout (${ms}ms)`),
+      onWakeFromSleep: () => {
+        try {
+          wakeRenewHook?.()
+        } catch {}
+      },
+    })
 
   // [mode-architecture] `--plan` legacy bukan lagi permission mode — pemetaannya
   // ke WorkMode PLAN terjadi di effectiveWorkMode (di atas). `--allow-all` tetap
@@ -1765,6 +1848,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       name: a.identity.name,
       qualified: a.identity.qualified,
       ...(a.target ? { target: a.target } : {}),
+      ...(a.intent ? { intent: a.intent } : {}),
       status: a.status as UiToolStatus,
       tsStart: a.tsStart,
       ...(a.label ? { label: a.label } : {}),
@@ -1925,6 +2009,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       } catch {}
     }
   }
+  let compactionCtl: { noteTurnCompleted(): void; resetThrash(): void } | undefined
   const compaction = createLlmCompaction({
     // LLM compaction DIUTAMAKAN supaya fakta tak hilang lewat fallback mekanikal
     // yang lossy. Provider: summarizer murah khusus (DEEPSEEK_API_KEY) ATAU
@@ -1942,10 +2027,15 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
         }),
     cwd: cwd ?? process.cwd(),
     getContextWindowTokens,
+    getTaskStateFallback: () =>
+      readPersistedTaskStateSync(sessionId, cwd ?? process.cwd()) ?? undefined,
     canPersistMemory: () =>
       (workModeControl?.getWorkMode() ?? effectiveWorkMode) === "EXECUTE" &&
       (permissions?.getMode() ?? permissionMode) !== "readonly" &&
       (permissions?.getMode() ?? permissionMode) !== "plan",
+    onController: (ctl) => {
+      compactionCtl = ctl
+    },
     onUsage: (u) => {
       try {
         // Angka sudah dinormalisasi di compactWithLlm (negatif/NaN → skip).
@@ -1977,6 +2067,10 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   // write_file, apply_patch, delete_file, move_file, git_restore/checkout,
   // lsp_rename) supaya tidak ada daftar manual kedua yang bisa drift.
   let workspaceMutationEpoch = 0
+  // Menghitung setiap percobaan mutasi workspace (termasuk gagal/parsial & work sub-agent)
+  // serta pemanggilan todo_write untuk memutuskan apakah pasca-turn perlu verify.
+  let turnMutationAttemptSeq = 0
+  let turnTodoWriteSeq = 0
   // Naik tiap step selesai / kompaksi agar observasi read-only (`git status`, `dir`)
   // pasca-kompaksi tak terkunci kunci `:gen` lama sementara retry dalam satu step tetap ter-dedup.
   let bashObservationEpoch = 0
@@ -2053,11 +2147,16 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   // saat itu — bukan snapshot lama. Tanpa ini ToolContext.permissionMode
   // (hanya PM, bukan WorkMode) membuat delegate_task melahirkan anak tanpa
   // ceiling WorkMode.
+  const hiddenWireTools = computeUnavailableWireTools(cfg, {
+    sandboxMode: process.env.MINICODE_SANDBOX,
+    interactiveAsk: Boolean(enterRepl || (!machineOutput && process.stdin.isTTY)),
+  })
   setSubAgentWorkMode(() => workModeControl?.getWorkMode() ?? effectiveWorkMode)
   setSubAgentGovernance(() => ({
     restrictBash,
     allowLocalConfig: allowLocalConfig === true,
     ...(cfg.bashAllowlist ? { bashAllowlist: cfg.bashAllowlist } : {}),
+    hiddenWireTools,
   }))
 
   let permissions: PermissionControl | undefined
@@ -2078,10 +2177,6 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   // Muat bahasa label UI lebih awal; bahasa balasan mengikuti percakapan pengguna.
   const { setConfigLocale } = await import("../src/ui/i18n/locale.ts")
   setConfigLocale((await loadLang().catch(() => undefined)) ?? null)
-  const hiddenWireTools = computeUnavailableWireTools(cfg, {
-    sandboxMode: process.env.MINICODE_SANDBOX,
-    interactiveAsk: Boolean(enterRepl || (!machineOutput && process.stdin.isTTY)),
-  })
   const session = await startupPhase("kernel-session", () =>
     createMinicodeSession({
       provider: router,
@@ -2244,7 +2339,8 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       ...(keepRecentTurns ? { keepRecentTurns } : {}),
       ...(safeConcurrency ? { concurrency: safeConcurrency } : {}),
       ...(safeWriteConcurrency ? { writeConcurrency: safeWriteConcurrency } : {}),
-      timeoutMs: effectiveTimeoutMs === 0 ? Infinity : effectiveTimeoutMs,
+      timeoutMs: effectiveWallTimeoutMs ?? Infinity,
+      idleTimeoutMs: effectiveTimeoutMs === 0 ? Infinity : effectiveTimeoutMs,
       ...(compaction ? { compaction } : {}),
     }),
   )
@@ -2282,6 +2378,10 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   const noteTaskChanged = (task: ReturnType<TaskStore["listTasks"]>[number]) => {
     const key = `${task.status}:${task.revision}`
     if (taskStatusSeen.get(task.id) === key) return
+    if (taskStatusSeen.size >= 2048) {
+      const oldest = taskStatusSeen.keys().next().value
+      if (oldest !== undefined) taskStatusSeen.delete(oldest)
+    }
     taskStatusSeen.set(task.id, key)
     presentation?.noteTaskStatus({
       taskId: task.id,
@@ -2675,6 +2775,10 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       verificationEmitted,
     )
     if (!observation) return
+    if (verificationEmitted.size >= 2048) {
+      const oldest = verificationEmitted.values().next().value
+      if (oldest !== undefined) verificationEmitted.delete(oldest)
+    }
     verificationEmitted.add(observation.invocationId)
     try {
       presentation?.noteVerificationObserved({
@@ -2693,8 +2797,9 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   ): void => {
     void (async () => {
       try {
-        const { records } = await loadJournal(scopeSession, cwd)
-        emitVerificationFromRecords(call, scopeSession, records)
+        const loaded = await loadVerificationJournal(scopeSession, cwd)
+        if (!loaded.hasVerification) return
+        emitVerificationFromRecords(call, scopeSession, loaded.records)
       } catch {}
     })()
   }
@@ -2702,6 +2807,15 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     try {
       const call = e.execution?.call as { id?: unknown; name?: unknown; args?: unknown } | undefined
       if (!call || typeof call.id !== "string" || typeof call.name !== "string") return
+      if (call.name === "todo_write") {
+        turnTodoWriteSeq++
+      }
+      const isWorkDelegate =
+        call.name === "delegate_task" &&
+        (call.args as { mode?: unknown } | undefined)?.mode === "work"
+      if (call.name === "delegate_task" ? isWorkDelegate : isMutationTool(call.name)) {
+        turnMutationAttemptSeq++
+      }
       if (!e.execution?.result?.isError && WRITE_TOOLS.has(call.name)) {
         workspaceMutationEpoch++
       }
@@ -2723,6 +2837,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     } catch {}
   })
   session.events.on("turn:completed", () => {
+    compactionCtl?.noteTurnCompleted()
     // [Audit F-04] Agregasi ukuran batch presentasi per turn, lalu reset.
     perfCount("presentation.flush.turnTotal", 0, turnBatchEvents)
     turnBatchEvents = 0
@@ -2741,8 +2856,10 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
       for (const [scopeSession, calls] of byScope) {
         void (async () => {
           try {
-            const { records } = await loadJournal(scopeSession, cwd)
-            for (const call of calls) emitVerificationFromRecords(call, scopeSession, records)
+            const loaded = await loadVerificationJournal(scopeSession, cwd)
+            if (!loaded.hasVerification) return
+            for (const call of calls)
+              emitVerificationFromRecords(call, scopeSession, loaded.records)
           } catch {}
         })()
       }
@@ -3042,7 +3159,29 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     recoveryGeneration++
     const previous = activeAgentSessionId
     activeAgentSessionId = sessionId
+    const activeAgentPrevious = activeAgentSessionId
+    void activeAgentPrevious
     const deadline = createRunDeadline()
+    let outageStartedAtMs: number | null = null
+    let outageCooldownAttempt = 0
+    const touchDeadline = () => deadline.touch()
+    const resetOutageEpisode = () => {
+      outageStartedAtMs = null
+      outageCooldownAttempt = 0
+    }
+    const offDeadlineEvents = [
+      session.events.on("turn:started", touchDeadline),
+      session.events.on("step:started", touchDeadline),
+      session.events.on("step:completed", () => {
+        touchDeadline()
+        resetOutageEpisode()
+      }),
+      session.events.on("turn:completed", resetOutageEpisode),
+      session.events.on("execution:started", touchDeadline),
+      session.events.on("execution:completed", touchDeadline),
+      session.events.on("provider:text", touchDeadline),
+      session.events.on("provider:extension", touchDeadline),
+    ]
     const runSignal = deadline.signal
       ? signal
         ? AbortSignal.any([signal, deadline.signal])
@@ -3067,36 +3206,73 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
           const failure = classifyFailure(error, {
             userAborted: signal?.aborted === true && deadline.signal?.aborted !== true,
           })
-          const decision = decideTurnResume(failure, ledger, p.trim().length > 0)
+          let decision = decideTurnResume(failure, ledger, p.trim().length > 0)
+          let tier2Cooldown = false
+          if (decision.action !== "retry" && autonomous) {
+            if (outageStartedAtMs === null) outageStartedAtMs = Date.now()
+            const cooldown = planAutonomousOutageCooldown({
+              failure: {
+                ...failure,
+                message: error instanceof Error ? error.message : String(error),
+              },
+              elapsedOutageMs: Date.now() - outageStartedAtMs,
+              cooldownAttempt: outageCooldownAttempt,
+              hasPrompt: p.trim().length > 0,
+            })
+            if (cooldown.action === "retry") {
+              outageCooldownAttempt = cooldown.attempt
+              decision = cooldown
+              tier2Cooldown = true
+              ledger.resetEpisode()
+            }
+          }
           if (decision.action !== "retry") throw error
+          // Tunda timer inaktivitas selama jeda retry/outage terencana agar
+          // tidur pemulihan panjang tak langsung diputus watchdog inaktivitas.
+          deadline.suspendInactivity()
           const secs = (decision.delayMs / 1000).toFixed(1)
           const left = Math.max(0, Math.round(decision.remainingMs / 1000))
-          process.stderr.write(
-            `[recovery] gangguan penyedia — melanjutkan turn otomatis ` +
-              `(percobaan ${decision.attempt}, jeda ${secs} dtk, sisa anggaran ${left} dtk)\n`,
-          )
+          if (tier2Cooldown) {
+            warnLine(
+              `[recovery:outage] jeda cooldown otonom #${decision.attempt} (${secs} dtk, sisa jendela ${left} dtk)`,
+            )
+          } else {
+            process.stderr.write(
+              `[recovery] gangguan penyedia — melanjutkan turn otomatis ` +
+                `(percobaan ${decision.attempt}, jeda ${secs} dtk, sisa anggaran ${left} dtk)\n`,
+            )
+          }
           // Tidur sadar-abort agar Esc/Ctrl+C atau deadline memutus jeda seketika
           // alih-alih menahan giliran sampai delayMs selesai.
-          await new Promise<void>((resolve) => {
-            if (runSignal?.aborted) {
-              resolve()
-              return
-            }
-            const onAbort = () => {
-              clearTimeout(timer)
-              resolve()
-            }
-            const timer = setTimeout(() => {
-              runSignal?.removeEventListener("abort", onAbort)
-              resolve()
-            }, decision.delayMs)
-            runSignal?.addEventListener("abort", onAbort, { once: true })
-          })
+          try {
+            await new Promise<void>((resolve) => {
+              if (runSignal?.aborted) {
+                resolve()
+                return
+              }
+              const onAbort = () => {
+                clearTimeout(timer)
+                resolve()
+              }
+              const timer = setTimeout(() => {
+                runSignal?.removeEventListener("abort", onAbort)
+                resolve()
+              }, decision.delayMs)
+              runSignal?.addEventListener("abort", onAbort, { once: true })
+            })
+          } finally {
+            deadline.resumeInactivity()
+          }
           // Pengguna menekan Ctrl+C saat menunggu: berhenti, jangan lanjut.
           if (runSignal?.aborted) throw error
         }
       }
     } finally {
+      for (const off of offDeadlineEvents) {
+        try {
+          off()
+        } catch {}
+      }
       deadline.cancel()
       if (activeAgentSessionId === sessionId) activeAgentSessionId = previous ?? null
     }
@@ -3111,6 +3287,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     let category: string | undefined
     let kind: string | undefined
     let retryAfterMs: number | undefined
+    let stalled = false
     let node: unknown = error
     for (let depth = 0; depth < 5 && node !== null && node !== undefined; depth++) {
       if (typeof node !== "object") break
@@ -3118,18 +3295,28 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
         category?: unknown
         kind?: unknown
         retryAfterMs?: unknown
+        message?: unknown
         cause?: unknown
       }
       if (typeof rec.category === "string" && category === undefined) category = rec.category
       if (typeof rec.kind === "string" && kind === undefined) kind = rec.kind
       if (typeof rec.retryAfterMs === "number" && retryAfterMs === undefined)
         retryAfterMs = rec.retryAfterMs
+      if (
+        !stalled &&
+        typeof rec.message === "string" &&
+        (/sent nothing for (\d+)ms/i.test(rec.message) ||
+          /timed out after \d+ms/i.test(rec.message))
+      ) {
+        stalled = true
+      }
       node = rec.cause
     }
     return {
       ...(category !== undefined ? { category } : {}),
       ...(kind !== undefined ? { kind } : {}),
       ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+      ...(stalled ? { stalled: true } : {}),
       abortedByUser: opts.userAborted,
     }
   }
@@ -3163,6 +3350,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
         startedAtMs: ledger.startedAtMs,
         nowMs: Date.now(),
         attemptsUsed: ledger.attemptsUsed(),
+        stallAttemptsUsed: ledger.stallAttemptsUsed(),
       },
       { hasPrompt },
     )
@@ -3506,6 +3694,8 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     // apa pun, tempelkan catatan agar agen memperbaiki dulu, bukan menumpuk
     // fitur di atas baseline rusak (yang hanya memperparah keadaan).
     let firstPrompt = p
+    const mutationsBeforeTurn = turnMutationAttemptSeq
+    const todosBeforeTurn = turnTodoWriteSeq
     const broken = await checkBaseline((s) => runVerifyWithPresentation(s ?? signal), signal)
     // Abort saat baseline jalan sudah melempar dari runVerify; cek ini untuk
     // abort yang datang tepat di sela (tanpa ini turn agen jalan padahal user
@@ -3528,6 +3718,13 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
           // fallback ke signal turn luar.
           await runOnce(prompt, s ?? signal)
         },
+        // Bila baseline sudah HIJAU tepat sebelum turn dan model hanya melakukan baca
+        // tanpa mutasi maupun klaim todo_write (PF-01), lewati verify pasca-turn yang identik.
+        // Bila baseline memang merah (P2.1), tetap jalankan self-heal sampai hijau atau cap siklus.
+        shouldVerify: () =>
+          Boolean(broken) ||
+          turnMutationAttemptSeq > mutationsBeforeTurn ||
+          turnTodoWriteSeq > todosBeforeTurn,
         verify: (s) => runVerifyWithPresentation(s ?? signal),
         onCycle: (cycle, max, v) => {
           if (cycle === max) {
@@ -3729,7 +3926,19 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
         buffer.length >= budgetTailInitialMessages.length &&
         budgetTailInitialMessages.every((m, idx) => {
           const cur = buffer[idx]
-          return cur === m || JSON.stringify(cur) === JSON.stringify(m)
+          if (cur === m) return true
+          const mc = cur as { role?: string; toolCallId?: string; content?: unknown }
+          const orig = m as { role?: string; toolCallId?: string }
+          if (
+            orig?.role === "tool" &&
+            mc?.role === "tool" &&
+            mc.toolCallId === orig.toolCallId &&
+            typeof mc.content === "string" &&
+            mc.content.startsWith(MICROCOMPACT_SENTINEL_PREFIX)
+          ) {
+            return true
+          }
+          return JSON.stringify(cur) === JSON.stringify(m)
         })
       const durableHistory: readonly unknown[] =
         contextOnlyArtifact !== undefined &&
@@ -3924,16 +4133,20 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     async () => {
       const { TaskStore } = await import("../src/task/store.ts")
       const { AUTONOMOUS_TOOL_NAMES } = await import("../src/task/autonomous-policy.ts")
+      const { AUTONOMOUS_BUILD_TOOL_NAMES } = await import("../src/task/autonomous-build-policy.ts")
       const store = new TaskStore(cwd, { authority: "SCHEDULER" })
       const autonomousCwd = cwd ?? process.cwd()
+      const bootAutonomousWorkMode = workModeControl?.getWorkMode() ?? effectiveWorkMode
+      const allowAutonomousBuild = autonomous === true && bootAutonomousWorkMode === "EXECUTE"
+      const allowedNames = allowAutonomousBuild
+        ? AUTONOMOUS_BUILD_TOOL_NAMES
+        : AUTONOMOUS_TOOL_NAMES
 
-      // [DESIGN DECISION] Objek tool ASLI, difilter ke allow-list 6S — bukan tiruan
-      // baru dan bukan seluruh tool sesi. Jail di `read_file` asli bagian dari batas
-      // keamanan; implementasi ulang = implementasi kedua yang rawan salah.
-      // `AUTONOMOUS_TOOL_NAMES` = output matriks 6S, jadi tak bisa melebar.
-      const autonomousTools = AUTONOMOUS_TOOL_NAMES.map((name) =>
-        sessionTools.find((t) => t.name === name),
-      ).filter((t): t is NonNullable<typeof t> => t !== undefined)
+      // [DESIGN DECISION] Objek tool ASLI, difilter ke matriks WorkMode-nya — bukan tiruan
+      // baru dan bukan seluruh tool sesi.
+      const autonomousTools = allowedNames
+        .map((name) => sessionTools.find((t) => t.name === name))
+        .filter((t): t is NonNullable<typeof t> => t !== undefined)
 
       // [P13.3] Retry safety DITURUNKAN dari scope tool yang benar-benar diterima
       // bridge, bukan ditegas di sini. Satu nama asing/mutasi → UNPROVEN (= HOLD,
@@ -3948,14 +4161,38 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
         // P2.2: token penulis milik boot ini — sesi + scheduler-nya SATU
         // penulis (satu lease). Tanpa ini keduanya saling menolak.
         authorityToken: writerToken,
-        instruction: "Work autonomously on the assigned task. Report what you found.",
+        instruction: allowAutonomousBuild
+          ? "Work autonomously on the assigned task inside Workspace. Implement the required changes, run tests/checks, and report verification evidence."
+          : "Work autonomously on the assigned task. Report what you found.",
         model: modelRef.current,
+        ...(autonomous ? { maxDrainCycles: 64 } : {}),
+        ...(allowAutonomousBuild && verifyActive
+          ? {
+              verifier: async (work) => {
+                const res = await runVerify(verifyCommand, work.cwd)
+                return {
+                  ok: res.ok,
+                  verdict: res.ok ? ("passed" as const) : ("failed" as const),
+                  summary: `${res.command} exited ${res.exitCode}`,
+                  requeueOnFail: !res.ok,
+                }
+              },
+            }
+          : {}),
         adapter: {
           store,
           tools: autonomousTools,
           provider: router,
           model: modelRef.current,
           cwdFor: () => autonomousCwd,
+          ...(allowAutonomousBuild
+            ? {
+                workMode: "EXECUTE" as const,
+                idleTimeoutMs: effectiveTimeoutMs === 0 ? Infinity : effectiveTimeoutMs,
+                restrictBash,
+                ...(cfg.bashAllowlist ? { bashAllowlist: cfg.bashAllowlist } : {}),
+              }
+            : {}),
           // [P1 M15] Turn otonom melewati admission runtime yang sama dengan turn
           // user: M13 → Kernel, lalu eksekusi fisiknya (child session) di dalam
           // execution itu. `undefined` pada mode selain `owned` = jalur lama.
@@ -3975,6 +4212,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
             const child = await createMinicodeSession({
               provider: spec.provider as never,
               tools: spec.tools as never,
+              hiddenWireTools,
               cwd: spec.cwd,
               systemExtra: spec.systemExtra,
               model: spec.model,
@@ -3994,12 +4232,9 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
                 : {}),
               // [PHASE 6U] The child conversation id is NOT a kernel config field.
               timeoutMs: spec.timeoutMs,
-              // [PHASE 6U][SECURITY] The 6S handler, not a `readonly` MODE. This
-              // seam is what keeps 6S's policy in force in production: the
-              // mode-derived handler is revocable via `__setMode` and admits
-              // `web_fetch`, both of which 6S ruled out for an unattended run.
+              ...(spec.idleTimeoutMs !== undefined ? { idleTimeoutMs: spec.idleTimeoutMs } : {}),
               permissionHandler: spec.permissionHandler as never,
-              permissionMode: "readonly",
+              permissionMode: spec.permissionMode,
             })
             // P3.5 (N2) — jembatan kompaksi otonom. Sesi anak ini TANPA
             // presentation adapter (berbeda dari anak delegate_task yang dipasangi
@@ -4261,6 +4496,7 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     writerClosed = true
     stopWriterRenewTimer()
     releaseSessionWriter(sessionId, writerToken, cwd)
+    releaseDbScope()
     // SATU-SATUNYA pause() mid-process yang tersisa: teardown sesi. stdin
     // TTY kini mengalir seumur proses (tanpa pause per prompt) agar siklus
     // pause→resume tak membunuh 'data' di Bun Windows; tanpa pause di sini
@@ -4301,6 +4537,10 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     modelRef,
     effectiveInitialModel,
     effectiveTimeoutMs,
+    ...(effectiveWallTimeoutMs !== undefined ? { effectiveWallTimeoutMs } : {}),
+    ...(autonomous ? { autonomous: true } : {}),
+    ...(maxEpochs !== undefined ? { maxEpochs } : {}),
+    ...(maxCostHour !== undefined ? { maxCostHour } : {}),
     permissionMode,
     get workMode() {
       return workModeControl?.getWorkMode() ?? effectiveWorkMode

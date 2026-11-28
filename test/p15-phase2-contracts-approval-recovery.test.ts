@@ -36,6 +36,7 @@ import {
   EXCLUSIVE_TOOLS,
   EXPLORE_TOOL_NAMES,
   GATED_TOOLS,
+  INTERNAL_EXCLUSIVE_TOOLS,
   READONLY_TOOL_NAMES,
   TOOL_CONTRACTS,
   WRITE_TOOLS,
@@ -101,7 +102,12 @@ describe("TOOL-01/LOOP-INV-04 — registry kontrak tool = sumber tunggal", () =>
     expect(setOf(names)).toEqual(new Set(allTools.map((t) => t.name)))
     for (const c of TOOL_CONTRACTS) {
       expect(TIERS).toContain(c.sideEffectTier)
-      expect(["parallel-read", "path-serialized-write", "exclusive"]).toContain(c.concurrencyClass)
+      expect([
+        "parallel-read",
+        "path-serialized-write",
+        "exclusive",
+        "internal-exclusive",
+      ]).toContain(c.concurrencyClass)
     }
   })
 
@@ -128,18 +134,11 @@ describe("TOOL-01/LOOP-INV-04 — registry kontrak tool = sumber tunggal", () =>
         "lsp_rename",
       ]),
     )
-    // EXCLUSIVE_TOOLS = tanpa path tunggal → batch penuh sekuensial
+    // EXCLUSIVE_TOOLS = tanpa path tunggal (di luar internal state) → batch penuh sekuensial
     expect(setOf([...EXCLUSIVE_TOOLS])).toEqual(
-      new Set([
-        "bash",
-        "code_run",
-        "git_commit",
-        "git_push",
-        "write_memory",
-        "forget_memory",
-        "todo_write",
-      ]),
+      new Set(["bash", "code_run", "git_commit", "git_push", "write_memory", "forget_memory"]),
     )
+    expect(setOf([...INTERNAL_EXCLUSIVE_TOOLS])).toEqual(new Set(["todo_write"]))
     // GATED_TOOLS = di-gate approval secara default
     expect(setOf([...GATED_TOOLS])).toEqual(
       new Set([
@@ -162,6 +161,7 @@ describe("TOOL-01/LOOP-INV-04 — registry kontrak tool = sumber tunggal", () =>
         "read_image",
         "glob",
         "grep",
+        "dep_graph",
         "read_memory",
         "todo_read",
         "git_status",
@@ -191,6 +191,7 @@ describe("TOOL-01/LOOP-INV-04 — registry kontrak tool = sumber tunggal", () =>
         "read_image",
         "glob",
         "grep",
+        "dep_graph",
         "git_status",
         "git_diff",
         "git_log",
@@ -471,6 +472,41 @@ describe("LOOP-G06/G07 — rekonsiliasi mutasi workspace via hash", () => {
     )
     expect(outside.verdict).toBe("UNKNOWN")
     expect(outside.reason).toBe("path-outside-root")
+
+    // (h) P1-3: move_file memverifikasi sumber & tujuan terhadap preTargetHash.
+    const moveSrc = join(dir, "move-src.txt")
+    const moveDst = join(dir, "move-dst.txt")
+    const moveHash = sha256("move-payload")
+    writeFileSync(moveSrc, "move-payload")
+    const moveNotRun = await reconcileWorkspaceMutationIntent(
+      {
+        paths: ["move-src.txt", "move-dst.txt"],
+        preTargetHash: moveHash,
+        postTargetHash: moveHash,
+      },
+      dir,
+    )
+    expect(moveNotRun.verdict).toBe("CONFIRMED_NOT_EXECUTED")
+    rmSync(moveSrc)
+    writeFileSync(moveDst, "move-payload")
+    const moveDone = await reconcileWorkspaceMutationIntent(
+      {
+        paths: ["move-src.txt", "move-dst.txt"],
+        preTargetHash: moveHash,
+        postTargetHash: moveHash,
+      },
+      dir,
+    )
+    expect(moveDone.verdict).toBe("CONFIRMED_EXECUTED")
+    expect(moveDone.targetPath).toBe("move-dst.txt")
+
+    // (i) P1-3: delete_file pada file yang memang tidak ada sejak awal ≠ CONFIRMED_EXECUTED.
+    const missingDel = await reconcileWorkspaceMutationIntent(
+      { paths: ["never-existed.txt"], preTargetHash: null, postTargetHash: null },
+      dir,
+    )
+    expect(missingDel.verdict).toBe("UNKNOWN")
+    expect(missingDel.reason).toBe("target-already-absent")
   })
 })
 

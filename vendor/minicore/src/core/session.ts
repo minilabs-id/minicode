@@ -58,6 +58,8 @@ export interface SessionConfig {
   executor?: ToolExecutor;
   budget?: BudgetPolicy;
   estimator?: TokenEstimator;
+  /** Skema tool aktual yang dikirim ke wire (mis. pasca filter hiddenWireTools) agar budget loop konsisten. */
+  wireTools?: () => readonly import("./tool.ts").ToolSchema[];
   compaction?: CompactionStrategy;
   recovery?: RecoveryPolicy;
   maxSteps?: number;
@@ -84,6 +86,13 @@ export interface SessionConfig {
    * DEFAULT_TIMEOUT_MS (10 minutes); set to Infinity to disable.
    */
   timeoutMs?: number;
+  /**
+   * Inactivity timeout for a single run() call, in milliseconds. Resets
+   * whenever steps, tool executions, or provider stream deltas/extensions
+   * occur, and grants wake grace across OS sleep jumps. Set to Infinity (or
+   * omit) to disable.
+   */
+  idleTimeoutMs?: number;
   /**
    * Reports errors thrown by event listeners. Observer code must never be able
    * to break a turn (lifecycle/executor events) nor trigger a spurious retry
@@ -174,6 +183,7 @@ export interface SessionInternal {
   readonly permissionMode?: string | (() => string);
   readonly budget: BudgetPolicy;
   readonly estimator: TokenEstimator;
+  readonly wireTools?: () => readonly import("./tool.ts").ToolSchema[];
   readonly compaction: CompactionStrategy;
   readonly recovery: RecoveryPolicy;
   readonly maxSteps: number;
@@ -184,6 +194,7 @@ export interface SessionInternal {
   readonly toolResultMaxTokens: number;
   readonly keepRecentTurns: number;
   readonly timeoutMs: number;
+  readonly idleTimeoutMs?: number;
   readonly store: ContextStore;
   readonly events: EventBus;
   readonly state: SessionState;
@@ -225,6 +236,7 @@ export function createSession(config: SessionConfig): Session {
     permissionMode: config.permissionMode,
     budget: config.budget ?? defaultBudgetPolicy,
     estimator: config.estimator ?? defaultTokenEstimator,
+    wireTools: config.wireTools,
     compaction: config.compaction ?? mechanicalCompaction,
     recovery: config.recovery ?? defaultRecoveryPolicy,
     maxSteps: config.maxSteps ?? DEFAULT_MAX_STEPS,
@@ -235,6 +247,7 @@ export function createSession(config: SessionConfig): Session {
     toolResultMaxTokens: config.toolResultMaxTokens ?? DEFAULT_TOOL_RESULT_MAX_TOKENS,
     keepRecentTurns: config.keepRecentTurns ?? DEFAULT_KEEP_RECENT_TURNS,
     timeoutMs: config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    ...(config.idleTimeoutMs !== undefined ? { idleTimeoutMs: config.idleTimeoutMs } : {}),
     store,
     events,
     state,
@@ -260,13 +273,23 @@ export function createSession(config: SessionConfig): Session {
       try {
         system = config.systemForContext?.() ?? system
       } catch {}
-      return estimateSessionContext(store, system, impl.registry.list(), impl.estimator);
+      let tools: readonly import("./tool.ts").ToolSchema[] = impl.registry.list();
+      try {
+        tools = impl.wireTools?.() ?? tools;
+      } catch {}
+      return estimateSessionContext(store, system, tools, impl.estimator);
     },
     async run(input, opts) {
       if (impl.running) throw new AgentError("busy", "session is already running");
       impl.running = true;
       const timeout = createTimeout(impl.timeoutMs);
-      const joined = joinSignals(impl.sessionAbort.signal, opts?.signal, timeout.signal);
+      const idleTimeout = createActivityTimeout(events, impl.idleTimeoutMs);
+      const joined = joinSignals(
+        impl.sessionAbort.signal,
+        opts?.signal,
+        timeout.signal,
+        idleTimeout.signal,
+      );
       const turnStore = new ContextStore();
       turnStore.appendAll(store.messages);
       const turnState: SessionState = {
@@ -310,6 +333,7 @@ export function createSession(config: SessionConfig): Session {
         throw error;
       } finally {
         timeout.cancel();
+        idleTimeout.cancel();
         joined.cleanup();
         impl.running = false;
         // Steering yang belum sempat di-drain terkubur bersama turn ini. Tanpa
@@ -373,6 +397,80 @@ function createTimeout(ms: number): Timeout {
     signal: controller.signal,
     cancel: () => {
       if (timer !== undefined) clearTimeout(timer);
+    },
+  };
+}
+
+/**
+ * Watchdog berbasis aktivitas per-turn: hanya membatalkan bila benar-benar
+ * tidak ada aktivitas kernel selama `ms`, dengan proteksi sleep/hibernate OS
+ * agar lompatan jam dinding tidak memutus turn yang baru bangun.
+ */
+function createActivityTimeout(events: EventBus, ms?: number): Timeout {
+  const controller = new AbortController();
+  if (typeof ms !== "number" || !Number.isFinite(ms) || ms <= 0) {
+    return { signal: controller.signal, cancel: noop };
+  }
+  const idleMs = Math.max(1, Math.floor(ms));
+  const JS_TIMER_MAX = 2_147_483_647;
+  const WAKE_JUMP_MS = 15_000;
+  let lastTouchMono = performance.now();
+  let lastTouchWall = Date.now();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let closed = false;
+
+  const arm = (remainingMs = idleMs) => {
+    if (timer !== undefined) clearTimeout(timer);
+    if (closed || controller.signal.aborted) return;
+    const step = Math.min(remainingMs, JS_TIMER_MAX);
+    const leftAfter = remainingMs - step;
+    timer = setTimeout(() => {
+      if (closed || controller.signal.aborted) return;
+      if (leftAfter > 0) {
+        arm(leftAfter);
+        return;
+      }
+      const monoDelta = Math.max(0, performance.now() - lastTouchMono);
+      const wallDelta = Math.max(0, Date.now() - lastTouchWall);
+      if (wallDelta - monoDelta > WAKE_JUMP_MS) {
+        lastTouchMono = performance.now();
+        lastTouchWall = Date.now();
+        arm(idleMs);
+        return;
+      }
+      controller.abort(new AgentError("timeout", `turn inactive for ${idleMs}ms`));
+    }, step);
+  };
+
+  const touch = () => {
+    if (closed || controller.signal.aborted) return;
+    lastTouchMono = performance.now();
+    lastTouchWall = Date.now();
+    arm(idleMs);
+  };
+
+  const unsubs = [
+    events.on("step:started", touch),
+    events.on("step:completed", touch),
+    events.on("execution:started", touch),
+    events.on("execution:completed", touch),
+    events.on("provider:text", touch),
+    events.on("provider:extension", touch),
+  ];
+  arm(idleMs);
+
+  return {
+    signal: controller.signal,
+    cancel: () => {
+      if (closed) return;
+      closed = true;
+      if (timer !== undefined) clearTimeout(timer);
+      timer = undefined;
+      for (const unsub of unsubs) {
+        try {
+          unsub();
+        } catch {}
+      }
     },
   };
 }

@@ -285,7 +285,9 @@ export function verifyPaths(tool: string, args: unknown, cwd: string): string[] 
       return p ? [p] : []
     }
     case "move_file": {
-      const out = [pick(a.from), pick(a.to)].filter((x): x is string => x !== null)
+      const out = [pick(a.path ?? a.from), pick(a.destination ?? a.to)].filter(
+        (x): x is string => x !== null,
+      )
       return out
     }
     case "git_commit":
@@ -337,7 +339,8 @@ async function targetHashesFor(
   root: string,
 ): Promise<{ preTargetHash?: string | null; postTargetHash?: string | null }> {
   if (!TARGET_HASH_TOOLS.has(name)) return {}
-  const rel = verifyPaths(name, args, root)[0]
+  const paths = verifyPaths(name, args, root)
+  const rel = paths[0]
   if (!rel) return {}
   const pre = await hashFileOrNull(resolve(root, rel))
   if (!pre.ok) return {}
@@ -349,8 +352,12 @@ async function targetHashesFor(
   } else if (name === "delete_file") {
     // Field hadir dengan nilai null = "diharapkan tidak ada setelah efek".
     out.postTargetHash = null
+  } else if (name === "move_file" && paths[1] && pre.hash !== null) {
+    // move_file memindahkan isi sumber ke tujuan (paths[1]); isi akhir tujuan
+    // diharapkan sama dengan hash pra-efek sumber.
+    out.postTargetHash = pre.hash
   }
-  // edit/apply_patch/move_file: isi akhir tak bisa diturunkan dari argumen →
+  // edit/apply_patch: isi akhir tak bisa diturunkan dari argumen →
   // postTargetHash absen (UNKNOWN bila isi berubah dari pre).
   return out
 }
@@ -364,9 +371,17 @@ export interface WorkspaceReconciliation {
   readonly reason: string
 }
 
+function resolveContainedPath(root: string, rel: string): string | null {
+  const abs = resolve(root, rel)
+  const back = relative(root, abs).replace(/\\/g, "/")
+  if (!back || back.startsWith("..") || isAbsolute(back)) return null
+  return abs
+}
+
 /** Rekonsiliasi intent mutasi terhadap disk saat ini (urutan penting):
+ *  0. dua path (move_file) → verifikasi sumber & tujuan terhadap preTargetHash
  *  1. isi == pre dan != post → CONFIRMED_NOT_EXECUTED
- *  2. post diketahui dan isi == post → CONFIRMED_EXECUTED
+ *  2. post diketahui dan isi == post (kecuali pre==post==null) → CONFIRMED_EXECUTED
  *  3. selainnya → UNKNOWN (aman: verifikasi, bukan ulang mutasi). */
 export async function reconcileWorkspaceMutationIntent(
   record: Pick<JournalRecord, "paths" | "preTargetHash" | "postTargetHash">,
@@ -377,10 +392,22 @@ export async function reconcileWorkspaceMutationIntent(
   if (!rel) {
     return { verdict: "UNKNOWN", targetPath: null, observedHash: null, reason: "no-target-path" }
   }
-  const abs = resolve(root, rel)
-  const back = relative(root, abs).replace(/\\/g, "/")
-  if (!back || back.startsWith("..") || isAbsolute(back)) {
+  const abs = resolveContainedPath(root, rel)
+  if (!abs) {
     return { verdict: "UNKNOWN", targetPath: rel, observedHash: null, reason: "path-outside-root" }
+  }
+  const destRel = record.paths?.[1]
+  let absDest: string | null = null
+  if (destRel !== undefined) {
+    absDest = resolveContainedPath(root, destRel)
+    if (!absDest) {
+      return {
+        verdict: "UNKNOWN",
+        targetPath: destRel,
+        observedHash: null,
+        reason: "path-outside-root",
+      }
+    }
   }
   if (record.preTargetHash === undefined) {
     return {
@@ -390,12 +417,67 @@ export async function reconcileWorkspaceMutationIntent(
       reason: "no-pre-target-hash",
     }
   }
+
+  const pre = record.preTargetHash
+  if (destRel && absDest) {
+    if (pre === null) {
+      return {
+        verdict: "UNKNOWN",
+        targetPath: rel,
+        observedHash: null,
+        reason: "source-absent-before-move",
+      }
+    }
+    const [observedSrc, observedDest] = await Promise.all([
+      hashFileOrNull(abs),
+      hashFileOrNull(absDest),
+    ])
+    if (!observedSrc.ok || !observedDest.ok) {
+      return {
+        verdict: "UNKNOWN",
+        targetPath: !observedSrc.ok ? rel : destRel,
+        observedHash: null,
+        reason: "target-unreadable",
+      }
+    }
+    const sameCasePath = abs.toLowerCase() === absDest.toLowerCase()
+    if (!sameCasePath && observedSrc.hash === null && observedDest.hash === pre) {
+      return {
+        verdict: "CONFIRMED_EXECUTED",
+        targetPath: destRel,
+        observedHash: observedDest.hash,
+        reason: "moved-to-destination",
+      }
+    }
+    if (!sameCasePath && observedSrc.hash === pre && observedDest.hash !== pre) {
+      return {
+        verdict: "CONFIRMED_NOT_EXECUTED",
+        targetPath: rel,
+        observedHash: observedSrc.hash,
+        reason: "source-intact",
+      }
+    }
+    return {
+      verdict: "UNKNOWN",
+      targetPath: destRel,
+      observedHash: observedDest.hash,
+      reason: "move-state-ambiguous",
+    }
+  }
+
   const observed = await hashFileOrNull(abs)
   if (!observed.ok) {
     return { verdict: "UNKNOWN", targetPath: rel, observedHash: null, reason: "target-unreadable" }
   }
-  const pre = record.preTargetHash
   const post = record.postTargetHash
+  if (pre === null && post === null && observed.hash === null) {
+    return {
+      verdict: "UNKNOWN",
+      targetPath: rel,
+      observedHash: null,
+      reason: "target-already-absent",
+    }
+  }
   if (observed.hash === pre && post !== pre) {
     return {
       verdict: "CONFIRMED_NOT_EXECUTED",
@@ -434,8 +516,10 @@ export function journalPath(sessionId: string, cwd?: string): string {
 export function deleteJournalFile(sessionId: string, cwd?: string): void {
   // Best-effort sinkron: unlinkSync selesai sebelum fungsi kembali (kontrak
   // `: void`); jangan pakai import async — memicu race baca-jurnal.
+  const p = journalPath(sessionId, cwd)
+  invalidateJournalCache(p)
   try {
-    unlinkSync(journalPath(sessionId, cwd))
+    unlinkSync(p)
   } catch {
     // Best-effort: file mungkin memang sudah tak ada.
   }
@@ -532,6 +616,8 @@ async function withFileLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
     return await fn()
   } finally {
     release()
+    // Lepas rantai promise setelah antrean kosong supaya sesi panjang/multi-child tidak membocorkan key.
+    if (fileLocks.get(key) === gate) fileLocks.delete(key)
   }
 }
 
@@ -550,8 +636,54 @@ function markDegraded(sessionId: string, cwd: string, why: string): void {
 
 // ── Tulis durabel: append → flush/fsync (§10) ──
 
+// Cache baca JSONL in-memory koheren-penulis (tervalidasi stat ino/mtimeNs/ctimeNs/size)
+// agar findIdempotentInvocation, persistEffectReceipt, & observer tidak membaca
+// ulang dan JSON.parse seluruh jurnal pada setiap pemanggilan tool.
+const JOURNAL_CACHE_MAX = 64
+interface JournalCacheEntry {
+  ino: bigint
+  mtimeNs: bigint
+  ctimeNs: bigint
+  size: bigint
+  records: JournalRecord[]
+  status: "valid" | "empty"
+  hasVerification: boolean
+}
+const journalCache = new Map<string, JournalCacheEntry>()
+
+function setJournalCache(path: string, entry: JournalCacheEntry): void {
+  journalCache.delete(path)
+  journalCache.set(path, entry)
+  while (journalCache.size > JOURNAL_CACHE_MAX) {
+    const oldest = journalCache.keys().next().value
+    if (oldest === undefined) break
+    journalCache.delete(oldest)
+  }
+}
+
+const activeJournalWrites = new Map<string, number>()
+let journalMutationSeq = 0
+
+function beginJournalWrite(path: string): void {
+  activeJournalWrites.set(path, (activeJournalWrites.get(path) ?? 0) + 1)
+  journalMutationSeq++
+}
+
+function endJournalWrite(path: string): void {
+  const left = (activeJournalWrites.get(path) ?? 1) - 1
+  if (left <= 0) activeJournalWrites.delete(path)
+  else activeJournalWrites.set(path, left)
+  journalMutationSeq++
+}
+
+function invalidateJournalCache(path: string): void {
+  journalCache.delete(path)
+  journalMutationSeq++
+}
+
 async function appendLine(path: string, obj: JournalRecord): Promise<boolean> {
   const line = `${JSON.stringify(obj)}\n`
+  beginJournalWrite(path)
   // Baris kecil + O_APPEND = tulis atomik antar proses (POSIX).
   try {
     await mkdir(dirname(path), { recursive: true, mode: 0o700 }).catch(() => {})
@@ -562,10 +694,32 @@ async function appendLine(path: string, obj: JournalRecord): Promise<boolean> {
     } finally {
       await h.close().catch(() => {})
     }
+    const cached = journalCache.get(path)
+    if (cached) {
+      try {
+        const st = await stat(path, { bigint: true })
+        const addedBytes = BigInt(Buffer.byteLength(line, "utf8"))
+        if (st.ino === cached.ino && st.size === cached.size + addedBytes) {
+          cached.records.push(obj)
+          if (obj.kind === "verification") cached.hasVerification = true
+          cached.status = "valid"
+          cached.mtimeNs = st.mtimeNs
+          cached.ctimeNs = st.ctimeNs
+          cached.size = st.size
+        } else {
+          invalidateJournalCache(path)
+        }
+      } catch {
+        invalidateJournalCache(path)
+      }
+    }
     return true
   } catch (e) {
+    invalidateJournalCache(path)
     process.stderr.write(`[warn] journal: write failed (${path}): ${(e as Error).message}\n`)
     return false
+  } finally {
+    endJournalWrite(path)
   }
 }
 
@@ -574,18 +728,44 @@ async function stateFor(path: string, key: string): Promise<WriterState> {
   if (!st) {
     st = { nextSeq: 0, healthy: true }
     // Lanjutkan seq lintas restart proses (anti tabrakan id).
-    try {
-      const raw = await readFile(path, "utf8")
-      for (const line of raw.split("\n")) {
-        if (!line.trim()) continue
-        try {
-          const r = JSON.parse(line) as { seq?: unknown }
-          if (typeof r.seq === "number" && Number.isFinite(r.seq)) {
-            st.nextSeq = Math.max(st.nextSeq, Math.floor(r.seq) + 1)
+    const cached = journalCache.get(path)
+    let populatedFromCache = false
+    if (cached) {
+      try {
+        const fileStat = await stat(path, { bigint: true })
+        if (
+          fileStat.ino === cached.ino &&
+          fileStat.mtimeNs === cached.mtimeNs &&
+          fileStat.ctimeNs === cached.ctimeNs &&
+          fileStat.size === cached.size
+        ) {
+          for (const r of cached.records) {
+            if (typeof r.seq === "number" && Number.isFinite(r.seq)) {
+              st.nextSeq = Math.max(st.nextSeq, Math.floor(r.seq) + 1)
+            }
           }
-        } catch {}
-      }
-    } catch {}
+          populatedFromCache = true
+        }
+      } catch {}
+    }
+    if (!populatedFromCache) {
+      try {
+        const raw = await readFile(path, "utf8")
+        for (const line of raw.split("\n")) {
+          if (!line.trim()) continue
+          try {
+            const r = JSON.parse(line) as { seq?: unknown }
+            if (typeof r.seq === "number" && Number.isFinite(r.seq)) {
+              st.nextSeq = Math.max(st.nextSeq, Math.floor(r.seq) + 1)
+            }
+          } catch {}
+        }
+      } catch {}
+    }
+    if (writers.size >= 512) {
+      const oldest = writers.keys().next().value
+      if (oldest !== undefined) writers.delete(oldest)
+    }
     writers.set(key, st)
   }
   return st
@@ -930,7 +1110,13 @@ async function sweepInner(sessionId: string, root: string): Promise<number> {
   })
   if (keep.length === loaded.records.length) return 0
   const data = keep.map((r) => JSON.stringify(r)).join("\n") + (keep.length ? "\n" : "")
-  await atomicWriteText(path, data)
+  beginJournalWrite(path)
+  try {
+    invalidateJournalCache(path)
+    await atomicWriteText(path, data)
+  } finally {
+    endJournalWrite(path)
+  }
   // Sinkronkan counter in-memory dengan file hasil sweep.
   const key = writerKey(sessionId, root)
   const st = writers.get(key)
@@ -1046,25 +1232,105 @@ function isRecordShape(r: unknown): r is JournalRecord {
   return o.state === "pending" || isTerminalJournalState(o.state as JournalState)
 }
 
+export async function loadVerificationJournal(
+  sessionId: string,
+  cwd?: string,
+): Promise<JournalLoad & { hasVerification: boolean }> {
+  return loadJournalInternal(sessionId, cwd)
+}
+
 export async function loadJournal(sessionId: string, cwd?: string): Promise<JournalLoad> {
+  const { hasVerification: _hv, ...load } = await loadJournalInternal(sessionId, cwd)
+  return load
+}
+
+async function loadJournalInternal(
+  sessionId: string,
+  cwd?: string,
+): Promise<JournalLoad & { hasVerification: boolean }> {
   const root = resolve(cwd ?? process.cwd())
   const path = journalPath(sessionId, root)
+  // Tangkap generasi & status tulis SEBELUM I/O async agar pembacaan konkuren yang
+  // beririsan dengan append/sweep/delete tak menanam cache ber-`stBig` basi
+  // bersama isi baru (yg dapat menggandakan record di appendLine berikutnya).
+  const seqAtStart = journalMutationSeq
+  const busyAtStart = activeJournalWrites.has(path)
   const warnings: string[] = []
+  let fileStat: Awaited<ReturnType<typeof stat>> | null = null
+  try {
+    fileStat = (await stat(path, { bigint: true })) as unknown as Awaited<ReturnType<typeof stat>>
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") {
+      invalidateJournalCache(path)
+      return {
+        records: [],
+        warnings,
+        truncatedTail: false,
+        quarantined: false,
+        status: "absent",
+        hasVerification: false,
+      }
+    }
+  }
+  const stBig = fileStat as unknown as {
+    ino: bigint
+    mtimeNs: bigint
+    ctimeNs: bigint
+    size: bigint
+  } | null
+  if (stBig) {
+    const cached = journalCache.get(path)
+    if (
+      cached &&
+      stBig.ino === cached.ino &&
+      stBig.mtimeNs === cached.mtimeNs &&
+      stBig.ctimeNs === cached.ctimeNs &&
+      stBig.size === cached.size
+    ) {
+      journalCache.delete(path)
+      journalCache.set(path, cached)
+      return {
+        records: cached.records.slice(),
+        warnings: [],
+        truncatedTail: false,
+        quarantined: false,
+        status: cached.status,
+        hasVerification: cached.hasVerification,
+      }
+    }
+  }
   let raw: string
   try {
     raw = await readFile(path, "utf8")
   } catch (e) {
     // ENOENT = absent; error lain = unreadable (bukan empty).
     if ((e as NodeJS.ErrnoException)?.code === "ENOENT") {
-      return { records: [], warnings, truncatedTail: false, quarantined: false, status: "absent" }
+      invalidateJournalCache(path)
+      return {
+        records: [],
+        warnings,
+        truncatedTail: false,
+        quarantined: false,
+        status: "absent",
+        hasVerification: false,
+      }
     }
+    invalidateJournalCache(path)
     warnings.push(`journal tak terbaca (${path}): ${(e as Error).message}`)
-    return { records: [], warnings, truncatedTail: false, quarantined: false, status: "unreadable" }
+    return {
+      records: [],
+      warnings,
+      truncatedTail: false,
+      quarantined: false,
+      status: "unreadable",
+      hasVerification: false,
+    }
   }
   const lines = raw.split("\n")
   // Baris akhir kosong = terminator normal, bukan truncasi.
   if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop()
   const records: JournalRecord[] = []
+  let hasVerification = false
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!
     if (!line.trim()) continue
@@ -1072,6 +1338,7 @@ export async function loadJournal(sessionId: string, cwd?: string): Promise<Jour
     try {
       parsed = JSON.parse(line)
     } catch {
+      invalidateJournalCache(path)
       const r = await handleCorrupt(
         path,
         lines,
@@ -1080,9 +1347,14 @@ export async function loadJournal(sessionId: string, cwd?: string): Promise<Jour
         warnings,
         `baris ${i + 1} bukan JSON valid`,
       )
-      return { ...r, status: "corrupt" }
+      return {
+        ...r,
+        status: "corrupt",
+        hasVerification: r.records.some((rec) => rec.kind === "verification"),
+      }
     }
     if (!isRecordShape(parsed)) {
+      invalidateJournalCache(path)
       const r = await handleCorrupt(
         path,
         lines,
@@ -1091,16 +1363,40 @@ export async function loadJournal(sessionId: string, cwd?: string): Promise<Jour
         warnings,
         `baris ${i + 1} bentuk record invalid`,
       )
-      return { ...r, status: "corrupt" }
+      return {
+        ...r,
+        status: "corrupt",
+        hasVerification: r.records.some((rec) => rec.kind === "verification"),
+      }
     }
+    if (parsed.kind === "verification") hasVerification = true
     records.push(parsed)
+  }
+  const status: "valid" | "empty" = records.length > 0 ? "valid" : "empty"
+  if (
+    stBig &&
+    !busyAtStart &&
+    !activeJournalWrites.has(path) &&
+    journalMutationSeq === seqAtStart &&
+    BigInt(Buffer.byteLength(raw, "utf8")) === stBig.size
+  ) {
+    setJournalCache(path, {
+      ino: stBig.ino,
+      mtimeNs: stBig.mtimeNs,
+      ctimeNs: stBig.ctimeNs,
+      size: stBig.size,
+      records: records.slice(),
+      status,
+      hasVerification,
+    })
   }
   return {
     records,
     warnings,
     truncatedTail: false,
     quarantined: false,
-    status: records.length > 0 ? "valid" : "empty",
+    status,
+    hasVerification,
   }
 }
 
@@ -1118,12 +1414,17 @@ async function handleCorrupt(
     warnings.push(
       `journal korup di ekor (${reason}) — baris dibuang, prefix (${prefix.length} record) tetap otoritatif`,
     )
+    beginJournalWrite(path)
     try {
+      invalidateJournalCache(path)
       await atomicWriteText(
         path,
         prefix.map((r) => JSON.stringify(r)).join("\n") + (prefix.length ? "\n" : ""),
       )
-    } catch {}
+    } catch {
+    } finally {
+      endJournalWrite(path)
+    }
     return { records: prefix, warnings, truncatedTail: true, quarantined: false, status: "corrupt" }
   }
   // Tengah korup: quarantine + pertahankan prefix sebagai live.
@@ -1131,13 +1432,18 @@ async function handleCorrupt(
   warnings.push(
     `journal KORUP di tengah (${reason}) — file dikarantina ke ${qpath}; prefix (${prefix.length} record) dipakai, suffix dianggap pending/ambigu`,
   )
+  beginJournalWrite(path)
   try {
+    invalidateJournalCache(path)
     await atomicWriteText(qpath, lines.join("\n"))
     await atomicWriteText(
       path,
       prefix.map((r) => JSON.stringify(r)).join("\n") + (prefix.length ? "\n" : ""),
     )
-  } catch {}
+  } catch {
+  } finally {
+    endJournalWrite(path)
+  }
   return { records: prefix, warnings, truncatedTail: false, quarantined: true, status: "corrupt" }
 }
 

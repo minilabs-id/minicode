@@ -12,6 +12,7 @@ import {
   type MinicodeConfig,
   normalizeConfig,
   type ProviderEntry,
+  parseJsonFile,
   updateConfigAtomic,
   withConfigLock,
   writeConfigAtomic,
@@ -226,7 +227,18 @@ export async function detectAndSave(
     apiKey,
     models: detected.models,
     providerHint: detected.providerHint,
+    ...(previous?.auth ? { auth: previous.auth } : {}),
     ...(previous?.contextWindows ? { contextWindows: previous.contextWindows } : {}),
+    ...(previous?.contextWindowSources
+      ? { contextWindowSources: previous.contextWindowSources }
+      : {}),
+    ...(previous?.maxOutputTokens ? { maxOutputTokens: previous.maxOutputTokens } : {}),
+    ...(previous?.maxOutputTokensDefault !== undefined
+      ? { maxOutputTokensDefault: previous.maxOutputTokensDefault }
+      : {}),
+    ...(previous?.enablePromptCaching !== undefined
+      ? { enablePromptCaching: previous.enablePromptCaching }
+      : {}),
     ...capacity,
     ...(prevEffort ? { reasoningEffort: prevEffort } : {}),
   }
@@ -343,7 +355,7 @@ export async function refreshProviderModels(
     // last-wins dan menelan update satu sama lain.
     await withConfigLock(path, async () => {
       try {
-        const cfg: MinicodeConfig = normalizeConfig(JSON.parse(await readFile(path, "utf8")))
+        const cfg: MinicodeConfig = normalizeConfig(parseJsonFile(await readFile(path, "utf8")))
         let changed = false
         for (const p of cfg.providers) {
           const nu = updated.get(p.id)
@@ -355,6 +367,7 @@ export async function refreshProviderModels(
             if (nu.contextWindows) p.contextWindows = nu.contextWindows
             if (nu.contextWindowSources) p.contextWindowSources = nu.contextWindowSources
             if (nu.maxOutputTokens) p.maxOutputTokens = nu.maxOutputTokens
+            if (nu.enablePromptCaching !== undefined) p.enablePromptCaching = nu.enablePromptCaching
             changed = true
           }
         }

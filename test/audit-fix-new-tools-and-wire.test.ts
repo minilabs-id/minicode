@@ -67,7 +67,7 @@ const propsOf = (t: (typeof allTools)[number]) =>
 // ── A: registrasi & kontrak ──────────────────────────────────────────────────
 
 test("3 tool baru terdaftar tepat sekali di allTools DAN TOOL_CONTRACTS", () => {
-  expect(allTools).toHaveLength(41)
+  expect(allTools).toHaveLength(42)
   expect(TOOL_CONTRACTS).toHaveLength(allTools.length)
   expect(new Set(allTools.map((t) => t.name)).size).toBe(allTools.length)
   for (const name of NEW_TOOLS) {

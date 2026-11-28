@@ -45,11 +45,11 @@ bun run gate:fast   # tsc + lint + test + coverage + pack + bash + bench:smoke +
 
 Gerbang lambat/stokastik (docker sandbox) tinggal di `slow.yml` — kegagalannya sinyal investigasi, bukan penolakan PR. CI per-commit (`ci.yml`) hanya menjalankan yang deterministik.
 
-### Budget ukuran paket (5.250 KiB)
+### Budget ukuran paket (5.500 KiB)
 
-`bun run gate:pack` mengukur ukuran tarball (`npm pack --dry-run`, KiB) dan menolak bila **melebihi 5.250 KiB (5,13 MiB)**. Angka tunggalnya ada di `scripts/pack-budget.ts` — satu sumber untuk gate dan tes, jadi keduanya tak bisa menyimpang. Batas ini **alarm regresi** (menangkap `node_modules`/`test` ikut terbawa), bukan target ukuran yang perlu dikejar.
+`bun run gate:pack` mengukur ukuran tarball (`npm pack --dry-run`, KiB) dan menolak bila **melebihi 5.500 KiB (5,37 MiB)**. Angka tunggalnya ada di `scripts/pack-budget.ts` — satu sumber untuk gate dan tes, jadi keduanya tak bisa menyimpang. Batas ini **alarm regresi** (menangkap `node_modules`/`test` ikut terbawa), bukan target ukuran yang perlu dikejar.
 
-Batas 5.250 KiB disetujui pemilik pada 2026-11-25 (re-baseline dari 5.000 KiB pasca hardening & UI/kompaksi v0.50.0: paket aktual 5.013 KiB / 342 file; margin ~237 KiB). Jangan menaikkan anggaran tanpa bukti baru dan persetujuan pemilik; ukur dulu runtime serta berkas non-runtime yang dapat dipangkas.
+Batas 5.500 KiB disetujui pemilik pada 2026-11-28 (re-baseline dari 5.250 KiB setelah pengetatan runtime & penambahan graf dependensi: paket aktual ~5.379 KiB / 348 file; margin ~120 KiB; sebelumnya 5.250 KiB disetujui 2026-11-25 untuk v0.50.0). Jangan menaikkan anggaran tanpa bukti baru dan persetujuan pemilik; ukur dulu runtime serta berkas non-runtime yang dapat dipangkas.
 
 Gerbang lain:
 

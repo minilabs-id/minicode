@@ -56,21 +56,25 @@ afterEach(async () => {
 
 // ── A / G: the declared schema ───────────────────────────────────────────────
 
-test("A. schema accepts an optional taskId, and keeps required + additionalProperties intact", () => {
+test("A. schema accepts an optional taskId, and keeps updates + additionalProperties intact", () => {
   const params = todoWriteTool.parameters as {
-    properties: { todos: { items: { properties: Record<string, unknown> } } }
+    properties: {
+      todos: { items: { properties: Record<string, unknown> } }
+      updates?: { items: { properties: Record<string, unknown>; required: string[] } }
+    }
     required: string[]
     additionalProperties: boolean
   }
   const item = params.properties.todos.items
-  // the one new property
+  // the one new property on todos items
   expect(Object.keys(item.properties)).toContain("taskId")
   // existing properties unchanged
   expect(Object.keys(item.properties).sort()).toEqual(["content", "status", "taskId"])
   // NOT made required - backward compatibility
   expect(params.properties.todos.items.properties.taskId).toBeDefined()
-  expect(JSON.stringify(params.required)).toContain("todos")
-  // still closed to arbitrary properties, so taskId is the ONLY new accepted key
+  expect(params.properties.updates?.items.required.sort()).toEqual(["status", "taskId"])
+  expect(params.required).toEqual([])
+  // still closed to arbitrary properties
   expect(
     (params.properties.todos.items as unknown as { additionalProperties: boolean })
       .additionalProperties,

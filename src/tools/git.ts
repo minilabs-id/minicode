@@ -261,7 +261,15 @@ export const gitLogTool: Tool = {
       ? resolve(sessionRoot, cwd as string)
       : sessionRoot
     if (!(await isGitRepo(resolvedCwd, ctx.signal))) return "not a git repository"
-    const n = String(Math.min(Math.max((limit as number) ?? 20, 1), 100))
+    const parsedLimit =
+      typeof limit === "number"
+        ? limit
+        : typeof limit === "string" && limit.trim()
+          ? Number(limit)
+          : Number.NaN
+    const n = String(
+      Number.isFinite(parsedLimit) ? Math.min(Math.max(Math.trunc(parsedLimit), 1), 100) : 20,
+    )
     return await runGit(["log", "--oneline", `-${n}`], resolvedCwd, ctx.signal)
   },
 }

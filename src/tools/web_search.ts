@@ -1,7 +1,7 @@
 import type { Tool } from "#minicore"
 import { isPrivateHost } from "../lib/net.ts"
 import { fenceUntrustedToolOutput, isAlreadyFenced, scrubSecrets } from "../policy/scrub.ts"
-import { readBodyCapped } from "./web_fetch.ts"
+import { decodeNumericHtmlEntities, readBodyCapped } from "./web_fetch.ts"
 
 // Penanda truncation (temuan audit #02): snippet/total yang dipotong
 // diam-diam tampak lengkap. Snippet 400 char, total per-provider di-cap.
@@ -407,14 +407,35 @@ async function grepAppResults(
 }
 
 function decodeXmlEntities(s: string): string {
-  return s
+  return decodeNumericHtmlEntities(s)
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
     .replace(/&apos;/g, "'")
     .replace(/&amp;/g, "&")
-    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
-    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
+}
+
+function extractXmlTagBodies(xml: string, tag: string, limit = Infinity): string[] {
+  const results: string[] = []
+  const openPrefix = `<${tag}`
+  const closeToken = `</${tag}>`
+  let pos = 0
+  while (pos < xml.length && results.length < limit) {
+    const start = xml.indexOf(openPrefix, pos)
+    if (start === -1) break
+    const boundary = xml[start + openPrefix.length]
+    if (boundary !== ">" && !/^\s$/.test(boundary ?? "")) {
+      pos = start + openPrefix.length
+      continue
+    }
+    const gt = xml.indexOf(">", start + openPrefix.length)
+    if (gt === -1) break
+    const end = xml.indexOf(closeToken, gt + 1)
+    if (end === -1) break
+    results.push(xml.slice(gt + 1, end))
+    pos = end + closeToken.length
+  }
+  return results
 }
 
 async function arxivResults(
@@ -424,26 +445,24 @@ async function arxivResults(
 ): Promise<DeveloperResult[]> {
   const url = `https://export.arxiv.org/api/query?search_query=all:${encodeURIComponent(query)}&start=0&max_results=${count}`
   const xml = await fetchTextKeyless(url, signal, { accept: "application/atom+xml" })
-  const entries = xml.match(/<entry[^>]*>[\s\S]*?<\/entry>/g) ?? []
-  return entries
-    .flatMap((entry) => {
-      const pick = (tag: string): string => {
-        const match = entry.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`))
-        return match ? stripHtml(decodeXmlEntities(match[1] ?? "")) : ""
-      }
-      const id = pick("id").replace(/^http:/, "https:")
-      if (!id) return []
-      const published = pick("published")
-      return [
-        {
-          title: pick("title") || "arXiv paper",
-          url: id,
-          snippet: pick("summary"),
-          meta: published ? published.slice(0, 10) : "",
-        },
-      ]
-    })
-    .slice(0, count)
+  const entries = extractXmlTagBodies(xml, "entry", count)
+  return entries.flatMap((entry) => {
+    const pick = (tag: string): string => {
+      const body = extractXmlTagBodies(entry, tag, 1)[0]
+      return body !== undefined ? stripHtml(decodeXmlEntities(body)) : ""
+    }
+    const id = pick("id").replace(/^http:/, "https:")
+    if (!id) return []
+    const published = pick("published")
+    return [
+      {
+        title: pick("title") || "arXiv paper",
+        url: id,
+        snippet: pick("summary"),
+        meta: published ? published.slice(0, 10) : "",
+      },
+    ]
+  })
 }
 
 interface CrossrefResponse {

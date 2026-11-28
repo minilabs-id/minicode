@@ -114,10 +114,60 @@ test("A1 pagu token/watchdog judul tersedia dan pendek", () => {
   expect(LIMITS.CHILD_TITLE_TIMEOUT_MS).toBeLessThan(LIMITS.SUB_AGENT_TIMEOUT_MS)
 })
 
-// ── B. Emisi judul ──────────────────────────────────────────────────────────
+function llmTitleEnv(): () => void {
+  const prev = process.env.MINICODE_SUBAGENT_LLM_TITLE
+  process.env.MINICODE_SUBAGENT_LLM_TITLE = "1"
+  return () => {
+    if (prev === undefined) delete process.env.MINICODE_SUBAGENT_LLM_TITLE
+    else process.env.MINICODE_SUBAGENT_LLM_TITLE = prev
+  }
+}
+
+test("B0 default 0-token generator menurunkan judul lokal tanpa panggilan LLM", async () => {
+  const restore = providerEnv()
+  const prevFlag = process.env.MINICODE_SUBAGENT_LLM_TITLE
+  delete process.env.MINICODE_SUBAGENT_LLM_TITLE
+  const dir = tmpRoot()
+  const prev = todoSession.id
+  todoSession.id = "audit-self-title-b0"
+  const emitted: AgentEvent[] = []
+  const seen: SubAgentSpec[] = []
+  let titleStreamCalls = 0
+  try {
+    installFactory(
+      {
+        id: "counting",
+        models: ["m"],
+        async *stream() {
+          titleStreamCalls++
+          yield { type: "text", text: "should not run" }
+          yield { type: "finish", reason: "stop" }
+        },
+      },
+      seen,
+    )
+    await delegateTaskTool.execute(
+      { prompt: "Please investigate dependency cycle in tools" },
+      ctxFor(dir, emitted),
+    )
+    expect(titleStreamCalls).toBe(0)
+    const ev = labelEventOf(emitted)
+    expect((ev?.data as { childLabel?: string } | undefined)?.childLabel).toBe(
+      "dependency cycle in tools",
+    )
+  } finally {
+    if (prevFlag !== undefined) process.env.MINICODE_SUBAGENT_LLM_TITLE = prevFlag
+    todoSession.id = prev
+    clearSubAgentSessionFactory()
+    restore()
+  }
+})
+
+// ── B. Emisi judul (mode opt-in MINICODE_SUBAGENT_LLM_TITLE=1) ─────────────
 
 test("B1 judul dinormalisasi (4 kata, ·) dan membawa id anak", async () => {
   const restore = providerEnv()
+  const restoreTitle = llmTitleEnv()
   const dir = tmpRoot()
   const prev = todoSession.id
   todoSession.id = "audit-self-title-b1"
@@ -133,17 +183,19 @@ test("B1 judul dinormalisasi (4 kata, ·) dan membawa id anak", async () => {
     expect(ev).toBeTruthy()
     const data = ev!.data as { forwardedChild: string; childLabel: string }
     expect(data.forwardedChild).toBe(seen[0]!.sessionId!)
-    expect(data.childLabel).toBe("audit·allowlist·bash·guard")
+    expect(data.childLabel).toBe("audit allowlist bash guard")
     expect(seen[0]!.label).toMatch(/^explore-\d+$/) // label sementara tetap
   } finally {
     todoSession.id = prev
     clearSubAgentSessionFactory()
+    restoreTitle()
     restore()
   }
 })
 
 test("B2 balasan garbage tak menghasilkan judul (fallback label sementara)", async () => {
   const restore = providerEnv()
+  const restoreTitle = llmTitleEnv()
   const dir = tmpRoot()
   const prev = todoSession.id
   todoSession.id = "audit-self-title-b2"
@@ -157,12 +209,14 @@ test("B2 balasan garbage tak menghasilkan judul (fallback label sementara)", asy
   } finally {
     todoSession.id = prev
     clearSubAgentSessionFactory()
+    restoreTitle()
     restore()
   }
 })
 
 test("B3 provider gagal = fail-soft, anak tetap selesai tanpa event judul", async () => {
   const restore = providerEnv()
+  const restoreTitle = llmTitleEnv()
   const dir = tmpRoot()
   const prev = todoSession.id
   todoSession.id = "audit-self-title-b3"
@@ -177,12 +231,14 @@ test("B3 provider gagal = fail-soft, anak tetap selesai tanpa event judul", asyn
   } finally {
     todoSession.id = prev
     clearSubAgentSessionFactory()
+    restoreTitle()
     restore()
   }
 })
 
 test("B4 watchdog memutus provider diam: tanpa judul, tanpa timer bocor", async () => {
   const restore = providerEnv()
+  const restoreTitle = llmTitleEnv()
   const dir = tmpRoot()
   const prev = todoSession.id
   todoSession.id = "audit-self-title-b4"
@@ -202,6 +258,7 @@ test("B4 watchdog memutus provider diam: tanpa judul, tanpa timer bocor", async 
     mutable.CHILD_TITLE_TIMEOUT_MS = savedTimeout
     todoSession.id = prev
     clearSubAgentSessionFactory()
+    restoreTitle()
     restore()
   }
 })

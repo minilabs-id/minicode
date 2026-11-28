@@ -283,3 +283,18 @@ test("oversized pending result fails without dropping its batch", () => {
   )
   expect(() => strategy().compact(storeOf(messages), { keepRecentTurns: 1 })).toThrow(/cannot fit/i)
 })
+
+test("getTaskStateFallback memulihkan state todo saat pesan resume tanpa WeakSet provenance", async () => {
+  const s = createLlmCompaction({
+    getTaskStateFallback: () => "todos 1/2 · sekarang: periksa router\n  [x] t1 — audit loop",
+  })
+  const resumed = [
+    // Simulasi pesan summary hasil load DB (tidak terdaftar di syntheticSummaries).
+    { role: "user" as const, content: "Previous context (loaded from resume)" },
+    { role: "assistant" as const, content: "Melanjutkan pemeriksaan." },
+    { role: "user" as const, content: "Lanjutkan tahap 2." },
+  ]
+  const out = s.compact(storeOf(resumed), { keepRecentTurns: 1 })
+  expect(String(out[0]!.content)).toContain("periksa router")
+  expect(String(out[0]!.content)).toContain("t1 — audit loop")
+})

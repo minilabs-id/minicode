@@ -220,6 +220,7 @@ describe("DISCUSS — ceiling read-only lokal (16 tool, tanpa network read)", ()
     read_image: { path: "probe.png" },
     glob: { pattern: "*.ts" },
     grep: { pattern: "foo" },
+    dep_graph: { action: "summary" },
     list_dir: { path: "." },
     git_status: {},
     git_diff: {},
@@ -261,8 +262,8 @@ describe("DISCUSS — ceiling read-only lokal (16 tool, tanpa network read)", ()
         expect(await h.check(c, {} as never)).toBe("deny")
       }
       expect(prompts).toBe(0)
-      // Ke-16 LOCAL_READONLY_TOOL_NAMES diizinkan tanpa prompt di seluruh 6 PM.
-      expect(LOCAL_READONLY_TOOL_NAMES).toHaveLength(16)
+      // Ke-17 LOCAL_READONLY_TOOL_NAMES diizinkan tanpa prompt di seluruh 6 PM.
+      expect(LOCAL_READONLY_TOOL_NAMES).toHaveLength(17)
       for (const name of LOCAL_READONLY_TOOL_NAMES) {
         expect(
           await h.check(
@@ -740,6 +741,7 @@ describe("Invariant #1 — 12 sel × seluruh tool bawaan: WorkMode tak pernah me
         list_dir: { path: "." },
         glob: { pattern: "*.ts" },
         grep: { pattern: "x" },
+        dep_graph: { action: "summary" },
         bash: { cmd: "echo ok" },
         code_run: { lang: "node", code: "1" },
         web_fetch: { url: "https://example.com" },

@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite"
 import { randomUUID } from "node:crypto"
-import { assertWriterEpochInTxn, openSessionHandle, sessionRowExistsInTxn } from "./schema.ts"
+import { assertWriterEpochInTxn, sessionRowExistsInTxn, withSessionDb } from "./schema.ts"
 
 export type RunStatus = "CREATED" | "RUNNING" | "COMPLETED" | "INTERRUPTED" | "FAILED"
 
@@ -81,42 +81,33 @@ const RUN_COLUMNS =
   "run_id, session_id, thread_id, status, started_at, ended_at, last_persisted_seq, pending_tool_ids, recovery_status, takeover_epoch, created_at"
 
 export function getRun(runId: string, cwd?: string): RunRow | null {
-  const db = openSessionHandle(cwd)
-  try {
+  return withSessionDb(cwd, (db) => {
     const row = db
       .prepare(`SELECT ${RUN_COLUMNS} FROM runs WHERE run_id = ?`)
       .get(runId) as RunRow | null
     return row ? rowToRun(row) : null
-  } finally {
-    db.close()
-  }
+  })
 }
 
 export function listSessionRuns(sessionId: string, cwd?: string): RunRow[] {
-  const db = openSessionHandle(cwd)
-  try {
-    return (
+  return withSessionDb(cwd, (db) =>
+    (
       db
         .prepare(`SELECT ${RUN_COLUMNS} FROM runs WHERE session_id = ? ORDER BY started_at`)
         .all(sessionId) as RunRow[]
-    ).map(rowToRun)
-  } finally {
-    db.close()
-  }
+    ).map(rowToRun),
+  )
 }
 
 export function getActiveRun(sessionId: string, cwd?: string): RunRow | null {
-  const db = openSessionHandle(cwd)
-  try {
+  return withSessionDb(cwd, (db) => {
     const row = db
       .prepare(
         `SELECT ${RUN_COLUMNS} FROM runs WHERE session_id = ? AND status = 'RUNNING' LIMIT 1`,
       )
       .get(sessionId) as RunRow | null
     return row ? rowToRun(row) : null
-  } finally {
-    db.close()
-  }
+  })
 }
 
 export function assessRunRecoveryStatus(run: RunRow): "NONE" | "UNKNOWN" {
@@ -142,9 +133,8 @@ export function createRun(
   cwd?: string,
   opts?: { runId?: string; pendingToolIds?: unknown; expectedEpoch?: number },
 ): RunRow {
-  const db = openSessionHandle(cwd)
-  try {
-    return db.transaction(() => {
+  return withSessionDb(cwd, (db) =>
+    db.transaction(() => {
       if (opts?.expectedEpoch !== undefined)
         assertWriterEpochInTxn(db, sessionId, opts.expectedEpoch)
       if (!sessionRowExistsInTxn(db, sessionId)) throw new Error(`session not found: ${sessionId}`)
@@ -182,10 +172,8 @@ export function createRun(
         takeover_epoch: epochRow.epoch,
         created_at: now,
       })
-    })()
-  } finally {
-    db.close()
-  }
+    })(),
+  )
 }
 
 const RUN_EDGES: Record<RunStatus, readonly RunStatus[]> = {
@@ -207,9 +195,8 @@ export function transitionRun(
   cwd?: string,
   opts?: { expectedEpoch?: number; recoveryStatus?: string },
 ): RunRow {
-  const db = openSessionHandle(cwd)
-  try {
-    return db.transaction(() => {
+  return withSessionDb(cwd, (db) =>
+    db.transaction(() => {
       const row = db
         .prepare(`SELECT ${RUN_COLUMNS} FROM runs WHERE run_id = ?`)
         .get(runId) as RunRow | null
@@ -239,10 +226,8 @@ export function transitionRun(
         ended_at: terminal ? now : row.ended_at,
         recovery_status: recovery,
       })
-    })()
-  } finally {
-    db.close()
-  }
+    })(),
+  )
 }
 
 export function completeRun(
@@ -333,9 +318,8 @@ export function advanceRunCursor(
   cwd?: string,
   opts?: { expectedEpoch?: number; expectedEventId?: string },
 ): RunRow {
-  const db = openSessionHandle(cwd)
-  try {
-    return db.transaction(() => {
+  return withSessionDb(cwd, (db) =>
+    db.transaction(() => {
       if (opts?.expectedEpoch !== undefined) {
         const owner = db.prepare("SELECT session_id FROM runs WHERE run_id = ?").get(runId) as {
           session_id: string
@@ -344,10 +328,8 @@ export function advanceRunCursor(
         assertWriterEpochInTxn(db, owner.session_id, opts.expectedEpoch)
       }
       return advanceRunCursorInTxn(db, runId, seq, undefined, opts)
-    })()
-  } finally {
-    db.close()
-  }
+    })(),
+  )
 }
 
 export function setRunPendingTools(
@@ -356,9 +338,8 @@ export function setRunPendingTools(
   cwd?: string,
   opts?: { expectedEpoch?: number },
 ): RunRow {
-  const db = openSessionHandle(cwd)
-  try {
-    return db.transaction(() => {
+  return withSessionDb(cwd, (db) =>
+    db.transaction(() => {
       const row = db
         .prepare(`SELECT ${RUN_COLUMNS} FROM runs WHERE run_id = ?`)
         .get(runId) as RunRow | null
@@ -368,10 +349,8 @@ export function setRunPendingTools(
       const pending = validatePendingToolIds(pendingToolIds)
       db.prepare("UPDATE runs SET pending_tool_ids = ? WHERE run_id = ?").run(pending, runId)
       return rowToRun({ ...row, pending_tool_ids: pending })
-    })()
-  } finally {
-    db.close()
-  }
+    })(),
+  )
 }
 
 export function tombstoneDeadRuns(
@@ -379,9 +358,8 @@ export function tombstoneDeadRuns(
   cwd?: string,
   opts?: { expectedEpoch?: number },
 ): number {
-  const db = openSessionHandle(cwd)
-  try {
-    return db.transaction(() => {
+  return withSessionDb(cwd, (db) =>
+    db.transaction(() => {
       if (opts?.expectedEpoch !== undefined)
         assertWriterEpochInTxn(db, sessionId, opts.expectedEpoch)
       // `ended_at` SENGAJA dibiarkan NULL: kematian tak terobservasi tidak
@@ -393,8 +371,6 @@ export function tombstoneDeadRuns(
         )
         .run(sessionId)
       return res.changes
-    })()
-  } finally {
-    db.close()
-  }
+    })(),
+  )
 }

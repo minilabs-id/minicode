@@ -290,12 +290,12 @@ try {
   writeFileSync(
     join(target, "VENDOR.md"),
     [
-      "# vendor/minicore — JANGAN EDIT MANUAL",
+      "# vendor/minicore — HOST-EDITABLE (unfrozen)",
       "",
-      "Salinan MiniCore dari source commit yang dipin, ditambah overlay host yang",
-      "diperiksa dari patch di `scripts/vendor-overlays/minicode-context.patch`.",
-      "Overlay memberi admission context per model dan system prompt dinamis;",
-      "simpan seam ini saat menyinkronkan source upstream.",
+      "Salinan MiniCore dari source commit yang dipin (referensi historis), ditambah",
+      "overlay host dari `scripts/vendor-overlays/minicode-context.patch`. Sejak v0.16.0",
+      "keputusan pemilik menghapus status vendor-beku — modifikasi host diperbolehkan",
+      "dengan tetap mengutamakan seam aditif.",
       "",
       `- source commit: \`${head}\``,
       `- source hash: \`${sourceHash}\``,
@@ -307,7 +307,7 @@ try {
       "   verifikasi dari paket terbit: hitung hash vendor/minicore di dalam tarball)",
       "",
       "Perbarui dengan `bun run vendor:minicore` (butuh `../minicore`).",
-      "`bun run vendor:check` memverifikasi source, overlay, dan fingerprint final.",
+      "`bun run vendor:check` bersifat informasional/nonaktif sementara host-editable aktif.",
       "",
     ].join("\n"),
   )

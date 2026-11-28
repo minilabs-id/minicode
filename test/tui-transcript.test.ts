@@ -478,7 +478,9 @@ describe("v0.43 — baris ledger error ringkas (tanpa duplikasi status/child)", 
         activity({
           toolCallId: parentId,
           name: "delegate_task",
-          label: "delegate_task",
+          label: "Audit modul",
+          target: undefined,
+          summary: "delegate_task",
           status: "failed",
         }),
         activity({
@@ -502,7 +504,7 @@ describe("v0.43 — baris ledger error ringkas (tanpa duplikasi status/child)", 
     })
 
     const rows = t.view(120, 6, 0)
-    const redaksi = `${humanToolLabel("delegate_task", { label: "delegate_task" })} failed`
+    const redaksi = `${humanToolLabel("delegate_task", { label: "Audit modul" })} failed`
     // Satu baris ledger, bukan dua: status/child tak jadi baris sendiri.
     expect(rows.filter((row) => row.includes(redaksi))).toHaveLength(1)
     const painted = rows.find((row) => row.includes(redaksi))!
@@ -935,11 +937,18 @@ describe("v0.40 — baris live tool tetap tail transien (bukan commit-in-place)"
     expect(t.total()).toBe(committedTotal)
   })
 
-  test("liveRows(w) mengembalikan baris live tanpa menambah committed", () => {
+  test("liveRows(w) mengembalikan baris live root saja tanpa menambah committed atau ↳ child", () => {
     const parent = activity({
       toolCallId: "p",
       name: "delegate_task",
+      intent: "Memahami alur render",
       target: undefined,
+      status: "running",
+    })
+    const siblingRoot = activity({
+      toolCallId: "r",
+      name: "read_file",
+      target: "app.ts",
       status: "running",
     })
     const child = activity({
@@ -958,19 +967,18 @@ describe("v0.40 — baris live tool tetap tail transien (bukan commit-in-place)"
       parentToolCallId: "parent-yang-sudah-hilang",
       status: "running",
     })
-    const { t, set } = setupMutable({ activities: [parent, child, orphan], turns: [] })
+    const { t, set } = setupMutable({ activities: [parent, siblingRoot, child, orphan], turns: [] })
     const beforeSize = t.size()
     const beforeTotal = t.total()
 
     const rows = t.liveRows(40)
-    expect(rows).toHaveLength(3)
-    // Urutan root → anak → anak yatim (sama dengan tail lama).
-    expect(rows[0]).toContain(humanToolLabel("delegate_task"))
+    expect(rows).toHaveLength(2)
+    expect(rows[0]).toContain("Memahami alur render")
     expect(rows[1]).toContain(humanToolLabel("read_file"))
-    expect(rows[2]).toContain(humanToolLabel("grep"))
     for (const row of rows) {
       expect(displayWidth(row)).toBe(40)
       expect(row).not.toContain("\x1b[2J")
+      expect(row).not.toContain("↳")
     }
     // Murni pembaca: tak ada mutasi state.
     expect(t.size()).toBe(beforeSize)
@@ -1183,5 +1191,185 @@ describe("v0.40 — baris live tool tetap tail transien (bukan commit-in-place)"
     expect(live).not.toContain("Delegasi tugas")
     expect(live).not.toContain("sub agent ·")
     expect(live).not.toContain("agen sub ·")
+  })
+
+  test("gelombang 3 sub-agent menyembunyikan jumlah live di ✦ & baris sub-agent memakai timer MM:SS redup + pulse", () => {
+    const acts: UiPresentationActivity[] = [
+      activity({
+        toolCallId: "d1",
+        name: "delegate_task",
+        intent: "Auditor Task & Approval",
+        status: "running",
+        tsStart: 1_000,
+      }),
+      activity({
+        toolCallId: "d2",
+        name: "delegate_task",
+        intent: "Pemburu Pola Berbahaya",
+        status: "running",
+        tsStart: 1_000,
+      }),
+      activity({
+        toolCallId: "d3",
+        name: "delegate_task",
+        intent: "Auditor Dokumen & Test",
+        status: "running",
+        tsStart: 1_000,
+      }),
+      activity({
+        toolCallId: "c1",
+        name: "read_file",
+        parentToolCallId: "d1",
+        childSessionId: "sub_1",
+        runId: "run_1",
+        status: "completed",
+      }),
+      activity({
+        toolCallId: "c2",
+        name: "grep",
+        parentToolCallId: "d3",
+        childSessionId: "sub_3",
+        runId: "run_3",
+        status: "failed",
+      }),
+    ]
+    const bus = createFakeBus()
+    let nowMs = 2_000 // elapsed = 1000ms (< 2 detik): timer belum muncul
+    let emitHandler: ((event: never) => void) | undefined
+    const tr = new Transcript(bus as never, {
+      now: () => nowMs,
+      getSnapshot: () => ({ activities: acts, turns: [] }),
+      onPresentationEvent: (next) => {
+        emitHandler = next as (event: never) => void
+        return () => {}
+      },
+    })
+    const emit = (type: string, extra: Record<string, unknown> = {}) =>
+      emitHandler?.({ type, ...extra } as never)
+
+    emit("turn.started", { seq: 1, turnId: 1 })
+    emit("tool.started", { seq: 2, turnId: 1, toolCallId: "d1", name: "delegate_task" })
+    emit("tool.started", { seq: 3, turnId: 1, toolCallId: "d2", name: "delegate_task" })
+    emit("tool.started", { seq: 4, turnId: 1, toolCallId: "d3", name: "delegate_task" })
+    emit("tool.completed", { seq: 5, turnId: 1, toolCallId: "c1", status: "completed" })
+    emit("tool.failed", { seq: 6, turnId: 1, toolCallId: "c2", status: "failed", message: "boom" })
+
+    // Awal: 3 running -> baris agregat tetap ringkas tanpa '(3 running)'
+    const allRunning = stripAnsi(
+      tr.view(120, 20, 0).find((l) => stripAnsi(l).includes(glyphs.agentIcon)) ?? "",
+    )
+    expect(allRunning).toBe(
+      `${glyphs.agentIcon} ${t("ts.agentSummary", { agents: 3, tools: 2, failed: 1 })} (1 ${t("ts.agentReason.error")})`,
+    )
+    expect(allRunning).not.toContain("(" + "3 ")
+    // Sebelum 2 detik: nama sub-agent tampil tanpa '... running' dan tanpa timer
+    const earlyRow = stripAnsi(tr.liveRows(120)[0] ?? "").trimEnd()
+    expect(earlyRow).toBe(`${glyphs.arrow} Auditor Task & Approval`)
+
+    // 2 agen selesai (d1 & d3), tinggal d2 yang running dengan elapsed = 11m 24s (684_000ms)
+    acts[0] = { ...acts[0]!, status: "completed" }
+    acts[2] = { ...acts[2]!, status: "completed" }
+    emit("tool.completed", { seq: 7, turnId: 1, toolCallId: "d1", status: "completed" })
+    emit("tool.completed", { seq: 8, turnId: 1, toolCallId: "d3", status: "completed" })
+
+    nowMs = 685_000 // 11m 24s -> pulse nyala (1140 % 2 === 0 -> c.info)
+    const partial = tr.view(120, 20, 0).map(stripAnsi)
+    const partialAgg = partial.find((l) => l.includes(glyphs.agentIcon)) ?? ""
+    expect(partialAgg).toContain(t("ts.agentSummary", { agents: 3, tools: 2, failed: 1 }))
+    expect(partialAgg).not.toMatch(/running|berjalan|done|selesai/i)
+
+    // Hanya d2 yang masih tampil di live running dengan format '<arrow> <nama> 11:24' (tanpa '... running')
+    const liveOnly = tr.liveRows(120).map((l) => stripAnsi(l).trimEnd())
+    expect(liveOnly).toEqual([`${glyphs.arrow} Pemburu Pola Berbahaya 11:24`])
+    expect(partial.some((l) => l === `${glyphs.arrow} Pemburu Pola Berbahaya 11:24`)).toBe(true)
+    expect(partial.join("\n")).not.toContain(t("ts.statusRunning"))
+
+    // Uji warna TTY truecolor: nama pulse (c.info <-> c.gray) & timer lebih redup (c.faint)
+    const prevIsTty = process.stdout.isTTY
+    const prevTerm = process.env.TERM
+    const prevColorterm = process.env.COLORTERM
+    const prevNoColor = process.env.NO_COLOR
+    const prevMinicodeColor = process.env.MINICODE_COLOR
+    const prevMotion = process.env.MINICODE_MOTION
+    process.env.TERM = "xterm-256color"
+    process.env.COLORTERM = "truecolor"
+    delete process.env.NO_COLOR
+    delete process.env.MINICODE_COLOR
+    delete process.env.MINICODE_MOTION
+    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
+    // `liveRows()` membungkus lewat `truncateToWidth`, yang menutup SGR defensif `\x1b[0m` setelah `\x1b[39m`.
+    const stripTrailingReset = (s: string) => (s.endsWith("\x1b[0m") ? s.slice(0, -4) : s)
+    try {
+      const brightColored = tr.liveRows(120)[0]!.trimEnd()
+      expect(stripTrailingReset(brightColored)).toBe(
+        `${c.info(`${glyphs.arrow} Pemburu Pola Berbahaya`)} ${c.faint("11:24")}`,
+      )
+
+      nowMs = 685_600 // +600ms -> pulse meredup (1141 % 2 === 1 -> c.gray)
+      const dimColored = tr.liveRows(120)[0]!.trimEnd()
+      expect(stripTrailingReset(dimColored)).toBe(
+        `${c.gray(`${glyphs.arrow} Pemburu Pola Berbahaya`)} ${c.faint("11:24")}`,
+      )
+
+      process.env.MINICODE_MOTION = "0"
+      const reducedMotion = tr.liveRows(120)[0]!.trimEnd()
+      expect(stripTrailingReset(reducedMotion)).toBe(
+        `${c.info(`${glyphs.arrow} Pemburu Pola Berbahaya`)} ${c.faint("11:24")}`,
+      )
+    } finally {
+      Object.defineProperty(process.stdout, "isTTY", { value: prevIsTty, configurable: true })
+      if (prevTerm === undefined) delete process.env.TERM
+      else process.env.TERM = prevTerm
+      if (prevColorterm === undefined) delete process.env.COLORTERM
+      else process.env.COLORTERM = prevColorterm
+      if (prevNoColor === undefined) delete process.env.NO_COLOR
+      else process.env.NO_COLOR = prevNoColor
+      if (prevMinicodeColor === undefined) delete process.env.MINICODE_COLOR
+      else process.env.MINICODE_COLOR = prevMinicodeColor
+      if (prevMotion === undefined) delete process.env.MINICODE_MOTION
+      else process.env.MINICODE_MOTION = prevMotion
+    }
+
+    // Agen ke-3 ikut selesai -> ringkasan tetap bersih
+    acts[1] = { ...acts[1]!, status: "completed" }
+    emit("tool.completed", { seq: 9, turnId: 1, toolCallId: "d2", status: "completed" })
+    const settledAgg = stripAnsi(
+      tr.view(120, 20, 0).find((l) => stripAnsi(l).includes(glyphs.agentIcon)) ?? "",
+    )
+    expect(settledAgg).toContain(t("ts.agentSummary", { agents: 3, tools: 2, failed: 1 }))
+  })
+})
+
+describe("markdown inline/heading/hr tidak membocorkan ##, ***, atau backtick", () => {
+  test("nested emphasis, heading berindentasi/list/kutipan, multi-backtick, dan *** bersih di pending maupun commit", () => {
+    const bus = createFakeBus()
+    const tr = new Transcript(bus as never)
+    const sample = [
+      "  ## Sub Berindentasi",
+      "- ## Sub Dalam Bullet",
+      "1. ### Sub Bernomor",
+      "> ## Kutipan Heading",
+      "Ini **kalimat *utama*** dan `kode()` serta ***tebal miring*** dan ```inline```.",
+      "***",
+      "---",
+    ].join("\n")
+
+    bus.emit("provider:text", { text: sample })
+    const pendOut = stripAnsi(tr.view(100, 30, 0).join("\n"))
+    expect(pendOut).toContain("Sub Berindentasi")
+    expect(pendOut).toContain("- Sub Dalam Bullet")
+    expect(pendOut).toContain("1. Sub Bernomor")
+    expect(pendOut).toContain("> Kutipan Heading")
+    expect(pendOut).toContain("Ini kalimat utama dan kode() serta tebal miring dan inline.")
+    expect(pendOut).not.toContain("##")
+    expect(pendOut).not.toContain("***")
+    expect(pendOut).not.toContain("`")
+
+    bus.emit("turn:completed", {})
+    const commOut = stripAnsi(tr.view(100, 30, 0).join("\n"))
+    expect(commOut).toContain("Ini kalimat utama dan kode() serta tebal miring dan inline.")
+    expect(commOut).not.toContain("##")
+    expect(commOut).not.toContain("***")
+    expect(commOut).not.toContain("`")
   })
 })

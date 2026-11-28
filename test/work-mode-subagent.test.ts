@@ -25,6 +25,7 @@ import {
   delegateTaskTool,
   EXPLORE_TOOL_NAMES,
   type SubAgentSpec,
+  setSubAgentGovernance,
   setSubAgentSessionFactory,
   setSubAgentWorkMode,
 } from "../src/tools/task.ts"
@@ -74,9 +75,9 @@ const dirs: string[] = []
 afterEach(async () => {
   for (const d of dirs.splice(0)) await cleanup(d)
   clearSubAgentSessionFactory()
-  // `setSubAgentWorkMode` global lintas-test — reset agar PLAN/DISCUSS tidak
-  // bocor ke test lain (mis. final-adversarial "chain 4" yang butuh EXECUTE).
+  // `setSubAgentWorkMode` & `setSubAgentGovernance` global lintas-test — reset.
   setSubAgentWorkMode(() => undefined)
+  setSubAgentGovernance(() => ({}))
 })
 
 async function runDelegate(workMode: "DISCUSS", pm: PermissionMode, modeArg: string) {
@@ -313,6 +314,52 @@ describe("child explore murni baca — read_memory tidak menaikkan access_count 
       expect(row!.access_count).toBe(0)
     } finally {
       db.close()
+    }
+  })
+
+  test("Wave 2: hiddenWireTools dari governance menyaring skema wire LSP anak tanpa mengubah spec.tools", async () => {
+    const { FakeProvider, finish, text } = await import("#minicore/test/fakes.ts")
+    const { createMinicodeSession } = await import("../src/app/session.ts")
+    const restore = providerEnv()
+    const dir = tmpRoot()
+    dirs.push(dir)
+    const seen: SubAgentSpec[] = []
+    setSubAgentWorkMode(() => "EXECUTE")
+    setSubAgentGovernance(() => ({
+      hiddenWireTools: new Set([
+        "lsp_diagnostics",
+        "lsp_definition",
+        "lsp_references",
+        "lsp_hover",
+        "lsp_symbols",
+        "lsp_workspace_symbols",
+        "lsp_rename",
+      ]),
+    }))
+    setSubAgentSessionFactory(fakeFactory(seen))
+    try {
+      await delegateTaskTool.execute({ prompt: "petakan", mode: "explore" }, ctxFor(dir, "auto"))
+      const spec = seen[0]!
+      // Kontrak `spec.tools` tetap penuh EXPLORE_TOOL_NAMES (menjaga audit sub-agent).
+      expect(spec.tools).toHaveLength(EXPLORE_TOOL_NAMES.length)
+      expect(spec.hiddenWireTools?.has("lsp_diagnostics")).toBe(true)
+
+      const provider = new FakeProvider([{ events: [text("ok"), finish("stop")] }])
+      const child = await createMinicodeSession({
+        provider,
+        tools: spec.tools,
+        hiddenWireTools: spec.hiddenWireTools,
+        cwd: dir,
+        permissionMode: "auto",
+        workMode: spec.workMode,
+      })
+      await child.run("cek tool wire")
+      const seenWireNames = (provider.requests[0]?.tools ?? []).map((t) => t.name)
+      expect(seenWireNames).toContain("read_file")
+      expect(seenWireNames).toContain("grep")
+      for (const n of seenWireNames) expect(n.startsWith("lsp_")).toBe(false)
+    } finally {
+      restore()
     }
   })
 })

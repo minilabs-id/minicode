@@ -317,6 +317,63 @@ export const BENCH_TASKS: BenchTask[] = [
   },
 ]
 
+// Suite regresi terpisah (di luar 13 BENCH_TASKS beku) untuk menguji jalur
+// planning/reasoning Wave 5 dalam mode hermetik tanpa menggeser baseline 13/13.
+export const PLANNING_REGRESSION_TASKS: BenchTask[] = [
+  {
+    id: "readonly-verify-noop",
+    description: "Answer a read-only question without modifying workspace under --verify",
+    async setup() {
+      const dir = await mkdtemp(join(tmpdir(), "minicode-bench-"))
+      await writeFile(
+        join(dir, "info.ts"),
+        "export const VERSION = '1.0.0'\nexport function ping() { return 'pong' }\n",
+        "utf8",
+      )
+      return dir
+    },
+    prompt: "Read info.ts and state the exported VERSION without editing any file.",
+    async verify(dir) {
+      const txt = await readFile(join(dir, "info.ts"), "utf8").catch(() => "")
+      const ok = txt.includes("export const VERSION = '1.0.0'")
+      return { passed: ok, detail: ok ? "untouched" : "unexpected mutation" }
+    },
+    cleanup: clean,
+  },
+  {
+    id: "parallel-plan-and-read",
+    description: "Batch todo_write alongside read_file in a single planning step",
+    async setup() {
+      const dir = await mkdtemp(join(tmpdir(), "minicode-bench-"))
+      await writeFile(join(dir, "config.json"), '{"mode":"strict"}\n', "utf8")
+      return dir
+    },
+    prompt: "Create a 1-item todo list via todo_write and inspect config.json in parallel.",
+    async verify(dir) {
+      const txt = await readFile(join(dir, "config.json"), "utf8").catch(() => "")
+      const ok = txt.includes('"mode":"strict"')
+      return { passed: ok, detail: ok ? "workspace preserved" : "missing config.json" }
+    },
+    cleanup: clean,
+  },
+  {
+    id: "stagnation-arg-variation",
+    description: "Guard repeated tool failures even when small flags vary",
+    async setup() {
+      const dir = await mkdtemp(join(tmpdir(), "minicode-bench-"))
+      await writeFile(join(dir, "Makefile"), "all:\n\techo ok\n", "utf8")
+      return dir
+    },
+    prompt: "Inspect Makefile and stop immediately instead of repeating failing checks.",
+    async verify(dir) {
+      const txt = await readFile(join(dir, "Makefile"), "utf8").catch(() => "")
+      const ok = txt.includes("echo ok")
+      return { passed: ok, detail: ok ? "Makefile intact" : "Makefile missing" }
+    },
+    cleanup: clean,
+  },
+]
+
 // Dukungan task eksternal (SWE-bench-format): array { id, description, prompt, files: {path, content}[], verify: string[] }.
 export interface ExternalTask {
   id: string

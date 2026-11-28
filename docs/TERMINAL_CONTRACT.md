@@ -22,6 +22,11 @@
 >
 > **Pointer per versi** (rincian di entri `## Perubahan v…` di bawah):
 >
+> - **Perbaikan parser markdown & pemisah horizontal (disetujui pemilik 2026-11-28)** — `renderInline()` memakai stack delimiter ala CommonMark + pencocokan run backtick `N`-panjang + parser tautan seimbang + `paintWithRestore()` sehingga penekanan bersarang (`**… *…***`, `***…***`), span multi-backtick (```` ```…``` ````), dan SGR di dalam heading/tautan tidak menyisakan `**`/`***`/`` ` `` mentah; helper bersama `renderMarkdownContentLine()` di `markdown.ts` & `Transcript.renderAssistantLine()` juga membuang `#` pada heading berindentasi maupun di dalam list/kutipan dan merender garis pemisah horizontal mandiri (`***`/`---`/`___`) dengan `c.dim(glyphs.hLine.repeat(…))`. Peta proteksi: `test/tui-format.test.ts`, `test/tui-transcript.test.ts`, `test/tui-theme-highlight.test.ts`.
+> - **Amandemen tampilan live & agregat sub-agent (disetujui pemilik 2026-11-28)** — baris agregat `✦` menghapus jumlah live/selesai dalam kurung (`(R running)` / `(R running · D done)`) sehingga selalu ringkas `✦ N sub agent · T tool · F failed` (plus perincian gagal bila `F > 0`). Baris live sub-agent (`delegate_task`) hanya menampilkan `› <nama>` dengan pulse warna halus (`c.info` terang ↔ `c.gray` redup tiap `600 ms`, statis `c.info` bila `MINICODE_MOTION=0`) dan timer `MM:SS` (`HH:MM:SS` bila `≥ 1 jam`) berwarna redup `c.faint` setelah `≥ 2 dtk`, tanpa teks status `… running`/`… berjalan`; tool non-sub-agent tetap memakai format `› <label> … running/berjalan (<Ns>)`.
+> - **Amandemen durasi akhir turn bersama rekap (disetujui pemilik 2026-11-28)** — di akhir setiap turn TUI (`turn:completed`/`turn.completed`/`turn.failed`/`turn.cancelled`, serta `--resume` bila `summary.durationMs` tersedia), `flushTurnTotal()` selalu mencatat lama turn berjalan dengan `formatElapsed` berspasi antara menit dan detik (`14s`, `1m 05s`, `1h 02m`) terlepas dari ada-tidaknya tool: jika ada tool digabung di baris rekap kumulatif (`2 command · 118 read · 1m 05s`, tetap ber-`rekap:true` untuk `/copy` dan menimpa rekap segmen terakhir via `replaceEntry`), sedangkan turn tanpa tool (`0` tool) menampilkan baris durasi saja (`1m 05s`, `kind:"system"` tanpa `rekap:true` agar `/copy` tetap menyalin narasi bersih). Rekap segmen tengah turn (`flushActivityFold`) tidak menyertakan durasi turn.
+> - **Amandemen pasca-v0.52.1 (tampilan live sub-agent 2 lapis, agregat per putaran, & label kerja — disetujui pemilik 2026-11-27)** — (1) baris live TUI hanya menampilkan aktivitas root (`!parentToolCallId`) agar baris `  ↳` tool anak tidak berkedip dan seluruh baris live sub-agent selaras gaya `runningLine()` dengan tool non-sub-agent; (2) agregat `✦` sub-agent dilacak **per putaran (`wave`)**: putaran lama tetap tertinggal di atas sebagai riwayat, putaran baru membuat blok `✦` + live root putaran berjalan di bawah dengan spasi/jeda konsisten dan kegagalan `delegate_task` tetap ditampilkan berlabel tugas; (3) `extractIntent` menyaring ringkasan `args.prompt` saat `delegate_task` tanpa `name`, `cleanDelegateRole` memblokir placeholder `"delegate_task"` & `"sub-agent (…) done:"`, `friendlyToolFailureTag`/`agentFailureReason` memisahkan `stepLimit`, dan `deriveSupersedes` mencegah overwrite lintas tugas `delegate_task` berbeda.
+> - **Amandemen gema paste di transkrip (disetujui pemilik 2026-11-27)** — placeholder paste `{paste text N line(s)}` tetap ringkas **hanya di composer** (termasuk recall histori `↑`/`↓` dan `Ctrl+R`); saat Enter (submit idle maupun enqueue/steer busy), token paste diekspansi penuh baik ke `host.submit`/`host.enqueue` maupun pada gema riwayat chat (`pushUser`) agar isi prompt terbuka dan terbaca di histori percakapan.
 > - **v0.52.1 (perbaikan UI/UX & keterbacaan warna tema — amandemen atas v0.51)** — (1) baris
 >   tunggu transien `waitingStatusRow()` tidak lagi tertahan oleh buffer
 >   `thinkingTail`/`thinkingArea` saat `FLAT_RENDERER` menekan baris thinking;
@@ -102,9 +107,9 @@
 >   latar warna)**, **tanpa prefix `minicode ›` di dalam composer** (gema di
 >   transkrip tetap memakai `minicode › `), **seleksi teks composer** via drag
 >   mouse / `Ctrl+A` / `Ctrl+C`, **word-wrap di batas spasi/tab**, serta
->   **placeholder paste ringkas** (`{paste text N lines}` untuk paste bracketed
+>   **placeholder paste ringkas** (`{paste text N lines}` di composer untuk paste bracketed
 >   ≥2 baris atau ≥160 char, hapus atomik Backspace/Delete, dan ekspansi penuh
->   saat submit/enqueue).
+>   saat submit/enqueue serta pada gema transkrip chat).
 >   Juga diamandemen `/copy`: menyalin **render 1 turn** dari transkrip (narasi
 >   assistant + rekap/laporan), bukan buffer output tool mentah; dan error tanpa
 >   21 redaksi kanonik tak dirender mentah — deny reason P0 tetap tampil.
@@ -130,6 +135,25 @@
 >   locale OS, narasi/model tetap memakai `/lang`.
 > - **v0.34** — sidebar kanan dihapus; chat kolom tengah (`cols ≥ 120 && rows ≥
 >   20` → `floor(cols/2)`, maks 50%); shortcut pane dihapus; I1 tidak berubah.
+
+## Amandemen tampilan live & agregat sub-agent (2026-11-28)
+
+Disetujui pemilik (2026-11-28) di atas kontrak `Amandemen pasca-v0.52.1` (mengamandemen butir #2 mengenai tanda jumlah live `(R running)` / `(R running · D done)` dan gaya `runningLine()` khusus `delegate_task`):
+
+1. **Baris agregat `✦` bersih tanpa jumlah live.** `formatAgentProgress()` selalu menampilkan `✦ N sub agent · T tool · F failed` (atau `gagal` + perincian kegagalan bila `F > 0`) baik ketika gelombang sedang berjalan maupun sesudah selesai, tanpa imbuhan `(R running)` maupun `(R running · D done)`.
+2. **Baris live sub-agent: `› <nama> <MM:SS>` dengan nama pulse & timer redup.** Khusus `delegate_task` pada `Transcript.runningLine()`:
+   - Teks status `… running` / `… berjalan` dihilangkan; cukup `› <nama>`.
+   - Setelah ambang `elapsedVisible` (`≥ 2 dtk`), timer ditampilkan tepat di sebelah nama dalam format `MM:SS` (`HH:MM:SS` bila `≥ 1 jam`, mis. `11:24`) memakai `c.faint(...)` agar lebih redup dari nama.
+   - Seluruh teks `› <nama>` berdenyut halus meredup–menyala (`c.info` ↔ `c.gray` bergantian tiap `600 ms`, mengikuti clock repaint TUI), dan tetap `c.info` statis saat `MINICODE_MOTION=0`.
+   - Tool non-sub-agent tetap memakai format `› <label> … running/berjalan (<Ns>)` seperti pada `v0.51`/`v0.52.1`.
+
+## Amandemen pasca-v0.52.1 (live sub-agent 2 lapis, riwayat per putaran, & budget sub-agent)
+
+Disetujui pemilik (2026-11-27) di atas kontrak `v0.52.1` tanpa mengubah geometri frame (`chatCols`, margin `3+3`, kotak composer, footer, ratchet):
+
+1. **Tampilan live sub-agent 2 lapis (selaras live tool non-sub-agent).** `Transcript.orderedRunning()` hanya merender aktivitas root (`!parentToolCallId`); baris tool anak `  ↳` tidak lagi berkedip di tail live (`runningRows()`/`liveRows()`). Tool anak tetap dihitung di baris agregat `✦` secara real-time.
+2. **Agregat `✦` per putaran (`wave`) & riwayat tetap di atas.** Setiap gelombang delegasi `delegate_task` membuat dan memperbarui baris `✦ N sub agent · T tool · F failed` sendiri. Saat gelombang masih berjalan dan sebagian sub-agent sudah selesai, baris tersebut menampilkan progres aktif (`✦ N sub agent (R running · D done) · …` / `(R berjalan · D selesai)`), lalu kembali bersih `✦ N sub agent · …` setelah seluruh root gelombang selesai. Saat putaran lama selesai dan putaran baru dimulai dalam turn yang sama, putaran lama tetap tertinggal di atas beserta baris kegagalan `delegate_task` berlabel tugasnya, sementara putaran baru membuka blok `✦` + live root putaran baru di bawahnya setelah satu jeda baris kosong (dan antar-baris aktivitas di dalam blok tetap rapat tanpa jeda kosong berulang).
+3. **Label tugas & diagnosis kegagalan.** `extractIntent()` merangkum frasa pertama `args.prompt` ketika `delegate_task` dipanggil tanpa `name`; `getPresentationSnapshot()` meneruskan `intent` ke `UiPresentationActivity` dan `minicode:child-link` non-placeholder menyinkronkan `activity.label` ke induk; `cleanDelegateRole()` memblokir placeholder `"delegate_task"` dan `"sub-agent (…) done:"`; `deriveSupersedes()` mencegah `delegate_task` berbeda tugas menimpa kegagalan putaran sebelumnya; serta `friendlyToolFailureTag()`/`agentFailureReason()` mengklasifikasikan `step limit reached` sebagai `stepLimit` (`step limit`/`batas langkah`).
 
 ## Perubahan v0.52.1 (perbaikan UI/UX & keterbacaan warna tema — amandemen atas v0.51)
 
@@ -334,14 +358,15 @@ saat baris live hilang**, sehingga posisi baris committed berubah di layar.
       grapheme (`rows.join("") === prefix + body`) dijaga demi sinkronisasi
       panah vertikal & klik mouse.
     - **Placeholder paste ringkas:** payload bracketed paste (`ESC[200~…ESC[201~`)
-      berjumlah **≥ 2 baris atau ≥ 160 karakter** diringkas di composer dan gema
-      transkrip sebagai token `{paste text N line(s)}` (`#2`, `#3`, … bila
+      berjumlah **≥ 2 baris atau ≥ 160 karakter** diringkas di composer
+      sebagai token `{paste text N line(s)}` (`#2`, `#3`, … bila
       jumlah baris sama berulang dalam satu draft). Backspace/Delete di ujung atau
       dalam token menghapus seluruh token secara atomik; `Ctrl+U`/`Esc`
       membersihkan peta paste aktif. Saat submit/enqueue (`doSubmit`), seluruh
-      token di-ekspansi satu lintasan ke teks paste penuh untuk dikirim ke
-      `host.submit` / `host.enqueue`; recall histori `↑`/`↓` dan `Ctrl+R`
-      memulihkan token beserta payload-nya (hingga 20 entri histori terakhir).
+      token di-ekspansi satu lintasan ke teks paste penuh baik untuk dikirim ke
+      `host.submit` / `host.enqueue` maupun untuk gema riwayat chat (`pushUser`);
+      recall histori `↑`/`↓` dan `Ctrl+R` tetap memulihkan token ringkas beserta
+      payload-nya di composer (hingga 20 entri histori terakhir).
 
 13. **Amendemen kenyamanan input, navigasi, antrean, & ketahanan dialog.**
     - **Atomik paste & navigasi kata:** token placeholder paste dijaga atomik
@@ -388,7 +413,7 @@ helper placeholder paste),
 `test/composer-box-and-paste.test.ts` (E2E word-wrap, kotak tipis sudut lengkung
 keliling composer tanpa latar warna pada truecolor/256/mono/ASCII + indikator
 `↑`/`↓`, seleksi teks composer via `Ctrl+A` & drag mouse, serta paste `{paste text N lines}`
-saat ketik, hapus atomik, histori, antre busy, serta ekspansi penuh saat submit),
+saat ketik, hapus atomik, recall histori, antre busy, serta ekspansi penuh ke submit & gema transkrip chat),
 `test/audit-fix-clean-composer.test.ts` (composer kosong/draft di dalam kotak
 tipis), `test/audit-fix-footer-receipts.test.ts` (klik seleksi mulai kolom 4; toast
 kwitansi tetap di footer), `test/chat-column.test.ts` (geometri & lebar composer;

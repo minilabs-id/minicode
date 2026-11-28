@@ -67,11 +67,15 @@ describe("TOOL-02 — Bash Guard Fast Deterministic Fuzz Subset", () => {
     // Simulate tool call — execute via handler.check() with ToolCall interface
     // deps typed as unknown but internally expects signal/registry/permissions/events
     const result = await handler.check(
-      { name: "bash", args: { command: pattern }, id: `test-${Date.now()}` },
+      { name: "bash", args: { cmd: pattern }, id: `test-${Date.now()}` },
       {} as any,
     )
     return result !== "allow"
   }
+
+  test("kontrol positif: perintah aman tetap diizinkan (membuktikan argumen cmd benar dibaca)", async () => {
+    expect(await checkPattern("ls")).toBe(false)
+  })
 
   test("bash guard rejects all critical patterns within 500ms", async () => {
     const start = Date.now()
@@ -86,7 +90,7 @@ describe("TOOL-02 — Bash Guard Fast Deterministic Fuzz Subset", () => {
 
     const elapsed = Date.now() - start
     expect(elapsed).toBeLessThan(1000) // Should complete well under 500ms
-    expect(rejected).toBeGreaterThan(0) // Most should be blocked
+    expect(rejected).toBe(PATTERNS.length)
     expect(passed + rejected).toBe(PATTERNS.length)
   })
 

@@ -25,6 +25,7 @@
 // perilaku kuadratik (25,9 detik > 10 detik).
 import { describe, expect, test } from "bun:test"
 import { scrubSecrets } from "../src/policy/scrub.ts"
+import { extractReadableHtml } from "../src/tools/web_fetch.ts"
 
 describe("scrubSecrets — pola env-dump (nama berisi penanda kredensial)", () => {
   test("nama env dengan penanda kredensial diredaksi", () => {
@@ -140,4 +141,28 @@ describe("scrubSecrets — input adversarial tidak boleh berskala patologis", ()
     expect(ms, `butuh ${ms} ms`).toBeLessThan(10_000)
     expect(out).toBe("[REDACTED]")
   }, 60_000)
+
+  test("P0-6: blok PEM valid diredaksi dan 10k BEGIN tak berpasangan di ~2MB tetap linear (<1000ms)", () => {
+    const valid =
+      "cert:\n-----BEGIN CERTIFICATE-----\nPUB\n-----END CERTIFICATE-----\nkey:\n-----BEGIN RSA PRIVATE KEY-----\nSECRET_KEY_DATA\n-----END RSA PRIVATE KEY-----\ntail"
+    const clean = scrubSecrets(valid)
+    expect(clean).toContain("-----BEGIN CERTIFICATE-----")
+    expect(clean).not.toContain("SECRET_KEY_DATA")
+    expect(clean).toContain("key:\n[REDACTED]\ntail")
+
+    const withStrayEnd =
+      "-----BEGIN EC PRIVATE KEY-----\n-----END CERTIFICATE-----\nSECRET\n-----END EC PRIVATE KEY-----"
+    expect(scrubSecrets(withStrayEnd)).toBe("[REDACTED]")
+
+    const adversarialPem = `${"-----BEGIN PRIVATE KEY-----\n".repeat(10_000)}${"A".repeat(1_500_000)}`
+    const t0 = Date.now()
+    expect(scrubSecrets(adversarialPem)).toBe(adversarialPem)
+    expect(Date.now() - t0).toBeLessThan(1000)
+
+    const adversarialHtml = `${"<script>".repeat(10_000)}${"<!--".repeat(10_000)}${"<div".repeat(5_000)}${"A".repeat(1_500_000)}`
+    const t1 = Date.now()
+    const htmlOut = extractReadableHtml(adversarialHtml)
+    expect(Date.now() - t1).toBeLessThan(1000)
+    expect(htmlOut.length).toBeGreaterThan(1_000_000)
+  })
 })

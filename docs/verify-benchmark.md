@@ -31,7 +31,10 @@ bun bench/eval-gate.ts --results bench/results.json --min-rate 1 --max-median-to
 
 CI menjalankan `test/eval-gate.test.ts` untuk menguji evaluator secara
 deterministik tanpa provider, lalu menjalankan CLI `gate:eval` terhadap output
-`bench:smoke` dan memastikan hasil palsu ditolak. `bench:smoke` hanya menguji
+`bench:smoke` dan memastikan hasil palsu ditolak. Karena sifat itu, `gate:fast`
+sengaja tidak menyertakan `gate:eval` (gate lokal tetap offline memakai
+`bench:smoke --fake`), sedangkan `bun run gate:eval` menjadi gate kualitas terpisah
+pasca-`bun run bench` nyata. `bench:smoke` hanya menguji
 wiring harness; hanya hasil yang secara eksplisit berlabel `fake: false` dapat
 dinilai, sehingga hasil fake atau artefak lama tanpa asal provider dinyatakan
 bukan bukti kualitas. Evaluasi
