@@ -1,32 +1,12 @@
-// P3.7 — Advanced A+C full-coverage fold renderer (pure, deterministic).
+// Full-coverage fold renderer (pure, deterministic): merender seluruh riwayat
+// kanonik `[0, N)` menjadi satu ringkasan tanpa ekor (`base_seq == head+1`),
+// sehingga proyeksi `CURRENT` dapat dibangun.
 //
-// Menutup celah yang diidentifikasi audit P3.7: satu-satunya renderer fold
-// deterministik (`mechanicalCompaction`, vendor) SELALU menyisakan ekor
-// (`kept >= 1`), sehingga tak pernah bisa mengklaim cakupan penuh
-// (`base_seq == head+1`, satu-satunya status CURRENT menurut P2.7 rule 9).
-// Modul ini me-render SELURUH riwayat kanonik [0, N) menjadi satu ringkasan —
-// tanpa ekor — sehingga produsen P3.4 dapat menulis proyeksi CURRENT.
-//
-// Batas keras (kontrak ratifikasi P3_ROADMAP.md + HARD RULES P3.7):
-//   - MURNI: tanpa SQL/fs/jaringan/LLM/random/clock/state. Input = baris +
-//     policy; output = nilai. `built_at` milik primitif P2.7, BUKAN renderer.
-//   - DERIVED-ONLY: tak menyentuh `messages`/proyeksi/event; tak memanggil
-//     persistence/presentation/selector.
-//   - CAKUPAN PENUH ATAU GAGAL: tiap baris sumber diproses dan dipertanggung-
-//     jawabkan tepat satu baris ringkasan; baris hilang/tak-kontinu/tak-
-//     didukung → throw eksplisit (jangan klaim CURRENT atas yang tak utuh).
-//   - SATU baris ringkasan per SATU baris sumber: lines.length === rows.length
-//     adalah bukti cakupan menurut konstruksi (bukan heuristik).
-//   - Konvensi render mengikuti kernel (`compactLine`: awalan `- role:`, cap
-//     400/200/80) agar konsisten lintas render; PERBEDAAN yang disengaja vs
-//     kernel didokumentasikan di bawah (bagian dari semantik A+C P3.7):
-//       * hasil tool non-error DI-RENDER (head 200 char), bukan `<result
-//         omitted>` — full coverage mewajibkan tiap sekuens dipertanggung-
-//         jawabkan; menghilangkan seluruh hasil tool akan melanggar §4.3
-//         (tool side effects) kontrak ratifikasi.
-//       * `reasoning` (bila ada) dipertahankan sebagai penanda head-capped,
-//         bukan dibuang — ketidakpastian/penalaran adalah state bermakna.
-//   - Teks akhir lewat `scrubSecrets` yang SUDAH ADA (tanpa scrub paralel).
+// Batas keras:
+//   - Murni: tanpa SQL/fs/jaringan/LLM/random/clock/state.
+//   - Derived-only: tidak menyentuh `messages`/proyeksi/event/persistence.
+//   - Cakupan penuh atau gagal: tiap baris sumber dipetakan 1:1 (`lines.length === rows.length`).
+//   - Teks akhir selalu melewati `scrubSecrets`.
 
 import { contentToText, safeStringify } from "#minicore/core/tokens.ts"
 import { scrubSecrets } from "../policy/scrub.ts"

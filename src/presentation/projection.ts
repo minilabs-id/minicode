@@ -65,14 +65,6 @@ export function projectProvenance(
   return "replay"
 }
 
-export interface ProjectionContext {
-  mode: ProjectionMode
-  /** Jam tepi (ms) untuk keputusan elapsed; wajib di-inject agar murni. */
-  now?: number
-}
-
-// ── Deskripsi semantik (tanpa paint/sanitasi/truncate) ──
-
 export interface ActivityDescription {
   toolCallId: string
   name: string
@@ -273,25 +265,6 @@ export function pinnedRunningActivity<T extends RunningLike>(
 /** Ambang elapsed terpusat: durasi live tampil bila berjalan >= 2 detik. */
 export function elapsedVisible(tsStart: number, now: number): boolean {
   return now - tsStart >= 2000
-}
-
-export interface ActivitySuffixParts {
-  status: ToolStatus
-  durationMs?: number
-  denyReason?: string
-  receiptPaths: string[]
-  retry: boolean
-}
-
-/** Bagian suffix ledger yang dipilih policy (renderer hanya format). */
-export function activitySuffixParts(desc: ActivityDescription): ActivitySuffixParts {
-  return {
-    status: desc.status,
-    ...(desc.durationMs !== undefined ? { durationMs: desc.durationMs } : {}),
-    ...(desc.denyReason ? { denyReason: desc.denyReason } : {}),
-    receiptPaths: [...desc.receiptPaths],
-    retry: desc.retryOf !== undefined,
-  }
 }
 
 // ── Seleksi node per mode ──
@@ -668,7 +641,7 @@ export function machineEventId(
   return `${sessionId}:${turnId ?? 0}:${seq ?? 0}`
 }
 
-export function machineTimestamp(timestamp: number): string {
+function machineTimestamp(timestamp: number): string {
   return new Date(Number.isFinite(timestamp) ? timestamp : 0).toISOString()
 }
 

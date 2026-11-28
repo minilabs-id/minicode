@@ -1,23 +1,15 @@
-// Content Store V2.1 (§16 plan / §21 architecture) — sibling model, non-otoritatif.
+// Content Store V2.1 — model konten pendamping yang non-otoritatif.
 //
-// Kenapa terpisah: PresentationState hanya menyimpan ContentRef (pointer);
-// isi besar (output tool, diff, reasoning) hidup di sini dengan retensi FIFO
-// yang adil untuk sesi panjang. Reducer TIDAK PERNAH membaca store untuk
-// keputusan (I-A04) — store hanya dilayani expand/proyeksi.
+// PresentationState hanya menyimpan ContentRef (pointer), sedangkan isi besar
+// (output tool, diff, reasoning) disimpan di sini dengan retensi FIFO agar
+// sesi panjang tetap hemat memori. Reducer tidak membaca store ini untuk
+// mengambil keputusan. Setelah restart proses, store kosong sehingga referensi
+// lama untuk kind=output fallback ke store persisten SQLite, sedangkan
+// reasoning yang sudah ter-evict menampilkan penanda retensi.
 //
-// Besar angka = `src/ui/session-state.ts` (200K per-entry / 500K total) — dipertahankan
-// sebagai awal, bukan angka magis baru. Evict = FIFO tertua + tandai dead
-// (bukan hapus diam-diam): proyeksi menampilkan penanda retensi, bukan string
-// kosong yang menyesatkan.
-//
-// Durable fallback: resolve miss → loader inject (sqlite messages, tool result
-// full) bila kind=output; reasoning di luar retensi = hilang dengan penanda
-// (jujur). Restart: store kosong; expandRef lama → fallback durable.
-//
-// Pola potong (surrogate-safe + splitTrailingEscape) DIUlang di sini (bukan
-// impor src/ui — boundary src/** non-ui dilarang impor src/ui). Pola sama
-// dengan `src/ui/session-state.ts`; trigonometri escape disederhanakan untuk kasus
-// tail yang mungkin terpotong.
+// Batas ukuran mengikuti `src/ui/session-state.ts` (200K per-entry / 500K total).
+// Pola pemotongan surrogate-safe dan penghindaran escape terpotong disamakan
+// dengan `src/ui/session-state.ts` karena `src/` non-ui dilarang mengimpor `src/ui/`.
 
 import type { ContentRef } from "./events.ts"
 
@@ -30,7 +22,7 @@ export type ContentKind = "output" | "diff" | "reasoning" | "diagnostic"
 
 export interface ContentMeta {
   kind: ContentKind
-  /** Stream asal (kontrak Unix dipertahankan saat /expand mencetak). */
+  /** Stream asal keluaran yang disimpan. */
   stream: "stdout" | "stderr"
   truncated: boolean
   /** Sumber konten saat resolve: store in-memory | durable sqlite | penanda retensi. */
@@ -59,7 +51,7 @@ export interface ContentStore {
   ): ContentEntry | undefined
   /** Semua idx untuk satu toolCallId (urut idx), sudah di-resolve. */
   expand(toolCallId: string, durable?: (toolCallId: string) => string | undefined): ContentEntry[]
-  /** Semua entry store yang masih hidup, insertion order (query /expand tanpa id). */
+  /** Semua entry store yang masih hidup berdasarkan urutan masuk. */
   expandAll(): ContentEntry[]
   clear(): void
   stats(): { entries: number; totalChars: number; dead: number }

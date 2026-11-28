@@ -7,7 +7,6 @@
 // yang tampak sukses. Jadi tekanan = gerbang, bukan catatan.
 
 import { existsSync, statfsSync } from "node:fs"
-import { homedir } from "node:os"
 import { dirname } from "node:path"
 
 /**
@@ -16,7 +15,7 @@ import { dirname } from "node:path"
  * terbatas lalu mengunci write berikutnya — menunggu sampai 0 berarti sudah
  * terlambat jauh sebelum itu.
  */
-export const MIN_FREE_BYTES = 64 * 1024 * 1024
+const MIN_FREE_BYTES = 64 * 1024 * 1024
 
 export type StorageCheck =
   | { ok: true; freeBytes: number }
@@ -158,14 +157,5 @@ function readRss(): number {
     return process.memoryUsage().rss
   } catch {
     return -1
-  }
-}
-
-/** Path default saat tak ada cwd eksplisit — dipakai diagnosa startup. */
-export function defaultProbePath(): string {
-  try {
-    return process.cwd()
-  } catch {
-    return homedir()
   }
 }

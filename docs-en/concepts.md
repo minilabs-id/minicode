@@ -11,7 +11,7 @@ What MiniCode is, why it is built this way, and why some things are deliberately
 
 ## The ReAct loop
 
-Every prompt runs as a `Thought -> Action -> Observation` loop until a final answer, the `--max-steps` limit (default 200; the 50 figure is only the sub-agent cap), or `--timeout` (default 1 hour). The model receives a system prompt containing `# Environment` (cwd + platform), a condensed repo-map, and relevant memory — then selects a tool, observes the result, and picks the next step. There is no hidden flow graph: whatever the agent does shows up as a ledger on screen. Since v0.35 the tool recap is a static committed row at the footer of each narration (`tool -> narration -> recap(tools before that narration)`, with the final turn recap cumulative; no symbol prefix since v0.41), and the `› …` activity label follows the OS locale while narration/model answers keep the user's `/lang` language. Since v0.36 the TUI composer is capped at 2 rows (long drafts use a sliding window, without shifting the transcript) and the `/` dropdown is an overlay inside the same frame without reducing `viewH`. Since v0.37 bracketed paste is active (`?2004h`/`?2004l` outside the frame), `Ctrl+A` selects the whole transcript when the composer is empty and the dropdown is closed, resize stabilises auto-scroll/drag/cursor/anchor, the echoed prompt is wrapped once to the chat width, and the prompt cap is progressive: `min(chatCols, 100 + floor(max(0, chatCols-100)/4))` with prefix `minicode › ` when `w−14 ≥ 24`, else `› `, plus `· ` for continuation rows — the 2-row composer and one-frame dropdown are not revoked.
+Every prompt runs as a `Thought -> Action -> Observation` loop until a final answer, the `--max-steps` limit (default 200; 600 is only the sub-agent hard cap), or `--timeout` (default 1 hour). The model receives a system prompt containing `# Environment` (cwd + platform), a condensed repo-map, and relevant memory — then selects a tool, observes the result, and picks the next step. There is no hidden flow graph: whatever the agent does shows up as a ledger on screen. Details of the two-row rounded composer, dropdown overlay, bracketed paste, static category recap, and OS-locale activity labels live in [TUI](repl.md) and [Terminal Contract](../docs/TERMINAL_CONTRACT.md).
 
 ## Shell-first: plain non-interactive, fullscreen interactive
 
@@ -32,7 +32,7 @@ is hand-written) and splits the two paths sharply:
   scrollback).
 - Colour only on a TTY; `NO_COLOR` always wins; program output stays free of cursor control when piped.
 
-Full details and their FROZEN contract: [Terminal Contract](TERMINAL_CONTRACT.md).
+Full details and their FROZEN contract: [Terminal Contract](../docs/TERMINAL_CONTRACT.md).
 
 ## Honesty as a feature
 
@@ -43,9 +43,9 @@ Several design decisions come from refusing to pretend:
 - **Measure, do not claim**: bash-guard is validated against an attack corpus plus legitimate commands (run `bun run gate:bash`). See [Security](security.md).
 - **Benchmark scores are reported as-is** with their validity limits (environment, sample size). See [Verify & Benchmark](verify-benchmark.md).
 
-## Zero-dependency runtime
+## Runtime with no third-party production dependencies
 
-A runtime with no third-party dependencies; the only hard requirement is **Bun** (`bun:sqlite` is used directly — it does not run on Node.js). The markdown web parser, table/diff renderers, and highlighting are also hand-built miniatures, not libraries. The payoff: a smaller audit surface, fast installs, and a supply chain you can read in one sitting.
+Production runtime has zero third-party packages in `dependencies` (`package.json` keeps test/lint tooling in `devDependencies`); the only hard requirement is **Bun** `>= 1.1.13` (`bun:sqlite` is used directly — it does not run on Node.js). The markdown parser, table/diff renderers, and highlighting are also hand-built without external UI libraries, keeping the audit surface and supply chain small.
 
 ## Language
 
@@ -57,11 +57,11 @@ MiniCode terms with a specific meaning.
 
 | Term | Meaning |
 |---|---|
-| **MiniCore** | The `STATE / MODEL / ACTION / LOOP` runtime kernel vendored into `vendor/minicore`; frozen core, zero-dep, resolved via `#minicore` |
+| **MiniCore** | The `STATE / MODEL / ACTION / LOOP` runtime kernel vendored into `vendor/minicore` (host-editable since v0.16.0), zero-dep, resolved via `#minicore` |
 | **MiniCode** | The agent-code layer above MiniCore: tools, agents, policy, providers, memory, sessions, CLI |
 | **Tool** | A capability the model selects inside the ReAct loop; MCP tools are added dynamically as `serverId.toolName` |
 | **Tool scope** | `full` or a read-only `explore` subset — `--tool-scope` |
-| **WorkMode** | How the agent works: `DISCUSS`, `PLAN`, or `BUILD` (product alias for the internal `EXECUTE` identity) |
+| **WorkMode** | How the agent works: `DISCUSS` or `BUILD` (product alias for the internal `EXECUTE` identity); legacy `PLAN` normalises to `DISCUSS` |
 | **PermissionMode** | The supervision choice: `AUTO` runs authorised capabilities; `ASK` requests approval for gated actions |
 | **Tool Access Policy** | The available capability boundary, such as read-only, allowlist, or the legacy `--allow-all` access profile |
 | **Gate** | A tool requiring human approval on a TTY; non-TTY always denies (e.g. `git_commit`, MCP, `delegate_task`) |

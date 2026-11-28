@@ -1,22 +1,17 @@
-// M15 — Inventaris jalur eksekusi produksi (registry, bukan hiasan).
+// Inventaris jalur eksekusi produksi.
 //
-// Kenapa berkas ini ada: M15 mengklaim "tak ada jalur produksi yangkilko bypass
-// runtime". Klaim seperti itu hanya berarti apa pun bila dip mechanically: kalau
-// daftar ini bisa lolos tanpa.register caller efek samping baru, ia bukan
-// inventaris — ia hiasan.
+// Mengunci daftar caller efek samping (process spawn / network) agar tidak ada
+// titik keluar baru yang melewati batas runtime secara diam-diam. Setiap titik
+// diklasifikasikan sebagai:
+//   runtime-owned   : milik Runtime (hanya src/runtime/**)
+//   external-tool   : efek yang dibutuhkan tool user/model (bash, git, grep)
+//   external-integ  : integrasi proses (MCP, LSP, hook, self-update, re-exec)
+//   legacy-durable  : durable state lama (mutation journal, checkpoint, shadow git,
+//                     sessions DB, TaskStore, trace) — bukan authority eksekusi
+//   runtime-adapter : adapter yang dipakai Runtime (backend, journal)
 //
-// Yang diEGISTRIKAN di sini adalah TITIK EFEK SAMPING (process spawn / network),
-// bukan "fitur". Alasannya: dua daftar terpisah (spawn dan fetch) menutup setiap
-// jalan keluar dari proses, dan setiap titik punya SATU jawaban tegas:
-//   runtime-owned : milik Runtime (hanya src/runtime/**)
-//   external-tool : efek yang DIBUTUHKAN user/model lewat tool (bash, git, grep)
-//   external-integ: integrasi proses (MCP, LSP, hook, self-update, re-exec)
-//   legacy-durable: durable state lama (mutation journal, checkpoint, shadow git,
-//                   sessions DB, TaskStore, trace) — bukan authority eksekusi
-//   runtime-adapter: adapter yang DIPAKAI Runtime (M5 backend, M11 journal)
-//
-// Aturan yang dikunci: berkas baru yang spawn/fetch dan tak terdaftar = test merah.
-// Itu satu-satunya cara "tak ada jalur tak dikenal" bisa tetap benar.
+// Aturan yang dikunci: berkas baru yang melakukan spawn/fetch dan belum
+// terdaftar di sini akan membuat test gagal.
 
 import { expect, test } from "bun:test"
 import { spawnSync } from "node:child_process"

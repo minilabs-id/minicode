@@ -160,7 +160,7 @@ export interface RecoveryLedger {
 }
 
 /** Apakah pesan error berasal dari guard timeout/stall stream (bukan fail-fast HTTP). */
-export function isTimeoutOrStallMessage(message: string): boolean {
+function isTimeoutOrStallMessage(message: string): boolean {
   return stalledMsFromMessage(message) !== undefined || /timed out after \d+ms/i.test(message)
 }
 
@@ -657,8 +657,8 @@ export async function createMinicodeSession(
       `createMinicodeSession: workMode ${resolvedWorkMode} dengan permissionHandler terinjeksi belum didukung (fail-closed S2.1)`,
     )
   }
-  // Dasar prompt dirakit sekali; hint mode ditambah LIVE per-turn lewat wrapper
-  // provider agar transisi `/work-mode`/`/mode` tercermin tanpa edit vendor.
+  // Dasar prompt dirakit sekali; hint mode ditambah per-turn lewat wrapper
+  // provider agar transisi `/work-mode`/`/mode` tercermin langsung di prompt.
   const baseSystem = await buildSystemPrompt({
     cwd: defaultCwd,
     extra: opts.systemExtra ?? "",

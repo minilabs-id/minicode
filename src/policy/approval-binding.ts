@@ -29,15 +29,15 @@ const GIT_STATE_TOOLS = new Set(["git_commit", "git_push"])
  * size+mtime+ctime+ino: approval untuk file raksasa tetap bisa dideteksi
  * berubah, tanpa membaca ratusan MB dua kali per prompt.
  */
-export const MAX_CONTENT_FINGERPRINT_BYTES = 2 * 1024 * 1024
+const MAX_CONTENT_FINGERPRINT_BYTES = 2 * 1024 * 1024
 
 /** Sidik jari "file tidak ada" — BEDA dari hash file kosong. */
-export const MISSING_TARGET = "missing"
+const MISSING_TARGET = "missing"
 /** Sidik jari "path ada tapi bukan file biasa" (mis. direktori). */
-export const NOT_A_FILE = "not-a-file"
+const NOT_A_FILE = "not-a-file"
 /** v0.33 (audit): file ADA tapi tak bisa dibaca (EACCES/EBUSY/EPERM) — jangan
  *  disamakan dengan MISSING_TARGET atau pesan staleness jadi menyesatkan. */
-export const UNREADABLE_TARGET = "unreadable"
+const UNREADABLE_TARGET = "unreadable"
 
 /** Sidik jari satu target file. */
 export interface ApprovalTarget {
@@ -74,7 +74,7 @@ export interface ApprovalBinding {
  * perubahan salah satu ujung mengubah operasi yang disetujui. Fallback lama
  * dipertahankan untuk binding yang dibuat sebelum rename wire v7.38.
  */
-export function approvalTargetPaths(tool: string, args: unknown, root: string): string[] {
+function approvalTargetPaths(tool: string, args: unknown, root: string): string[] {
   if (!FILE_TARGET_TOOLS.has(tool)) return []
   const a = (args ?? {}) as Record<string, unknown>
   const str = (v: unknown): string => (typeof v === "string" ? v : "")

@@ -8,7 +8,7 @@
 | `echo "prompt" \| minicode` | The prompt comes from a pipeline/another tool |
 | `minicode exec "prompt" --json` | CI: `minicode.output.v1` JSONL envelope on stdout + a final versioned `{"type":"summary"}` line |
 
-`exec --json` emits one JSON per canonical lifecycle event (tool step, output, error) with the `minicode.output.v1` envelope, including `source` and `visibility`; the full schema is in [Output Protocol Spec](OUTPUT_PROTOCOL_SPEC.md). A structured, versioned **summary** appears at the end. Even a *setup* failure (e.g. no provider) carries one `{"type":"summary","ok":false,...}` line on stdout — the stream is never empty; human messages stay on stderr, exit `1`. Model text flows as separate `{type:"text",delta}` records that are already scrubbed and ANSI-free.
+`exec --json` emits one JSON per canonical lifecycle event (tool step, output, error) with the `minicode.output.v1` envelope, including `source` and `visibility`; the full schema is in [Output Protocol Spec](../docs/OUTPUT_PROTOCOL_SPEC.md). A structured, versioned **summary** appears at the end. Even a *setup* failure (e.g. no provider) carries one `{"type":"summary","ok":false,...}` line on stdout — the stream is never empty; human messages stay on stderr, exit `1`. Model text flows as separate `{type:"text",delta}` records that are already scrubbed and ANSI-free.
 
 ## Machine summary: the optional `verify` field
 
@@ -73,7 +73,7 @@ printf '%s\n' '{"id":1,"method":"initialize"}' '{"id":2,"method":"shutdown"}' | 
 
 The `submit_result` tool produces final structured JSON, called at most once per run, in `NO_PROMPT` mode (no confirmation requested). In `exec --json` the result content is forwarded **verbatim** — an API-style replacement for `response_format`. When `result.findings` holds an explicit list of `{category, severity, summary, evidence?}`, those findings are also projected as `finding.detected` events. Suited to tasks whose results are consumed by another program rather than a human.
 
-`--json` mode uses the lifecycle envelope and summary described above and in [Output Protocol Spec](OUTPUT_PROTOCOL_SPEC.md); model text remains separate `{type:"text",delta}` records. A setup failure always carries one summary line with `ok:false`.
+`--json` mode uses the lifecycle envelope and summary described above and in [Output Protocol Spec](../docs/OUTPUT_PROTOCOL_SPEC.md); model text remains separate `{type:"text",delta}` records. A setup failure always carries one summary line with `ok:false`.
 
 ## Mid-run clarification: `ask_user`
 
@@ -83,7 +83,7 @@ The `submit_result` tool produces final structured JSON, called at most once per
 
 | Control | Default | Note |
 |---|---|---|
-| `--max-steps <n>` | 200 (`LIMITS.DEFAULT_MAX_STEPS`) | Tool step limit per run, with auto-escalation; 50 is only the sub-agent hard cap (`SUB_AGENT_MAX_STEPS`), not this runtime default — the CLI help now derives the same number from `LIMITS.DEFAULT_MAX_STEPS` |
+| `--max-steps <n>` | 200 (`LIMITS.DEFAULT_MAX_STEPS`) | Tool step limit per run, with auto-escalation; 600 is the sub-agent hard cap (`SUB_AGENT_MAX_STEPS`), not this runtime default — the CLI help derives the same number from `LIMITS.DEFAULT_MAX_STEPS` |
 | `--timeout <ms>` | 900000 (15 minutes) | Hard deadline per run; `0` = Infinity |
 | `--ratelimit <rpm>` | — | LLM request token bucket per minute |
 | `--budget <usd>` | — | Warn at 80%; exceeded -> one-shot `exit(1)`, TUI breaks the loop; `exec` enforces it the same way as one-shot |

@@ -1898,19 +1898,6 @@ export function findFsKeyConflicts(
   }
 }
 
-export function listSessionAliases(canonical: string, cwd?: string): SessionAliasRow[] {
-  const db = open(cwd)
-  try {
-    return db
-      .prepare(
-        "SELECT alias, fs_key, canonical, reason, created_at FROM session_aliases WHERE canonical = ? ORDER BY created_at",
-      )
-      .all(canonical) as SessionAliasRow[]
-  } finally {
-    db.close()
-  }
-}
-
 // P2.2 — majukan generasi penulis tepat satu langkah, atomik terhadap
 // pengambil-alihan simultan. Kunci: PRIMARY KEY (session_id, prior_epoch) —
 // pecundang menabrak constraint dan MENGAMATI hasil pemenang (idempoten),
@@ -2027,9 +2014,8 @@ export function isHistoryEventId(value: unknown): value is string {
   )
 }
 
-// SATU-SATUNYA allocator produksi: CSPRNG 122-bit, tanpa input (bukan dari
-// seq, bukan dari konten — tabrakan acak praktis mustahil; bila constraint
-// menabrak, save GAGAL loud, tak pernah merge diam-diam).
+// Allocator produksi: CSPRNG 122-bit, tanpa bergantung pada seq atau konten.
+// Jika terjadi tabrakan constraint, save gagal keras tanpa merge diam-diam.
 export function allocateHistoryEventId(): string {
   return `evt_${randomUUID()}`
 }
@@ -2360,19 +2346,6 @@ export function listChildSessions(parentSessionId: string, cwd?: string): string
       .prepare("SELECT id FROM sessions WHERE parent_session_id = ? ORDER BY created_at DESC")
       .all(parentSessionId) as { id: string }[]
     return rows.map((r) => r.id)
-  } finally {
-    db.close()
-  }
-}
-
-/** True when a Session has at least one child Session (delete-safety). */
-export function hasChildSessions(sessionId: string, cwd?: string): boolean {
-  const db = open(cwd)
-  try {
-    const row = db
-      .prepare("SELECT 1 AS ok FROM sessions WHERE parent_session_id = ? LIMIT 1")
-      .get(sessionId) as { ok: number } | null
-    return row !== null
   } finally {
     db.close()
   }
@@ -3184,8 +3157,7 @@ export function shrinkThreadHistory(
     return db.transaction(() => {
       assertWriterEpochInTxn(db, sessionId, opts.expectedEpoch as number)
       if (!sessionRowExistsInTxn(db, sessionId)) throw new Error(`session not found: ${sessionId}`)
-      // Thread default dijamin ada (migrasi kolom belum mematerialisasikannya;
-      // jalur shrink boleh instantiate atomik — sama seperti saveSession).
+      // Pastikan thread default ada sebelum menulis riwayat.
       ensureDefaultThreadInTxn(db, sessionId, now)
       const thread = db
         .prepare("SELECT status FROM threads WHERE session_id = ? AND thread_id = ?")

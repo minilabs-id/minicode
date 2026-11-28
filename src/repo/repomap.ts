@@ -190,16 +190,10 @@ const PATTERNS: Record<string, LinePattern[]> = {
   ],
 }
 
-// Ekstraksi simbol berbasis regex per-bahasa.
-//
-// Keputusan Fase 3.2 (PLAN_V4): `src/repo/tree-sitter.ts` DIHAPUS, bukan
-// diimplementasikan. Alasannya diukur, bukan diasumsikan.
-//
-// Prototipe `web-tree-sitter` + `tree-sitter-typescript` berjalan dan cepat
-// (init 89 ms, load grammar 19 ms, parse 6 ms), tapi perbandingan pada 5 file
-// nyata di repo ini menunjukkan selisihnya kecil dan hampir seluruhnya berupa
-// **member kelas** (`constructor`, `append`, `execute`, `check`, `__setMode`)
-// dan variabel lokal — bukan simbol top-level yang berguna untuk orientasi:
+// Ekstraksi simbol berbasis regex per-bahasa. Tree-sitter (`src/repo/tree-sitter.ts`)
+// sengaja tidak digunakan berdasarkan hasil benchmark di bawah (perlu ~1,4 MB wasm
+// per bahasa dan tambahan utamanya hanya member kelas/variabel lokal di repo yang
+// sudah menyentuh cap 2.500 char):
 //
 //   file                      tree-sitter  regex  yang terlewat regex
 //   src/policy/bash-guard.ts       6         5    1 (helper lokal)
@@ -218,10 +212,6 @@ const PATTERNS: Record<string, LinePattern[]> = {
 // membuat pembaca (dan dokumen) percaya kemampuan yang tidak ada. Bila suatu
 // saat repo-map dipisah per-file atau cap dinaikkan, tree-sitter layak
 // dipertimbangkan ulang — dengan pengukuran baru, bukan asumsi.
-export async function extractSymbolsAsync(content: string, lang: string): Promise<string[]> {
-  return extractSymbols(content, lang)
-}
-
 // Ekstrak simbol dari konten file berdasarkan bahasa. Deterministik & cepat (regex).
 export function extractSymbols(content: string, lang: string): string[] {
   const patterns = PATTERNS[lang]

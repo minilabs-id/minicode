@@ -148,7 +148,7 @@ export interface RuntimeHost {
  * dengan timeout MCP/bash 30 dtk yang sudah ada di repo. UNKNOWN register:
  * kalibrasi beban diperlukan sebelum dianggap SLA.
  */
-export const DEFAULT_HOOK_TIMEOUT_MS = 30_000
+const DEFAULT_HOOK_TIMEOUT_MS = 30_000
 
 async function runHookBounded(
   hook: (() => void | Promise<void>) | undefined,

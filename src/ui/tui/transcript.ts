@@ -275,7 +275,7 @@ function advanceFence(cursor: FenceCursor, line: string): FenceState {
 // reducer presentasi (state durable/resume) — dua lapis retention berbeda untuk
 // substansi berbeda (viewport vs riwayat yang bisa di-replay).
 export const TRANSCRIPT_CAP = 5000
-export const TRANSCRIPT_TEXT_MAX_CHARS = 1_000_000
+const TRANSCRIPT_TEXT_MAX_CHARS = 1_000_000
 /** Baris pending lebih panjang dari ini tidak dimemo (kunci = isi baris). */
 const PENDING_MEMO_LINE_MAX = 4096
 /** Batas entri memo proyeksi pending sebelum dibuang seluruhnya. */
@@ -1256,7 +1256,7 @@ export class Transcript {
    * sentinel baru menambah angka/count; kalau jadi baris baru, justru muncul
    * dinding "1 tool…", "2 tool…", "3 tool…" yang ingin kita hilangkan.
    * Margin tetap di `sourcePrefix`, teks sumber = ringkasan polos, jadi seleksi
-   * & `/copy` tak membawa tiga spasi chrome (kontrak margin v0.33).
+   * & `/copy` tak membawa spasi bingkai kiri.
    */
   private refreshCompactionTrimRow(): void {
     const row = this.compactionTrimRow

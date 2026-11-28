@@ -558,9 +558,8 @@ function fixedContextTokens(s: SessionInternal): number {
   return estimateSystem(system, s.estimator) + estimateTools(wireToolsForContext(s), s.estimator);
 }
 
-// The single compaction seam. Prefers the strategy's optional async method
-// (LLM summary) and always falls back to the sync strategy on failure — an
-// async compactor must never be able to crash the loop.
+// Prefers the strategy's optional async method (LLM summary) and falls back
+// to the sync strategy on non-abort failure; sync failures or aborts still surface.
 async function compactStore(s: SessionInternal, signal: AbortSignal): Promise<void> {
   const opts = { keepRecentTurns: s.keepRecentTurns };
   if (s.compaction.compactAsync) {

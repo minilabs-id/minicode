@@ -18,8 +18,8 @@ export function readVersion(): string {
   }
 }
 
-/** Default global = LIMITS (200); angka 50 adalah cap sub-agent, bukan default CLI. */
-export const HELP = `Minicode - coding agent on frozen MiniCore
+/** Default langkah global = `LIMITS.DEFAULT_MAX_STEPS` (200); sub-agent dibatasi terpisah di `src/constants.ts`. */
+export const HELP = `Minicode - coding agent on MiniCore
 Usage:
   minicode                        # interactive chat
   minicode "prompt" [options]     # one-shot run

@@ -211,11 +211,7 @@ function hashRecord(content: Record<string, unknown>): string {
 // metadata persistence (journalSequence, recordHash, schemaVersion — lokal
 // storage dan boleh berbeda secara sah). Deterministik via canonicalJson. ──
 
-export interface CanonicalEventContent {
-  readonly [key: string]: unknown
-}
-
-export function canonicalEventContent(event: ExecutionEvent): Record<string, unknown> {
+function canonicalEventContent(event: ExecutionEvent): Record<string, unknown> {
   const redacted = redactMetadata(event.metadata as Record<string, string> | undefined)
   return {
     eventId: event.eventId,
@@ -238,7 +234,7 @@ export function canonicalEventContent(event: ExecutionEvent): Record<string, unk
   }
 }
 
-export function canonicalIntentContent(intent: IntentInput): Record<string, unknown> {
+function canonicalIntentContent(intent: IntentInput): Record<string, unknown> {
   const redacted = redactMetadata(intent.metadata)
   return {
     intentId: intent.intentId,
@@ -257,7 +253,7 @@ export function canonicalIntentContent(intent: IntentInput): Record<string, unkn
  * Mengembalikan nama field yang berbeda (diagnostik TANPA nilai — tanpa dump
  * payload sensitif ke error). Sama = duplicate aman; beda = IDENTITY_CONFLICT.
  */
-export function diffCanonicalContent(
+function diffCanonicalContent(
   stored: Record<string, unknown>,
   incoming: Record<string, unknown>,
 ): string[] {

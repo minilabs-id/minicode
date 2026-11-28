@@ -39,7 +39,7 @@ export type NoProgressVerdict =
       readonly message: string
     }
 
-export class NoProgressError extends Error {
+class NoProgressError extends Error {
   override readonly name = "NoProgressError"
   readonly kind: LoopGuardKind
   readonly reason: LoopGuardReason
@@ -101,7 +101,7 @@ export function canonicalArgsHash(args: unknown): string {
  * Ambil headline error yang stabil (baris pertama bermakna, menormalkan angka
  * durasi volatil agar timeout/error yang sama menghasilkan sidik jari sama).
  */
-export function normalizeErrorHeadline(errorText: string): string {
+function normalizeErrorHeadline(errorText: string): string {
   const firstLine =
     String(errorText ?? "")
       .split(/\r?\n/)

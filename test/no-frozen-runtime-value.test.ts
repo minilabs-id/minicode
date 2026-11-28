@@ -225,6 +225,9 @@ describe("konvensi: tak ada nilai runtime yang dibekukan saat import", () => {
       }
     }
     // Pesan kegagalan sengaja panjang: pelanggarnya tidak akan tahu kenapa.
-    expect(offenses, "lihat PLAN.md P0.1 — bungkus dalam fungsi/getter").toEqual([])
+    expect(
+      offenses,
+      "jangan simpan getter ke const module scope — bungkus dalam fungsi/getter",
+    ).toEqual([])
   })
 })

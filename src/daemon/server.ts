@@ -92,7 +92,7 @@ interface Conn {
 
 let connSeq = 0
 
-// Pemisah mustahil di label (sanitizeLabel membuang kontrol). Scope live =
+// Pemisah non-cetak di label (disanitasi oleh `sanitizeLabel`). Scope live =
 // identitas logis + id koneksi agar koneksi sama tak berbagi kunci langganan.
 const CONSUMER_SCOPE_SEP = String.fromCharCode(1)
 const DEFAULT_MAX_PENDING_HANDSHAKES = 32
@@ -447,7 +447,7 @@ export class DaemonServer {
     this.#deps.telemetry.inc("subscribe.attached")
 
     // Pasang listener live sebelum replay: event yang tiba lebih dulu masuk
-    // antrean lalu difilter cursor replay (celah replay/langganan mustahil).
+    // antrean lalu difilter oleh cursor replay agar tidak ada celah di antara keduanya.
     this.#ensureLive(sid)
 
     // 1) frontiers  2) snapshot  3) cursor

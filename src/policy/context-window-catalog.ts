@@ -19,7 +19,7 @@ export interface ContextWindowCatalogEntry {
   tokens: number
 }
 
-export const CONTEXT_WINDOW_CATALOG: ContextWindowCatalogEntry[] = [
+const CONTEXT_WINDOW_CATALOG: ContextWindowCatalogEntry[] = [
   { family: "deepseek-v4", tokens: 1_000_000 },
   { family: "deepseek-v3.2", tokens: 1_000_000 },
   { family: "deepseek", tokens: 131_072 },

@@ -13,7 +13,7 @@
 
 export type ShellPlatform = "posix" | "win32"
 
-export function currentShellPlatform(): ShellPlatform {
+function currentShellPlatform(): ShellPlatform {
   return process.platform === "win32" ? "win32" : "posix"
 }
 

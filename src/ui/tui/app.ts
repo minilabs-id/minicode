@@ -1,4 +1,4 @@
-// App TUI — pemilik tunggal layar mode `--tui` (kontrak I17-I20).
+// App TUI — pemilik tunggal layar sesi interaktif (kontrak I17-I20).
 //
 // Arsitektur: SATU repaint sinkron per event. Tak ada painter lain yang aktif
 // bersamaan (turn berjalan = spark pada status bar, bukan painter). Frame

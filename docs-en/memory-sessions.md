@@ -67,6 +67,6 @@ The context limit is read per model from `providers[].contextWindows` (exact mod
 
 ## Repo intelligence & telemetry
 
-The system prompt carries a regex repo-map (9 languages) + LSP `workspace/symbol` fallback. Cache in `.minicode/repomap.json` (mtime signature). Files are ordered by import graph (60 files, 2.5k chars). `MINICODE_REPOMAP=regex` skips LSP. Tree-sitter is deliberately not used (measured reasons in `extractSymbolsAsync`).
+The system prompt carries a regex repo-map (9 languages) + LSP `workspace/symbol` fallback. Cache in `.minicode/repomap.json` (mtime signature). Files are ordered by import graph (60 files, 2.5k chars). `MINICODE_REPOMAP=regex` skips LSP. Tree-sitter is deliberately not used (notes in `src/repo/repomap.ts`).
 
 Telemetry `.minicode/traces.jsonl` — one line per run (tokens, steps, cost, duration); prompt scrubbed; chmod 600; rotated at 1000 lines. Opt out with `MINICODE_TELEMETRY=0`. `minicode stats` shows the deny rate from `step-traces.jsonl`.

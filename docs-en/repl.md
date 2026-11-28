@@ -181,7 +181,7 @@ since v0.42. The v0.42 "commit-in-place / never-shrink by id" clause is
 **overridden only on the transience of the live row**; other v0.42 clauses
 (concise failure text, recap without `└`) still apply. Archives are neither
 deleted nor renumbered — see the `## Perubahan v0.43` entry in
-`TERMINAL_CONTRACT.md`.
+[Terminal Contract](../docs/TERMINAL_CONTRACT.md).
 
 ## Consistency rules (contract I25)
 

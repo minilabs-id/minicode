@@ -317,7 +317,7 @@ export async function loginWithDeviceFlow(
  * Return null bila tidak ada refresh token atau server menolak — pemanggil
  * memutuskan apakah itu berarti "minta login ulang".
  */
-export async function refreshAccessToken(
+async function refreshAccessToken(
   providerId: string,
   creds: AuthCredentials,
 ): Promise<AuthCredentials | null> {

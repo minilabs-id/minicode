@@ -67,22 +67,11 @@ export type EffectAckSource =
   | "git-commit"
   | "external-response"
   | "absent"
-export type ReceiptLoss = "none" | "response" | "persistence" | "unknown"
-export type ReceiptUncertainty =
-  | "none"
-  | "ambiguous-effect"
-  | "unverified-external"
-  | "evidence-incomplete"
 export type IdempotencyScope = "session" | "mcp"
 export type IdempotencyStatus = "proceed" | "committed" | "failed" | "pending" | "conflict"
 export type ChildDelegationStatus = "committed" | "failed" | "pending" | "absent"
 export type ChildJournalStatus = "committed" | "failed" | "pending" | "absent"
 export type ChildVerificationStatus = "present" | "absent" | "inconclusive" | "absent-record"
-
-export interface ToolInvocationRequestLocator {
-  tool: string
-  providerToolCallId?: string
-}
 
 export interface ToolInvocationRequest {
   sessionId: string
@@ -293,7 +282,7 @@ export interface ObservedAck {
   ackAuthority?: "application-observed"
 }
 
-export function extractObservedAck(tool: string, result: unknown): ObservedAck {
+function extractObservedAck(tool: string, result: unknown): ObservedAck {
   const absent: ObservedAck = { ack: null, ackSource: "absent" }
   if (typeof result !== "string") return absent
   if (tool === "bash" || tool === "code_run") {
@@ -321,7 +310,7 @@ export function extractObservedAck(tool: string, result: unknown): ObservedAck {
   return absent
 }
 
-export function hasTruncationMarker(result: unknown): boolean {
+function hasTruncationMarker(result: unknown): boolean {
   return typeof result === "string" && TRUNCATION_MARKERS.some((marker) => result.includes(marker))
 }
 
@@ -1181,7 +1170,7 @@ export async function verifyGitCommit(input: {
 }
 
 /** Map an actually executed verifier outcome (never model prose) to a verdict. */
-export function mapVerifierOutcome(result: VerifyResult): VerificationVerdict {
+function mapVerifierOutcome(result: VerifyResult): VerificationVerdict {
   return result.ok ? "present" : "inconclusive"
 }
 

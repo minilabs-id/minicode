@@ -19,7 +19,7 @@ import { globToRegExp } from "./glob.ts"
 
 // v7.32 (L6): prefix marker timeout ripgrep. Dipakai dua arah — runRipgrep
 // menandai hasil (walau kosong) dan pemanggil membedakannya dari miss asli.
-export const RIPGREP_TIMEOUT_PREFIX = "… [truncated: ripgrep timeout"
+const RIPGREP_TIMEOUT_PREFIX = "… [truncated: ripgrep timeout"
 export const RIPGREP_TIMEOUT_MARKER = `${RIPGREP_TIMEOUT_PREFIX} ${LIMITS.GREP_RIPGREP_TIMEOUT_MS}ms]`
 
 /** Pesan eksplisit saat rg timeout sebelum menghasilkan satu pun match. */
@@ -811,7 +811,7 @@ function runRipgrep(
   })
 }
 
-export function formatContextCapMark(
+function formatContextCapMark(
   lines: readonly string[],
   hasMore: boolean,
   timedOut: boolean,

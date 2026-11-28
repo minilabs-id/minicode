@@ -124,43 +124,7 @@ export function decideContention(source: ContentionSource): ContentionDecision {
 
 // ── starvation ────────────────────────────────────────────────────────────────
 
-/**
- * [PHASE 6T] Is the selected policy starvation-free? Stated as a claim so it can
- * be tested rather than argued.
- *
- * [FACT] The mechanism is not fairness in the policy — it is that a task which
- * has run leaves the ready set. `reconcileIfNoCompletedAttempt` (store) reverts
- * `IN_PROGRESS` ONLY when the generation has no completion marker, so:
- *
- *   attempt completed  -> the marker exists -> NOT reverted -> stays IN_PROGRESS
- *                        -> not PENDING    -> not ready     -> never re-selected
- *   attempt never ran  -> no marker       -> reverted      -> PENDING -> ready again
- *
- * [INFERENCE] So a task that repeatedly fails by RETURNING does not starve its
- * successors — it leaves the ready set on its first attempt. Strict `ORDER ASC`
- * is therefore starvation-free here, without any fairness machinery.
- *
- * [INFERENCE] The same mechanism is the honest limit: there is no verifier, so a
- * task that returned is also never moved on, and it stays IN_PROGRESS forever.
- * That is not starvation of B; it is A being stuck. Both statements are true and
- * the distinction matters, because the fix for "A is stuck" (a verifier that
- * requeues it) is exactly what would REINTRODUCE starvation of B under a strict
- * order — a lower-ordered task that always requeues would win every cycle.
- *
- * [DESIGN DECISION] Therefore: if a verifier is ever added, selection must gain
- * an explicit anti-starvation rule at that moment. It is recorded here as a
- * dependency rather than pre-solved, because no verifier exists and pre-building
- * for it would be speculative.
- */
-export const SELECTION_IS_STARVATION_FREE = true
-
-/**
- * [PHASE 6T] The conditional fairness rule, stated now and NOT implemented.
- *
- * Exported so the dependency is machine-visible: when a requeueing authority
- * appears, this is the property that must hold, and
- * `test/phase6t-trigger-policy-lifecycle.test.ts` asserts
- * the current model satisfies the *unconditional* form.
- */
-export const ANTISTARVATION_REQUIREMENT =
-  "if a task can be requeued to PENDING after running, ORDER ASC alone is insufficient and selection must gain an age or attempt-count tiebreak"
+// Catatan desain (starvation): selama task hanya keluar dari antrean ready lewat
+// `reconcileIfNoCompletedAttempt`, task gagal tidak otomatis di-requeue ke
+// `PENDING`. Jika di masa depan ada mekanisme requeue ulang ke `PENDING`,
+// pemilihan task harus menambahkan age atau attempt-count tiebreak.

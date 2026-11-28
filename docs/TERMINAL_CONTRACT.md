@@ -170,8 +170,7 @@ Entri ini menjaga seluruh geometri frame v0.43/v0.51 (termasuk bingkai `#36383E`
 
 Entri teratas ini adalah **amandemen v0.42**, bukan penulisan ulang kontrak.
 Arsip v0.42 dan entri v7.x sebelumnya dipindahkan ke berkas
-`TERMINAL_CONTRACT_ARCHIVE.md` di root repo (tidak ikut paket npm karena tidak
-dibutuhkan runtime) — **tidak dihapus maupun direnomor**;
+`.audit/TERMINAL_CONTRACT_ARCHIVE.md` (di luar `docs/` agar tidak ikut paket npm) — **tidak dihapus maupun direnomor**;
 aturan presedensi "entri teratas menang" tetap berlaku. Cakupan = lapisan
 tampilan transkrip TUI; kontrak output mesin/JSONL dan jurnal/verbose tidak
 berubah. Tidak ada angka gate di entri ini.
@@ -438,8 +437,8 @@ setelahnya.
 
 ## Indeks arsip
 
-Isi lengkap arsip: `TERMINAL_CONTRACT_ARCHIVE.md` di root repo — tidak ikut
-paket npm karena bukan kebutuhan runtime. Arsip tidak dihapus maupun direnomor.
+Isi lengkap arsip: `.audit/TERMINAL_CONTRACT_ARCHIVE.md` (tidak ikut
+paket npm karena bukan kebutuhan runtime). Arsip tidak dihapus maupun direnomor.
 
 Status & presedensi: entri teratas menang. Aturan presedensi: arsip di bawah
 tidak pernah menimpa klausa entri aktif di atasnya.

@@ -148,8 +148,8 @@ async function run(
   const normalized = reorderForSecureCli(args)
   const proc = Bun.spawn([process.execPath, entry, ...normalized], {
     // cwd proses = workspace, jadi `process.cwd()` dan `--cwd` sepakat. Tool file
-    // memakai `process.cwd()` sebagai root jail (lihat PLAN.md P2.1); menyamakan
-    // keduanya menjaga test ini mengukur CLI, bukan ketidaksepakatan itu.
+    // memakai `ToolContext.cwd` sebagai root jail; menyamakan keduanya menjaga
+    // test ini mengukur CLI, bukan ketidaksepakatan dua path root.
     cwd: ws.dir,
     stdin: "ignore",
     stdout: "pipe",

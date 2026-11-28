@@ -6,7 +6,7 @@
 25 harga bawaan tersedia offline. Untuk cakupan luas, tarik sendiri — **tidak ada fetch otomatis** di jalur run (jalur run hanya baca cache lokal agar tidak menambah latensi/bocor pola pemakaian):
 
 ```bash
-minicode pricing sync                 # tarik katalog + harga dari models.dev lewat fetchPinnedUrl (IP di-pin ke socket, DNS strict/noCache, host privat & redirect ditolak, cap 2 MB)
+minicode pricing sync                 # tarik katalog + harga dari models.dev lewat fetchPinnedUrl (IP di-pin ke socket, DNS strict/noCache, host privat & redirect ditolak, cap 12 MiB)
 minicode pricing status               # sumber aktif + umur cache + tanda (stale) bila cache lebih tua dari 1 hari
 minicode pricing show claude-sonnet-4-5
 minicode pricing clear                # kembali ke bawaan
@@ -46,4 +46,4 @@ minicode --budget 0.05 --budget-strict "task ketat"
 | `Total` | `usage.getSession()` | Kumulatif sesi = Input + Output (tak pernah di-reset) |
 | `Cost` | tabel harga offline | Estimasi, atau `N/A` bila model tak dikenal — **tanpa fetch** |
 
-Aturan praktis: `Turn` besar + `Context` kecil = turn ini boros di jendela sempit (saatnya `/view compact` atau `/clear`); `Total` besar + `Cost: N/A` = model tanpa harga, `--budget` fail-closed (dianggap over). Kurva token per sesi bisa direplay dari `.minicode/step-traces.jsonl` (kolom `totalTokens` per baris, monoton naik); `minicode stats` menampilkan peak-nya (`Peak tok`).
+Aturan praktis: `Turn` besar + `Context` kecil = turn ini boros di jendela sempit (saatnya `/clear` atau mulai sesi baru); `Total` besar + `Cost: N/A` = model tanpa harga, `--budget` fail-closed (dianggap over). Kurva token per sesi bisa direplay dari `.minicode/step-traces.jsonl` (kolom `totalTokens` per baris, monoton naik); `minicode stats` menampilkan peak-nya (`Peak tok`).

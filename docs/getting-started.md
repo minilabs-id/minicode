@@ -85,7 +85,7 @@ minicode auth status         # lihat kredensial + kapan kedaluwarsa
 minicode --work-mode BUILD "buat http server hello world di server.ts" --verbose
 ```
 
-Yang terjadi: model menerima system prompt berisi `# Environment` (cwd + platform) + repo-map ringkas, lalu loop ReAct `Thought → Action → Observation` sampai jawaban final atau batas (`--max-steps` default 200, `--timeout` default 1 jam; angka 50 adalah cap sub-agent, bukan default sesi).
+Yang terjadi: model menerima system prompt berisi `# Environment` (cwd + platform) + repo-map ringkas, lalu loop ReAct `Thought → Action → Observation` sampai jawaban final atau batas (`--max-steps` default 200, `--timeout` default 1 jam; angka 600 adalah hard-cap sub-agent, bukan default sesi).
 
 Coba mode interaktif:
 

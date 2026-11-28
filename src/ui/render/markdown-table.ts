@@ -132,12 +132,9 @@ function splitPipeRowInternal(line: string, unmatchedCodeIsLiteral: boolean): Sp
   return { cells }
 }
 
-export function splitPipeRow(line: string): string[] | null {
+function splitPipeRow(line: string): string[] | null {
   return splitPipeRowInternal(line, false)?.cells ?? null
 }
-
-export const parseTableRow = splitPipeRow
-export const isTableDelimiter = (line: string): boolean => parseDelimiterRow(line) !== null
 
 function unescapeCell(cell: string): string {
   let out = ""
@@ -169,7 +166,7 @@ function unescapeCell(cell: string): string {
   return out.trim()
 }
 
-export function parseDelimiterRow(line: string): PipeTableAlignment[] | null {
+function parseDelimiterRow(line: string): PipeTableAlignment[] | null {
   const split = splitPipeRow(line)
   if (!split || split.length === 0) return null
   const aligns: PipeTableAlignment[] = []
@@ -292,12 +289,6 @@ export function parseMarkdownTable(
   const extraLines = extra.filter((value): value is string => typeof value === "string")
   const source = [typeof input === "string" ? input : input.join("\n"), ...extraLines].join("\n")
   return parseMarkdownBlocks(source).find((block) => block.type === "table")?.table ?? null
-}
-
-export function parseMarkdownTables(input: string): MarkdownTable[] {
-  return parseMarkdownBlocks(input)
-    .filter((block): block is Extract<MarkdownBlock, { type: "table" }> => block.type === "table")
-    .map((block) => block.table)
 }
 
 export class MarkdownTableStream {

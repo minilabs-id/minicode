@@ -99,7 +99,7 @@ export function clearCompletionEvidence(): void {
   completionEvidence = () => UNVERIFIED
 }
 
-export function currentCompletionEvidence(): CompletionEvidence {
+function currentCompletionEvidence(): CompletionEvidence {
   try {
     return completionEvidence() ?? UNVERIFIED
   } catch {
@@ -280,7 +280,7 @@ export async function deleteTodoFiles(sessionId: string, cwd: string): Promise<v
   deleteTodoFilesSync(sessionId, cwd)
 }
 
-export function taskStatusToTodoStatus(status: TaskStatus): TodoStatus {
+function taskStatusToTodoStatus(status: TaskStatus): TodoStatus {
   switch (status) {
     case "COMPLETED":
       return "completed"

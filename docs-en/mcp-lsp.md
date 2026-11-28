@@ -26,7 +26,7 @@ Once registered, `mcp_list` shows **tools, resources, prompts** together:
 
 Dynamic `serverId.toolName` tools appear automatically. `resources`/`prompts` are optional in the spec: a server answering "Method not found" still connects with its tools intact.
 
-HTTP security: private hosts are denied unless `--allow-private` (the same guard as `web_fetch`, which uses `fetchPinnedUrl`: resolve once, pin the validated IP to the socket, re-resolve with strict/no-cache DNS on redirects, reject private hosts; no proxy/pool/redirect bypass and a 2 MB cap). Redirects are not followed. Sizes are bounded. Responses are matched by request id. The `Authorization` header never reaches the logs.
+HTTP security: private hosts are denied unless `--allow-private` (the same guard as `web_fetch` with strict/no-cache DNS and private-host rejection; pricing sync uses `fetchPinnedUrl` with socket IP pinning and a 12 MiB cap). Redirects are not followed. Sizes are bounded. Responses are matched by request id. The `Authorization` header never reaches the logs.
 
 Permissions: every dotted MCP tool is always gated. Under `ASK`, a call asks for confirmation once per server+tool+args triple (`[a] Always` persists to the allowlist); under `AUTO`, registered/authorised tools run without a prompt while unknown ones are *denied* (not prompted). `readonly`/`plan`/`allowlist` deny. There is no auto-allow wildcard (supply-chain protection).
 
@@ -49,6 +49,11 @@ Server-mode semantics: each `tools/call` goes through kernel validateArgs -> per
 minicode config lsp add .ts --command typescript-language-server --args --stdio
 ```
 
-Once registered: `lsp_diagnostics`, `lsp_definition`, `lsp_references`, `lsp_hover`, `lsp_symbols`, `lsp_workspace_symbols`. Diagnostics run automatically on `edit`/`write_file` when a server is configured. `didClose` cleanup is automatic.
+Once registered: `lsp_diagnostics`, `lsp_definition`, `lsp_references`, `lsp_hover`, `lsp_symbols` (supporting hierarchical `DocumentSymbol` and `SymbolInformation`), `lsp_workspace_symbols`, and `lsp_rename` (seven tools). Diagnostics run automatically on `edit`/`write_file` when a server is configured, and all LSP tools take a `path` argument (v7.38+, replacing `file`).
 
-If LSP does not run: make sure the server is installed and the command is right. The regex repo-map still works as a fallback (`MINICODE_REPOMAP=regex`).
+- **Monorepo isolation & cache accuracy:** LSP instances are partitioned per `(ext, projectRoot)` using the nearest project root marker (`package.json`, `tsconfig.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, etc.). Sending `didChange` clears stale diagnostics for modified contents, and read queries fail closed symmetrically if no server handles the extension.
+- **Lifecycle & wire hiding:** `move_file` and `delete_file` trigger automatic `didClose` cleanup (and emit a pre-mutation `[dep-graph] warning:` if the target is still imported). When no LSP server is configured, all seven LSP tools are hidden automatically from the model's wire schema (`hiddenWireTools`) across main sessions, sub-agents, the autonomous scheduler, and `minicode mcp serve` (unless `--all-tools`).
+
+`lsp_rename` (v7.38) is the **only LSP tool that writes** the workspace (via `atomicWriteText`), so it is **gated** like git-write (`path` + `symbol` or 0-based `line`/`character` + `newName`; fail-closed on missing server, empty edits, invalid `newName`, overlapping edits, or targets outside the workspace jail).
+
+If LSP does not run: make sure the server is installed and the command is right (check `minicode doctor`). Even without active LSP, static dependency mapping runs via `dep_graph` (`src/repo/dep-graph.ts`), and the regex repo-map remains available (`MINICODE_REPOMAP=regex`).

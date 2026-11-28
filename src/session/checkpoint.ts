@@ -409,7 +409,7 @@ export async function beginTurnSnapshot(
   }
 }
 
-export async function snapshotCompleteWorkspace(cwd: string): Promise<FileSnapshot[]> {
+async function snapshotCompleteWorkspace(cwd: string): Promise<FileSnapshot[]> {
   const snapshots: FileSnapshot[] = []
   let bytes = 0
   const visit = async (directory: string): Promise<void> => {
@@ -669,7 +669,7 @@ export async function applyWorkspacePaths(
 }
 
 /** Pulihkan snapshot safety; dipakai rollback undo dan arah redo rewind. */
-export async function restoreWorkspaceSafety(
+async function restoreWorkspaceSafety(
   snapshot: WorkspaceSafetySnapshot,
   cwd: string = process.cwd(),
 ): Promise<string[]> {
@@ -746,30 +746,6 @@ export async function undoFilesToTurn(
     // diadopsi rekonsiliasi sebagai pointer yang salah.
     return { noCheckpoint: false, checkpoint, restoredFiles, safety }
   })
-}
-
-/** Salin checkpoint sebelum timestamp event prompt ke manifest sesi cabang. */
-export async function copyCheckpointPrefix(
-  srcSessionId: string,
-  dstSessionId: string,
-  beforeTimestamp: number,
-  cwd: string = process.cwd(),
-): Promise<number> {
-  const src = await loadCheckpointManifest(srcSessionId, cwd)
-  const checkpoints = src.checkpoints.filter((cp) => {
-    const ts = Date.parse(cp.timestamp)
-    return Number.isFinite(ts) && ts < beforeTimestamp
-  })
-  if (checkpoints.length === 0) return 0
-  await saveCheckpointManifest(
-    {
-      sessionId: dstSessionId,
-      currentIndex: checkpoints.length - 1,
-      checkpoints,
-    },
-    cwd,
-  )
-  return checkpoints.length
 }
 
 export async function undoLastCheckpoint(

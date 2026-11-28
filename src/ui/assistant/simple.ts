@@ -985,9 +985,8 @@ export function attachSimpleLogger(bus: UiBus, opts: SimpleOptions = {}): () => 
         return
       }
       const target = typeof args.path === "string" ? args.path : undefined
-      // Section tool dikecilkan: satu baris `  + label`, isi di-buffer untuk
-      // /expand. Ledger lain (chevron) tetap satu baris — ini menggantikan
-      // pencetakan isi (bash/edit/diff/content tool), bukan marker.
+      // Section tool dikecilkan menjadi satu baris `  + label` tanpa mencetak
+      // isi tool (buffer `/expand` telah dihapus sejak v0.34).
       if (ui.sectionMinimized("tool")) {
         ui.setActiveSection(null)
         const label = activity?.summary

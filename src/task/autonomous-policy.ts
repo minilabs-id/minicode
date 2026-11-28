@@ -194,7 +194,7 @@ export const TOOL_CAPABILITIES: readonly ToolClassification[] = [
     capability: "PRIVILEGED",
     autonomous: false,
     evidence:
-      "VERIFIED: writes history and identity. The existing sub-agent layer strips it for the same reason (src/tools/task.ts:309-321).",
+      "VERIFIED: writes history and identity. The existing sub-agent layer strips it for the same reason (`EXPLORE_TOOL_NAMES` di `src/tools/task.ts`).",
   },
   {
     name: "git_push",
@@ -252,7 +252,7 @@ export const TOOL_CAPABILITIES: readonly ToolClassification[] = [
     capability: "MUTATING",
     autonomous: false,
     evidence:
-      "VERIFIED as a task-ownership hazard, not merely a write: todo_write can author TaskStatus, and under 6P `IN_PROGRESS` is a Scheduler-owned execution state. Letting an autonomous model write it would let a model fabricate a claim the lineage would then treat as real. The existing sub-agent layer strips it for the same reason (src/tools/task.ts:309-321).",
+      "VERIFIED as a task-ownership hazard, not merely a write: todo_write can author TaskStatus, and under 6P `IN_PROGRESS` is a Scheduler-owned execution state. Letting an autonomous model write it would let a model fabricate a claim the lineage would then treat as real. The existing sub-agent layer strips it (`EXPLORE_TOOL_NAMES` di `src/tools/task.ts`).",
   },
   {
     name: "submit_result",

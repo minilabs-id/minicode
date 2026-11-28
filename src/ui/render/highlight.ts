@@ -230,13 +230,9 @@ function highlightTsTokens(text: string): string {
         return c.brightMagenta(c.bold(token))
       }
       if (/^[A-Z][A-Za-z0-9_$]*$/.test(token)) {
-        // Type / Class name
         return c.brightCyan(token)
       }
-      // Tidak ada cabang khusus untuk true/false/null/undefined: keempatnya sudah
-      // ada di TS_KEYWORDS, jadi cabang di atas selalu menang. Cabang terpisah
-      // yang pernah ada di sini tak pernah terjangkau (terlihat saat coverage
-      // highlight.ts dinaikkan: satu baris mustahil dicapai test apa pun).
+      // `true`/`false`/`null`/`undefined` sudah ditangani `TS_KEYWORDS` di atas.
       return token
     }),
   )

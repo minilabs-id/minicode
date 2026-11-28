@@ -16,7 +16,7 @@ export interface HintItem {
 }
 
 /** Warna kunci (lebih terang) vs label (redup) — aksesibel tanpa warna. */
-export function paintHint(item: HintItem): string {
+function paintHint(item: HintItem): string {
   return `${c.accent(item.key)} ${c.dim(item.label)}`
 }
 

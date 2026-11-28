@@ -3,12 +3,12 @@
 This document is the active map of structure and runtime flow for contributors.
 
 The owner's phase roadmap is not available in this checkout; do not infer phase
-status or next actions from the changelog or the code. `TERMINAL_CONTRACT.md` is
+status or next actions from the changelog or the code. [Terminal Contract](../docs/TERMINAL_CONTRACT.md) is
 the FROZEN terminal contract — read it before changing output; behaviour changes
 require a contract update and a protection test map. The active output contracts
-live in the [event model](OUTPUT_EVENT_MODEL.md), [protocol](OUTPUT_PROTOCOL_SPEC.md),
-[rendering](OUTPUT_RENDERING_SPEC.md), and [UX rules](OUTPUT_UX_RULES.md). The
-rendering flow map is in [UI Render Pipeline](UI_RENDER_PIPELINE.md).
+live in the [event model](../docs/OUTPUT_EVENT_MODEL.md), [protocol](../docs/OUTPUT_PROTOCOL_SPEC.md),
+[rendering](../docs/OUTPUT_RENDERING_SPEC.md), and [UX rules](../docs/OUTPUT_UX_RULES.md). The
+rendering flow map is in [UI Render Pipeline](../docs/UI_RENDER_PIPELINE.md).
 
 ## Three layers
 
@@ -55,8 +55,7 @@ per-segment slice that resets), formatted as one line:
 `2 command · 118 read · 1 other` (no symbol prefix since v0.41). The older
 clauses — a two-line live recap,
 a net-zero `flushActivityFold`, `liveSummaryRows()` following the tail, and a
-floating separator row between narrations — are **v0.33/v7.x archive material
-overridden by v0.35**; see the [Terminal Contract](TERMINAL_CONTRACT.md) for
+floating separator row between narrations — are **v0.33/v7.x archive material overridden by v0.35**; see [Terminal Contract](../docs/TERMINAL_CONTRACT.md) for
 precedence.
 
 ```text
@@ -111,42 +110,23 @@ path with prefix-compare is 10 ms.
 
 ## Task system (durable work state)
 
-Task state is **not** chat history and **not** a tool trace. Its semantic owner is
-`src/tools/todo.ts`; `.minicode/todos/<id>.json` is the only source of truth, and
-`plan.updated` (the durable event for ACP/`exec --json`) is only a **projection**
-of that file.
+Task state is **not** chat history and **not** a tool trace. The durable source of truth is `TaskStore` in the workspace SQLite database (`.minicode/tasks.db`, `src/task/store.ts` + `src/task/db/{types,schema}.ts`), while `src/tools/todo.ts` acts as the model/tool adapter (updating `.minicode/todos/<id>.json` + syncing to `TaskStore` via `synchronizeCanonicalTasks` in `src/task/sync.ts`), and `plan.updated` (the durable event for ACP/`exec --json`) is a downstream projection (`syncTodoViewsFromTaskStore`).
 
 ```text
-todo_write (model) -> normalizeTodos -> .minicode/todos/<id>.json   (state)
-                            |                    ^
-                            |                    | setCompletionEvidence
-                            |            last verify evidence
-                            v
-                     plan.updated (projection, emitted AFTER the tool succeeds)
+todo_write (model) -> normalizeTodos -> .minicode/todos/<id>.json (projection snapshot)
+                            |                    |
+                            |                    v
+                            |         synchronizeCanonicalTasks -> .minicode/tasks.db (TaskStore: authority)
+                            |                                            ^
+                            v                                            | setCompletionEvidence
+                     plan.updated (downstream projection AFTER success) -┘
 ```
 
 Three rules hold this domain together:
 
-1. **Canonical session identity (P2.1).** Todos are bound to the canonical `sid`
-   from `resolveSessionIdentity` (`src/session/identity.ts`), not the volatile
-   process id (`bootId`). `--resume` without `--session` no longer forges a random
-   id; an unknown `--resume` fails explicitly (`SESSION_NOT_FOUND`).
-2. **Completion needs evidence.** `setCompletionEvidence()` injects a verdict
-   (`unverified` | `passed` | `failed`) from the composition root. `failed` refuses
-   `completed` -> the task becomes `blocked` + its reason, and the result is
-   reported to the model. The `unverified` default keeps usage without `--verify`
-   POSSIBLE; what is forbidden is silent completion without a trace.
-3. **One normaliser, two stores.** `planFromTodos` (the adapter) calls the same
-   `normalizeTodos` as the file, so status/cap/`blocked` cannot diverge — and the
-   plan event is emitted at `execution:completed`, not from the arguments before
-   the tool runs.
-
-Boundary of the **todo** subsystem: todo files stay flat — no dependency field in
-`TodoItem`, no user surface (`/tasks`), `/undo` restores files and conversation via a branch session but leaves todo status untouched, and no TTL/GC for todo files outside SQLite. Dependencies/graph and
-scheduling **do exist**, but in a separate subsystem: the TaskGraph + Scheduler in
-`src/task/` operate on the TaskStore (`.minicode/tasks.db`), not on todo files;
-`todo_write` may only touch it through a canonical `taskId` (`src/tools/todo.ts`),
-and its control surface is `/scheduler` (off by default).
+1. **Canonical session identity (P2.1) & canonical `TaskStore` IDs (P4A).** Todos are bound to the canonical `sid` from `resolveSessionIdentity` (`src/session/identity.ts`), not the volatile process id (`bootId`). `--resume` without `--session` no longer forges a random id; an unknown `--resume` fails explicitly (`SESSION_NOT_FOUND`). Canonical `taskId` allocation belongs exclusively to `TaskStore`.
+2. **Completion needs evidence.** `setCompletionEvidence()` injects a verdict (`unverified` | `passed` | `failed` | `stale`) from the composition root. `failed` refuses `completed` -> the task becomes `blocked` + its reason, and the result is reported to the model; `requireVerified && unverified` holds claims in `VERIFYING` or downgrades per the verification gate. The `unverified` default keeps usage without `--verify` possible; what is forbidden is silent completion without a trace.
+3. **One status authority, one projection path.** `TaskStore` is the single authority for mutation/reconciliation/claim (`TaskAuthority`: `LEGACY` vs `SCHEDULER`), while `TaskGraph` and `ProductionScheduler` in `src/task/` operate over `.minicode/tasks.db`; `todo_write` and `/openwork` read and sync through `src/task/sync.ts` and `syncTodoViewsFromTaskStore` — and `plan.updated` is emitted only at `execution:completed`, not before the tool runs. (`/undo` restores files and conversation via a branch session, leaving durable task status untouched.)
 
 ## Verification evidence (P2.10)
 
@@ -198,98 +178,50 @@ directly. 37 invariants (I1–I37; I36 = command output window, I37 = recovery/a
 neither is a sidebar invariant) + the test map (`tui-app`, `screen-buffer`,
 `tui-popup`, `transient-arbitration`, `loading-bar`, `input-resize`, `exit-codes`,
 `acp`, `ui-boundary`, `chat-column` for v0.34 centred-column geometry, plus
-`retry-visibility`, `perf-no-quadratic`, `shell-tokenize`, `subagent-budget`) are in
-`TERMINAL_CONTRACT.md`. The old `sidebar-invariants`, `sidebar-model`,
-`sidebar-width` and `thinking-truncation` claims were revoked with the sidebar.
-That contract also carries a **protection gap map** — claims whose implementation
-is correct but has no guarding assertion yet; that is a work list, not a green list.
+`retry-visibility`, `perf-no-quadratic`, `shell-tokenize`, `subagent-budget`) live in
+[Terminal Contract](../docs/TERMINAL_CONTRACT.md). The old `sidebar-invariants`,
+`sidebar-model`, `sidebar-width` and `thinking-truncation` claims were revoked
+with the sidebar. That contract also carries a **protection gap map** — claims
+whose implementation is correct but lacks a guarding assertion yet (a work list,
+not a green list).
 
 Seven display primitives (all inside the fullscreen TUI when interactive): the
 `minicode >` transcript shown at boot/idle and returning automatically after a
 turn — chat carries narration, a category recap (e.g.
-`3 command · 2 read · 5 subagent`), tool lines, the `✦` aggregate, findings,
-the `+ thinking` marker (back in v0.34), and the final answer; the per-tool
-ledger, `✦`, and `finding.detected` returned to the chat (v0.33 moved them to a
-sidebar — now revoked); the `Tool:` line and folded buffers stay removed; a
-one-line status bar (`✦ 00.00.00 Discuss  model  cwd ... context  Auto ●` — mode
-values only, product labels `Work Mode:`/`Permission Mode:` removed in v0.24; the
-`●` dot is yellow = allow-list active, grey = inactive, red `○` = unrestricted, a
-`◷ N` badge when background jobs are alive), with new sessions at `DISCUSS`+`AUTO`,
-Work Mode choices only Discuss/Build and Permission Mode only Auto/Ask; Work
-Mode on the left and Permission Mode in cyan right-aligned near the context (timer
-dim when idle, only seconds white when active, minutes light up after 60 s, hours
-after 1 h; process sparkle; no bullet separator; `src/ui/tui/app.ts` renders the
-composer dots and one spacer above the footer per frame); a single-box composite
-popup (`/model`, `/provider`, `/sessions`, forms, approvals) via
-`openAltScreen`/`paintRegion`; thinking uses the `+ thinking` marker in the chat (composer
-dots; controlled by `MINICODE_SHOW_THINKING`, full reasoning stays in the journal;
-`MINICODE_ACTIVITY_PANEL` is legacy/deprecated (D3), `MINICODE_MINIMIZE_ACTIVITY`
-still folds); an actionable error message in red once per
-failure (`takePendingError`); a centred chat column (v0.34) — `cols ≥ 120 && rows ≥
-20` gives `chatCols = floor(cols/2)` with left/right padding, a centred
-footer/composer, full width below the threshold, computed in
-`src/ui/render/chat-column.ts` and part of the same `paint()` frame (never
-scrollback, I1 unchanged). Pane shortcuts (`Alt/Ctrl+PgUp/PgDn`, per-pane wheel,
-`Ctrl+O` Live detail) are removed. Command status/confirmation (sync, auth,
-config, spinner) uses colour only, without icons; retry appears as one footer
-micro-toast `retry n/total · Ns` with a 4 s TTL and a live counter.
+`3 command · 2 read · 5 subagent`, cumulative with turn duration at turn end),
+tool lines, the `✦` aggregate, findings (`[EVALUATE]` notes go to `/logs`), the
+`+ thinking` marker (back in v0.34), and the final answer; a one-line status bar
+(`✦ 00.00.00 Discuss  model  cwd ... context  Auto ●`, with new sessions starting
+in `DISCUSS`+`AUTO`, timer dim when idle and brighter when active); a single-box
+composite popup (`/model`, `/provider`, `/sessions`, forms, approvals) via
+`openAltScreen`/`paintRegion`; thinking via `+ thinking` in chat
+(`MINICODE_SHOW_THINKING`); an actionable error message once per failure
+(`takePendingError`); the centred chat column (`cols ≥ 120 && rows ≥ 20` ->
+`chatCols = floor(cols/2)`, full width below threshold, computed in
+`src/ui/render/chat-column.ts`); colour-only command statuses; and one footer
+micro-toast `retry n/total · Ns` (4 s TTL, live counter).
 
-Composer/menu flow since v0.36–v0.37: `composerWidth()` and `chatWidth()` are
-two helpers from **one geometry source** in `src/ui/render/chat-column.ts` —
-`composerWidth()` is used by the composer painter, `composer-wrap.ts`, and
-cursor/click mapping. The v0.37 prompt cap is progressive:
-`min(chatCols, 100 + floor(max(0, chatCols-100)/4))` (100→100, 200→125,
-300→150, 500→200; replacing `min(100, chatWidth())`); the prefix is `minicode › `
-when the content room `w−14 ≥ 24` (`w ≥ 38`), else `› `, with `· ` for
-continuation rows. The composer is at most 2 rows — a long draft uses a sliding
-window without changing the frame height or transcript position. The `/`
-dropdown is not a `paintRegion()` popup: it is drawn inside the same `paint()`
-frame (one `stdout.write`, I1), overlaying the lower transcript rows without
-reducing `viewH`, and a click in the dropdown area maps to a menu item, not a
-transcript selection; since v0.37 the dropdown closes on a busy/abort
-transition. See invariants I14/I17/I19/I1 and the `## Perubahan v0.37` entry
-(which overrides the v0.36 cap/threshold) in `TERMINAL_CONTRACT.md`.
-
-Since v0.43 the **live tool activity row** is transient again, as in v0.40.0:
-it follows the transcript tail and disappears once the tool finishes. When the
-live row appears, `total` grows and sticky-tail shifts the window (history may
-move up); when it disappears and `total` shrinks, the window does not shift
-back — committed rows keep their on-screen position and the space below may be
-empty. The mechanism is a **per-turn `scrollBack` ratchet** (only ever grows),
-reset on `turn:started`, a new prompt, or `/clear`; not an overlay, not a
-`liveRegion`, and not a commit-in-place of the live row. Committed history stays
-intact; I1 (one write per frame) holds with no new writer or region. Only the
-transience aspect of the v0.42 "commit-in-place / never-shrink by id" clause is
-overridden (other v0.42 clauses still apply). See the `## Perubahan v0.43` entry
-in `TERMINAL_CONTRACT.md`.
-
-## Paste & selection flow (v0.37)
-
-Three new input flows touch the controller/painter boundary:
-`src/ui/input/{ask-line,prompt-engine}.ts` enables **bracketed paste**
-(`?2004h` on entry / `?2004l` on exit) in the TUI, `askLine`/`askSecret`, and
-`src/ui/screens/output-window.ts`. Those sequences are written **outside the
-`paint()` frame** — not grid cells, not per-repaint diffs — so I1 (one `write`
-per frame) still holds; a CR inside a paste becomes a draft newline, never a
-stacked submit (reason: multiline paste corrupts the draft). `src/ui/tui/app.ts`
-maps `Ctrl+A` to `selectAll` with an empty composer and closed dropdown (select
-every logical transcript row via `src/ui/tui/transcript.ts`), and keeps `Home`
-when a draft/menu is present; `Ctrl+C` finalises an active drag into a selection
-first, then copies via OSC 52. Resize stabilises state: auto-scroll stops, drag
-is cancelled, the cursor column preference is reset, and the scroll anchor is
-rebased even with an active selection; a click after resize uses the new geometry
-from `chat-column.ts`. The echoed user prompt is stored as one logical row and
-wrapped once to the chat column width in the projector (not the full terminal
-width — centred padding can double-wrap it).
+Since v0.36–v0.43: `composerWidth()` and `chatWidth()` come from **one geometry
+source** in `src/ui/render/chat-column.ts`. Chat and composer share 3+3
+symmetrical frame padding (`contentCols = chatCols - 6`) with progressive cap
+`min(w, 100 + floor(max(0, w - 100) / 4))`. Rounded thin-line 1–2 row dynamic
+composer box, overlay `/` dropdown within the same `paint()` frame (I1),
+bracketed paste (`?2004h`/`?2004l` outside the frame), `{paste text N lines}`
+placeholders, `Ctrl+A`/`Ctrl+C` selection, resize stabiliser, and per-turn
+`scrollBack` ratchet for transient live tool rows follow [Terminal Contract](../docs/TERMINAL_CONTRACT.md).
 
 ## Key modules
 
 - `src/session/verification.ts` + `src/tools/evidence.ts`: application-owned invocation identity, awaited intent/receipt, explicit observation, idempotency, and child-effect correlation — all in the same mutation journal.
 
-- `src/ui/render/`: `theme.ts` (getter `c`/`glyphs`, level-aware 16/256/truecolor palette), `width.ts` (columns), `sanitize.ts` (only SGR passes), `ledger.ts` (status word/glyph/paint + shared run marker for TUI & linear), `hint.ts` (`key label` grammar hints, space-only), `list.ts` (`›` row marker + fixed columns), `notice.ts` (success/error/info notices), `markdown.ts`, `markdown-layout.ts` (markdown layout for the centred chat column), `markdown-table.ts` (streaming pipe-table parser), `table-grid.ts` (terminal grid budget), `cells.ts` (grapheme+SGR framebuffer + a "rewrite the tail" diff for incremental writes), `composer-wrap.ts` (incremental composer wrap), `chat-column.ts` (v0.34 centred-column geometry: `chatCols = floor(cols/2)` when `cols ≥ 120 && rows ≥ 20`, padding, full width below the threshold, footer/composer follow; since v0.36 the single source of `composerWidth()`/`chatWidth()` for prompt width, cursor, and the adaptive prefix — v0.37 cap `min(chatCols, 100 + floor(max(0, chatCols-100)/4))`, prefix `minicode › ` when `w−14 ≥ 24`), `agent-progress.ts` (the `✦` sub-agent aggregate in chat), `tool-label.ts` (resolves the OS locale via `Intl` into the `› …` tool activity label; single source shared by the TUI and `src/ui/assistant/simple.ts`, while narration/model answers keep using `/lang`), `highlight.ts diff.ts table.ts wrap.ts money.ts errors.ts`. The old `sidebar-layout.ts`, `sidebar.ts`, `sidebar-model.ts`, `activity-format.ts` and the `window.ts` readout view are no longer used for a side panel since v0.34; incremental reasoning parsing is still guarded by `test/perf-no-quadratic.test.ts`.
-- `src/presentation/`: `events.ts` defines presentation events and the durability registry; `adapter.ts` maps runtime to `DomainEvent`; `reducer.ts`/`model.ts` build replayable state and derived summaries; `store.ts` stores content references; `projection.ts` forms the `minicode.output.v1` envelope and machine error categories. `src/session/persistence.ts` stores the `presentation_events` and `messages` logs with `reasoning`/`is_error` fidelity. `cli/setup.ts` owns the exhaustive `toPresentationEvent()` bridge; the TUI/linear/machine renderers use policy decisions via `PresentationPolicy` injection.
-- `src/policy/`: `context.ts` (density-aware code/JSON estimator + usage calibration), `context-window.ts` + `context-window-catalog.ts` (window resolution: config -> catalogue -> models.dev -> 128K alias default -> 32K), `bpe.ts` + `tokenizer-registry.ts` (on-demand precise BPE tokenizers from HuggingFace, local cache, density fallback), `compaction.ts` (LLM + mechanical compaction, anti-drift/anti-thrash, prefers the session provider), `usage.ts`/`pricing.ts` (cost estimates + models.dev), `shell-tokenize.ts` + `subagent-budget.ts` (platform-aware shell tokenizer and sub-agent step-budget resolution).
-- `src/ui/input/`: `askLine`, `prompt-engine` (grapheme `Intl.Segmenter`, streaming decoder, bracket-paste, mouse X10/SGR press/drag/release + normalised wheel; app-level selection in the TUI). Since v0.37 bracketed paste is active (`?2004h`/`?2004l`, outside the frame per I1) in the TUI, `askLine`/`askSecret`, and the output window; `Ctrl+A` = `selectAll` with an empty composer and closed dropdown (else `Home`); `Ctrl+C` copies even while a drag is active.
+- `src/ui/render/`: `theme.ts` (getter `c`/`glyphs`, level-aware 16/256/truecolor palette), `width.ts` (columns), `sanitize.ts` (only SGR passes), `ledger.ts`, `hint.ts`, `list.ts`, `notice.ts`, `markdown.ts`, `markdown-layout.ts`, `markdown-table.ts`, `table-grid.ts`, `cells.ts`, `composer-wrap.ts`, `chat-column.ts` (centred chat-column and progressive `composerWidth(contentCols)` geometry), `agent-progress.ts` (`✦` sub-agent aggregate), `tool-label.ts` (OS locale activity labels + human auto-labels shared across TUI and `simple.ts`), `highlight.ts`, `diff.ts`, `table.ts`, `wrap.ts`, `money.ts`, `errors.ts` (`formatLabeledToolFailure` & `friendlyToolFailureTag`). Legacy sidebar modules were removed in v0.34; incremental reasoning parsing is guarded by `test/perf-no-quadratic.test.ts`.
+- `src/presentation/`: `events.ts`, `adapter.ts`, `reducer.ts`/`model.ts`, `store.ts`, `projection.ts` (`minicode.output.v1` envelope and machine error categories). `src/session/persistence.ts` with `src/session/db/{schema,runs}.ts` stores `presentation_events`, `runs`, and `messages` with `reasoning`/`is_error` fidelity; `src/session/rewind.ts` coordinates checkpoint restore + `branchSession` + rewind records; `src/task/store.ts` with `src/task/db/{types,schema}.ts` manages `.minicode/tasks.db`. `cli/setup.ts` (`cli/bootstrap/presentation-bridge.ts`) owns the exhaustive `toPresentationEvent()` bridge and injects `PresentationPolicy`.
+- `src/policy/`: `context.ts`, `context-window.ts` + `context-window-catalog.ts`, `bpe.ts` + `tokenizer-registry.ts`, `compaction.ts`, `autonomous-loop.ts`, `recovery-budget.ts`, `usage.ts`/`pricing.ts`, `shell-tokenize.ts` + `subagent-budget.ts`.
+- `src/lib/`: UI-independent core utilities including `liveness-clock.ts` (`setSafeTimeout`, `createActivityDeadline`) and `safe-open.ts` (`createSafeScanReader` with cached parent `realpath` and `lstat`/`O_NOFOLLOW`/`fstat` verification).
+- `src/repo/`: `repomap.ts` (`git ls-files` discovery, quick-stamp cache, <20 ms ranking + LSP fallback) and `dep-graph.ts` (hybrid static dependency engine: `Bun.Transpiler.scan`, masked type/re-export pass, polyglot imports, alias resolver, Tarjan SCC cycles, non-test centrality, BFS impact).
+- `src/tools/`: file/shell/memory/task tools plus `dep_graph.ts` (#42 read-only graph tool), `lsp.ts` (7 LSP tools with `(ext, projectRoot)` monorepo isolation and `lsp_rename`), `move_file.ts`/`delete_file.ts` (graph importer warning + `didClose` + cache invalidation), and `grep.ts`.
+- `src/task/`: `store.ts`/`scheduler.ts`/`trigger.ts`, `autonomous-policy.ts`, `autonomous-build-policy.ts`, `autonomous-context.ts`, `autonomous-adapter.ts`, and `production-scheduler.ts`.
+- `src/ui/input/`: `askLine`, `prompt-engine` (grapheme `Intl.Segmenter`, streaming decoder, bracket-paste, mouse X10/SGR press/drag/release + wheel; app-level selection in the TUI; no pane shortcuts).
 - `src/ui/screens/`: pure views `picker/wizard/model-manager/provider-manager/form/dialog/output-window`; `output-window.ts` is the scrollable command readout above the chat (v7.18).
 - `src/ui/assistant/simple.ts`: linear printer + OSC52 clipboard. `turn-status.ts`: the transient line. `approval/prompt.ts`: `promptAsk/promptAskText`.
 - `src/daemon/`: hosted-session runtime, discovery, framed IPC/capabilities, replay, approval brokerage, child supervision, and ordered shutdown; composition via `cli/commands/daemon.ts`.

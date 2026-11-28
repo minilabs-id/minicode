@@ -39,7 +39,7 @@ export type ExecutionStateSnapshot = string
 
 /** Label yang dianggap terminal untuk kebijakan retensi + TTL + cleanup.
  * Heuristik observasi (absorbing-label), BUKAN otoritas lifecycle. */
-export const TERMINAL_SNAPSHOT: ReadonlySet<string> = new Set([
+const TERMINAL_SNAPSHOT: ReadonlySet<string> = new Set([
   "COMPLETED",
   "FAILED",
   "CANCELLED",

@@ -15,8 +15,8 @@ import { chunkByWidth, displayWidth, segmentGraphemes } from "./width.ts"
 /** Tabel kelipatan lebar tab, sinkron dengan `chunkByWidth`. */
 const TAB_WIDTH = 8
 
-export const PASTE_COLLAPSE_MIN_LINES = 2
-export const PASTE_COLLAPSE_MIN_CHARS = 160
+const PASTE_COLLAPSE_MIN_LINES = 2
+const PASTE_COLLAPSE_MIN_CHARS = 160
 
 function graphemeColumns(g: string): number {
   if (g === "\t") return TAB_WIDTH
@@ -183,8 +183,8 @@ export function wrapComposerLine(
 
 /**
  * Jalur cepat penambahan karakter di akhir baris untuk mode word-wrap. Hanya
- * menerima kasus yang masih muat di baris terakhir agar paritas dengan
- * `wrapComposerLine` tetap 100% identik; selebihnya mengembalikan `null`.
+ * menerima kasus ASCII/grapheme sederhana yang masih muat di baris terakhir;
+ * selebihnya mengembalikan `null` agar pemanggil membungkus ulang penuh.
  */
 export function appendWordWrapped(
   rows: string[],
@@ -311,10 +311,7 @@ export interface PasteTokenMatch {
 }
 
 /** Cari seluruh token paste `{paste ...}` beserta rentang UTF-16 dan grapheme-nya. */
-export function findPasteTokenSpans(
-  line: string,
-  pastes: ReadonlyMap<string, string>,
-): PasteTokenMatch[] {
+function findPasteTokenSpans(line: string, pastes: ReadonlyMap<string, string>): PasteTokenMatch[] {
   if (!pastes.size || !line) return []
   const re = pasteTokenRegex(pastes.keys())
   if (!re) return []

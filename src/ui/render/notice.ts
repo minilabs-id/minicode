@@ -6,7 +6,7 @@ import { c } from "./theme.ts"
 
 export type NoticeKind = "success" | "error" | "info"
 
-export function paintNotice(kind: NoticeKind, text: string): string {
+function paintNotice(kind: NoticeKind, text: string): string {
   const clean = sanitizeAnsiLine(text)
   if (kind === "success") return c.success(clean)
   if (kind === "error") return c.error(clean)

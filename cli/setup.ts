@@ -585,7 +585,7 @@ export interface CliSession {
     orphanEvidence: number
     unsupportedProjection: number
   }
-  /** Content store untuk /expand [id]. */
+  /** Akses content store (pencarian per-toolCallId/ringkas). */
   expandContent: (toolCallId: string) => ContentEntry[]
   expandAllContent: () => ContentEntry[]
   getPresentationSnapshot: () => UiPresentationSnapshot
@@ -2451,8 +2451,8 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   // pelacakan operasi in-flight untuk `runs.pending_tool_ids`.
   //
   // Penanda in-flight dipasang dari bus event KERNEL, bukan dari barrier:
-  // `execution:started` di-emit secara SINKRON tepat sebelum `tool.execute`
-  // (vendor/minicore/src/core/executor.ts:86 vs :89), sehingga `beginToolInFlight`
+  // `execution:started` di-emit secara sinkron tepat sebelum `tool.execute`
+  // di `vendor/minicore/src/core/executor.ts`, sehingga `beginToolInFlight`
   // (tulis SQLite sinkron) sudah durable saat `tool.execute` mulai. Tool yang
   // ditolak policy tidak pernah sampai ke event ini, jadi daftar hanya berisi
   // operasi yang benar-benar akan berjalan.
@@ -4077,9 +4077,8 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
   // scheduler memintanya, dan jurnal fail-closed menggagalkan startup sebelum
   // mesin otonom dibangun.
   const runtimeCwd = cwd ?? process.cwd()
-  // [P13.3] Holder fakta lapisan task. Runtime dibuat lebih dulu daripada
-  // scheduler, jadi nilainya baru ada setelah schedulerconstructed — holder ini
-  // dibaca lewat thunk saat fakta dibutuhkan (bukan saat runtime dibangun).
+  // Holder fakta lapisan task: nilainya diisi setelah scheduler dibuat sehingga
+  // dibaca lewat thunk saat runtime membutuhkannya.
   let taskLayerFacts: TaskLayerFacts = { schedulerAttached: null, storeOpen: null }
   const productionRuntime: ProductionRuntimeHandle = await createProductionRuntime(
     runtimeGateFor(runtimeMode),
@@ -4114,9 +4113,8 @@ export async function createCliSession(opts: CliSessionOptions): Promise<CliSess
     ? inspectStartupRecovery(productionRuntime.runtime()!, { authorityHeld: false })
     : null
 
-  // [P1 M15] Runner dipasang ke tool sub-agen HANYA saat runtime memiliki
-  // eksekusi (mode owned). Mode lain: tak ada setter call sama sekali, jadi
-  // jalur legacy anak benar-benar tak tersentuh (nol overhead).
+  // Runner dipasang ke tool sub-agen hanya saat runtime memiliki kepemilikan
+  // eksekusi (mode `owned`); pada mode lain setter tidak dipanggil.
   if (executionRunner.owns) setSubAgentExecutionRunner(executionRunner)
 
   // ── [PHASE 6U] AUTONOMOUS SCHEDULER COMPOSITION ────────────────────────────

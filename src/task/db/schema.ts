@@ -15,8 +15,8 @@ import {
 } from "../model.ts"
 import { TASK_DATA_VERSION, TASK_DB_FILENAME, type TaskRow } from "./types.ts"
 
-export const SCHEMA_ATTEMPTS = 8
-export const SCHEMA_BACKOFF_MS = 25
+const SCHEMA_ATTEMPTS = 8
+const SCHEMA_BACKOFF_MS = 25
 
 export function withBusyRetrySync<T>(fn: () => T, attempts = SCHEMA_ATTEMPTS): T | null {
   return withSqliteBusyRetrySync(fn, { attempts, backoffMs: SCHEMA_BACKOFF_MS })
@@ -99,11 +99,11 @@ export const handles = new Map<string, Database>()
 const initialized = new Set<string>()
 export const txDepth = new Map<string, number>()
 
-export function openTxPaths(): string[] {
+function openTxPaths(): string[] {
   return [...txDepth.entries()].filter(([, d]) => d > 0).map(([p]) => p)
 }
 
-export function assertNoOpenTx(p: string, what: string): void {
+function assertNoOpenTx(p: string, what: string): void {
   if ((txDepth.get(p) ?? 0) > 0) {
     throw new TaskError(
       "TASK_TX_ACTIVE",
@@ -252,7 +252,7 @@ export function closeTaskStoreHandle(cwd?: string): void {
   }
 }
 
-export function parseJson<T>(raw: string | null, fallback: T): T {
+function parseJson<T>(raw: string | null, fallback: T): T {
   if (!raw) return fallback
   try {
     const v = JSON.parse(raw) as T

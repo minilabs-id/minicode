@@ -8,7 +8,7 @@ Flow: the baseline is tested first (if red, a Health-Check note is attached to t
 
 Shadow-git checkpoints: a per-turn snapshot as a tree SHA (O(delta), no file cap, `HEAD`/index untouched, refs point at *trees* so nothing appears in `git log`). `.gitignore` is honoured. Non-repo fallback snapshots files.
 
-Repo-map: per-file symbols (regex, 9 languages) cached in `.minicode/repomap.json` and injected into the system prompt. Tree-sitter is not used — measured reasons in `extractSymbolsAsync` (`src/repo/repomap.ts`).
+Repo-map: per-file symbols (regex, 9 languages) cached in `.minicode/repomap.json` and injected into the system prompt. Tree-sitter is not used — notes in `src/repo/repomap.ts`.
 
 v0.33 added a `perf-no-quadratic` guard for incremental reasoning ingest (O(n) rather than O(n²)), enforced by `test/perf-no-quadratic.test.ts`. Since v0.34 the reasoning no longer feeds a right sidebar (removed), but the incremental requirement still applies to reasoning bookkeeping and the `+ thinking` marker path.
 

@@ -1,61 +1,11 @@
-// M14 — Runtime composition root: BUILD + WIRE, bukan decide/mutate/recover.
+// Composition root runtime: merangkai host, kernel, journal, supervisor,
+// dispatch bridge, dan recovery dengan batas kepemilikan eksplisit (construct +
+// wire tanpa mengambil alih keputusan policy/scheduler/session/UI).
 //
-// Kenapa berkas ini ada (P1 M14): M1–M13 dibangun per-modul dan "prepared but
-// controlled" — lengkap + teruji, tapi belum dirangkai menjadi SATU runtime.
-// Modul ini adalah rangkaiannya: satu host, satu kernel, satu plane, satu
-// journal, satu supervisor, satu bridge, satu recovery — dirangkai dengan
-// kepemilikan eksplisit, tanpa otoritas kedua dan tanpa mengubah siapa pun.
-//
-// Batas yang dikunci (jangan dilonggarkan tanpa ADR baru):
-// - Composition = construct + connect. Ia TIDAK memutuskan, TIDAK memutasi
-//   lifecycle di luar port yang sudah ada, TIDAK menafsirkan recovery, TIDAK
-//   mengeksekusi backend, TIDAK menyentuh policy/scheduler/task/session/UI.
-//   Semua keputusan tetap milik modul asalnya (M8/M9/M12/M13/M5).
-// - Session != Runtime Host != Execution. Modul ini tidak punya konsep sesi
-//   yang bisa mengubah state sesi; ia hanya membawa sessionId sebagai label.
-// - SATU komposisi = SATU dunia. Tidak ada singleton global, tidak ada state
-//   mutable di module scope: dua komposisi (session/workspace berbeda) tidak
-//   mungkin saling melihat event, jurnal, atau dispatch satu sama lain.
-// - Journal path EKSPLISIT dari caller. Tidak ada default global dan tidak ada
-//   pengambilan dari acak: resume berarti caller memberikan path yang SAMA.
-// - Journal wajib secara default (fail-closed): open gagal = konstruksi gagal.
-//   "Tak ada jurnal" hanya boleh terjadi bila mode non-durable diminta eksplisit.
-//
-// === MODEL SHUTDOWN (satu-satunya urutan; lihat runShutdown) ===
-//
-//   admission latch  ->  host.shutdown()  ->  execution drain
-//   ->  event delivery drain  ->  journal.flush()  ->  journal.close()
-//   ->  host.close()  ->  (pemanggil: session/UI detach)
-//
-// Kenapa urutan itu, berdasarkan kepemilikan yang BENAR-BENAR ada (bukan nama):
-// - Latch admission milik composition (satu boolean monoton). Port admission
-//   mengeceknya LEBIH DALAM dari hostState M13, jadi penolakan tetap deterministik
-//   walau host masih READY (jeda antara latch dan host.shutdown() adalah async).
-// - host.shutdown() = latch admitting/run + hook onShutdown milik PEMILIK. Hook
-//   itu adalah tempat owner menghentikan produsen event; karena itu hook berjalan
-//   SEBELUM drain/flush, bukan sesudah.
-// - Execution drain = menunggu kerja in-flight yang DIDAFTARKAN runtime (track()).
-//   Executions non-terminal yang TIDAK dilacak TIDAK ditulis ulang:
-//   shutdown tak pernah mengarang COMPLETED; ia melapor, dan M12 yang menafsirkan.
-// - Event delivery drain: M10 emit() sepenuhnya sinkron (tak ada antrean), jadi
-//   satu-satunya pengiriman async adalah append M11. Drain menunggu append yang
-//   masih jalan, termasuk yang muncul selama drain itu sendiri.
-// - journal.flush() setelah drain: inilah batas durability. Setelah flush, hook
-//   berhenti append (barrier) — sehingga tak ada append SETELAH flush, dan
-//   pastinya tak ada reopen yang diam-diam.
-// - journal.close() sesudah flush: bukti durable sudah dicatat; gagalnya close
-//   tak boleh membatalkan bukti itu.
-// - host.close() TERAKHIR: host tak memegang jurnal, jadi menutupnya lebih dulu
-//   hanya menambah cara kegagalan membatalkan batas durability. Hook onClose yang
-//   melempar dilaporkan eksplisit (tidak ditelan) lewat RuntimeShutdownResult.
-//
-// BUKAN FSM kedua: composition tak punya state machine lifecycle. Authority
-// lifecycle tetap RuntimeHost (CREATED/STARTING/READY/DRAINING/CLOSING/CLOSED);
-// latch composition cuma menjawab satu pertanyaan monoton: "admission masih
-// dibuka?" — true lalu false, tak pernah kembali true.
-//
-// drainTimeoutMs = batas DRAIN saja (tak memaksa hasil jadi "sukses"): drain
-// yang tak tuntas dilaporkan sebagai "uncertain", bukan dipoles jadi hijau.
+// Urutan shutdown (lihat `runShutdown`):
+//   admission latch -> host.shutdown() -> execution drain -> event delivery drain
+//   -> journal.flush() -> journal.close() -> host.close() -> caller detach.
+// Drain yang melewati `drainTimeoutMs` dilaporkan sebagai `uncertain`.
 
 import {
   createDispatchBridge,

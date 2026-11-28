@@ -1,20 +1,7 @@
-// Production canonical task synchronization — Phase 4A.4.
-//
-// THIS IS NEW ARCHITECTURE. The pre-wipe production writer did not survive the
-// workspace wipe and has no surviving caller: `store.orig.ts` defined
-// `synchronizeTasks` but nothing in any recovered file invoked it. This module
-// is the FIRST production consumer of TaskStore, and its placement is a design
-// decision, not a recovery.
-//
-// THE BOUNDARY
-//     todo_write payload
-//         -> JSON durable write            (unchanged, still the legacy file)
-//         -> THIS module                  (canonical TaskStore state)
-//         -> plan publication             (unchanged, downstream)
-//
-// The ordering is the one already proven in production: a durable write happens
-// before the plan is published, so a failed durable write suppresses the plan
-// (`src/presentation/adapter.ts`). Nothing here invents a new ordering.
+// Sinkronisasi tugas kanonikal produksi untuk `todo_write`.
+// Urutan eksekusi: tulis JSON persisten lebih dulu -> sinkronkan state ke
+// TaskStore -> publikasikan rencana di adapter (`src/presentation/adapter.ts`).
+// Jika penulisan persisten gagal, pembaruan rencana ikut ditahan.
 //
 // CLASSIFICATION (the approved distinction)
 //   mixed payload (>=1 taskId)  -> id-bearing items are EXISTING, id-less items

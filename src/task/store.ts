@@ -974,43 +974,17 @@ export class TaskStore {
   }
 
   /**
-   * [PHASE 6I] Revert a stranded in-flight task, deciding strandedness by
-   * EXECUTION LINEAGE rather than by revision.
+   * Pulihkan tugas in-flight yang terbengkalai berdasarkan lineage eksekusi
+   * dalam satu statement agar tidak ada celah read-then-write.
    *
-   * This replaces the 6F `reconcileStranded`-after-marker-read sequence. The
-   * lineage predicate and the revert are ONE statement, so there is no
-   * read-then-write window: a concurrent completion record cannot slip between
-   * the decision and the mutation. That property was 6B's and 6G re-confirmed it
-   * must not be regressed.
+   * Aturan perbandingan:
+   * - `attempt_generation IS NULL` -> terbengkalai (belum pernah selesai)
+   * - `attempt_generation < exec_generation` -> terbengkalai (generasi baru belum tuntas)
+   * - `attempt_generation = exec_generation` -> tidak terbengkalai
+   * - `attempt_generation > exec_generation` -> data korup -> lempar error
    *
-   * The rule, exactly as 6H specified it:
-   *
-   *   attempt_generation IS NULL            -> STRANDED  (never completed)
-   *   attempt_generation <  exec_generation -> STRANDED  (a later generation
-   *                                               superseded an earlier one; the
-   *                                               current one has no record)
-   *   attempt_generation =  exec_generation -> not stranded
-   *   attempt_generation >  exec_generation -> impossible -> THROW
-   *
-   * The `IS NULL` disjunct is explicit rather than a comparison because
-   * `NULL < 0` is NULL, not true: a LEGACY-created `IN_PROGRESS` row that was
-   * never claimed (`exec_generation = 0`, no attempt) must be reconciled.
-   *
-   * The relation is STRICTLY `<`, and that strictness is load-bearing twice over.
-   * `<>` would wrongly match the impossible `attempt > exec` and silently revert
-   * a row on corrupt data; `<` excludes it, so the row is left alone, `changes`
-   * is 0, and the classification below raises instead of guessing. `<=` would be
-   * worse still: it would match `attempt = exec`, i.e. a COMPLETED generation,
-   * and reintroduce the 6D livelock in lineage form.
-   *
-   * Because `exec_generation` advances ONLY on an accepted claim, NO ordinary
-   * mutation - title, order, dependency, parent, blockedReason, evidence,
-   * verification, or status - can change the outcome of this rule. That is the
-   * structural end of 6G D1.
-   *
-   * The caller MUST hold session ownership; without it this refuses and mutates
-   * nothing (6B, unchanged). Never deletes. Never writes lineage. Never
-   * manufactures verification or evidence. Never reads a graph.
+   * Pemanggil wajib memegang kepemilikan sesi; operasi ini tidak menghapus
+   * baris, tidak menulis lineage baru, dan tidak membuat bukti verifikasi.
    */
   reconcileIfNoCompletedAttempt(
     sessionId: string,

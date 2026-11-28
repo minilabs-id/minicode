@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.53.1] - 2026-11-28
+
+### Cleaned & Synced — pembersihan kode mati, perapian arsip & struktur, serta penyelarasan dokumentasi
+
+- **Pembersihan berkas & arsip kerja:**
+  - Hapus berkas root redundan (`AGENT-NOTES.md`, `catatanagent.md`, `PLAN.md`), pindahkan `TERMINAL_CONTRACT_ARCHIVE.md` ke `.audit/TERMINAL_CONTRACT_ARCHIVE.md`, rapikan 39 berkas `.audit/` usang dengan indeks `.audit/README.md` terbarui, serta hapus 12 skrip one-off yang tidak terpakai di `scripts/`.
+- **Penghapusan kode mati & pengurangan eksposur modul:**
+  - Hapus 37 deklarasi tanpa referensi (runtime & tipe) beserta impor ikutannya lintas modul `src/`, serta turunkan 103 simbol internal yang hanya dipakai intra-modul menjadi privat modul.
+- **Perbaikan komentar, faktualitas dokumentasi, & sinkronisasi `docs/` ↔ `docs-en/`:**
+  - Bersihkan komentar kode yang usang/keliru/berlebihan di modul `src/`, `cli/`, `scripts/`, dan `vendor/minicore/` tanpa mengubah perilaku runtime.
+  - Perbaiki angka dan detail faktual lintas `AGENTS.md`, `README.md`, `docs/`, dan `docs-en/` (`17` tool `explore`, `SUB_AGENT_MAX_STEPS` = `600`, default pool `5` / timeout `3600000 ms`, cap `pricing sync` `12 MiB`, `COMPACTION_LLM_TIMEOUT_MS` `60 dtk`, `store:true` di `docs-en/config.md`, `5.500 KiB` di `docs-en/contributing.md`, kontrak `UiPresentationSnapshot`/`ProjectionNode` di `docs/OUTPUT_RENDERING_SPEC.md`, `TaskStore` `.minicode/tasks.db` di `docs-en/architecture.md`, daftar `dep_graph`/`lsp_rename`/`path` di `docs-en/tools.md` & `docs-en/mcp-lsp.md`), deduplikasi ulang allowlist & ringkasan TUI, serta perbaiki seluruh tautan/anchor markdown yang patah.
+
 ## [0.53.0] - 2026-11-28
 
 ### Added & Improved — `dep_graph`, otonomi multi-epoch, UX live & markdown, hardening audit, serta optimasi performa
@@ -737,8 +749,7 @@ waktu hanya berbahaya bila git gagal, dan itu sudah ditutup di atas.
 ### Added
 - Jendela konteks manual per model untuk provider yang tidak melaporkan kapasitas: `minicode config context-window <provider> <model> <128k|200k|1m|1024x1024|auto>`. Nilai tersimpan berlabel `user` sehingga `minicode sync` tidak menimpanya; `auto` mengembalikan model itu ke deteksi otomatis. Pilihan preset mengikuti ukuran nyata model produksi, termasuk tiga varian 1M yang berbeda (1.000.000 / 1.048.576 / 1.050.000).
 
-Rencana, batas verifikasi platform, dan migrasi lanjutan: `.audit/audit-remediation-plan.md`
-(artefak audit kerja, sengaja di luar `docs/` agar tidak ikut terkemas).
+(Catatan remediasi historis rilis ini disimpan di arsip kerja terpisah di luar `docs/` agar tidak ikut terkemas.)
 
 ## [0.25.0] - 2026-11-14
 

@@ -76,49 +76,6 @@ export function writeConsumerOffset(
   }
 }
 
-/** Reset eksplisit (konsumen meminta mulai dari awal/tail) — bukan hasil ack. */
-export function resetConsumerOffset(consumerId: string, sid: string, to = -1, cwd?: string): void {
-  const db = openWorkspaceSessionDb(cwd)
-  try {
-    db.prepare(
-      "UPDATE consumer_offsets SET last_acked_seq = ?, updated_at = ? WHERE consumer_id = ? AND session_id = ?",
-    ).run(to, Date.now(), consumerId, sid)
-  } finally {
-    db.close()
-  }
-}
-
-export interface ConsumerOffsetRow {
-  consumerId: string
-  sid: string
-  lastAckedSeq: number
-  updatedAt: number
-}
-
-export function listConsumerOffsets(sid: string, cwd?: string): ConsumerOffsetRow[] {
-  const db = openWorkspaceSessionDb(cwd)
-  try {
-    const rows = db
-      .prepare(
-        "SELECT consumer_id, session_id, last_acked_seq, updated_at FROM consumer_offsets WHERE session_id = ? ORDER BY consumer_id",
-      )
-      .all(sid) as {
-      consumer_id: string
-      session_id: string
-      last_acked_seq: number
-      updated_at: number
-    }[]
-    return rows.map((r) => ({
-      consumerId: r.consumer_id,
-      sid: r.session_id,
-      lastAckedSeq: r.last_acked_seq,
-      updatedAt: r.updated_at,
-    }))
-  } finally {
-    db.close()
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Persetujuan durable
 // ---------------------------------------------------------------------------
@@ -160,7 +117,7 @@ export function canTransition(from: ApprovalState, to: ApprovalState): boolean {
   return ALLOWED[from]?.includes(to) ?? false
 }
 
-export class ApprovalTransitionError extends Error {
+class ApprovalTransitionError extends Error {
   readonly code = "APPROVAL_INVALID_STATE"
   constructor(
     readonly id: string,

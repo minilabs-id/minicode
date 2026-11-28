@@ -17,9 +17,9 @@
 //   ke jalur durable YANG SUDAH ADA (appendPresentationEvents) — idempoten,
 //   berpagar epoch bila epoch dipegang, tanpa store kedua.
 //
-// Batas keras (roadmap ratifikasi + HARD RULES):
-//   - TANPA store/cache/sidecar baru; TANPA perubahan vendor/kernel; TANPA schema.
-//   - TANPA tulis ke messages/turns/head/run/canonical history.
+// Batas keras:
+//   - Tanpa store/cache/sidecar baru dan tanpa perubahan schema DB.
+//   - Tanpa tulis ke messages/turns/head/run/canonical history.
 //   - TANPA fabricate revision; TANPA promosi UNKNOWN→fresh.
 //   - ContextStore tetap buffer runtime; canonical tetap satu-satunya authority;
 //     P3.1/P2.7 tetap batas publikasi.

@@ -193,24 +193,14 @@ export const LIMITS = {
   GIT_TIMEOUT_MS: 20_000,
   /** F-15: cap output git saat streaming (git_diff/log di repo raksasa). */
   GIT_OUTPUT_MAX_CHARS: 500_000,
-  /** Executor & sub-agents — tuned for 4-core laptop (6/1) vs 8/2 server */
-  /** [T-008 OBSERVATION.md] Batas langkah = backstop, bukan anggaran kerja.
-   * 50 terlalu kecil untuk kerja nyata (4 dari 5 `turn.failed` pada sesi
-   * 17b6a5ff adalah `exceeded 50 steps`). Default kini 200 dan NAIK satu tangga
-   * otomatis saat sesi terbukti mentok — lihat `src/policy/step-escalation.ts`.
-   * Cap sub-agent naik ke 100 atas rekomendasi riset & persetujuan owner;
-   * pagar tetap ada (pool, provider cooldown, watchdog liveness, eskalasi
-   * satu tangga), jadi ini bukan delegasi tanpa batas. */
+  /** Executor & sub-agents — tuned for 4-core laptop vs multi-core server. */
+  /** Batas langkah = backstop pengaman. Default 200 (naik satu tangga otomatis
+   * saat sesi mentok — lihat `src/policy/step-escalation.ts`). */
   DEFAULT_MAX_STEPS: 200,
   EXECUTOR_CONCURRENCY: 6,
   EXECUTOR_WRITE_CONCURRENCY: 1,
   /**
-   * Slot konkuren untuk sub-agen. Default 5: fan-out 5 explorer kini benar-
-   * benar jalan paralel, tak ada 2 anak yang mengantri menunggu slot.
-   * Env `MINICODE_SUB_AGENT_POOL_SIZE` masih bisa meng-override (1..16) bila
-   * mesin lebih kecil. Antrian lama (dengan 3 slot) bukan penyebab
-   * "turn exceeded ...ms" — clock mulai saat slot didapat — tapi menghilangkan
-   * antrean membuat total wall-clock fan-out lebih pendek.
+   * Slot konkuren untuk sub-agen. Default 5 (override via `MINICODE_SUB_AGENT_POOL_SIZE` 1..16).
    */
   SUB_AGENT_POOL_SIZE: envBoundedInt("MINICODE_SUB_AGENT_POOL_SIZE", 5, 1, 16),
   SUB_AGENT_BUDGET_EXPLORE: 24,
@@ -218,29 +208,20 @@ export const LIMITS = {
   /** Ambang bacaan berturut-turut untuk detektor NoProgress pada sub-agent:
    *  angka 8 terlalu ketat bagi mode `plan` di proyek besar saat fase recon. */
   SUB_AGENT_CONSECUTIVE_READ_LIMIT: 48,
-  /** [T-008] Cap langkah eksplisit sub-agent naik 50 → 100 → 600 (persetujuan
-   * owner) agar sebanding dengan timeout 1 jam (~6 dtk/langkah, rasio lama
-   * 300 dtk/50). Tetap TERPILAH dari `DEFAULT_MAX_STEPS` sesi utama. KENAPA
-   * aman: pagar lain tetap — pool 5, provider cooldown 60 dtk, NoProgress 8,
-   * watchdog idle 120 dtk, ACE consequence, riwayat bound 32. Ini atap
-   * backstop, bukan izin berputar tanpa henti. */
+  /** Backstop langkah sub-agent (600, terpisah dari `DEFAULT_MAX_STEPS`). Pagar
+   * lain tetap berlaku: pool 5, provider cooldown, NoProgress, watchdog idle 120 dtk,
+   * ACE consequence, dan riwayat 32 entri. */
   SUB_AGENT_MAX_STEPS: 600,
   /**
-   * Timeout satu turn sub-agen. Naik 120_000 → 300_000 → 600_000 → 3_600_000
-   * (1 jam). Audit 2026-11-23: 300 dtk masih kehabisan waktu untuk 4 explorer
-   * paralel dengan ~38–51 tool call (prompt pendek kena ratio 0,6 ⇒ 180 dtk).
-   * Aman karena watchdog liveness (`task.ts:1192-1224`) membunuh anak yang
-   * benar-benar diam dalam 120 dtk — jadi pagu panjang hanya membantu anak
-   * yang sehat tapi lambat, bukan membiarkan proses macet. Pagaru biaya tetap
-   * `SUB_AGENT_MAX_STEPS` (100), bukan timeout. Env
-   * `MINICODE_SUB_AGENT_TIMEOUT_MS` tetap meng-override.
+   * Timeout satu turn sub-agen (default 3_600_000 ms / 1 jam, override via
+   * `MINICODE_SUB_AGENT_TIMEOUT_MS`). Watchdog liveness di `src/tools/task.ts`
+   * menghentikan anak yang diam sebelum batas ini; pagu langkah tetap dibatasi
+   * oleh `SUB_AGENT_BUDGET_*` dan `SUB_AGENT_MAX_STEPS`.
    */
   SUB_AGENT_TIMEOUT_MS: envBoundedInt("MINICODE_SUB_AGENT_TIMEOUT_MS", 3_600_000, 1, JS_TIMER_MAX),
   /**
-   * Interval watchdog liveness sub-agent. Tiap ~2 detik watchdog memeriksa
-   * apakah anak masih mengirim `step:started`/`step:completed`. KENAPA 2 dtk:
-   * cukup cepat untuk menghentikan anak yang diam sebelum timeout penuh
-   * (5 menit), tapi jarang cukup untuk menambah beban pada pool paralel.
+   * Interval watchdog liveness sub-agent (2 dtk) untuk memeriksa detak
+   * `step:started`/`step:completed` anak secara berkala.
    */
   SUB_AGENT_HEARTBEAT_INTERVAL_MS: 2_000,
   /**

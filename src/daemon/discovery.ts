@@ -23,11 +23,11 @@ import { resolveLocalDbPath } from "../lib/db-path.ts"
 import { resolveTrustedExecutable } from "../lib/trusted-exec.ts"
 import { sanitizeSpawnEnv } from "../policy/scrub.ts"
 
-export const ENDPOINT_FILE = "daemon-endpoint.json"
-export const LEASE_FILE = "daemon-lease.json"
+const ENDPOINT_FILE = "daemon-endpoint.json"
+const LEASE_FILE = "daemon-lease.json"
 
 /** Lease dianggap basi bila lebih tua dari ini (heartbeat jauh lebih sering). */
-export const LEASE_STALE_MS = 15_000
+const LEASE_STALE_MS = 15_000
 
 export interface DaemonEndpoint {
   version: 1

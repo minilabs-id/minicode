@@ -204,7 +204,7 @@ export function parseMemoryLine(line: string): { text: string; tags: string[] } 
   }
 }
 
-export function memoryLineText(line: string): string {
+function memoryLineText(line: string): string {
   return parseMemoryLine(line)?.text ?? ""
 }
 

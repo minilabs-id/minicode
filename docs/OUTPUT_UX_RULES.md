@@ -156,43 +156,7 @@ lewat `Intl` (id/en) di semua permukaan (TUI, one-shot/`exec`, ACP via
 `simple.ts`; resolver `src/ui/render/tool-label.ts`), sementara narasi/jawaban
 model tetap memakai bahasa user (`/lang`).
 
-**v0.36 — composer & dropdown overlay.** Composer tinggi **maksimal 2 baris**
-(dulu hingga 5): draft panjang memakai jendela geser, tanpa menambah baris di
-frame dan tanpa menggeser transkrip; satu baris kosong pemisah footer tetap.
-Lebar prompt/kursor = `composerWidth() = min(100, chatWidth())` (bukan
-`chatWidth()` penuh), prefix `minicode › ` bila ≥60 kolom else `› `, lanjutan
-`· `. Dropdown `/` digambar **di dalam frame `paint()` yang sama** (satu
-`stdout.write`, I1) sebagai overlay yang menimpa baris transkrip bawah, **tanpa
-mengurangi `viewH`** dan tanpa `paintRegion()` terpisah (menghindari dua write &
-flicker saat steer). Klik di area dropdown memilih item menu, bukan seleksi
-transkrip. Klausa lama (composer 5 baris, dropdown memotong `viewH`, kursor
-mengikuti `chatWidth()` penuh) adalah arsip yang ditimpa v0.36.
-
-**v0.37 — bracketed paste, select-all, resize & geometri progresif.** TUI,
-`askLine`/`askSecret`, dan output-window memakai `?2004h`/`?2004l` di luar frame
-(I1 tetap satu `write` per frame); CR dalam paste = newline draft, bukan submit
-bertingkat. `Ctrl+A` = `selectAll` seluruh baris logis transkrip bila composer
-kosong & dropdown tertutup (Home bila ada draft/menu); `Ctrl+C` menyalin juga
-saat drag aktif. Resize menghentikan auto-scroll, membatalkan drag, mereset
-kolom kursor, dan merebase anchor gulir walau seleksi aktif; dropdown ditutup
-saat busy/abort; klik pasca-resize memakai geometri baru. Gema prompt disimpan
-satu baris logis dan di-wrap sekali selebar kolom chat. Cap prompt progresif
-`min(chatCols, 100 + floor(max(0, chatCols-100)/4))` dengan prefix `minicode › `
-bila `w−14 ≥ 24`, else `› `; composer 2 baris & dropdown overlay tetap.
-
-**v0.43 — baris live tool transien, ratchet `scrollBack` per turn (amandemen
-v0.42).** Yang tidak boleh hilang adalah **history chat yang sudah committed**
-(tetap berlaku sejak v0.42). Baris aktivitas tool **live kembali transien**
-seperti v0.40.0: ikut tail, hilang setelah tool selesai. Saat baris live muncul,
-`total` bertambah dan sticky-tail menggeser jendela — history boleh naik. Saat
-baris live hilang dan `total` menyusut, jendela **tidak bergeser balik**: posisi
-baris committed di layar tetap, ruang di bawah boleh kosong. Mekanismenya =
-**ratchet `scrollBack` per turn** (hanya naik, tidak turun), di-reset pada
-`turn:started` / prompt baru / `/clear` — bukan overlay, bukan `liveRegion`,
-bukan commit-in-place baris live. I1 (satu write/frame) utuh; tidak ada
-writer/region baru. Butir v0.42 "commit-in-place / never-shrink by id"
-**ditimpa hanya pada aspek transiensi baris live**; klausa v0.42 lain (teks
-gagal ringkas, rekap tanpa `└`) tetap berlaku. Arsip tidak dihapus/direnomor.
+Lebar composer mengikuti satu geometri `composerWidth()` atas `contentCols = chatCols - 6` (`src/ui/render/chat-column.ts`), dengan kotak tipis 1–2 baris dinamis dan dropdown `/` overlay dalam frame `paint()` yang sama (I1). Rincian historis v0.34–v0.43 dicatat secara otoritatif di [Kontrak Terminal](TERMINAL_CONTRACT.md).
 
 ## 3. Status vocabulary
 
@@ -486,11 +450,7 @@ terminal task event dan summary tepat satu kali.
   ambang chat penuh lebar. Popup/modal tetap full-screen ter-centre pada `cols`
   (I20). Tidak ada sidebar/pane sejak v0.34.
 - Semua ukuran memakai display columns; CJK/emoji dua kolom.
-- Composer maksimal 2 baris (v0.36, tetap): lebar prompt/kursor v0.37 =
-  `composerWidth() = min(chatCols, 100 + floor(max(0, chatCols-100)/4))`, prefix
-  `minicode › ` bila `w−14 ≥ 24` / `› `, lanjutan `· `; dropdown `/` = overlay
-  dalam frame yang sama, tidak mengurangi `viewH`, tanpa region terpisah. Klik
-  area dropdown = item menu; dropdown ditutup saat busy/abort.
+- Composer dinamis 1–2 baris; lebar mengikuti `composerWidth()` atas `contentCols = chatCols - 6` (`TERMINAL_CONTRACT.md`); dropdown `/` overlay dalam frame yang sama tanpa mengurangi `viewH`.
 - Long path/command wrap atau truncate dengan marker, tidak pernah dipotong tanpa
   petunjuk.
 - Resize terjadi saat paint; cursor selalu diparkir di input/overlay aktif.
@@ -574,7 +534,6 @@ Native terminal drag selection is not promised while the app owns mouse tracking
 - [ ] Finding tampil di chat (TUI) / transkrip (linear) dan tetap typed di machine.
 - [ ] Retry hanya satu micro-toast footer 4 dtk, bukan baris ledger atau envelope machine.
 - [ ] (v0.35, amendemen v0.41) Rekap = baris committed statis di footer tiap narasi, sejak v0.41 tanpa prefix simbol; rekap akhir turn kumulatif; label `› …` memakai locale OS, narasi memakai `/lang`.
-- [ ] (v0.36) Composer maks 2 baris (jendela geser, transkrip tidak bergeser); lebar `composerWidth() = min(100, chatWidth())`; dropdown `/` overlay dalam satu frame tanpa mengurangi `viewH` dan tanpa `paintRegion()` terpisah; klik area dropdown = item menu.
-- [ ] (v0.37) Bracketed paste `?2004h`/`?2004l` di luar frame tanpa submit bertingkat; `Ctrl+A` select-all (Home bila draft/menu) & `Ctrl+C` saat drag aktif; resize stabilizer (auto-scroll/drag/kursor/anchor, dropdown busy/abort); echo prompt satu baris logis di-wrap sekali selebar chat; cap prompt progresif `min(chatCols, 100 + floor(max(0, chatCols-100)/4))`.
-- [ ] (v0.43) Baris live tool transien ikut tail (v0.40.0): history committed utuh; `total` naik saat live muncul → jendela boleh naik; saat live hilang & `total` menyusut jendela tidak geser balik (posisi committed tetap, ruang bawah boleh kosong) via ratchet `scrollBack` per turn yang di-reset pada `turn:started`/prompt baru/`/clear`; bukan overlay/`liveRegion`/commit-in-place; I1 satu write/frame; aspek transiensi v0.42 ditimpa, klausa v0.42 lain tetap.
+- Composer 1–2 baris dinamis berkotak tipis (jendela geser, transkrip tidak bergeser); lebar isi mengikuti `composerWidth()` atas `contentCols = chatCols - 6`; dropdown `/` overlay dalam satu frame tanpa mengurangi `viewH` dan tanpa `paintRegion()` terpisah; klik area dropdown = item menu.
+- Checklists historis v0.37 dan v0.43 (bracketed paste, `Ctrl+A`/`Ctrl+C`, resize stabilizer, ratchet `scrollBack` per turn) mengikuti aturan presedensi aktif di [Kontrak Terminal](TERMINAL_CONTRACT.md).
 - [ ] Machine output tidak bergantung pada scraping human text.

@@ -49,7 +49,7 @@ Gerbang lambat/stokastik (docker sandbox) tinggal di `slow.yml` — kegagalannya
 
 `bun run gate:pack` mengukur ukuran tarball (`npm pack --dry-run`, KiB) dan menolak bila **melebihi 5.500 KiB (5,37 MiB)**. Angka tunggalnya ada di `scripts/pack-budget.ts` — satu sumber untuk gate dan tes, jadi keduanya tak bisa menyimpang. Batas ini **alarm regresi** (menangkap `node_modules`/`test` ikut terbawa), bukan target ukuran yang perlu dikejar.
 
-Batas 5.500 KiB disetujui pemilik pada 2026-11-28 (re-baseline dari 5.250 KiB setelah pengetatan runtime & penambahan graf dependensi: paket aktual ~5.379 KiB / 348 file; margin ~120 KiB; sebelumnya 5.250 KiB disetujui 2026-11-25 untuk v0.50.0). Jangan menaikkan anggaran tanpa bukti baru dan persetujuan pemilik; ukur dulu runtime serta berkas non-runtime yang dapat dipangkas.
+Batas **5.500 KiB** di `scripts/pack-budget.ts` berfungsi sebagai alarm regresi. Jalankan `bun run gate:pack` untuk melihat ukuran aktual dan jumlah berkas paket terkini. Jangan menaikkan anggaran tanpa bukti baru dan persetujuan pemilik; ukur dulu berkas non-runtime yang dapat dipangkas.
 
 Gerbang lain:
 
@@ -90,7 +90,7 @@ bun run vendor:check   # provenance MiniCore (soft; vendor host-editable sejak v
 
 ## Aturan kode
 
-- Kernel upstream `vendor/minicore/src/core/*` beku. Overlay host yang disetujui tersimpan di `scripts/vendor-overlays/` dan diterapkan oleh `bun run vendor:minicore`; jangan edit tree vendor atau `VENDOR.md` manual. Butuh seam baru? Buktikan dulu tidak bisa sebagai Tool/Provider/Policy, tambahkan test, lalu pin melalui generator.
+- `vendor/minicore/**` bersifat host-editable sejak v0.16.0 (`vendor/minicore/VENDOR.md`), tetapi tetap utamakan seam aditif, jaga batas lapisan (`test/ui-boundary.test.ts`), tambahkan test, dan sinkronkan overlay yang relevan di `scripts/vendor-overlays/`.
 - Limit terpusat di `src/constants.ts` (`LIMITS`) — tanpa magic number tersebar.
 - Semua spawn via `sanitizeSpawnEnv`; semua tulis file via `atomicWriteText`.
 - Satu sumber pola ANSI: `ANSI_PATTERN`/`stripAnsi` di `src/ui/render/theme.ts`.

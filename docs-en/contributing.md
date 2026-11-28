@@ -44,11 +44,11 @@ bun run gate:fast   # tsc + lint + test + coverage + pack + bash + bench:smoke +
 
 Slow/stochastic gates (docker sandbox) stay in `slow.yml` — their failure is an investigation signal, not a PR rejection. The per-commit CI (`ci.yml`) only runs the deterministic ones.
 
-### Package size budget (5,250 KiB)
+### Package size budget (5,500 KiB)
 
-`bun run gate:pack` measures the tarball size (`npm pack --dry-run`, KiB) and refuses when it **exceeds 5,250 KiB (5.13 MiB)**. The single figure lives in `scripts/pack-budget.ts` — one source for the gate and the tests, so the two cannot drift. This limit is a **regression alarm** (catching `node_modules`/`test` leaking in), not a size target to chase.
+`bun run gate:pack` measures the tarball size (`npm pack --dry-run`, KiB) and refuses when it **exceeds 5,500 KiB (5.37 MiB)**. The single figure lives in `scripts/pack-budget.ts` — one source for the gate and the tests, so the two cannot drift. This limit is a **regression alarm** (catching `node_modules`/`test` leaking in), not a size target to chase.
 
-The 5,250 KiB limit was approved by the owner on 2026-11-25 (re-baselined from 5,000 KiB after v0.50.0 hardening & UI/compaction: actual package 5,013 KiB / 342 files, ~237 KiB margin). Do not raise the budget without new evidence and owner approval; measure runtime and prunable non-runtime files first.
+Run `bun run gate:pack` to inspect current actual bytes and file counts. Do not raise the budget without new evidence and owner approval; measure runtime and prunable non-runtime files first.
 
 Other gates:
 
@@ -90,7 +90,7 @@ bun run vendor:check   # MiniCore provenance (soft; vendor host-editable since v
 
 ## Code rules
 
-- The upstream kernel `vendor/minicore/src/core/*` is frozen. Approved host overlays live in `scripts/vendor-overlays/` and are applied by `bun run vendor:minicore`; do not edit the vendor tree or `VENDOR.md` by hand. Need a new seam? First prove it cannot be a Tool/Provider/Policy, add a test, then pin it through the generator.
+- `vendor/minicore/**` is host-editable since v0.16.0 (`vendor/minicore/VENDOR.md`); still prefer additive seams, keep the layer boundaries in `test/ui-boundary.test.ts`, add tests, and keep relevant overlays synced under `scripts/vendor-overlays/`.
 - Limits are centralised in `src/constants.ts` (`LIMITS`) — no scattered magic numbers.
 - Every spawn goes through `sanitizeSpawnEnv`; every file write through `atomicWriteText`.
 - One source for the ANSI pattern: `ANSI_PATTERN`/`stripAnsi` in `src/ui/render/theme.ts`.

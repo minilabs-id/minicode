@@ -18,9 +18,9 @@ import type { DialogSpec } from "./dialog.ts"
 
 export type WindowRole = "list" | "form" | "viewer" | "progress"
 
-export const WINDOW_MIN_COLS = 56
-export const WINDOW_MAX_COLS = 88
-export const WINDOW_MARGIN = 4
+const WINDOW_MIN_COLS = 56
+const WINDOW_MAX_COLS = 88
+const WINDOW_MARGIN = 4
 
 /** Lebar jendela seragam: clamp(cols-4, 56, 88), dibatasi ruang terminal. */
 export function windowWidth(cols: number): number {

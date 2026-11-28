@@ -11,12 +11,6 @@ import {
   wrapByWidth,
 } from "./width.ts"
 
-export interface GridColumn {
-  header: string
-  align?: PipeTableAlignment
-  width?: number
-}
-
 export interface GridTable {
   headers: readonly string[]
   rows: readonly (readonly string[])[]

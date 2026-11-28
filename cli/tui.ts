@@ -2491,7 +2491,7 @@ export async function runTui(ctx: CliSession, progress?: StartupProgress): Promi
           )
           return false
         }
-        // Command BUKAN giliran bicara: jangan pushUser (konvensi app.ts:1313).
+        // Command BUKAN giliran bicara: jangan `pushUser` (lihat konvensi di `src/ui/tui/app.ts`).
         // Kwitansi cukup toast — hasil/output command punya mekanisme sendiri
         // saat dijalankan nanti (window / toast dari submit()).
         queuedCommands.push(line)

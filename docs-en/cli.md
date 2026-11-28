@@ -43,7 +43,7 @@ Subcommands are routed in `cli/router.ts` (`stats`, `sessions`, `mcp`, `config`,
 | `--ratelimit <rpm>` | LLM request limit per minute |
 | `--budget <usd>` | Session cost cap; warn at 80%, exit/break when exceeded; unknown cost + usage = over (fail-closed default) |
 | `--budget-strict` | Explicit fail-closed assertion on top of the above (back-compat) |
-| `--tool-scope <s>` | `full` (default) \| `explore` = read-only subset of 12 tools |
+| `--tool-scope <s>` | `full` (default) \| `explore` = read-only subset of 17 tools |
 | `--plan` | **Deprecated** — alias for `--work-mode DISCUSS` (read-only planning) |
 | `--allowlist` | Bash safe commands only (legacy tool-access policy) |
 | `--ask` | Request approval for gated calls (human-supervised) |
@@ -72,7 +72,7 @@ after the system prompt, tools, and history are counted.
 
 In the TUI, **Tab** cycles Work Mode (`Discuss` -> `Build`) and **Shift+Tab** toggles Permission Mode (`Auto` <-> `Ask`). `/mode auto|ask` changes approval; `/mode discuss|build` changes the operating mode. The footer shows Work Mode on the left and Permission Mode in cyan on the right, near context usage; on narrow terminals the labels are condensed.
 
-Since v0.34 the right sidebar is gone: the chat is a centred middle column (at most 50% of terminal width, footer/composer centred with it). Tool lines, the `✦` aggregate, findings, and the `+ thinking` marker live in the chat; the old pane shortcuts (`Alt/Ctrl+PgUp/PgDn`, `Ctrl+O`) are unbound. Since v0.43/v0.51 chat and composer share symmetrical 3-column left/right frame padding (`chatCols - 6`), the composer is a rounded thin-line box of **1–2 dynamic rows** without an inner prefix (scrollable when >2 rows, compact `{paste text N lines}` placeholders, composer drag/`Ctrl+A`/`Ctrl+C` selection, and word-wrap), `Ctrl+A` selects all transcript rows when the composer is empty and menus are closed (else composer/Home), `Ctrl+C` copies even while a drag is active, resize stabilises auto-scroll/drag/cursor/anchor, live tool rows adapt to `max(3, floor(viewH * 0.5))` with human intent/auto labels, and the prompt cap is progressive `min(contentCols, 100 + floor(max(0, contentCols-100)/4))`. Since v0.41 the `/update` slash command exists only in the interactive TUI; non-TTY/one-shot/`exec`/pipe/ACP answer "not available" without spawning npm. The shortcuts that remain are listed in [TUI — Slash Commands & Keyboard](repl.md).
+The interactive TUI uses a centred chat column with no right sidebar, symmetrical frame padding (`chatCols - 6`), a 1–2 row rounded composer box, `/` and `@mention` overlay dropdowns inside the same frame, bracketed paste, and adaptive live tool rows (full layout, `/update`, and keybinding details live in [TUI — Slash Commands & Keyboard](repl.md) and [Terminal Contract](../docs/TERMINAL_CONTRACT.md)); `/update` is restricted to the interactive TUI (non-TTY fails closed).
 
 ## When to use what
 

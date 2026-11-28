@@ -76,7 +76,7 @@ kegagalan konten.
 
 **Contract wajib menjawab:**
 - *Who requested?* — budget path (kernel, pressure ≥ 75%) atau recovery path
-  (kernel, error konteks). Manual `/view compact` tak menyentuh kernel (view saja).
+  (kernel, error konteks). (`context.compacted` dipicu dari loop, bukan dari perintah view.)
 - *Why?* — reason event di atas.
 - *What is eligible?* — hanya messages; system prompt di-cap di hulu
   (`SYSTEM_PROMPT_MAX_CHARS` 8000), tool schema TIDAK pernah terkompaksi.
@@ -87,8 +87,7 @@ kegagalan konten.
   (`src/policy/compaction.ts`) mempertahankan hasil tool pembawa fakta ~800 char
   dan prosa ~250/180 char (TIDAK lagi `<result omitted>` seperti folder mekanis
   kernel), plus reasoning dan tail lama.
-- *What if compaction fails?* — LLM gagal/timeout (10s) → fallback sync
-  mekanis; async compactor tak pernah bisa crash loop.
+- *What if compaction fails?* — LLM gagal/timeout (`COMPACTION_LLM_TIMEOUT_MS` 60 dtk, first-byte 25 dtk, idle 15 dtk) → fallback sync mekanis; async compactor tak pernah bisa crash loop.
 - *Can it retry?* — budget: tidak (flag); recovery: sekali per turn (flag).
 - *Can another occur in the same turn?* — budget + recovery boleh co-exist
   (flag terpisah); sesama kind tidak.

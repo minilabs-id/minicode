@@ -1,24 +1,17 @@
-// P2.8 — Context Assembly (read-only, derived, RAM-only).
-//
-// Perakitan konteks = lapisan TUNGGAL antara histori kanonik/proyeksi turunan
-// dan buffer vendor. Aturan“P2.8” yang bersifat hukum:
+// Perakitan konteks = lapisan tunggal antara histori kanonik/proyeksi turunan
+// dan buffer runtime. Aturan kontrak:
 //
 //   HANYA proyeksi CURRENT yang boleh ikut. State lain (STALE / INCOMPLETE /
-//   CORRUPT / UNKNOWN / absen) → fallback ke histori kanonik persis seperti
-//   hari ini. “Tak ada proyeksi” berarti “tak ada proyeksi yang bisa dipakai”,
-//   BUKAN “histori kosong”.
+//   CORRUPT / UNKNOWN / absen) -> fallback ke histori kanonik penuh.
 //
-// Batas keras modul ini:
+// Batas modul:
 //   - BACA SAJA. Nol tulis ke messages / history_projections / runs / sessions.
-//   - Tanpa reads atas runs / run_id / last_persisted_seq (Run bukan input konteks).
+//   - Tanpa reads atas runs / run_id / last_persisted_seq.
 //   - Tanpa kebijakan budget / pemicu kompaksi (milik vendor).
-//   - Tanpa ringkasan baru (summary berasal dari pemanggil P2.7), tanpa rebuild.
-//   - Tanpa state durable: ContextView hidup hanya di RAM per proses.
+//   - Tanpa ringkasan baru atau rebuild; tanpa state durable.
 //
-// Bentuk ringkasan sintetis mengikuti konvensi vendor yang sudah ada
-// (vendor/minicore/src/core/compact.ts:48-51 — {role:"user", content:"Previous
-// context:\n..."}): pesan user biasa, TANPA field persistence-only (event_id,
-// seq, run_id, thread_id, migrated, …) dan tidak pernah ditulis balik ke histori.
+// Bentuk ringkasan sintetis mengikuti konvensi `vendor/minicore/src/core/compact.ts`
+// (`{role: "user", content: "Previous context:..."}`) tanpa field persistence-only.
 
 import type { Message } from "#minicore/core/types.ts"
 import { registerCompactionSummary } from "../policy/compaction.ts"
@@ -35,8 +28,8 @@ import { buildRuntimeStateHeader, type OperationalStateSnapshot } from "./runtim
 export type ContextSource = "projection" | "messages"
 
 /**
- * View konteks turunan — NILAI SESAJA, bukan state persistensi.
- * Tidak pernah diserialisasi, tidak pernah jadi otoritas resume.
+ * View konteks turunan — nilai RAM saja, bukan state persistensi.
+ * Tidak diserialisasi dan tidak pernah menjadi otoritas resume.
  */
 export interface ContextView {
   /** Ringkasan cakupan [0, coveredSeq); absen bila fallback penuh. */
@@ -48,9 +41,9 @@ export interface ContextView {
   /** Materialisasi untuk di-seed ke ContextStore vendor (appendAll). */
   messages: Message[]
   /**
-   * Artefak context-only yang Tertanam di `messages[0]` (bila proyeksi
-   * dipakai). Wajib dipROID oleh jalur persist agar artefak turunan tak
-   * pernah menjadi histori kanonik. `undefined` pada fallback.
+   * Artefak context-only yang tertanam di `messages[0]` (bila proyeksi
+   * dipakai). Wajib dibuang oleh jalur persist agar artefak turunan tak
+   * masuk ke histori kanonik. `undefined` pada fallback.
    */
   contextOnly?: ContextOnlyArtifact
   /**
@@ -107,13 +100,11 @@ export function boundaryIsSafe(
 /**
  * Identitas artefak context-only yang HANYA boleh hidup di ContextStore.
  *
- * Mengapa field penanda tak bisa di-ekspresikan di pesan: vendor
- * `snapshotMessage` (vendor/minicore/src/core/snapshot.ts:17) untuk
- * role "user" HANYA mempertahankan `{role, content}` — field tambahan
- * DIBUANG sebelum `session.state.history` terlihat aplikasi. Jadi penanda
- * struktural mustahil tanpa mengubah vendor (dilarang). Kanal yang selamat
- * hanyalah content itu sendiri — maka kanal ini adalah FINGERPRINT TEBAK
- * PERSIS dari artefak yang kita buat sendiri, bukan pola tekstual heuristik.
+ * Mengapa tidak memakai field tambahan: vendor `snapshotMessage`
+ * (`vendor/minicore/src/core/snapshot.ts`) untuk role `"user"` hanya
+ * mempertahankan `{role, content}` dan membuang field lain. Karena modul ini
+ * menjaga adapter bebas-edit, pencocokan dilakukan memakai exact byte match
+ * pada konten artefak yang dibuat sendiri, bukan pola heuristik.
  *
  * Batasnya jelas: hanya cocok untuk satu pesan (index 0) dan hanya bila
  * role+content identik_byte dengan artefak yang dicatat. Kalau kernel

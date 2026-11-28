@@ -1,37 +1,7 @@
-// PHASE 6U — PRODUCTION SCHEDULER COMPOSITION.
-//
-// This is the first phase allowed to make the Scheduler reachable from
-// production. It is NOT the enablement phase: the gate is OFF by default and
-// nothing about ordinary MiniCode execution changes.
-//
-// ── WHY A SEPARATE MODULE ────────────────────────────────────────────────────
-//
-// The composition root needs to own seven things at once — scheduler lifecycle,
-// trigger, the autonomous adapter, session ownership, cancellation, shutdown and
-// the enablement gate. Threading that through `cli/setup.ts` (1500+ lines that
-// already build providers, MCP, LSP, RAG, presentation and shadow-git state) would
-// bury the one thing a reader most needs to check: whether the gate is consulted
-// BEFORE anything is constructed.
-//
-// So the policy lives here, in a module small enough to read in full, and
-// `cli/setup.ts` calls exactly one function from it — behind a flag that defaults
-// to false.
-//
-// ── THE CENTRAL INVARIANT ────────────────────────────────────────────────────
-//
-// > Scheduler must remain completely inert when autonomous scheduling is disabled.
-//
-// [DESIGN DECISION] The gate is checked BEFORE construction, not after. The
-// alternative — build the Scheduler, then refuse to activate it — satisfies the
-// letter of "inert" while still opening a SQLite handle, registering a
-// cancellation listener and allocating a trigger coordinator on every single
-// run. The mission's disabled-mode invariants (zero claims, zero child sessions,
-// zero triggers, zero background resources, and P1's "no Scheduler construction")
-// are only *structurally* satisfiable if nothing is built.
-//
-// [DESIGN DECISION] Dependencies arrive as a THUNK. `deps()` is not called when
-// disabled, which is what makes "no DB handle, no provider, no session factory
-// touched" a property of the control flow rather than a promise in a comment.
+// Composition scheduler produksi (terpisah dari `cli/setup.ts` agar pemeriksaan
+// gerbang `--enable-scheduler` sebelum konstruksi mudah diverifikasi).
+// Invariant utama: saat `--enable-scheduler` nonaktif, `deps()` tidak dipanggil
+// sehingga handle/koneksi DB scheduler tidak dibuat.
 
 import {
   type AutonomousAdapterConfig,
@@ -195,7 +165,7 @@ export interface ProductionSchedulerHandle {
   getTrigger(): TriggerCoordinator | null
 }
 
-/** The inert handle. Allocates nothing beyond the object itself. */
+/** Handle nonaktif: tidak menyentuh store/scheduler saat gerbang mati. */
 function inertHandle(gate: SchedulerGate): ProductionSchedulerHandle {
   return {
     enabled: gate.enabled,
@@ -210,11 +180,8 @@ function inertHandle(gate: SchedulerGate): ProductionSchedulerHandle {
 }
 
 /**
- * [PHASE 6U] THE PRODUCTION COMPOSITION ROOT.
- *
- * `deps` is a thunk and is invoked only when the gate is open. That single fact
- * is what makes disabled mode provably free: not "we decided not to use the
- * store" but "we never asked for it".
+ * Bangun scheduler produksi di belakang gerbang `--enable-scheduler`.
+ * Thunk `deps` hanya dievaluasi bila gerbang aktif.
  */
 export async function createProductionScheduler(
   gate: SchedulerGate,

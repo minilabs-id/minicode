@@ -20,8 +20,8 @@ The file tools' `cwd` **must** come from `ToolContext.cwd`, never `process.cwd()
 | `write_file` | Create/overwrite, auto-create parents | Atomic tmp->rename + mkdir. Automatic LSP diagnostics when a server is configured |
 | `edit` | Replace a string (must match exactly once) | Unique + atomic, fuzzy CRLF/whitespace + deterministic hashline (`src/tools/hashline.ts`) |
 | `apply_patch` | Multi-hunk Aider-style SEARCH/REPLACE blocks | Many patches in one call |
-| `move_file` | Atomic move/rename | An existing destination is first backed up to trash (the path is recorded). Jailed in the permission layer too |
-| `delete_file` | Soft-delete into `.minicode/.trash/` | Undo via `move_file`. Capped at the newest 100, gitignored. Shared helper `src/lib/trash.ts` |
+| `move_file` | Atomic move/rename | An existing destination is first backed up to trash (the path is recorded). Jailed in the permission layer too; runs pre-mutation `[dep-graph] warning:`, LSP `didClose`, and graph cache invalidation |
+| `delete_file` | Soft-delete into `.minicode/.trash/` | Undo via `move_file`. Capped at the newest 100, gitignored. Shared helper `src/lib/trash.ts`; runs pre-mutation `[dep-graph] warning:`, LSP `didClose`, and graph cache invalidation |
 | `read_image` | Image -> model context | Full base64 + reports `(bytes mime, tokens)` via `estimateImageTokens`. Opening checks the canonical target, a boundary re-check, `dev+ino` handle identity, and hardlinks (`safeOpenRead`). A 2 MB file-size guard applies, but the effective limit is stricter: base64 is bounded by the kernel truncation budget (`toolResultMaxTokens` 4096x4-200 ~ 16 KB) so images are not corrupted mid-truncation |
 
 Paging examples:
@@ -38,6 +38,7 @@ read_file({ path: "src/big.ts", offset: 500, limit: 50 })
 |---|---|---|
 | `glob` | Find `**/*.ts` patterns | Supports `{a,b}`, cwd jail |
 | `grep` | Cross-file regex | `rg --vimgrep --no-follow` when on PATH, otherwise an internal walker fallback. Both use the same jail + secret scrub and produce identical results. `MINICODE_GREP_ENGINE=js` forces the fallback. If `rg` fails (different regex flavour), it falls back automatically with a warning |
+| `dep_graph` | Module dependency graph, hubs, BFS impact, cycles | Hybrid static graph (TS/JS `Bun.Transpiler` + type/re-export pass + polyglot); optional `action` (`summary\|file\|impact\|cycles`), `path`, `depth`, `includeTests`, `cwd`; workspace-jailed |
 
 ## Exec
 
@@ -116,13 +117,14 @@ Requires `minicode config lsp add` first. Once registered:
 | Tool | Function |
 |---|---|
 | `lsp_diagnostics` | Diagnostics for one file |
-| `lsp_definition` | Definition location (`file+symbol` or `line/character`) |
+| `lsp_definition` | Definition location (`path` + `symbol` or `line/character`) |
 | `lsp_references` | All references repo-wide |
 | `lsp_hover` | Type information |
-| `lsp_symbols` | Document outline |
+| `lsp_symbols` | Document outline (`DocumentSymbol` + `SymbolInformation`) |
 | `lsp_workspace_symbols` | Workspace-wide search; an empty query returns popular symbols |
+| `lsp_rename` | Rename symbol via WorkspaceEdit (the **only** writing LSP tool) — `path` + `symbol`/`line`/`character` + `newName`; **gated** like git-write, fail-closed on invalid/empty edits or out-of-jail targets |
 
-`didClose` cleanup is automatic.
+`didClose` cleanup (edit/move/delete), multi-root monorepo `(ext, projectRoot)` isolation, and automatic wire hiding (`hiddenWireTools`) when no LSP server is configured apply across sessions, sub-agents, and `mcp serve` (unless `--all-tools`).
 
 ## The check chain
 

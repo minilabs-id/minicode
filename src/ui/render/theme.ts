@@ -303,7 +303,7 @@ function attr(open: number, close: number): Paint {
 /**
  * Slot warna semantik.
  *
- * GETTER — JANGAN simpan ke `const` di module scope; lihat PLAN.md P0.1.
+ * GETTER — JANGAN simpan ke `const` di module scope.
  * Setiap properti membaca level warna saat DIPANGGIL. Menulis
  * `const HEADER = c.dim(...)` di module scope membekukan hasilnya pada import
  * pertama (NO_COLOR, COLORTERM tidak lagi berpengaruh). Kesalahan ini sudah
@@ -487,7 +487,7 @@ export const cErr = {
 
 // ── Glyphs - minimal, Ubuntu Server style ──
 //
-// GETTER — JANGAN simpan ke `const` di module scope; lihat PLAN.md P0.1.
+// GETTER — JANGAN simpan ke `const` di module scope.
 // `supportsUtf8()` dievaluasi saat dipakai supaya `MINICODE_ASCII=1` dan
 // perubahan env di test langsung berlaku. `const OK = glyphs.check` di
 // `cli/commands.ts` pernah membekukannya (V8) sehingga fallback ASCII tidak
@@ -697,7 +697,7 @@ export const ESC = String.fromCharCode(27)
 // menyisakan `~` dan merusak hitungan kolom. DCS/APC/PM/SOS = `ESC` + satu
 // huruf `P/_/^/X` (BUKAN `ESC[` + kelas karakter) — pola lama `\[P_\^X]`
 // hanya cocok untuk `ESC[P`/`ESC[_` dst. sehingga payload DCS bocor.
-export const ANSI_PATTERN = `${ESC}(?:\\[[0-9:;?<=>]*[@-~]|\\[[0-9:;?<=>]*|\\][^${ESC}\\u0007]*(?:\\u0007|${ESC}\\\\)|(?:P|_|\\^|X)[^${ESC}\\u0007]*(?:\\u0007|${ESC}\\\\)|[()#][0-~]|[0-~])`
+const ANSI_PATTERN = `${ESC}(?:\\[[0-9:;?<=>]*[@-~]|\\[[0-9:;?<=>]*|\\][^${ESC}\\u0007]*(?:\\u0007|${ESC}\\\\)|(?:P|_|\\^|X)[^${ESC}\\u0007]*(?:\\u0007|${ESC}\\\\)|[()#][0-~]|[0-~])`
 
 /** Regex bersama untuk stripAnsi.
  *

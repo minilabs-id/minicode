@@ -20,14 +20,14 @@ Variabel yang paling menentukan perilaku (sisanya referensi di bawah):
 | `CI` | `1` → perlakukan sebagai CI: auto-update fail-closed (tanpa pemasangan, tanpa spawn npm) — lihat v0.41 |
 | `MINICODE_AUTO_UPDATE_DONE` | Guard internal: `1` ditetapkan pada proses restart hasil `/update` agar tidak memicu pemeriksaan/install berulang (loop). Jangan diset manual |
 | `MINICODE_PERMISSION` | `allowlist` → tool-access policy bash (profil warisan) |
-| `MINICODE_TOOL_SCOPE` | `explore` → subset read-only 12 tool (sama `--tool-scope explore`) |
+| `MINICODE_TOOL_SCOPE` | `explore` → subset read-only 17 tool (sama `--tool-scope explore`) |
 | `MINICODE_WORK_MODE` | `DISCUSS` \| `BUILD` → operating mode (sama `--work-mode`; default `DISCUSS`; `BUILD` dipetakan ke `EXECUTE` internal; flag menang atas env; nilai tak dikenal gagal ke `DISCUSS` dengan peringatan) |
 | `MINICODE_HOOKS` | `1` → jalankan hook `pre/post-run` dari `~/.minicode/hooks/*.js` & `.minicode/hooks/*.js` (konteks di env `MINICODE_HOOK_CTX`; env hook disanitasi tanpa secret; dilewati bila sesi dibatalkan) |
 | `MINICODE_SESSION_TTL_DAYS` | TTL sesi (default 30; `0` = selamanya) |
 | `MINICODE_REWIND_DRAFT` | Internal handoff `/undo`: `1` → TUI memuat prompt target dari record rewind ke composer cabang |
 | `MINICODE_REWIND_NOTICE` | Internal handoff `/undo`/`/redo`: notice base64 yang ditampilkan sekali di transkrip sesi anak |
-| `MINICODE_SUB_AGENT_TIMEOUT_MS` | Timeout default per turn sub-agent (ms, finite >0; default 300000 / 5 menit). Bisa ditimpa per delegasi lewat argumen `timeoutMs` pada `delegate_task` |
-| `MINICODE_SUB_AGENT_POOL_SIZE` | Jumlah slot eksekusi sub-agent paralel (1..16, default 3). Naikkan bila sering menjalankan fan-out 5+ agen sekaligus |
+| `MINICODE_SUB_AGENT_TIMEOUT_MS` | Timeout default per turn sub-agent (ms, finite >0; default 3600000 / 1 jam). Bisa ditimpa per delegasi lewat argumen `timeoutMs` pada `delegate_task` |
+| `MINICODE_SUB_AGENT_POOL_SIZE` | Jumlah slot eksekusi sub-agent paralel (1..16, default 5). Naikkan bila sering menjalankan fan-out lebih banyak sekaligus |
 | `MINICODE_SUBAGENT_LLM_TITLE` | `1` → aktifkan panggilan LLM paralel singkat untuk membuat judul sub-agent `delegate_task` yang tidak diberi `name`; default mati (memakai ringkasan deterministik dari `prompt`) |
 | `MINICODE_REWIND_LOCK_MAX_AGE_MS` | Batas usia lock `operation.lock` rewind sebelum dianggap stale (default 600000 ms / 10 menit). Operator bisa memperpanjang bila rewind sering terputus di mesin lambat |
 | `MINICODE_BOOT_ID` | Penanda boot mesin untuk validasi lock rewind lintas restart. Bila tidak diset, diturunkan dari `hostname` + `Date.now() - os.uptime()`; set eksplisit untuk determinisme saat clock NTP bergeser |

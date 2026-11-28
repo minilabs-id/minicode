@@ -32,12 +32,12 @@ export interface FooterStatus {
   metrics?: string
   /**
    * Frame animasi spark: 0 = idle (spark redup statis), >0 = busy (pulse
-   * putih↔abu). Chrome yang menaikkan frame saat turn berjalan; render hanya
+   * putih↔abu). `TuiApp` menaikkan frame saat turn berjalan; render hanya
    * memetakan frame → glyph berwarna.
    */
   sparkFrame?: number
   /**
-   * v7.29: interval kedip spark (ms) mengikuti kecepatan model — makin cepat
+   * Interval kedip spark (ms) mengikuti kecepatan model — makin cepat
    * stream teks masuk, makin kecil. 0/undefined = pakai default (200ms).
    */
   streamIntervalMs?: number

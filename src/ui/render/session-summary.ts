@@ -4,9 +4,8 @@
 // rapi & legible di ukuran kecil, tidak hancur seperti block-element yang
 // didownscale. Detail sesi di baris berikutnya, rata kiri.
 //
-// Wordmark tanpa warna custom: gradien truecolor (cyan→magenta) tidak didukung
-// merata di semua terminal dan pernah membuat "minicode" tak tampil. Bold polos
-// via `c` menjamin selalu terlihat + hormati NO_COLOR.
+// Wordmark memakai bold polos via `c` agar tetap terbaca pada terminal
+// tanpa dukungan gradien truecolor serta tetap menghormati NO_COLOR.
 
 import { t } from "../i18n/locale.ts"
 import { renderLogoRows } from "./logo.ts"

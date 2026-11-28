@@ -23,7 +23,7 @@ const execFileAsync = promisify(execFile)
 const denseTokenCharacters =
   /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Extended_Pictographic}]/gu
 
-export function countDenseTokenCharacters(text: string): number {
+function countDenseTokenCharacters(text: string): number {
   let dense = 0
   for (const match of text.matchAll(denseTokenCharacters)) {
     if (match[0]) dense++
@@ -35,7 +35,7 @@ export function countDenseTokenCharacters(text: string): number {
 // dipakai menaikkan estimasi agar tidak under-count di gateway.
 const CODE_SYNTAX = /[{}()[\]<>;,=+\-*/&|!#$%^~:?@."'\\]/g
 
-export function countCodeSyntaxCharacters(text: string): number {
+function countCodeSyntaxCharacters(text: string): number {
   let n = 0
   for (const match of text.matchAll(CODE_SYNTAX)) {
     if (match[0]) n++

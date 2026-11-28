@@ -25,27 +25,11 @@ recovery/approval, bukan invariant sidebar. Baca versi terbaru di dokumen
 
 ## Otoritas roadmap
 
-Roadmap arsitektur adalah milik pemilik repo. `ROADMAP.md` tidak tersedia di
-checkout ini, jadi status Big Phase maupun next action belum dapat dinyatakan.
-`PLAN.md` ada di checkout ini tetapi hanyalah ledger legacy, bukan roadmap
-aktif; `ROADMAP.md` tidak ada.
-Jangan merekonstruksi status dari changelog, kode, atau artefak histori. Jangan
-menulis ulang master roadmap sebagai agent. Label Big Phase (`P1`–`P14`),
-sub-milestone (`P2.x`), Quality Remediation (`Stage 1`–`10`), dan hotfix
-(`P0/UX-001`) adalah namespace berbeda.
+Roadmap arsitektur adalah milik pemilik repo. `ROADMAP.md` (dan `PLAN.md` legacy yang sudah dihapus) tidak tersedia di checkout ini, jadi status Big Phase maupun next action belum dapat dinyatakan. Jangan merekonstruksi status dari changelog, kode, atau artefak histori. Jangan menulis ulang master roadmap sebagai agent. Label Big Phase (`P1`–`P14`), sub-milestone (`P2.x`), Quality Remediation (`Stage 1`–`10`), dan hotfix (`P0/UX-001`) adalah namespace berbeda.
 
 ## Status checkout
 
-HEAD checkout ini adalah kandidat rilis **v0.53.0** (penambahan `dep_graph` & graf impor/kompak repomap, controller `--autonomous` + BUILD terjail, amandemen durasi turn & live sub-agent tanpa `(R running)` dengan pulse + `MM:SS` redup, perbaikan parser markdown CommonMark + pemulihan arahan jawaban ringkas, hardening audit pra-rilis, dan optimasi performa boot/loop/render). `package.json` mencatat `0.53.0`; kontrak terminal memakai amandemen **2026-11-28** di atas v0.52.1/v0.51
-(mengamandemen v0.43 pada tail live adaptif, reveal ketikan live, waiting
-indicator, dan kegagalan berbasis label `<label> mengalami kegagalan (<tag>)`
-di atas kotak tipis composer `╭─╮│╰╯`, tinggi 1–2 baris dinamis + scroll, margin
-simetris 3+3, dan ratchet `scrollBack` naik-saja) serta arsip v0.42–v0.34. Angka
-gate historis v0.33 di bawah bukan hasil checkout ini. `PLAN.md` adalah ledger milestone legacy, bukan
-roadmap aktif. `ROADMAP.md`, `docs/ARCHITECTURE.html`, dan `docs/audit/` tidak
-ada; status roadmap belum tersedia. Gate repository dapat dijalankan, tetapi
-checkout tidak boleh disebut hijau atau release-ready sebelum seluruh gate lulus
-pada kandidat yang sama.
+HEAD checkout ini adalah kandidat rilis **v0.53.1** (`package.json` mencatat `0.53.1`). Kontrak terminal aktif: [docs/TERMINAL_CONTRACT.md](docs/TERMINAL_CONTRACT.md) (entri terbaru 2026-11-28; arsip lama dipindah ke `.audit/TERMINAL_CONTRACT_ARCHIVE.md`). `ROADMAP.md`, `PLAN.md`, `docs/ARCHITECTURE.html`, dan `docs/audit/` tidak ada; status roadmap belum tersedia. Gate repository dapat dijalankan, tetapi checkout tidak boleh disebut hijau atau release-ready sebelum seluruh gate lulus pada kandidat yang sama.
 
 Peta dokumentasi aktif: [docs/README.md](docs/README.md), navigasi:
 [`docs/SUMMARY.md`](docs/SUMMARY.md), arsitektur: [docs/architecture.md](docs/architecture.md),
@@ -57,75 +41,18 @@ kontrak terminal: [docs/TERMINAL_CONTRACT.md](docs/TERMINAL_CONTRACT.md).
 bun x tsc --noEmit && bun run lint && bun test && bun run gate:coverage && bun run gate:pack
 ```
 
-Lima perintah di atas adalah **minimum lokal**. Set canonical untuk seluruh gate
-adalah `bun run gate:fast` — gabungan tsc, lint, test, coverage, pack, bash,
-bench:smoke, audit:harness, dan gate:telemetry. Gate memakai manifest
-`package.json` yang ada pada checkout ini.
+Lima perintah di atas adalah **minimum lokal**. Set canonical untuk seluruh gate adalah `bun run gate:fast` (`tsc`, `lint`, `test`, `coverage`, `pack`, `bash`, `bench:smoke`, `audit:harness`, dan `gate:telemetry`).
 
-### Gate coverage — HASIL HISTORIS kandidat rilis v0.33.0 (2026-11-21)
+Catatan hasil historis: `.audit/FINAL-STATE.md` menyimpan catatan gate historis kandidat sebelumnya (`v0.33.0`, 2026-11-21) dan **bukan** status checkout saat ini. Jalankan ulang gate jika ada perubahan setelah kandidat tersebut.
 
-> **Bukan janji untuk commit berikutnya.** Angka di bawah tercatat pada pohon
-> kandidat rilis v0.33.0 (checkpoint 2026-11-21): commit fitur `1aaca14`
-> ditambah bump versi, CHANGELOG, dan pembaruan dokumentasi. Angka historis
-> tetap historis — sebutkan checkpoint-nya, jangan menyebutnya sebagai hasil
-> checkout berikutnya. Jalankan ulang gate bila ada perubahan setelah ini.
+Gejala flake Windows di bawah beban suite penuh (lulus saat dijalankan terpisah):
+- timeout batas 5–7,5 dtk pada `test/supply-chain.test.ts`, `test/work-mode-cli.test.ts`, `test/writer-inventory.test.ts`, `test/exit-codes.test.ts`, `test/extreme.test.ts`, `test/phase1-tools.test.ts`
+- `test/concurrency-cross-process.test.ts` (§32 dua proses tulis sesi)
 
-`bun run gate:coverage` **selesai dan lulus** pada kandidat tersebut:
-
-```
-[coverage-gate] funcs 90.22% (min 87) · lines 91.07% (min 86)
-[coverage-gate] lantai per-berkas: 19/19 modul kritis hijau
-```
-
-Angka gate lain pada kandidat yang SAMA (`bun run gate:fast`, exit 0): `bun x
-tsc --noEmit` = bersih (0 error), `bun run lint` = 851 file / 0 error,
-`bun test` = 6627 pass / 33 skip / 0 fail, `bun run gate:pack` = 23 pass / 0
-fail (budget 5000 KiB, paket 4903 KB / 340 file), `bun run gate:bash`,
-`bun run bench:smoke`, `bun run gate:telemetry` lolos, `bun run audit:harness`
-= 73 pass / 0 fail (2 advisory). Checkpoint lebih awal `1aaca14` (sebelum
-meta/dokumentasi) mencatat coverage 90.19% funcs / 91.07% lines dan paket
-4874 KB — selisih kecil karena perubahan test/i18n/dokumen pada kandidat rilis.
-
-Catatan lama soal "job panjang dihentikan saat sesi berakhir" tidak lagi
-berlaku di lingkungan ini: `gate:coverage` diselesaikan dengan proses latar
-yang bertahan melewati sesi pemanggil dan log-nya dibaca setelah selesai.
-
-Gejala flake yang sudah teridentifikasi, jangan dikejar sebagai regresi:
-
-- Di bawah beban suite penuh, beberapa test yang menunggu subproses keluar
-  dengan batas 5–7,5 dtk bisa timeout (`test/supply-chain.test.ts`,
-  `test/work-mode-cli.test.ts`, `test/writer-inventory.test.ts`,
-  `test/exit-codes.test.ts`, `test/extreme.test.ts`,
-  `test/phase1-tools.test.ts`). Semuanya lulus saat dijalankan sendiri; run
-  penuh berikutnya 0 fail.
-- `test/concurrency-cross-process.test.ts` (§32 dua proses tulis sesi) adalah
-  flake lintas-proses Windows yang sama kelasnya.
-
-Angka di atas adalah hasil pada kandidat tersebut, bukan janji untuk commit
-berikutnya: jalankan ulang gate bila ada perubahan setelah kandidat ini.
-Jangan menurunkan ambang di `scripts/coverage-gate.ts` atau menaikkan budget di
-`scripts/pack-budget.ts` untuk membuat gate hijau.
-
-**Ruang lingkup klaim hasil — baca sebelum menulis laporan status.**
-
-- Laporan **stage-scoped** (mis. "Stage 8.1 `FIX VERIFIED`") **hanya boleh
-  mengklaim scope yang benar-benar divalidasi** pada scope itu: perintah yang
-  dijalankan, commit/working tree yang diuji, angka pass/fail/skip/error, dan
-  tes yang **tidak** dijalankan. Hasil stage-scoped **tidak boleh** ditulis
-  seolah-olah seluruh repository hijau.
-- **Menutup track Quality Remediation penuh** (Stage 1–10) atau **mengumumkan
-  release-readiness / quality akhir** tetap **mensyaratkan seluruh gate akhir
-  lulus pada satu kandidat final yang sama** — urutan di atas ditambah
-  `bun run audit:harness`, smoke build/package, dan pemeriksaan CI yang
-  relevan. Ambang gate **tidak boleh** diturunkan untuk membuat hasil terlihat
-  hijau.
-- Angka hasil historis (laporan sebelumnya) tetap berstatus **historical**:
-  sebutkan checkpoint-nya, jangan menyebutnya sebagai hasil sekarang.
-
-Jangan turunkan ambang coverage atau naikkan budget paket untuk membuat gate
-hijau. Sumber angkanya `scripts/coverage-gate.ts` dan
-`scripts/pack-budget.ts`; perubahan budget memerlukan bukti baru dan
-persetujuan pemilik.
+**Ruang lingkup klaim hasil:**
+- Laporan stage-scoped hanya boleh mengklaim perintah, lingkup tree, dan angka pass/fail/skip/error yang benar-benar dijalankan.
+- Menutup track penuh atau mengumumkan release-readiness mensyaratkan seluruh gate akhir (`gate:fast`, `audit:harness`, smoke package, CI) lulus pada satu kandidat final yang sama.
+- Jangan menurunkan ambang coverage di `scripts/coverage-gate.ts` atau menaikkan budget di `scripts/pack-budget.ts` tanpa bukti baru dan persetujuan pemilik.
 
 ## Batas lapisan (dijaga `test/ui-boundary.test.ts`)
 
@@ -168,8 +95,7 @@ persetujuan pemilik.
   (`width.ts`) SENGAJA mempertahankan sekuens utuh karena footer memakai CHA
   non-SGR untuk merapatkan konteks.
 - `cwd` tool file **wajib** dari `ToolContext.cwd`, bukan `process.cwd()`.
-- Lebar prompt = **kolom**, bukan karakter: `composerWidth() = min(100, chatWidth())`
-  dipakai konsisten oleh wrap, cache, kursor vertikal, klik mouse, dan frame.
+- Lebar prompt = **kolom**, bukan karakter: `composerWidth(contentCols)` dari `src/ui/render/chat-column.ts` (`min(w, 100 + floor(max(0, w - 100) / 4))` atas `contentCols = chatCols - 6`) dipakai konsisten oleh wrap, cache, kursor vertikal, klik mouse, dan frame.
 - Wheel selalu menggulir chat; `Home/End` ke top/ekor chat. **ARSIP v0.33
   (dihapus v0.34):** wheel per-pane, `Alt/Ctrl+PgUp/PgDn`, `Ctrl+O`.
 - Retry micro-toast TTL 4 dtk **ditimpa** tiap event: repaint satu baris footer,

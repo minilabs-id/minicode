@@ -8,7 +8,7 @@
 // terlihat (QUEUE_OVERFLOW) alih-alih memori yang meledak.
 
 import { type DaemonStreamPhase, MAX_QUEUE_PER_CONN } from "./protocol.ts"
-import { readConsumerOffset, resetConsumerOffset, writeConsumerOffset } from "./store.ts"
+import { writeConsumerOffset } from "./store.ts"
 
 export interface PendingEvent {
   seq: number
@@ -307,13 +307,4 @@ export class SubscriptionRegistry {
   get size(): number {
     return this.#byKey.size
   }
-}
-
-/** Offset durable konsumen — TERPISAH dari cursor langganan. */
-export function persistedOffset(consumerId: string, sid: string, cwd?: string): number {
-  return readConsumerOffset(consumerId, sid, cwd)
-}
-
-export function resetOffset(consumerId: string, sid: string, cwd?: string): void {
-  resetConsumerOffset(consumerId, sid, -1, cwd)
 }

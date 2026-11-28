@@ -119,7 +119,7 @@ provider (an unexpected bill). A bare model (no `::`) keeps the old behaviour
 
 Provider building is centralised in `src/providers/build.ts`. The fallback router covers rate_limit/server/network (clone-error + base64 fix + retryAfter cap). The wire protocol is detected from the `/responses` probe path -> `responses` hint; host substrings are only a fallback. `max_tokens` is 8192; a `length` stop is an explicit warning, not silent text.
 
-Responses API: `/v1/responses`, `previous_response_id` chaining per model, `store:false` by default.
+Responses API: `/v1/responses`, delta chaining via `previous_response_id` per model+prefix (automatically reset on compaction/rewind/branch switch), `store:true`.
 
 ## Global vs local
 

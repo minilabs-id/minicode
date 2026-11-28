@@ -3,7 +3,7 @@
 // Setiap test di sini mengunci sink kebocoran yang TERBUKTI via reproducer
 // (lihat laporan audit #10): redaction header/URL/env yang lolos scrubber,
 // serta residual traces + shadow-git refs yang bertahan setelah deleteSession.
-// Bila test gagal di kode lama, ia menguji yang dikiranya (Prinsip 3 PLAN.md).
+// Bila test gagal sebelum perbaikan, berarti ia memverifikasi regresi yang sebenarnya.
 import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { spawnSync } from "node:child_process"
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises"

@@ -95,7 +95,7 @@ export function isTestFilePath(relPath: string): boolean {
   )
 }
 
-export function detectLang(relPath: string): string {
+function detectLang(relPath: string): string {
   const dot = relPath.lastIndexOf(".")
   if (dot === -1) return ""
   switch (relPath.slice(dot).toLowerCase()) {

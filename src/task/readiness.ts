@@ -81,7 +81,7 @@ const ELIGIBLE_STATUSES: ReadonlySet<TaskStatus> = new Set<TaskStatus>(["PENDING
  * mode is asymmetric: a false negative merely leaves a task unready, a false
  * positive executes dependent work on a false premise.
  */
-export function dependencySatisfied(dependency: GraphNode): boolean {
+function dependencySatisfied(dependency: GraphNode): boolean {
   return dependency.status === "COMPLETED"
 }
 
@@ -96,7 +96,7 @@ export function eligibleForReadiness(node: GraphNode): boolean {
 }
 
 /** True when a task is in a state from which it will never proceed. */
-export function isTerminalStatus(status: TaskStatus): boolean {
+function isTerminalStatus(status: TaskStatus): boolean {
   return TERMINAL_STATUSES.has(status)
 }
 

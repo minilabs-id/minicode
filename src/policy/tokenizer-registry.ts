@@ -37,7 +37,7 @@ function cachePath(repo: string): string {
 }
 
 /** Cari repo tokenizer untuk id model (hanya keluarga open yang dikenal). */
-export function findTokenizerRepo(modelId: string): string | undefined {
+function findTokenizerRepo(modelId: string): string | undefined {
   const m = modelId.toLowerCase()
   for (const { family, repo } of TOKENIZER_REPOS) if (m.includes(family)) return repo
   return undefined

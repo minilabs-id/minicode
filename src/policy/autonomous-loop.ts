@@ -9,7 +9,7 @@ import type { WorkMode } from "./work-mode.ts"
  *      selesai, dan pendekatan yang pernah gagal disuntikkan ringkas di setiap epoch baru).
  */
 
-export const AUTONOMOUS_DEFAULT_MAX_NO_PROGRESS_EPOCHS = 5
+const AUTONOMOUS_DEFAULT_MAX_NO_PROGRESS_EPOCHS = 5
 const ONE_HOUR_MS = 3_600_000
 const MAX_GOAL_MEMORY_ITEMS = 15
 

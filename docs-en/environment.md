@@ -20,7 +20,7 @@ The variables that most determine behaviour (the rest are referenced below):
 | `CI` | `1` -> treat as CI: auto-update is fail-closed (no install, no npm spawn) — see v0.41 |
 | `MINICODE_AUTO_UPDATE_DONE` | Internal guard: set to `1` on the restart process produced by `/update` so it does not trigger another check/install (loop). Do not set manually |
 | `MINICODE_PERMISSION` | `allowlist` -> bash tool-access policy (legacy profile) |
-| `MINICODE_TOOL_SCOPE` | `explore` -> read-only subset of 12 tools (same as `--tool-scope explore`) |
+| `MINICODE_TOOL_SCOPE` | `explore` -> read-only subset of 17 tools (same as `--tool-scope explore`) |
 | `MINICODE_WORK_MODE` | `DISCUSS` \| `BUILD` -> operating mode (same as `--work-mode`; default `DISCUSS`; legacy `PLAN` normalises to `DISCUSS`; `BUILD` maps to internal `EXECUTE`; flag wins over env) |
 | `MINICODE_HOOKS` | `1` -> run `pre/post-run` hooks from `~/.minicode/hooks/*.js` & `.minicode/hooks/*.js` (context in the `MINICODE_HOOK_CTX` env; hook env is sanitised without secrets; skipped when the session is cancelled) |
 | `MINICODE_SESSION_TTL_DAYS` | Session TTL (default 30; `0` = forever) |

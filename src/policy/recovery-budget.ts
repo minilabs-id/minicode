@@ -1,50 +1,8 @@
 /**
- * Anggaran pemulihan bersama untuk SATU panggilan logis ke penyedia.
- *
- * ── Kenapa modul ini ada ────────────────────────────────────────────────────
- * Insiden aslinya (sesi `17b6a5ff`, OBSERVATION.md T-009): satu gangguan
- * penyedia yang berlangsung belasan detik mematikan sesi total, karena anggaran
- * retry kernel hanya 3 percobaan (1+2+4 = 7 dtk).
- *
- * Perbaikan naif — "naikkan jumlah percobaan di retry, lalu tambahkan resume
- * turn" — sudah dicoba dan salah secara struktural. Retry dan resume berada di
- * dua lapisan berbeda, jadi biayanya BERKALI, bukan bertambah: 5 percobaan retry
- * diulang untuk setiap resume menghasilkan 3 × 23 dtk + 13 dtk ≈ **82 detik**
- * untuk provider yang mati permanen. Sebelum perubahan itu hanya 7 detik.
- *
- * Itu bukan bug angka, melainkan anti-pattern yang punya nama: *retry
- * amplification* / *retry storm* (AWS Well-Architected REL05-BP03, "implement
- * retries at only one level"). Setiap lapisan yang punya anggarannya sendiri
- * mengalikan lapisan di bawahnya, dan hasilnya adalah penundaan raksasa tanpa
- * tambahan kesembuhan.
- *
- * ── Yang dipakai sebagai gantinya (riset 2026) ──────────────────────────────
- * Satu anggaran WAKTU TOTAL dipegang di puncak, dan setiap percobaan memakai
- * sisa anggaran itu. Konsekuensinya: biaya total konstan berapa pun banyaknya
- * lapisan yang mencoba. Ini pola "timeout budget" yang sama dipakai SDK AWS
- * (retry quota), Google SRE, dan panduan agent-loop modern: *"a budget removes
- * the multiplication by construction — the second attempt inherits what the
- * first one left"*.
- *
- * Tiga mekanisme yang ikut dibawa dari praktik standar:
- *   1. **Retry quota (token bucket)** — AWS standard mode. Token berkurang tiap
- *      percobaan dan pulih saat sukses. Saat habis, kita berhenti cepat alih-alih
- *      menunggu penuh untuk kegagalan yang sudah jelas tidak membaik. Inilah yang
- *      membuat provider mati total gagal dalam hitungan detik, bukan menit.
- *   2. **Full jitter** — jeda acak pada `[0, delay]` (bukan delay pasti). Tanpa
- *      jitter, semua klien yang gagal bersamaan mencoba lagi bersamaan pula dan
- *      mengulang beban yang sama: *thundering herd* yang tertunda.
- *   3. **`Retry-After` sebagai FLOOR, bukan target** — provider lebih tahu kapan
- *      jendelanya dibuka; kita tidak pernah menunggu lebih pendek dari itu.
- *
- * ── Apa yang TIDAK dilakukan ────────────────────────────────────────────────
- * - Tidak ada penambahan jumlah percobaan tanpa batas. Anggaran waktu dan kuota
- *   token adalah dua pagar yang berbeda; keduanya wajib.
- * - Tidak ada retry untuk kegagalan terminal (auth, request invalid, konteks
- *   kehabisan, anggaran habis). Mengulangnya tidak mengubah hasil.
- *
- * Modul ini MURNI (tanpa I/O, tanpa jam global) supaya kebijakan bisa diuji
- * langsung: pemanggil memberi `nowMs`, bukan menyembunyikan `Date.now()`.
+ * Anggaran pemulihan bersama untuk satu panggilan logis ke penyedia.
+ * Menyatukan budget waktu total (45 dtk) dan kuota token bucket agar retry
+ * provider dan resume turn tidak mengalikan penundaan satu sama lain, lengkap
+ * dengan full jitter dan `Retry-After` sebagai batas bawah. Murni tanpa I/O.
  */
 
 /** Batas atas waktu yang boleh dipakai untuk memulihkan SATU panggilan logis.
@@ -259,7 +217,7 @@ export function recoveryDelay(
 /** Batas waktu total menunggu gangguan penyedia berkelanjutan di mode `--autonomous` (4 jam). */
 export const AUTONOMOUS_OUTAGE_MAX_WAIT_MS = 14_400_000
 /** Tangga jeda cooldown bertahap untuk gangguan panjang tanpa thundering herd (maks 15 mnt). */
-export const AUTONOMOUS_COOLDOWN_STEPS_MS: readonly number[] = [
+const AUTONOMOUS_COOLDOWN_STEPS_MS: readonly number[] = [
   15_000, 30_000, 60_000, 120_000, 300_000, 600_000, 900_000,
 ]
 

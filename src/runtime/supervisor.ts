@@ -113,7 +113,7 @@ export interface SupervisionPolicy {
   readonly escalationWaitMs?: number
 }
 
-export const DEFAULT_SUPERVISION_POLICY: Required<SupervisionPolicy> = {
+const DEFAULT_SUPERVISION_POLICY: Required<SupervisionPolicy> = {
   maxAttempts: 3,
   backoffBaseMs: 1000,
   backoffMaxMs: 8000,

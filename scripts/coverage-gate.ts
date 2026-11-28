@@ -23,99 +23,14 @@ function getArg(name: string, fallback: number): number {
   return Number.isFinite(v) ? v : fallback
 }
 
-// Baseline terukur setelah penambahan test lapisan UI (harness fake-TTY untuk
-// askLine/picker + handler subcommand): 79,26% funcs /
-// 82,13% lines. Ambil sedikit di bawah supaya CI tidak flaky, lalu naikkan
-// bertahap. Riwayat: 0.7.0 = 71,95%/76,76%.
-// Baseline baru setelah test anti-frozen runtime, highlight adversarial,
-// provider-manager flows, dan CLI subprocess: 82,36% funcs / 84,16% lines.
-// P13 P0 menambah 4 tool + safe-open + responses + swebench tanpa test yet
-// → turun ke 77,82/81,24. Turunkan sementara, naikkan lagi setelah test P1.
-// P13/P11/P10 P1 mendarat (TTL hierarkis, 2 tool, Responses, branch, doctor,
-// safe-open/trash tests): 80,75/84,52. Kunci di 80/84 — sisa ke 81/83 ada di
-// area lama yang belum tersentuh (lsp 18%, config 42%, repl), bukan kode baru.
-// Harness P0-P3 + test config in-process (list/add/remove lokal, positional
-// flag ditolak): 81,69/85,25. Kunci di 81/83.
-// Pasca-fix HIGH (read_image TOCTOU, edit/patch jail, responses instance-local + 6 MEDIUM):
-// 80,85/84,47 — funcs turun 0,84 karena branch defensif baru belum tercakup test
-// (provider instance-local, safeOpenRead ENOENT mapping, pricing redirect check).
-// Turunkan sementara ke 80/83 agar gate tidak flaky, naikkan lagi setelah test P1 tambahan.
-// Enter→picker thinking + effort anti-hilang (preserve detectAndSave, scope-aware
-// model-manager, 6 test baru): 81,83/84,32. Kunci lines di 84 (stabil di
-// 84,12–84,32); funcs tetap 80 karena berayun 80,62–81,83 antar run (flaky bila 81).
-// Mutation journal (AUDIT #01C: journal.ts 92,31/93,91 + 24 test, delegate
-// wiring, resume/finalize): 82,42/85,17 dua run identik. Kunci lines di 85;
-// funcs tetap 80 (aturan lama: jangan kunci funcs — berayun antar run flaky).
-// Footer lengket (chrome sticky + faint + spark pulse + konteks live): 84,88
-// lines (turun 0,12 karena branch MINICODE_FOOTER/off/print + pulse timer
-// belum 100% tercakup). Turunkan sementara ke 84, naikkan lagi setelah test
-// pulse/esc/context lebih komplit. Funcs tetap 80.
-// TUI single-tampilan (hapus repl/chrome/overlay/info-window + form popup +
-// thinking + approval tercatat + live repaint): 83,10/84,53 dua run identik.
-// Kunci lines di 84,5; funcs tetap 80.
-// Bug-hunt TUI deep + fix semua (sanitize C1/bidi, truncate/chunk SGR-only,
-// boundary diff/format/table/section/markdown/highlight, locale LC_ALL,
-// tooSmall abort, stale-handle, clear/scroll, approval pipe-deny, form
-// revert, i18n label + 30 test baru): 83,28/84,58 satu run. Lines +0,05
-// (noise) — kunci tetap 84,5; funcs tetap 80 (aturan lama anti-flaky).
-// Audit TUI (sinyal SIGTERM/SIGHUP, Home/End jump, Shift+Pg half-page,
-// abort hint, MINICODE_MOTION, kursor sync-update, form idle + 13 test
-// baru): 83,42–83,45/84,64–84,65. Lines +0,14 — margin terlalu tipis untuk
-// dikunci 84,6 (berisiko flaky); kunci tetap 84,5; funcs tetap 80.
-// Audit menyeluruh 2026-09-23 (F1 skip PTY nyata, F5 lantai per-berkas, F9
-// env docs, F13 batas lapisan): 83,42 funcs / 84,64 lines, 2350 pass / 20 skip
-// (run penuh 259 dtk). Funcs NAIK dikunci 83 (margin 1,2 pp — sebelumnya 80
-// dibiarkan 3,4 pp di bawah hasil terukur, jadi tak pernah menangkap regresi);
-// lines tetap 84,5 (margin 0,14 pp sudah disengaja anti-flaky sejak 0.10.x).
-// Phase 2 parity: 84,46 funcs / 85,46 lines, 2559 pass / 22 skip. Kunci di
-// 84/85 sesuai aturan repo (naikkan minimum bila coverage naik).
-// P2.10 Verification (ToolInvocationId + EffectIntent/Receipt + VerificationRecord
-// + idempotency + read-back verifier + 50 test baru, verification.ts 97,01/99,66,
-// evidence.ts 100/100): 86,65 funcs / 87,54 lines satu run. Kunci di 85/86
-// (margin ~1,6/1,5 pp anti-flaky, konsisten praktik repo).
-// P12 S2.2 WorkMode (ceiling runtime + visibilitas tool + CLI/exec/ACP + subagent
-// + hooks + command `/work-mode`; 65 test baru): 87,18-87,20 funcs / 88,17 lines
-// — dua sampel identik (gate:coverage), di atas baseline P12.1 87,05/88,06.
-// Kenaikan terukur: funcs +0,15 pp, lines +0,11 pp.
-//
-// KEPUTUSAN AMBANG (aturan AGENTS.md baris 15: "Coverage naik → naikkan juga
-// minimum"): FUNCS dinaikkan 85 → 86. Lines TETAP 86 — kenaikan +0,11 pp
-// berada di kelas "noise" yang secara historis repo TAHAN (presiden: "Lines
-// +0,14 — margin terlalu tipis untuk dikunci", "Lines +0,05 (noise) — kunci
-// tetap 84,5"), sedangkan repo menaikkan minimum lines hanya saat kenaikannya
-// SIGNIFIKAN (Phase 2 parity +0,82 pp; P2.10 +2,08 pp). Menaikkan ambang lines
-// 86 → 87 dengan hasil terukur 88,17 tidak menambah deteksi regresi bermakna
-// (regresi harus >1,17 pp untuk tertangkap, vs >2,17 pp bila ambang 86) — jadi
-// tidak diambil. Ambang funcs 86 memberi margin 1,20 pp terhadap baseline
-// terendah 87,05, sejalan dengan preseden "Audit menyeluruh 2026-09-23" yang
-// mengunci 83 dengan margin 1,2 pp. Ambang TIDAK PERNAH diturunkan.
-//
-// P13.4 + P13.5 (multi-consumer daemon + E2E runtime hosted; 5 test baru di
-// test/p13-e2e-runtime.test.ts): 88,00 funcs / 88,94 lines — satu run penuh
-// (5023 pass / 19 skip / 0 fail, 340 berkas) di atas baseline P13.3 87,83/88,83.
-// Kenaikan funcs +0,17 pp melewati preseden P12 (+0,15 pp → naik), sehingga
-// minimum FUNCS dinaikkan 86 → 87 (margin 1,00 pp terhadap hasil terukur —
-// kelas margin yang sama dengan preseden 2026-09-23 dan P12). Lines +0,11 pp
-// identik dengan kelas "noise" yang dipertahankan P12 (+0,11 pp tidak dikunci);
-// minimum LINES tetap 86. Ambang tetap TIDAK PERNAH diturunkan.
+// Ambang agregat (funcs/lines) — baseline historis v0.10–P13 tidak lagi ditulis
+// panjang lebar; jaga ambang tetap jujur tanpa diturunkan saat ada perubahan.
 const MIN_LINES = getArg("--lines", 86)
 const MIN_FUNCS = getArg("--funcs", 87)
 
-// ── lantai per-berkas modul kritis (audit F5) ──
-// Gate agregat BUTA terhadap modul tunggal yang jatuh: policy/jail 97% → 5%
-// tak terlihat selama total tertahan. Daftar ini SENGAJA per-berkas, bukan
-// per-direktori — modul ber-lantai rendah karena batas proses/jaringan
-// (mcp/server.ts dijalankan test-nya sebagai subprocess sehingga tak
-// terinstrumentasi; update-check/web_search/lsp butuh server nyata) tak boleh
-// memaksa exemption global.
-// Angka = hasil terukur 2026-09-23 dikurangi margin ≥5 pp. Bila berkas
-// dipindah/di-rename, gate GAGAL ("tidak ada di laporan") supaya lantai tak
-// pernah jadi zombie yang diam-diam tak memeriksa apa pun.
-// Blind spot yang DICATAT (belum dilantai, alasan diverifikasi):
-//   src/mcp/server.ts 5,06% lines — test-nya spawn server (proses lain);
-//   cli/auto-update.ts 18,18% — butuh rilis npm nyata;
-//   src/lib/atomic-write.ts 53,73% — cabang retry Windows EPERM/EBUSY;
-//   src/policy/pricing.ts 68,78% / src/tools/web_search.ts 48,87% — jaringan.
+// Lantai per-berkas modul kritis mencegah rata-rata agregat menyembunyikan
+// penurunan drastis pada satu modul keamanan/inti. Berkas yang dipindah/hilang
+// menggagalkan gate secara eksplisit.
 const CRITICAL_FILES: [string, number, number][] = [
   // [path, min funcs, min lines]
   ["src/policy/permission.ts", 90, 90],

@@ -16,7 +16,7 @@ import {
  * operasi eksternal/push (`git_push`, `git_commit`, `mcp_*`, `web_*`), supaya
  * worker otonom tetap terjail di workspace dan tervalidasi sebelum COMPLETED.
  */
-export const AUTONOMOUS_WORKSPACE_WRITE_TOOLS: readonly string[] = [
+const AUTONOMOUS_WORKSPACE_WRITE_TOOLS: readonly string[] = [
   "write_file",
   "edit",
   "apply_patch",
@@ -41,8 +41,8 @@ const AUTONOMOUS_BUILD_TOOL_SET: ReadonlySet<string> = new Set(AUTONOMOUS_BUILD_
 
 /**
  * Validasi daftar tool terhadap WorkMode aktif:
- * - `DISCUSS` (default): tetap 100% read-only (kontrak Phase 6S `assertAutonomousToolScope`).
- * - `EXECUTE` (`BUILD`): mengizinkan subset tulis-workspace + build/test terjail, menolak tool luar ruang lingkup.
+ * - `DISCUSS` (default): hanya tool daftar baca/observasi otonom (`assertAutonomousToolScope`).
+ * - `EXECUTE` (`BUILD`): mengizinkan subset tulis-workspace + build/test terjail.
  */
 export function assertModeBoundedAutonomousToolScope(
   toolNames: readonly string[],

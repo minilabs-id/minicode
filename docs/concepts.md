@@ -12,19 +12,7 @@ Minicode itu apa, kenapa dibangun begitu, dan kenapa beberapa hal sengaja tidak 
 
 ## Loop ReAct
 
-Setiap prompt berjalan sebagai loop `Thought → Action → Observation` sampai jawaban final, batas `--max-steps` (default 200; angka 50 adalah cap sub-agent, bukan default sesi), atau `--timeout` (default 1 jam). Model menerima system prompt berisi `# Environment` (cwd + platform), repo-map ringkas, dan memory yang relevan — lalu memilih tool, melihat hasilnya, dan memilih langkah berikutnya. Tidak ada grafik alur tersembunyi: di jalur non-interaktif jejak aksi tampil sebagai ledger di stderr; di TUI interaktif chat memuat narasi, rekap kategori (mis. `3 command · 2 read · 5 subagent`), baris tool ringkas, dan jawaban akhir. Sejak v0.34 tidak ada panel samping — rincian ada di chat dan jurnal. Sejak
-v0.35 rekap tool menjadi baris committed statis di footer tiap narasi
-(`tool → narasi → rekap(tool sebelum narasi)`, rekap akhir turn kumulatif; sejak v0.41 tanpa prefix simbol),
-dan label aktivitas `› …` memakai locale OS — narasi/model tetap memakai
-bahasa user (`/lang`). Sejak v0.36 composer TUI dibatasi maksimal 2 baris
-(draft panjang = jendela geser, tanpa menggeser transkrip), dropdown `/`
-menjadi overlay dalam frame yang sama tanpa mengurangi `viewH`. Sejak v0.37
-bracketed paste aktif (`?2004h`/`?2004l` di luar frame), `Ctrl+A` = select-all
-transkrip bila composer kosong & dropdown tertutup, resize menstabilkan
-auto-scroll/drag/kursor/anchor, gema prompt di-wrap sekali selebar chat, dan
-lebar prompt progresif `min(chatCols, 100 + floor(max(0, chatCols-100)/4))`
-dengan prefix `minicode › ` bila `w−14 ≥ 24`, else `› `, lanjutan `· ` — composer
-2 baris dan dropdown overlay tidak dicabut.
+Setiap prompt berjalan sebagai loop `Thought → Action → Observation` sampai jawaban final, batas `--max-steps` (default 200; angka 600 adalah hard-cap sub-agent, bukan default sesi), atau `--timeout` (default 1 jam). Model menerima system prompt berisi `# Environment` (cwd + platform), repo-map ringkas, dan memory yang relevan — lalu memilih tool, melihat hasilnya, dan memilih langkah berikutnya. Tidak ada grafik alur tersembunyi: di jalur non-interaktif jejak aksi tampil sebagai ledger di stderr; di TUI interaktif chat memuat narasi, rekap kategori (mis. `3 command · 2 read · 5 subagent`), baris tool ringkas, dan jawaban akhir tanpa panel samping (rincian kotak composer dinamis 1–2 baris, dropdown overlay, paste, rekap akhir turn, dan label OS ada di [TUI](repl.md) dan [Kontrak Terminal](TERMINAL_CONTRACT.md)).
 
 ## Shell-first: non-interaktif polos, interaktif fullscreen
 
@@ -53,9 +41,9 @@ Beberapa keputusan desain lahir dari tidak mau berpura-pura:
 - **Ukur, bukan klaim**: bash-guard divalidasi korpus serangan + perintah sah (jalankan `bun run gate:bash`). Lihat [Keamanan](security.md).
 - **Skor benchmark dilaporkan apa adanya** beserta batas validitasnya (lingkungan, ukuran sampel). Lihat [Verify & Benchmark](verify-benchmark.md).
 
-## Zero-dep runtime
+## Runtime tanpa dependency pihak ketiga
 
-Runtime tanpa dependency pihak ketiga; satu-satunya kebutuhan keras adalah **Bun** (`bun:sqlite` dipakai langsung — tidak jalan di Node.js). Parser markdown web, renderer tabel/diff, dan highlight juga mini buatan sendiri, bukan library. Manfaatnya: audit permukaan lebih kecil, install cepat, dan supply-chain yang bisa dibaca sambil duduk.
+Runtime produksi tanpa dependency pihak ketiga pada `dependencies` (`package.json` hanya memuat perkakas uji/lint di `devDependencies`); satu-satunya kebutuhan runtime adalah **Bun** `>= 1.1.13` (`bun:sqlite` dipakai langsung — tidak jalan di Node.js). Parser markdown, renderer tabel/diff, dan highlight juga dibangun internal tanpa library UI eksternal, sehingga jejak audit dan rantai pasoknya tetap ringkas.
 
 ## Bahasa
 
@@ -68,7 +56,7 @@ istilah teknis English — tabel ini mengunci maknanya.
 
 | Istilah | Makna |
 |---|---|
-| **MiniCore** | Kernel runtime `STATE / MODEL / ACTION / LOOP` di-vendor ke `vendor/minicore`; inti beku, zero-dep, di-resolve via `#minicore` |
+| **MiniCore** | Kernel runtime `STATE / MODEL / ACTION / LOOP` di-vendor ke `vendor/minicore` (host-editable sejak v0.16.0); zero-dep, di-resolve via `#minicore` |
 | **Minicode** | Layer agencode di atas MiniCore: tools, agents, policy, providers, memory, sessions, CLI |
 | **Tool** | Kemampuan yang dipilih model dalam loop ReAct; tool MCP dapat ditambahkan dinamis sebagai `serverId.toolName` |
 | **Tool scope** | `full` atau subset read-only `explore` — flag `--tool-scope` |

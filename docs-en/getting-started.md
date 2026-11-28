@@ -83,7 +83,7 @@ minicode auth status         # show credentials and when they expire
 minicode --work-mode BUILD "create a hello world http server in server.ts" --verbose
 ```
 
-What happens: the model receives a system prompt containing `# Environment` (cwd + platform) plus a condensed repo-map, then a ReAct loop `Thought -> Action -> Observation` until a final answer or a limit (`--max-steps` default 200 — 50 is only the sub-agent cap — and `--timeout` default 1 hour).
+What happens: the model receives a system prompt containing `# Environment` (cwd + platform) plus a condensed repo-map, then a ReAct loop `Thought -> Action -> Observation` until a final answer or a limit (`--max-steps` default 200 — 600 is only the sub-agent hard cap — and `--timeout` default 1 hour).
 
 Try interactive mode:
 

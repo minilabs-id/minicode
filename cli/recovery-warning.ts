@@ -61,10 +61,7 @@ export interface RecoveryPreview {
  * SGR anak tak boleh mengubah presentasi baris). Lone surrogate di ujung
  * potongan dibuang (satu unit lebih pendek, bukan karakter rusak).
  */
-export function boundRecoveryPreview(
-  summary: string,
-  persistedTruncated: boolean,
-): RecoveryPreview {
+function boundRecoveryPreview(summary: string, persistedTruncated: boolean): RecoveryPreview {
   // U+2028/U+2029 dinetralkan jadi spasi di sini (jalur display, BUKAN
   // sanitizer global — preseden cleanCell di src/ui/render/table.ts:16):
   // keduanya batas baris logis yang dipertahankan sanitizeAnsiLine, dan

@@ -95,11 +95,10 @@ export function workModeVisible(
   // termasuk FILE/INTERNAL/READONLY), jadi sembunyikan bersama gated/MCP — kalau
   // tidak, model membuang langkah mencoba tool yang pasti deny.
   if (permissionMode === "allowlist") return !GATED_TOOLS.has(name) && name !== "code_run"
-  // v7.40 (audit): di EXECUTE × `auto`, `ask_user` masih dikirim di wire tetapi
-  // handler permission AUTO menolaknya deterministik (permission.ts:1064).
-  // visible ≠ callable — sembunyikan agar model tak membuang langkah mencoba
-  // tool yang pasti deny. Hiding headless (interactiveAsk:false) TETAP di
-  // computeUnavailableWireTools; jangan campur atau hapus di sini.
+  // Di EXECUTE × `auto`, `ask_user` tetap ditolak handler permission AUTO
+  // secara deterministik (`permission.ts`). Sembunyikan agar model tak mencoba
+  // tool yang pasti ditolak. Hiding headless (`interactiveAsk: false`) tetap di
+  // `computeUnavailableWireTools`.
   if (name === "ask_user" && permissionMode === "auto") return false
   return true
 }
@@ -136,7 +135,7 @@ export async function setupToolLayer(
       tool.name === "write_memory" ? createWriteMemoryTool(jobOwnerSid) : tool,
     )
   }
-  // Harness-P2: scope explore = subset read-only sub-agen (tetap 12 EXPLORE_TOOL_NAMES).
+  // Scope `explore` = subset read-only sub-agen (`EXPLORE_TOOL_NAMES`, 17 tool).
   if (scope === "explore")
     sessionTools = allTools.filter((t) => EXPLORE_TOOL_NAMES.includes(t.name))
   // F-03 (P5 §C2): background bash job diikat ke sid kanonik sesi ini.

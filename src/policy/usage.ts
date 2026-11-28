@@ -149,10 +149,7 @@ export function maxTurnsExceededError(
   return Object.assign(err, { code: "max_turns_exceeded" as const })
 }
 
-export function turnBudgetStatus(
-  maxTurns: number | undefined,
-  turnCount: number,
-): "ok" | "max-turns" {
+function turnBudgetStatus(maxTurns: number | undefined, turnCount: number): "ok" | "max-turns" {
   if (maxTurns == null || !Number.isFinite(maxTurns) || maxTurns < 1) return "ok"
   return turnCount >= Math.floor(maxTurns) ? "max-turns" : "ok"
 }

@@ -44,7 +44,7 @@ export function isTaskStatus(value: unknown): value is TaskStatus {
  * "hidup lagi" selalu keputusan operator yang tercatat di kode pemanggil,
  * bukan efek samping tulisan status biasa.
  */
-export const TERMINAL_TASK_STATUSES: ReadonlySet<TaskStatus> = new Set(["COMPLETED", "CANCELLED"])
+const TERMINAL_TASK_STATUSES: ReadonlySet<TaskStatus> = new Set(["COMPLETED", "CANCELLED"])
 
 export function isTerminalTaskStatus(status: TaskStatus): boolean {
   return TERMINAL_TASK_STATUSES.has(status)

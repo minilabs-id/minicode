@@ -8,18 +8,16 @@
 
 import type { DomainEvent } from "../presentation/events.ts"
 import {
-  DEFAULT_THREAD_ID,
   getActiveRun,
-  getThreadHead,
   loadPresentationEventsRange,
   messageHead,
   presentationHead,
   readWriterEpoch,
 } from "../session/persistence.ts"
-import type { Provenance, SessionFrontiers, SessionSnapshot } from "./protocol.ts"
+import type { SessionFrontiers, SessionSnapshot } from "./protocol.ts"
 
 /** Batas event dalam satu snapshot — memori daemon tak boleh ikut ukuran sesi. */
-export const SNAPSHOT_EVENT_LIMIT = 400
+const SNAPSHOT_EVENT_LIMIT = 400
 
 /** Batas per halaman replay — konsumen minta lanjut bila masih kurang. */
 export const REPLAY_PAGE_LIMIT = 200
@@ -67,30 +65,6 @@ export function createStoreFeed(sid: string, cwd?: string): SessionFeed {
   }
 }
 
-export interface HostedFeedSource {
-  /** Kepala presentasi HIDUP (dari reducer sesi), bukan dari DB. */
-  head: () => number
-  frontiers: () => SessionFrontiers
-  /** Langganan live dari composition root (`onPresentationEvent`). */
-  subscribe: (fn: (event: DomainEvent) => void) => () => void
-}
-
-/**
- * Feed sesi yang di-host daemon ini: baca durable untuk replay + langganan
- * live untuk tail. Durable tetap dibaca dari toko (bukan dari memori sesi)
- * supaya angka frontier yang dikirim konsumen = apa yang benar-benar durable.
- */
-export function createHostedFeed(sid: string, src: HostedFeedSource, cwd?: string): SessionFeed {
-  return {
-    sid,
-    hosted: true,
-    head: () => src.head(),
-    frontiers: () => src.frontiers(),
-    readRange: (fromSeq, limit) => loadPresentationEventsRange(sid, fromSeq, limit, cwd),
-    liveSubscribe: (fn) => src.subscribe(fn),
-  }
-}
-
 export interface SnapshotResult {
   snapshot: SessionSnapshot
   /** true bila ada baris tak lolos decode — konsumen HARUS diberi tahu. */
@@ -133,23 +107,5 @@ export function buildSnapshot(
       capturedAt: now,
     },
     rejected,
-  }
-}
-
-/**
- * Provenance untuk satu baris replay. Selalu "REPLAY" — baris ini datang dari
- * disk, bukan dari penulis hidup; menandainya LIVE akan membuat konsumen
- * mencampur jalur observasi dan menarik kesimpulan "masih berjalan" dari data
- * mati.
- */
-export const REPLAY_PROVENANCE: Provenance = "REPLAY"
-
-export function defaultFrontiers(sid: string, cwd?: string): SessionFrontiers {
-  const base = durableFrontiers(sid, cwd)
-  // Kepala thread default ikut dilaporkan agar konsumen membedakan "sesi
-  // kosong" dari "sesi dengan thread lain yang sedang menulis".
-  return {
-    ...base,
-    messageHead: Math.max(base.messageHead, getThreadHead(sid, DEFAULT_THREAD_ID, cwd)),
   }
 }

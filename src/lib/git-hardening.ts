@@ -76,7 +76,7 @@ export interface FilterDriver {
  * ada satu sumber yang terlewat, filter yang benar-benar jalan lolos (fail-open).
  * Lebih aman menolak semua filter lokal; `--local` sudah cukup hilangkan FP.
  */
-export function discoverFilterDriversSync(cwd: string): FilterDriver[] {
+function discoverFilterDriversSync(cwd: string): FilterDriver[] {
   const gitBin = resolveTrustedExecutable("git")
   const env = sanitizeSpawnEnv(process.env)
   // `--local` = baca HANYA `.git/config` repo. Tanpa ini, `git config` ikut

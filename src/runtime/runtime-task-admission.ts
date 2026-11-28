@@ -1,49 +1,7 @@
-// P13.3 Stage A — Peta jenis kerja → kapabilitas runtime (KONTRAK, bukan tebakan).
-//
-// Kenapa berkas ini ada: P13.1 sudah menjadikan "boleh terima kerja durable
-// baru?" sebagai keputusan PER JENIS KERJA (`admitDurableWork`), tapi peta
-// jenis-kerja → kapabilitas belum pernah diisi. Tanpa peta, keputusan itu hanya
-// jadi hiasan: semua jenis kerja akan ditolak (peta kosong) atau semua jenis
-// kerja akan diterima (peta longgar). Peta ini adalah sumber kebenarannya.
-//
-// KOSAKATA JENIS KERJA — BUKAN ciptaan modul ini. Issuer resminya sudah ada:
-// `src/runtime/production-execution.ts` (`TurnExecutionRequest.kind`) dan
-// `src/runtime/dispatch.ts` (union yang sama). Modul ini hanya MENDAFTARKAN
-// jenis yang memang ada di produksi:
-//
-//   "background" — pekerjaan otonom dari Scheduler (src/task/autonomous-context.ts:
-//                  `runner.run({ kind: "background", schedulerSource: "autonomous" })`)
-//   "child"     — sesi anak yang didelegasikan (src/tools/task.ts:
-//                  `runner.run({ kind: "child", ... })`)
-//   "turn"      — turn interaktif pengguna (default M13: src/runtime/dispatch.ts
-//                  `kind: request.kind ?? "turn"`)
-//   "task"      — ADA di union TIPE, tapi TIDAK ADA producer-nya di produksi
-//                  (hasil inventaris repo: tak ada satu pun `kind: "task"` yang
-//                  dibuat). Karena itu TIDAK dipetakan: jenis yang tak dipetakan
-//                  ditolak (fail-closed), bukan diterka.
-//
-// KEBUTUHAN KAPABILITAS — tiap butir punya jalur kode yang MENYAKSIKAN kebutuhannya:
-//
-//   durable-task-store
-//     Scheduler MEMAKAI TaskStore sebagai otoritas: claim atomik + revisi
-//     (src/task/scheduler.ts `store.claimTask(sessionId, taskId, current.revision,
-//     { exclusive: true })`) lalu commit di akhir siklus. Durable work tanpa
-//     TaskStore = tidak ada claim, tidak ada otoritas, tidak ada recovery.
-//
-//   task-scheduler
-//     Kerja "background" lahir dari siklus Scheduler (claim di atas); admission
-//     runtime tanpa scheduler terpasang berarti tidak ada yang meng-offer kerja
-//     itu dan lifecycle-nya tak punya pemilik siklus.
-//
-// YANG SENGAJA TIDAK DIKLASAKAN: `durable-journal`. Jurnal runtime adalah
-// HISTORY EKSEKUSI (intent dispatch + event kernel), bukan syarat kerja:
-// mode non-durable (`journalRequired: false`, dipakai mode runtime
-// `constructed`) secara resmi berjalan tanpa jurnal — jadi menjadikannya
-// syarat akan menutup gerbang untuk konfigurasi yang sah. Yang TIDAK boleh
-// hilang adalah otoritas task (TaskStore) dan pemiliknya (scheduler).
-//
-// SEMUA BUTIR HANYA YANG BISA DIBUKTI DARI KODE. Tidak ada kapabilitas yang
-// diANGGAP lebih tinggi dari yang dilalui jalur kode nyata.
+// Peta kebutuhan kapabilitas runtime per jenis kerja (`background`, `child`,
+// `turn`). Jenis kerja lain (mis. `task` yang belum memiliki producer) tidak
+// dipetakan sehingga ditolak secara fail-closed. `durable-journal` tidak
+// diwajibkan karena mode runtime `constructed` dapat berjalan tanpa jurnal.
 
 import {
   createRequirementMap,

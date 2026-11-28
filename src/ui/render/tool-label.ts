@@ -8,7 +8,7 @@ import type { Locale, MsgKey } from "../i18n/locale.ts"
 import { sanitizeAnsiLine } from "./sanitize.ts"
 import { truncateToWidth } from "./width.ts"
 
-/** Sekitar 12 tool umum. Nama di luar peta jatuh ke nama internal apa adanya. */
+/** Peta kunci i18n untuk 42 tool bawaan + reasoning. Nama di luar peta jatuh ke nama internal apa adanya. */
 const TOOL_LABEL_KEYS: Readonly<Record<string, MsgKey>> = {
   read_file: "activity.tool.readFile",
   read_image: "activity.tool.readImage",
@@ -139,7 +139,7 @@ export function humanToolLabel(rawName: string, activity?: HumanToolActivity): s
  * pada bash, ringkas path panjang menjadi basename bila >36 kolom, dan buang
  * awalan `pattern=`/`query=`/`glob=` agar nyaman dibaca.
  */
-export function cleanAutoTarget(rawName: string, rawTarget?: string): string {
+function cleanAutoTarget(rawName: string, rawTarget?: string): string {
   if (!rawTarget) return ""
   let clean = sanitizeAnsiLine(rawTarget).trim()
   if (!clean) return ""

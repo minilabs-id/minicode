@@ -420,4 +420,3 @@ scope P14 yang disetujui pemilik 2026-10-26, bukan pekerjaan tertunda:
 
 - [CLI](cli.md) — referensi lengkap flag.
 - [Arsitektur](architecture.md) — di mana scheduler berada.
-- [Open Work lintas sesi](#open-work-lintas-sesi) — pekerjaan lintas sesi yang diteruskan scheduler.

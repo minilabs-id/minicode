@@ -596,8 +596,8 @@ function writerKey(session: string, cwd: string): string {
 
 // ── Serialisasi per-file ──
 // Alokasi seq + append harus atomik: dua intent konkuren membaca nextSeq sama
-// → tabrakan id. Rantai janji per file; deadlock mustahil bila callback tak
-// memanggil API terkunci lain.
+// berisiko tabrakan id. Gunakan rantai promise per file, dan hindari memanggil
+// API terkunci lain secara bersarang dari dalam callback agar tidak deadlock.
 const fileLocks = new Map<string, Promise<void>>()
 
 async function withFileLock<T>(key: string, fn: () => Promise<T>): Promise<T> {

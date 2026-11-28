@@ -8,7 +8,7 @@ Alur: baseline diuji dulu (bila merah, Health-Check ditempel ke prompt awal) →
 
 Checkpoint shadow-git: snapshot per turn sebagai SHA tree (O(delta), tanpa cap file, `HEAD`/index tak tersentuh, ref menunjuk *tree* sehingga tak muncul di `git log`). `.gitignore` dihormati. Non-repo fallback snapshot file. Restore bersifat fail-closed: baca diff yang gagal melempar error (bukan menganggap berkas "identical") dan `rm` yang gagal ditandai `skipped: remove failed: <code>` (bukan `(removed)`), supaya kegagalan tak tersembunyi sebagai sukses.
 
-Repo-map: simbol per file (regex, 9 bahasa) di-cache `.minicode/repomap.json`, disuntik ke system prompt. Tree-sitter tidak dipakai — alasan terukur di `extractSymbolsAsync` (`src/repo/repomap.ts`).
+Repo-map: simbol per file (regex, 9 bahasa) di-cache `.minicode/repomap.json`, disuntik ke system prompt. Tree-sitter tidak dipakai — alasan tercatat di `src/repo/repomap.ts`.
 
 Secret scrubber meredaksi `sk-`, `ghp_`, `AKIA`, PEM, JWT, Bearer, `api_key=...` sebelum ke LLM.
 

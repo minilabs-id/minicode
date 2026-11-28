@@ -43,7 +43,7 @@ Subcommand di-route di `cli/router.ts` (`stats`, `sessions`, `mcp`, `config`, `s
 | `--ratelimit <rpm>` | Batas request LLM per menit |
 | `--budget <usd>` | Batas biaya sesi; warn 80%, exit/break bila lewat; cost tak dikenal + pemakaian = over (fail-closed default) |
 | `--budget-strict` | Penegasan eksplisit fail-closed di atas (back-compat) |
-| `--tool-scope <s>` | `full` (default) \| `explore` = subset read-only 12 tool |
+| `--tool-scope <s>` | `full` (default) \| `explore` = subset read-only 17 tool |
 | `--allowlist` | Bash hanya perintah aman (tool-access policy warisan) |
 | `--ask` | Minta persetujuan untuk pemanggilan yang digate (human-supervised) |
 | `--allow-all` | Profil akses privileged (path jail + bash-guard tetap aktif) |
@@ -70,7 +70,7 @@ Batas berubah otomatis saat `/model` mengganti model. MiniCode juga membatasi
 keluaran stream berdasarkan ruang tersisa setelah system prompt, tools, dan
 riwayat dihitung.
 
-Di TUI, **Tab** meng-toggle Work Mode (`Discuss` ↔ `Build`) dan **Shift+Tab** meng-toggle Permission Mode (`Auto` ↔ `Ask`). `/mode auto|ask` mengubah persetujuan; `/mode discuss|build` mengubah operating mode. Footer menampilkan Work Mode di kiri dan Permission Mode berwarna cyan di kanan, dekat penggunaan konteks; pada terminal sempit label dipadatkan. Sejak v0.34 sidebar kanan sudah dihapus: chat adalah kolom tengah (maks 50% lebar terminal, footer/composer ter-centre). Baris tool/`✦`/finding dan marker `+ thinking` ada di chat; pintasan pane lama (`Alt/Ctrl+PgUp/PgDn`, `Ctrl+O`) tidak lagi terikat. Sejak v0.37 bracketed paste aktif, `Ctrl+A` = select-all bila composer kosong & dropdown tertutup (else Home), `Ctrl+C` menyalin juga saat drag aktif, resize menstabilkan auto-scroll/drag/kursor/anchor, dan lebar prompt progresif `min(chatCols, 100 + floor(max(0, chatCols-100)/4))` (composer tetap ≤2 baris). Sejak v0.41 slash command `/update` hanya ada di TUI interaktif (handoff terminal aman); non-TTY/one-shot/`exec`/pipe/ACP menjawab "not available" tanpa spawn npm. Ringkasan pintasan yang masih berlaku ada di [TUI](repl.md).
+Di TUI, **Tab** meng-toggle Work Mode (`Discuss` ↔ `Build`) dan **Shift+Tab** meng-toggle Permission Mode (`Auto` ↔ `Ask`), sedangkan `/mode` mengubah keduanya secara eksplisit. Footer menampilkan Work Mode di kiri dan Permission Mode berwarna cyan di kanan dekat indikator konteks. Chat terpusat pada kolom tengah tanpa sidebar kanan (rincian tata letak, composer, dropdown overlay, paste, dan pintasan keyboard lihat [TUI](repl.md) dan [Kontrak Terminal](TERMINAL_CONTRACT.md)); `/update` hanya tersedia di TUI interaktif (non-TTY fail-closed).
 
 ## Kapan memakai apa
 
@@ -115,8 +115,8 @@ Kepala tabel penuh ada di [Environment Variables](environment.md); yang paling s
 | `MINICODE_ACTIVITY_PANEL` | Legacy/deprecate (D3): diterima agar konfigurasi lama tidak error, tetapi tidak lagi mengubah tampilan — sidebar sudah dihapus di v0.34 |
 | `MINICODE_SESSION_SUMMARY=0` | Matikan blok penutup sesi (model/mode/rincian tool/agent/token) |
 | `MINICODE_STARTUP_PROGRESS=0` | Matikan baris progres startup |
-| `MINICODE_SUB_AGENT_POOL_SIZE` | Slot sub-agent paralel (1..16, default 3) |
-| `MINICODE_SUB_AGENT_TIMEOUT_MS` | Timeout per turn sub-agent (ms, default 300000); ditimpa `timeoutMs` di `delegate_task` |
+| `MINICODE_SUB_AGENT_POOL_SIZE` | Slot sub-agent paralel (1..16, default 5) |
+| `MINICODE_SUB_AGENT_TIMEOUT_MS` | Timeout per turn sub-agent (ms, default 3600000); ditimpa `timeoutMs` di `delegate_task` |
 | `NO_UPDATE_CHECK=1` | Lewati pengecekan pembaruan saat startup |
 | `MINICODE_AUTO_UPDATE=0\|false\|off` | Nonaktifkan pengecekan & pemasangan pembaruan otomatis |
 | `CI=1` | Auto-update fail-closed: tanpa pemasangan, tanpa spawn npm |

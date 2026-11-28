@@ -326,9 +326,9 @@ export const READONLY_TOOL_NAMES: ReadonlySet<string> = new Set(
 )
 
 /**
- * Derivasi P0.2 (Q1/Q2): semua 16 tool `PURE_READ` lokal yang diizinkan pada
- * ceiling `DISCUSS` (`visible === callable`, nol mutasi workspace/DB, nol
- * network read). Diturunkan dari `TOOL_CONTRACTS` tanpa daftar manual kedua.
+ * Derivasi P0.2 (Q1/Q2): semua tool `PURE_READ` lokal yang diizinkan pada
+ * ceiling `DISCUSS` (17 tool saat ini: `visible === callable`, tanpa mutasi
+ * workspace/DB maupun network read). Diturunkan dari `TOOL_CONTRACTS`.
  */
 export const LOCAL_READONLY_TOOL_NAMES: readonly string[] = TOOL_CONTRACTS.filter(
   (c) => c.allowedInReadonly && c.sideEffectTier === "PURE_READ",
@@ -337,10 +337,7 @@ export const LOCAL_READONLY_TOOL_NAMES: readonly string[] = TOOL_CONTRACTS.filte
 /**
  * Derivasi P0.2 (Q2): tool baca jaringan (`web_fetch`, `web_search`) —
  * `allowedInReadonly` untuk `EXECUTE`; di `DISCUSS` (termasuk ceiling PLAN)
- * TIDAK ditolak mentah-mentah, melainkan lewat gerbang approval prompt
- * eksplisit `__promptGated` (headless / tanpa gerbang = fail-closed deny).
- * Koreksi v7.40: komentar lama "ditolak penuh di DISCUSS" salah — work-mode.ts
- * mengizinkan via prompt, bukan deny absolut.
+ * melewati gerbang approval prompt eksplisit `__promptGated` (headless = deny).
  */
 export const NETWORK_READ_TOOL_NAMES: ReadonlySet<string> = new Set(
   TOOL_CONTRACTS.filter((c) => c.allowedInReadonly && c.sideEffectTier !== "PURE_READ").map(
@@ -349,17 +346,14 @@ export const NETWORK_READ_TOOL_NAMES: ReadonlySet<string> = new Set(
 )
 
 /**
- * Derivasi Tool Access Policy: tool ekstra yang diizinkan pada ceiling PLAN
- * (di atas 18 `READONLY_TOOL_NAMES`). Tiga artefak perencanaan yang aman:
+ * Derivasi Tool Access Policy: 3 tool ekstra yang diizinkan pada ceiling PLAN
+ * di atas `READONLY_TOOL_NAMES` (total 22 tool):
  *   - `todo_write`     → artefak rencana `.minicode/plans` (bukan file workspace)
- *   - `delegate_task`  → penelahan rencana (dipaksa explore/read-only di task.ts
- *                        bila parent PLAN — permission hanya membuka gerbangnya)
- *   - `submit_result`  → singleton memori-proses (exec --json) tanpa tulis file
+ *   - `delegate_task`  → penelaahan rencana (dipaksa mode `explore` di task.ts)
+ *   - `submit_result`  → singleton memori-proses (`exec --json`) tanpa tulis file
  *
- * v7.33: dulu literal hardcode di modul ini — kini DITURUNKAN dari flag
- * `allowedInPlan` supaya menjadi satu sumber bersama `tool-contract.ts`.
- * Satu sumber untuk ceiling WorkMode PLAN (`work-mode.ts`), visibilitas tool
- * (`tool-layer.ts`), dan handler PermissionMode `plan` warisan (`permission.ts`).
+ * Diturunkan dari flag `allowedInPlan` di `TOOL_CONTRACTS` sebagai satu sumber
+ * bagi `work-mode.ts`, `tool-layer.ts`, dan `permission.ts`.
  */
 export const PLAN_EXTRA_TOOL_NAMES: ReadonlySet<string> = new Set(
   TOOL_CONTRACTS.filter((c) => c.allowedInPlan).map((c) => c.name),
@@ -439,13 +433,10 @@ export function classifyContractTool(name: string): "mutation" | "none" | "unkno
 }
 
 // ── Pesan actionable untuk tool yang disembunyikan mode ──────────────────────
-// Kernel melihat registry yang sudah difilter WorkMode/PermissionMode, jadi
-// `bash` di DISCUSS tampak sebagai "tool tak dikenal". Model lalu menyimpulkan
-// salah argumen dan retry buta (bukti: sesi 9f3fee62 seq 151). Ini BUKAN
-// pelebaran izin: tool tetap tak bisa dipanggil, yang berubah hanya redaksi
-// error. Predikat visibilitas di bawah MENCERMINkan `workModeVisible` di
-// tool-layer.ts dari sumber yang sama (TOOL_CONTRACTS), supaya tak ada dua
-// daftar yang bisa drift.
+// Kernel melihat registry yang sudah difilter WorkMode/PermissionMode, sehingga
+// `bash` di DISCUSS tampak sebagai tool tak dikenal. Pesan error eksplisit di bawah
+// memberi tahu mode aktif tanpa memperlebar izin, dan predikat visibilitasnya
+// mencerminkan `workModeVisible` dari sumber tunggal `TOOL_CONTRACTS`.
 
 /** Predikat visibilitas untuk tool built-in (mirror `workModeVisible`, tanpa MCP). */
 function builtinVisibleInMode(

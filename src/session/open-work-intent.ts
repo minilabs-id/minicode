@@ -229,7 +229,7 @@ export function classifySessionScopes(
 
 const TERMINAL_STATES: ReadonlySet<OpenWorkState> = new Set(["COMPLETED", "CANCELLED", "DECLINED"])
 
-export function isTerminalIntentState(state: OpenWorkState): boolean {
+function isTerminalIntentState(state: OpenWorkState): boolean {
   return TERMINAL_STATES.has(state)
 }
 

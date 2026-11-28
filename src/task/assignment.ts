@@ -1,47 +1,15 @@
-// Canonical task assignment — Phase 4A.4A.
+// Kanonikal task assignment untuk menyalurkan ID TaskStore yang baru dicetak
+// oleh sinkronisasi `todo_write` kembali ke builder rencana melalui return value.
 //
-// THIS IS NEW ARCHITECTURE.
+// Alasan memakai trailer pada string return tool:
+// - `ToolContext` (`vendor/minicore/src/core/tool.ts`) tidak membawa tool-call ID.
+// - Kernel memasangkan call dengan result melalui string hasil di event
+//   `execution:completed` (`vendor/minicore/src/core/executor.ts`), sehingga
+//   return value menjadi saluran per-operasi yang berkorelasi langsung tanpa
+//   state tersembunyi atau duplikasi logika `runCall`.
 //
-// THE PROBLEM
-//     `todo_write` may declare id-less items. Canonical synchronization mints real
-//     TaskStore ids for them inside one transaction, so TaskStore knows the
-//     identity and the plan builder does not. Phase 4A.4 therefore refused to emit
-//     `payloadVersion: 2` for any payload that created a task. This module carries
-//     the minted identity forward so the SAME operation that created the task can
-//     deliver it to plan construction.
-//
-// WHY THE RETURN VALUE IS THE CHANNEL (this is the load-bearing design fact)
-//     Two properties of the frozen kernel decide it, and both were verified in
-//     `vendor/minicore` before this design was chosen:
-//
-//       1. `ToolContext` (vendor/minicore/src/core/tool.ts:22) carries
-//          `signal`, `state`, `cwd`, `permissionMode` and `emit` — and NO tool-call
-//          id. A tool therefore cannot name its own operation, so it cannot key any
-//          channel it is handed, and a keyed map is the only thing that could keep
-//          two in-flight writes apart. This is why the design is NOT a registry.
-//       2. The kernel pairs `call` with `result` inside ONE `execution:completed`
-//          event (vendor/minicore/src/core/executor.ts:102), and only the
-//          serialized string survives (`serializeContent`).
-//
-//     The tool's return value is therefore the only per-operation channel the
-//     kernel itself correlates. Consequence, stated plainly: the assignment travels
-//     in the same string the model already receives, as one trailing line. There is
-//     no hidden state, no module-level map, and no way for operation A's assignment
-//     to be read by operation B — the adapter cannot see it at all except through
-//     the result of that same call.
-//
-//     The rejected alternative was a custom executor that would see the raw
-//     (non-serialized) tool return value and emit a separate structured event. That
-//     would keep the model output clean, but it means re-implementing the frozen
-//     kernel's `runCall` (permission checks, argument validation, abort handling,
-//     snapshotting). Duplicating dispatch semantics to save one line of cosmetic
-//     noise is a bad trade, so it was not done.
-//
-// FAIL-CLOSED, ALWAYS
-//     `decode` returns `undefined` for anything it does not fully understand: a
-//     missing trailer, a foreign session, a malformed id, a duplicate, a wrong
-//     wire version. An incomplete assignment must never yield `payloadVersion: 2`,
-//     so "I don't understand this" and "this is not canonical" are the same answer.
+// Bersifat fail-closed: `decode` mengembalikan `undefined` untuk trailer yang
+// hilang, sesi asing, ID rusak, duplikat, atau versi wire yang salah.
 
 import { isTaskId } from "./model.ts"
 

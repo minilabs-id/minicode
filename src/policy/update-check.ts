@@ -58,7 +58,7 @@ export function getLastUpdateFailure(): UpdateFailure | null {
 }
 
 /** Bersihkan state sebelum alur manual dengan runner injection (tanpa installUpdate). */
-export function clearLastUpdateFailure(): void {
+function clearLastUpdateFailure(): void {
   lastFailure = null
 }
 
@@ -80,7 +80,7 @@ function shouldSkip(): boolean {
 }
 
 /** Opt-out yang dipakai runManualUpdate (/update) — sama dengan gate auto-update. */
-export function isUpdateOptedOut(env: NodeJS.ProcessEnv = process.env): boolean {
+function isUpdateOptedOut(env: NodeJS.ProcessEnv = process.env): boolean {
   if (env.NO_UPDATE_CHECK === "1") return true
   if (env.CI === "1") return true
   const off = (env.MINICODE_AUTO_UPDATE ?? "").trim().toLowerCase()

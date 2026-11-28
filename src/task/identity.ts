@@ -1,27 +1,6 @@
-// Canonical task IDENTITY substrate — Phase 3A.
-//
-// THIS IS A RECONSTRUCTION, NOT A RECOVERY. There is no surviving source for
-// `src/task/identity.ts` or `src/task/normalize.ts`, and the Phase 2 artifact
-// (`todo.orig.ts`) contains ZERO occurrences of `taskId`, `ordinal`,
-// `address`, `resolveTask`, `TaskStore` or `synchronizeTasks`. Nothing in this
-// file may be described as "recovered".
-//
-// It is reconstructed from two real sources:
-//
-//   1. VERIFIED FROM CURRENT SOURCE — the Phase 1 TaskStore is the one and only
-//      allocator (`nextId` uses `max`, not `count`; `createTask` inserts
-//      `revision = 1`; the primary key is `(session_id, task_id)`). This file
-//      DELEGATES to it and never allocates an id of its own.
-//
-//   2. RECONSTRUCTED FROM HISTORY — the behaviour that was deferred in Phase 1
-//      lives in `store.orig.ts`'s `synchronizeTasks`, whose guard clauses are
-//      quoted at each rule below. That is genuine recovered evidence for the
-//      RULES, even though the Phase 3 wiring is gone.
-//
-// NOT IN SCOPE (Phase 3B): `TodoItem.taskId` propagation, `PlanStep.taskId`,
-// `plan.updated` payloadVersion=2, the plan pipeline, TaskGraph, Scheduler.
-// `DeclaredTask` below is this layer's own input contract precisely so that
-// `TodoItem` is NOT modified here.
+// Lapisan identitas & normalisasi tugas kanonikal.
+// Delegasikan alokasi ID sepenuhnya ke `TaskStore` agar tidak ada dua sumber
+// penomoran; `DeclaredTask` menjadi kontrak input lokal tanpa mengubah `TodoItem`.
 
 import type { TodoStatus } from "../tools/todo.ts"
 import { isTaskId, type Task, TaskError, type TaskStatus } from "./model.ts"

@@ -67,6 +67,6 @@ Batas konteks dibaca per model dari `providers[].contextWindows` (exact model ID
 
 ## Repo intelligence & telemetry
 
-System prompt memuat repo-map regex (9 bahasa) + fallback LSP `workspace/symbol`. Cache `.minicode/repomap.json` (sig mtime). File diurut import-graph (60 files, 2.5k chars). `MINICODE_REPOMAP=regex` skip LSP. Tree-sitter sengaja tidak dipakai (alasan terukur di `extractSymbolsAsync`).
+System prompt memuat repo-map regex (9 bahasa) + fallback LSP `workspace/symbol`. Cache `.minicode/repomap.json` (sig mtime). File diurut import-graph (60 files, 2.5k chars). `MINICODE_REPOMAP=regex` skip LSP. Tree-sitter sengaja tidak dipakai (alasan tercatat di `src/repo/repomap.ts`).
 
 Telemetry `.minicode/traces.jsonl` — satu baris per run (tokens, steps, cost, durasi); prompt di-scrub; chmod 600; rotate 1000 baris. Opt-out `MINICODE_TELEMETRY=0`. `minicode stats` tampilkan deny-rate dari `step-traces.jsonl`.

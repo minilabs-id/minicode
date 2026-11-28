@@ -160,7 +160,7 @@ I = bisa diinterupsi, L = bisa tiba setelah completion.
 
 | Event | Producer | Representasi UI | S | D | O | I | L |
 |---|---|---|---|---|---|---|---|
-| assistant text | provider stream | stdout/TUI wrap ber-indentasi gantung (margin kiri 3 kolom adaptif, jeda antar-poin/heading/blok) + code fence 3-spasi; pipe-table-aligned di TTY, source sanitized di non-TTY | ya | tidak (E1) | tidak | ya (abort) | tidak (detach flush 1x, E6) |
+| assistant text | provider stream | stdout/TUI wrap ber-indentasi gantung (margin frame simetris 3+3, jeda antar-poin/heading/blok) + code fence 3-spasi; pipe-table-aligned di TTY, source sanitized di non-TTY | ya | tidak (E1) | tidak | ya (abort) | tidak (detach flush 1x, E6) |
 | tool call | model → kernel | `› nama target` muted (compact: diam) | tidak | tidak | tidak | ya | tidak |
 | tool result | tool → executor | v0.34: ringkasan kategori di chat (`3 command · 2 read · 5 subagent`) + baris ledger per-tool/`✦`/finding kembali ke chat; `Tool:`/`/expand`/collapsed buffer tetap dihapus | tidak | tidak | tidak | ya | tidak |
 | reasoning | provider extension | v0.34: marker `+ thinking` di chat bila `MINICODE_SHOW_THINKING=1`, detail di jurnal; inkremental dengan marker trim, bukan pane Thinking sidebar. Jalur linear: stderr/verbose | ya | tidak | tidak | ya | tidak |

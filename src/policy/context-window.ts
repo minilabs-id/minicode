@@ -19,7 +19,7 @@ export const DEFAULT_FALLBACK_CONTEXT_WINDOW_TOKENS = 131_072
 // Default konservatif 128K (bukan 32K) supaya kompaksi tidak prematur; bila
 // aktual lebih besar (mis. 1M), jalur recovery 400→compact-and-retry tetap
 // menyelamatkan. User bisa set `provider.contextWindows` untuk nilai eksak.
-export const DEFAULT_ALIAS_CONTEXT_WINDOW_TOKENS = 131_072
+const DEFAULT_ALIAS_CONTEXT_WINDOW_TOKENS = 131_072
 const ROUTER_ALIAS_RE = /^(auto|best|default|cheapest|router)([:_-]|$)/i
 
 export interface ContextWindowResolution {

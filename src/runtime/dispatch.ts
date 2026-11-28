@@ -67,8 +67,6 @@ export type DispatchState =
   | "DUPLICATE"
   | "UNCERTAIN_DUPLICATE"
 
-export type DispatchOutcome = DispatchState
-
 export interface DispatchRequest {
   readonly dispatchId: string
   readonly schedulerSource: string

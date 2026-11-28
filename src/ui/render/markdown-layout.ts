@@ -297,7 +297,7 @@ export class MarkdownFlowStepper {
 /**
  * Rapikan spasi presentasi jawaban model: hapus baris kosong di tepi, batasi
  * jeda berulang di luar fence, dan sisipkan jeda 1 baris antar-poin utama /
- * paragraf / heading / blok kode. Isi code fence tetap literal 100%.
+ * paragraf / heading / blok kode. Isi code fence tidak diformat ulang (selain normalisasi CRLF).
  */
 export function formatAssistantSpacing(text: string): string {
   const lines = text.replace(/\r\n?/g, "\n").split("\n")

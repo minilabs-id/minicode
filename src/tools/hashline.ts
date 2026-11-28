@@ -11,11 +11,11 @@ function fnv1a(str: string): number {
   return h >>> 0
 }
 
-export function hashLine(line: string): string {
+function hashLine(line: string): string {
   return fnv1a(line).toString(16).padStart(8, "0")
 }
 
-export function hashLines(lines: string[]): string[] {
+function hashLines(lines: string[]): string[] {
   return lines.map(hashLine)
 }
 

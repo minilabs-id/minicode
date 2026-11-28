@@ -11,9 +11,9 @@
 // meneruskannya ke Transcript + printer linier). Delegator di sini dipertahankan
 // agar call-site lama (one-shot, export test) tetap jalan tanpa DI besar.
 //
-// Semantik tombol: `+` = expand (lihat isi), `-` = minimize (satu baris).
-// Minimized = isi TIDAK dicetak, hanya `  + label` — isi di-buffer untuk
-// /expand. Thinking memakai reasoning.visible sebagai invers dari minimize
+// Semantik tampilan: `+` = perluas (lihat isi), `-` = lipat (satu baris).
+// Saat terlipat hanya label ringkas yang dicetak; thinking memakai
+// reasoning.visible sebagai kebalikan dari status terlipat.
 // (expanded = visible), jadi /thinking/Ctrl+T lama tetap satu arti.
 import {
   type CollapsedSectionView,
@@ -57,7 +57,7 @@ export function clearCollapsedSections(): void {
   defaultUiState.clearCollapsedSections()
 }
 
-/** Konten section yang dikecilkan pada turn terakhir (untuk /expand). */
+/** Konten section yang dilipat pada turn terakhir untuk inspeksi detail. */
 export function collapsedSectionsSnapshot(): CollapsedSectionView[] {
   return defaultUiState.collapsedSectionsSnapshot()
 }

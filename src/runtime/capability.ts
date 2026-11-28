@@ -74,11 +74,6 @@ export interface CapabilityRequest {
 
 export type AuthorizationOutcome = "allow" | "deny" | "ask"
 
-export interface AuthorizationDecision {
-  readonly outcome: AuthorizationOutcome
-  readonly reason: string
-}
-
 /** Provenance grant — traceable tanpa secret/prompt (auditability M6). */
 export interface GrantProvenance {
   readonly requestedBy: string

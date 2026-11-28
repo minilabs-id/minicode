@@ -1,17 +1,6 @@
-// PHASE 6AC - CONTROLLED ENABLEMENT ASSERTIONS.
-//
-// These are DERIVATIONS from the controlled experiment in
-// `scripts/phase6ac-controlled.ts`, not a second implementation of it.
-//
-// [DESIGN DECISION] The drills are the evidence; this file is the reader's
-// checklist. Every test here either re-derives one drill's finding from production
-// composition, or asserts a property the mission lists that no drill measures
-// directly. Nothing here mocks the product, and nothing here is a substitute for
-// having run the experiment.
-//
-// The distinction matters: 6AB proved "the trigger reaches fire()" with
-// in-process tests. 6AC asks whether an OPERATOR can use it, and a test that only
-// composes `createCliSession` in-process would answer the 6AB question again.
+// Regresi controlled enablement scheduler & command /scheduler (production composition).
+// Menguji kontrak enablement eksplisit (`--enable-scheduler`), eksekusi manual
+// (`/scheduler run|status|stop`), serta pagar no-background-timer di cli/setup.ts.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"

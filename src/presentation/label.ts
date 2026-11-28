@@ -17,11 +17,11 @@ export function isMcpToolName(name: string): boolean {
   return name.indexOf(".") > 0
 }
 
-export const MAX_TARGET = 80
+const MAX_TARGET = 80
 /** Cap preview args di label satu-baris. */
-export const MAX_PREVIEW = 60
+const MAX_PREVIEW = 60
 /** Cap summary ringkas tool. */
-export const MAX_SUMMARY = 120
+const MAX_SUMMARY = 120
 /** Cap label status bar (nama+target). */
 export const MAX_LABEL = 200
 

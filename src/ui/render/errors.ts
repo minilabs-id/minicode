@@ -582,7 +582,7 @@ const CANONICAL_TAG_BY_KEY: Readonly<
  * Tag penyebab super-ringkas (1–3 kata) untuk disandingkan dengan label
  * manusiawi saat tool gagal — tanpa membocorkan raw JSON/credential.
  */
-export function friendlyToolFailureTag(message: string): string {
+function friendlyToolFailureTag(message: string): string {
   const raw = String(message ?? "")
   if (!raw.trim()) return ""
   if (TOOL_DUPLICATE_RE.test(raw)) return tSystem("tag.duplicate")

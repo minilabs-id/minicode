@@ -1,47 +1,16 @@
-// Phase 6C — Scheduler core: headless, dependency-injected, single-session,
-// serial. NEW ARCHITECTURE.
+// Scheduler core: headless, dependency-injected, single-session, serial.
+// Diwiring ke produksi via `src/task/production-scheduler.ts` (`new Scheduler(...)`)
+// saat flag scheduler aktif di composition root.
 //
-// Implements the Phase 6A design lock. Wired into production via
-// `src/task/production-scheduler.ts` (`new Scheduler(...)`), diaktifkan dari
-// composition root saat scheduler di-enable.
+// Pemisahan tanggung jawab:
+//   - TaskGraph : menentukan tugas yang siap dijalankan (read-only)
+//   - Scheduler : menentukan langkah berikutnya & aturan lifecycle/recovery
+//   - TaskStore : satu-satunya penulis state tugas persisten
 //
-// ── WHAT IT IS ───────────────────────────────────────────────────────────────
-//
-// Three questions have three owners, kept strictly apart:
-//
-//   TaskGraph  "what is executable right now, and why?"   (read-only)
-//   Scheduler  "what do we attempt next, and under what lifecycle/recovery rules?"
-//   TaskStore  "what is durably true?"                      (sole writer)
-//
-// ── WHAT IT DELIBERATELY DOES NOT DO ─────────────────────────────────────────
-//
-//   * no SQLite, no bun:sqlite, no TaskStore internals
-//   * no readiness reimplementation — `readyTasks()` is consumed verbatim
-//   * no graph semantics, no dependency derivation, no blocker inference
-//   * never writes COMPLETED, never verifies, never manufactures evidence
-//   * never calls parallelExecutor, tools, providers or permissions
-//   * no retry policy, no lease, no heartbeat, no priority, no fairness
-//   * no message-history or transcript reads for task truth
-//   * presentation_events is never an input
-//
-// ── SHAPE PROVENANCE ─────────────────────────────────────────────────────────
-//
-// HISTORICAL DESIGN EVIDENCE (recovered `p77-repro.ts` call sites) justifies the
-// SHAPE only: `new Scheduler(sessionId, { store, runTurn, instruction })`,
-// `discover()`, `getActiveClaim()`. Those are signatures a test once used. They
-// are not evidence of any behaviour, and none is inferred from them.
-//
-// NOT adopted, having no evidence anywhere: `canExecute`, `blockingDeps`,
-// `topological`, `sourceRevision`. Those names appeared in a brief and were
-// never found in any artifact; 5A recorded them as unsourced.
-//
-// ── V1 DEPLOYMENT INVARIANT ──────────────────────────────────────────────────
-//
-// A session must not be concurrently driven by independent Scheduler instances
-// across OS processes. Session ownership is process-local (Phase 6B) and cannot
-// see another OS process, so this module does not pretend to prevent it. It
-// prevents concurrent ownership *within* a process, and refuses to act when
-// ownership is uncertain.
+// Batasan modul: tidak mengakses SQLite/TaskStore internals langsung, memakai
+// `readyTasks()` apa adanya, tidak menulis status COMPLETED atau menyimpulkan
+// bukti/verifikasi, dan tidak memanggil tool/provider/permission langsung.
+// Kepemilikan sesi bersifat lokal per proses dan gagal aman saat tidak pasti.
 
 import {
   type ContinuityClass,
@@ -261,7 +230,7 @@ export interface ActiveClaim {
   readonly sessionIncarnation: number
 }
 
-export class SchedulerError extends Error {
+class SchedulerError extends Error {
   readonly reason: string
   constructor(reason: string, message: string) {
     super(message)

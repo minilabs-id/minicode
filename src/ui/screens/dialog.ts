@@ -36,8 +36,8 @@ interface BoxChars {
   v: string
 }
 
-export const MIN_MODAL_COLS = 20
-export const MIN_MODAL_ROWS = 10
+const MIN_MODAL_COLS = 20
+const MIN_MODAL_ROWS = 10
 
 /** Syarat minimum dimensi terminal agar kotak Layer 2 muat bersih dan terbaca. */
 export function canRenderModal(

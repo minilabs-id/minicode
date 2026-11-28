@@ -13,7 +13,7 @@ PresentationState + ContentStore
         ↓
 ProjectionPolicy(mode, viewport, locale)
         ↓
-RendererInput (nodes + source refs + interaction state)
+UiPresentationSnapshot / ProjectionNode[]
         ↓
 TUI / linear / machine renderer
 ```
@@ -53,45 +53,7 @@ Renderer tidak boleh:
 
 ## 3. Kontrak input renderer
 
-```ts
-interface RendererInput {
-  snapshot: PresentationSnapshot
-  mode: "normal" | "verbose" | "debug" | "machine"
-  viewport: { columns: number; rows: number; locale: "en" | "id" }
-  content: ContentResolver
-  clock: RendererClock
-}
-```
-
-> **Catatan sinkronisasi:** blok tipe di atas adalah **sketsa target**. Implementasi
-> aktif memakai `UiPresentationSnapshot`/`PresentationPolicy` (`src/ui/contract.ts`)
-> dan `ProjectionNode` berbentuk `{ kind, id, seq, data }` dengan kind
-> `message|turn|tool|approval|reasoning|system|plan|finding|result|diagnostic`
-> (`src/presentation/projection.ts`). Tipe `PresentationSnapshot`, `ContentResolver`,
-> `RendererClock`, `SourceRef`, `EvidenceRef`, dan `SemanticError` belum ada sebagai
-> tipe runtime.
-
-`PresentationSnapshot` harus read-only. `ContentResolver` mengembalikan `ContentEntry`
-dengan marker retention; tidak mengembalikan seluruh raw database tanpa batas.
-`RendererClock` adalah satu-satunya sumber waktu visual; `Date.now()` tidak boleh
-dipanggil dari node builder atau state reducer.
-
-### Projection node
-
-```ts
-type ProjectionNode =
-  | { kind: "user"; text: string; source: SourceRef }
-  | { kind: "message"; text: string; source: SourceRef; streaming: boolean }
-  | { kind: "activity"; activity: ActivityEntry }
-  | { kind: "finding"; finding: FindingEntry; evidence: EvidenceRef[] }
-  | { kind: "plan"; plan: PlanEntry }
-  | { kind: "result"; result: ResultEntry }
-  | { kind: "warning" | "error" | "diagnostic"; error: SemanticError }
-  | { kind: "system"; text: string; source: SourceRef }
-```
-
-Node membawa semantic payload. `priority`, `collapse`, `visibility`, dan
-`groupKey` menentukan policy; node tidak membawa keputusan terminal.
+Implementasi aktif menggunakan `UiPresentationSnapshot`, `PresentationPolicy` (`src/ui/contract.ts`), dan `ProjectionNode` (`kind: "message" | "turn" | "tool" | "approval" | "reasoning" | "system" | "plan" | "finding" | "result" | "diagnostic"` di `src/presentation/projection.ts`). Snapshot bersifat read-only; resolusi konten lewat `ContentStore` mengembalikan `ContentEntry` beserta penanda retensi (tidak menarik seluruh raw database tanpa batas), dan seluruh waktu tampilan berasal dari parameter/clock terinjeksi agar reducer dan node builder tetap murni.
 
 ## 4. Projection policy
 

@@ -1,5 +1,5 @@
 // Agregat `✦` sub-agent di chat — murni, tanpa I/O/TTY. Satu baris ditimpa
-// di tempat. Sidebar v0.33 tak jadi; jangan tambah pane untuk angka ini.
+// di tempat; jangan tambah pane samping terpisah untuk angka ini.
 // Angka jujur: agent/tools dari id unik, failure dikelompokkan per alasan.
 
 import { t } from "../i18n/locale.ts"

@@ -4,8 +4,7 @@
 // harness (safety, guard, jail, budget), BUKAN kemampuan model.
 // Beda dengan bench/runner.ts (resolve rate butuh LLM) dan
 // bench/swebench.ts (butuh clone + pytest): audit ini murni menjalankan
-// kode kebijakan dan melaporkan angka. Prinsip PLAN.md #1: harness yang
-// menjalankan kodenya.
+// kode kebijakan dan melaporkan angka. Harness mengeksekusi langsung kode kebijakan produksi.
 //
 // Usage: bun bench/harness-audit.ts [--json]
 // Exit 1 bila ada cek safety yang FAIL; fake-detector hanya advisory.

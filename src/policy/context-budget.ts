@@ -23,15 +23,15 @@ export const OUTPUT_RESERVE_MAX_TOKENS = 20_000
 export const OUTPUT_RESERVE_MIN_TOKENS = 4_096
 
 /** Dipakai saat `max_output_tokens` tidak dilaporkan endpoint. */
-export const OUTPUT_RESERVE_DEFAULT_TOKENS = 20_000
+const OUTPUT_RESERVE_DEFAULT_TOKENS = 20_000
 
 /** Jarak ambang kompaksi dari effective window (lihat `compactBufferFor`
  * untuk penyesuaian jendela kecil). */
 export const COMPACT_BUFFER_TOKENS = 13_000
 
 /** Buffer peringatan (warning) sebelum kompaksi, dan jarak blocking. */
-export const COMPACT_WARNING_BUFFER_TOKENS = 20_000
-export const COMPACT_BLOCKING_BUFFER_TOKENS = 3_000
+const COMPACT_WARNING_BUFFER_TOKENS = 20_000
+const COMPACT_BLOCKING_BUFFER_TOKENS = 3_000
 
 /** Di bawah jendela ini buffer diskalakan: 13k dari 32k = 40% jendela hilang. */
 export const SMALL_WINDOW_THRESHOLD_TOKENS = 64_000
@@ -113,25 +113,9 @@ export function contextBudgetFor(windowTokens: number, maxOutputTokens?: number)
 }
 
 /**
- * Ambang volume lokal untuk mereklasifikasi 400 generik sebagai kehabisan
- * konteks.
- *
- * `min(CONTEXT_RECLASSIFY_400_MIN_LOCAL_TOKENS, window * ratio)`: jendela besar
- * tetap memakai 50.000 (aman dari salah klasifikasi argumen tool yang panjang),
- * sedangkan jendela kecil bisa mencapainya sebelum benar-benar penuh. Tanpa
- * lantai proporsional, model 32k mustahil menempuh recovery.
- */
-/**
  * Putuskan apakah 400/`unknown` generik layak diperlakukan sebagai kehabisan
- * konteks (compact-and-retry).
- *
- * Dulu: `localInputTokens >= contextReclassifyThreshold(window)` — pada jendela
- * besar itu berarti "≥50k token", sehingga HAMPIR SEMUA penolakan (skema tool,
- * parameter tak didukung, kuirk gateway) dianggap konteks penuh. Sesi nyata
- * menaikkan jendela 1M→2M karena 400 biasa lalu kompaksi baru berjalan di
- * ~1.9M token. Sekarang butuh salah satu bukti:
- *   1. provider sendiri menyebut konteks/panjang prompt, atau
- *   2. estimasi lokal sudah melewati TITIK KOMPAKSI (bukan sekadar "besar").
+ * konteks (compact-and-retry): butuh bukti provider menyebut konteks/panjang
+ * prompt, atau estimasi lokal sudah melewati titik kompaksi.
  */
 export function shouldReclassifyAsOverflow(input: {
   localInputTokens: number
@@ -149,6 +133,11 @@ export function shouldReclassifyAsOverflow(input: {
   return input.localInputTokens >= budget.compactTrigger
 }
 
+/**
+ * Ambang volume lokal untuk mereklasifikasi 400 generik sebagai kehabisan konteks
+ * (`min(CONTEXT_RECLASSIFY_400_MIN_LOCAL_TOKENS, window * ratio)`). Lantai
+ * proporsional menjaga jendela kecil (mis. 32k) tetap bisa memicu pemulihan.
+ */
 export function contextReclassifyThreshold(windowTokens: number): number {
   const cap = LIMITS.CONTEXT_RECLASSIFY_400_MIN_LOCAL_TOKENS
   const window = Number.isFinite(windowTokens) && windowTokens > 0 ? windowTokens : 0

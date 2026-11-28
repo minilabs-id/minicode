@@ -12,7 +12,7 @@ import { AgentError } from "#minicore/core/errors.ts"
 import { LIMITS } from "../constants.ts"
 
 /** Ambang deviasi wall-vs-monotonic untuk mengenali komputer baru bangun sleep/hibernasi. */
-export const WAKE_JUMP_THRESHOLD_MS = 15_000
+const WAKE_JUMP_THRESHOLD_MS = 15_000
 
 export interface ActivityDeadlineOptions {
   /** Batas diam (ms) tanpa `touch()` sebelum abort. `0` atau `Infinity` = nonaktif. */

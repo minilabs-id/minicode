@@ -9,7 +9,7 @@ export interface CliFlagSpec {
 
 // Tabel deklaratif tunggal seluruh flag CLI yang dikenal parser — BOOLEAN_FLAGS,
 // VALUE_FLAGS, dan KNOWN_FLAGS diturunkan darinya agar tidak menyimpang.
-export const CLI_FLAG_SPECS: Readonly<Record<string, CliFlagSpec>> = {
+const CLI_FLAG_SPECS: Readonly<Record<string, CliFlagSpec>> = {
   // ── Flag meta ─────────────────────────────────────────────────────────────
   "-h": { kind: "meta" },
   "--help": { kind: "meta" },
@@ -218,7 +218,7 @@ export function parseToggleArg(raw: string): boolean | undefined | "invalid" {
 }
 
 /** Parse flag numerik runtime + peringatan seragam untuk CLI utama & `exec`. */
-export function parseNumericFlag(
+function parseNumericFlag(
   getArg: (name: string) => string | undefined,
   flag: string,
   kind: "positive" | "non-negative" | "usd",

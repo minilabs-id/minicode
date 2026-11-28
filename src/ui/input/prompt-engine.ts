@@ -150,7 +150,7 @@ export function cursorLineIndex(text: string, cursor: number): { lineIdx: number
 const THAI_DEPENDENT = new RegExp(
   `[${String.fromCharCode(0x0e31)}-${String.fromCharCode(0x0e4e)}${String.fromCharCode(0x0ec8)}-${String.fromCharCode(0x0ecd)}]`,
 )
-export function deletePrevUnit(line: string, cursor: number): { line: string; cursor: number } {
+function deletePrevUnit(line: string, cursor: number): { line: string; cursor: number } {
   if (cursor <= 0) return { line, cursor }
   const pts = toGraphemes(line)
   const target = pts[cursor - 1] ?? ""

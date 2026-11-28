@@ -301,7 +301,7 @@ export async function writeConfigAtomic(path: string, cfg: MinicodeConfig): Prom
 }
 
 /** Baca `.minicode/config.json` lokal SAJA tanpa merge global. */
-export async function loadLocalConfigOnly(cwd = process.cwd()): Promise<MinicodeConfig> {
+async function loadLocalConfigOnly(cwd = process.cwd()): Promise<MinicodeConfig> {
   try {
     const localPath = resolve(cwd, LOCAL)
     const raw = await readFile(localPath, "utf8")

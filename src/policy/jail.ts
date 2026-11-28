@@ -10,8 +10,6 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 export const SENSITIVE_RE =
   /(?:^|[/\\])(?:\.env(?:\.[a-z0-9_.-]+)?(?:[/\\]|$)|\.git[/\\](?:config|credentials|hooks)(?:[/\\]|$)|\.git-credentials$|\.npmrc(?:\.[a-z0-9_-]+)?(?:[/\\]|$)|\.netrc(?:\.[a-z0-9_-]+)?(?:[/\\]|$)|\.ssh(?:[/\\]|$)|\.aws(?:[/\\]|$)|\.kube(?:[/\\]|$)|\.docker[/\\]config\.json$|id_(?:rsa|ecdsa|ed25519|dsa)(?:\.(?:pub|ppk))?$|credentials\.json$|\.minicode[/\\](?:auth|daemon-endpoint|daemon-lease|mcp-schema-pins)\.json$|secrets?\.(?:yaml|yml|json)$|terraform(?:\.[a-z0-9_-]+)*\.tfvars$|node_modules(?:[/\\]|$)|system32[/\\]config[/\\](?:sam|system|security|software|default)(?:[/\\]|$)|ntds\.dit$)|\.(?:pem|key|p12|pfx|jks|keystore)$/i
 
-const DOTDOT_SEG_RE = /(?:^|[/\\])\.\.(?:[/\\]|$)/
-
 /**
  * Normalisasi nama segmen untuk pencocokan sensitif/owned-state lintas-OS:
  * kupas NTFS Alternate Data Stream (`:$DATA` dkk.) dan titik/spasi ekor yang
@@ -118,21 +116,6 @@ export function isSensitiveReal(p: string, root: string): boolean {
   return isOwnedReal(p, root, isSensitive)
 }
 
-/**
- * Restore sah dari soft-delete: sumber di `.minicode/.trash/`, tujuan di
- * luar `.minicode/` (workspace). Satu-satunya arah gerak file tool yang
- * boleh menyentuh state minicode — dipakai carve-out move_file di
- * permission.ts. Tanpa ini kunci penuh mematahkan restore (atau sebaliknya
- * celah bila arahnya dibalik: menanam ke trash = menulis state).
- */
-const TRASH_RE = /(?:^|[/\\])\.minicode[/\\]\.trash(?:[/\\]|$)/i
-
-export function isTrashRestore(from: string, to: string): boolean {
-  if (!from || !to) return false
-  if (DOTDOT_SEG_RE.test(from) || DOTDOT_SEG_RE.test(to)) return false
-  return TRASH_RE.test(from) && !isOwnedState(to)
-}
-
 export function isPathOutsideRoot(p: string, root: string): boolean {
   if (!p) return false
   const abs = isAbsolute(p) ? resolve(p) : resolve(root, p)
@@ -203,7 +186,7 @@ export function isCwdOutsideRoot(cwd: string, root: string): boolean {
 // P0-3: Windows tidak punya O_NOFOLLOW — TOCTOU symlink di Windows hanya
 // bisa ditahan via lstat pre-check. Hardlink (nlink>1) juga berbahaya karena
 // realpath tak melihatnya (hardlink = nama lain file yang sama).
-export function isSymlink(p: string): boolean {
+function isSymlink(p: string): boolean {
   try {
     return lstatSync(p).isSymbolicLink()
   } catch {

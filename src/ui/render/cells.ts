@@ -28,8 +28,6 @@ export interface Cell {
   cont?: boolean
 }
 
-const BLANK: Cell = { glyph: " ", style: "" }
-
 /** SGR saja (`ESC[...m` dengan parameter angka/`;`/`:`) — sisanya diabaikan. */
 function isSgr(seq: string): boolean {
   if (!seq.startsWith("\x1b[") || !seq.endsWith("m")) return false
@@ -360,5 +358,3 @@ export function sameCells(a: Cell[], b: Cell[]): boolean {
   for (let i = 0; i < a.length; i++) if (!sameCell(a[i], b[i])) return false
   return true
 }
-
-export const EMPTY_CELLS: readonly Cell[] = [BLANK]

@@ -318,7 +318,7 @@ export function __setMcpPinPersistProbeForTest(fn: (() => void) | null): void {
 export const mcpSchemaPinRegistry = new McpSchemaPinRegistry()
 
 /** Path pin per-workspace; sengaja lokal agar proyek berbeda tak saling percaya. */
-export function mcpSchemaPinPath(cwd?: string): string {
+function mcpSchemaPinPath(cwd?: string): string {
   return resolve(cwd ?? process.cwd(), ".minicode", "mcp-schema-pins.json")
 }
 

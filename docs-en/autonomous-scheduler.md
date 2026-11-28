@@ -413,21 +413,9 @@ exclusions approved by the owner on 2026-10-26, not deferred work:
 | A `/openwork` TUI readout | The milestone text only says "show/export"; a new TUI surface needs its own terminal contract |
 | Merge with lease/admission | Outside the milestone text; a merge stays one transaction + an audit ledger |
 | Cross-session merge without explicit adoption | The roadmap's authority model: the portfolio is a projection, task changes go through the authority path |
-| A release-ready claim | P14 closure only covers the structured-evidence contract; P13 limitations still apply and the tree is still uncommitted |
-
-> **v0.33 — on release-readiness claims.** Closing this track (or any Quality
-> Remediation stage) is **not** a release-ready claim. Release readiness requires
-> every gate to pass on **one final candidate** — the full deterministic order
-> plus `audit:harness`, a smoke build/package, and the relevant CI checks. Gate
-> thresholds must not be lowered to make a result look green. Before reporting any
-> result, pin the candidate with `git rev-parse HEAD` and `git diff --stat` and
-> attach those to the report: the working tree is transient, and a finding can go
-> stale the moment another session or process changes it. Do not hardcode pass
-> counts — report the numbers the commands actually printed, with the candidate's
-> checkpoint.
+| A release-ready claim | P14 closure only covers the structured-evidence contract; P13 limitations still apply. Pin `git rev-parse HEAD` and `git diff --stat` as the checkpoint and re-run all gates on the same candidate before declaring green — historical figures are not current results |
 
 ## Related
 
 - [CLI](cli.md) — the complete flag reference.
 - [Architecture](architecture.md) — where the scheduler sits.
-- [Open Work](autonomous-scheduler.md) — cross-session work handed on to the scheduler.

@@ -116,7 +116,7 @@ export function canPersistAlways(args: unknown): boolean {
 
 /**
  * "Always" TIDAK boleh dipakai ulang untuk `delegate_task`: satu approval ASK
- * hanya mencakup SATU delegasi (docs/AGENTS.md:8), kalau tidak "Always"
+ * hanya mencakup SATU delegasi (`docs/agents.md`), kalau tidak "Always"
  * menggandakan efek samping anak. `canPersistAlways` tetap murni soal ukuran
  * args; pembatasan di helper ini dipakai gerbang view. Broker inject bisa
  * return "always", jadi `saveAlways` dan `matchAllowlist` ikut memblokir (fail-closed).
@@ -801,7 +801,7 @@ function buildDiffPreview(name: string, args: unknown): string | undefined {
       }
       case "edit": {
         const p = str(a.path)
-        // Skema NYATA tool `edit` = `oldString`/`newString` (src/tools/edit.ts:133-142).
+        // Skema tool `edit` memakai `oldString`/`newString` (lihat `editTool` di `src/tools/edit.ts`).
         const oldv = line(str(a.oldString ?? a.old_string), 140)
         const newv = line(str(a.newString ?? a.new_string), 140)
         const delta = `${oldv ? `\n  -${oldv}` : ""}${newv ? `\n  +${newv}` : ""}`
@@ -1546,13 +1546,10 @@ export function createPermissionHandler(
     ask: PermissionAsk | undefined,
     requireTTY: boolean,
   ): Promise<GatedAnswer> {
-    // [AGENT-CONTROL-2] Carve-out daemon (allowNonTtyAsk) HANYA untuk tool
-    // non-gated (mis. web_fetch yang memang lewat ApprovalBroker). Tool gated
-    // — terutama delegate_task — tetap butuh terminal: broker yang di-inject
-    // tak boleh mengubah non-TTY jalur persetujuan (docs/AGENTS.md:8 dan
-    // docs/exec.md: delegasi non-TTY ditolak fail-closed). Tanpa pagar ini,
-    // askUser dari daemon bisa menyetujui delegasi tanpa operator hadir dan
-    // menggandakan efek samping anak.
+    // Carve-out daemon (`allowNonTtyAsk`) hanya untuk tool non-gated (mis. `web_fetch`
+    // via ApprovalBroker). Tool gated seperti `delegate_task` tetap wajib
+    // terminal (`docs/agents.md` dan `docs/exec.md`: delegasi non-TTY ditolak
+    // fail-closed) agar broker daemon tidak menyetujui delegasi tanpa operator.
     const brokerReady = allowNonTtyAsk && !isGated(call.name)
     const ttyReady = brokerReady || Boolean(process.stdin.isTTY)
     const headless = signal?.aborted === true || !ask || (requireTTY && !ttyReady)

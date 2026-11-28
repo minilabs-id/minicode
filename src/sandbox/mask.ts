@@ -12,7 +12,7 @@ import { tmpdir } from "node:os"
 import { join, relative, resolve } from "node:path"
 
 /** Template env publik non-rahasia yang tetap diizinkan terbaca di sandbox (Opsi A). */
-export const SAFE_ENV_TEMPLATES: ReadonlySet<string> = new Set([
+const SAFE_ENV_TEMPLATES: ReadonlySet<string> = new Set([
   ".env.example",
   ".env.sample",
   ".env.template",
@@ -31,7 +31,7 @@ const MAX_SCAN_DIRS = 2000
 const MAX_SCAN_DEPTH = 8
 
 /** Apakah nama file termasuk berkas `.env*` sensitif yang wajib dimasking. */
-export function isSensitiveEnvFileName(name: string): boolean {
+function isSensitiveEnvFileName(name: string): boolean {
   const lower = name.toLowerCase()
   if (SAFE_ENV_TEMPLATES.has(lower)) return false
   return lower === ".env" || lower.startsWith(".env.")

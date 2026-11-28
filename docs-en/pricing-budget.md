@@ -2,7 +2,7 @@
 
 ## Offline prices + sync
 
-25 built-in prices are available offline. For wider coverage, pull them yourself — there is **no automatic fetch** on the run path (the run path only reads the local cache so it adds no latency and leaks no usage patterns). `pricing sync` fetches via `fetchPinnedUrl`: the hostname is resolved once and the validated IP is pinned to the socket, redirects re-resolve with strict/no-cache DNS, private hosts are rejected, and there is no bypass through a proxy, connection pool, or redirect; responses are capped at 2 MB. Sync stays explicit-only:
+25 built-in prices are available offline. For wider coverage, pull them yourself — there is **no automatic fetch** on the run path (the run path only reads the local cache so it adds no latency and leaks no usage patterns). `pricing sync` fetches via `fetchPinnedUrl`: the hostname is resolved once and the validated IP is pinned to the socket, redirects re-resolve with strict/no-cache DNS, private hosts are rejected, and there is no bypass through a proxy, connection pool, or redirect; responses are capped at 12 MiB. Sync stays explicit-only:
 
 ```bash
 minicode pricing sync                 # pull the catalogue + prices from models.dev via fetchPinnedUrl (IP-pinned, explicit-only)
@@ -45,4 +45,4 @@ minicode --budget 0.05 --budget-strict "tight task"
 | `Total` | `usage.getSession()` | Session cumulative = Input + Output (never reset) |
 | `Cost` | offline price table | Estimate, or `N/A` for an unknown model — **no fetch** |
 
-Rule of thumb: large `Turn` + small `Context` = this turn is wasteful in a narrow window (time for `/compact` or `/clear`); large `Total` + `Cost: N/A` = a model without a price, so `--budget` is fail-closed (treated as over). The per-session token curve can be replayed from `.minicode/step-traces.jsonl` (the `totalTokens` column per line, monotonically increasing); `minicode stats` shows its peak (`Peak tok`).
+Rule of thumb: large `Turn` + small `Context` = this turn is wasteful in a narrow window (time for `/clear` or a new session); large `Total` + `Cost: N/A` = a model without a price, so `--budget` is fail-closed (treated as over). The per-session token curve can be replayed from `.minicode/step-traces.jsonl` (the `totalTokens` column per line, monotonically increasing); `minicode stats` shows its peak (`Peak tok`).

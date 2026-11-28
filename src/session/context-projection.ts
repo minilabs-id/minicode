@@ -84,9 +84,8 @@ export interface ProjectionProduceResult {
  * deteksi di kanonik (derive) DAN validasi teks yang dikirim jalur kompaksi:
  *  1. "Previous context (" — ringkasan LLM / header fold kernel lama
  *     (SUMMARY_HEADER, compactActiveTurn, composeBoundedSummary).
- *  2. "Previous context:\n" — mechanical digest dari conversationDigest
- *     (compaction.ts:218). `\n` WAJIB disertakan: tanpa itu startsWith(
- *     "Previous context:") menangkap prosa user ("Previous context: my
+ *  2. "Previous context:\n" — mechanical digest dari `conversationDigest`
+ *     di `src/policy/compaction.ts`. `\n` wajib disertakan agar prose user biasa
  *     notes…") dan salah mengganti konteks asli dengan ringkasan palsu.
  */
 function isKernelSummaryText(text: string): boolean {

@@ -148,7 +148,7 @@ const PROVIDER_COOLDOWN_MS = 60_000
  * jendela baru tanpa menambah state, timer, atau biaya baru. Jadi retry tetap
  * terjadi (setelah jeda), hanya saja dibatasi 3 kali per scope.
  */
-export const SUB_AGENT_MAX_ATTEMPTS = 4
+const SUB_AGENT_MAX_ATTEMPTS = 4
 
 /**
  * Pola gangguan provider yang mencakup auth/rate-limit (v0.43.2). Sebelumnya
@@ -367,7 +367,7 @@ const LOCAL_TITLE_STOPWORDS = new Set([
 ])
 
 /** Generator judul sub-agent lokal 0-token agar delegasi default tak memicu side-call LLM. */
-export function deriveLocalChildTitle(prompt: string): string {
+function deriveLocalChildTitle(prompt: string): string {
   let cleanRaw = ""
   for (const ch of prompt.slice(0, 200)) {
     const code = ch.charCodeAt(0)
@@ -398,12 +398,8 @@ function detailCount(value: unknown, fallback: string): string {
     : fallback
 }
 
-// Harness-P2: scope read-only bersama untuk sub-agen explore DAN sesi utama
-// (--tool-scope explore). Satu daftar, satu makna: scoping per fase (pelajaran
-// Vercel: tool minimum per fase, bukan semua 38 sekaligus). Diuji oleh
-// test/harness-p2 + audit invariant bench/harness-audit.
-// [Fase 2 / TOOL-01] Diimpor dari registry kontrak tool — dulu daftar manual
-// di sini yang harus disinkronkan dengan tool-layer.
+// Scope read-only bersama untuk sub-agen explore dan `--tool-scope explore`,
+// diimpor dari registry kontrak tool agar tidak menyimpang dari `tool-layer.ts`.
 import { EXPLORE_TOOL_NAMES } from "../policy/tool-contract.ts"
 
 export { EXPLORE_TOOL_NAMES }
@@ -509,7 +505,7 @@ export function setActiveDelegateCallId(id: string | undefined): void {
   activeDelegateCallId = id
 }
 
-export function getActiveDelegateCallId(): string | undefined {
+function getActiveDelegateCallId(): string | undefined {
   return activeDelegateCallId
 }
 
@@ -527,10 +523,6 @@ let childExecutionRunner: ProductionExecutionRunner | undefined
 
 export function setSubAgentExecutionRunner(runner: ProductionExecutionRunner | undefined): void {
   childExecutionRunner = runner
-}
-
-export function getSubAgentExecutionRunner(): ProductionExecutionRunner | undefined {
-  return childExecutionRunner
 }
 
 const SUBAGENT_PROVIDER_CACHE_TTL_MS = 500
@@ -640,7 +632,7 @@ export function setSubAgentGovernance(fn: () => SubAgentGovernance): void {
   subAgentGovernanceFn = fn
 }
 
-export function subAgentGovernance(): SubAgentGovernance {
+function subAgentGovernance(): SubAgentGovernance {
   try {
     return subAgentGovernanceFn() ?? { restrictBash: true, allowLocalConfig: false }
   } catch {

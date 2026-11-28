@@ -38,7 +38,7 @@ import { deriveRuntimeView } from "./runtime-status.ts"
 import { admitTaskWork } from "./runtime-task-admission.ts"
 
 /** Token CLI untuk mode produksi runtime (deterministik per invokasi). */
-export const RUNTIME_MODE_FLAG = "--runtime"
+const RUNTIME_MODE_FLAG = "--runtime"
 
 /**
  * Tiga tahap, bukan boolean. Alasannya: M14 membuktikan "dapat dibangun" dan M15
@@ -48,7 +48,7 @@ export const RUNTIME_MODE_FLAG = "--runtime"
  * - `constructed` : Stage B — runtime + journal dibangun, eksekusi masih legacy.
  * - `owned`       : Stage C/D — admission wajib lewat M13 + Kernel.
  */
-export const RUNTIME_MODES = ["off", "constructed", "owned"] as const
+const RUNTIME_MODES = ["off", "constructed", "owned"] as const
 export type RuntimeProductionMode = (typeof RUNTIME_MODES)[number]
 
 export interface RuntimeModeResolution {

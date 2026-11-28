@@ -69,9 +69,8 @@ function estimateContent(content: Content, est: TokenEstimator): number {
 }
 
 /**
- * JSON.stringify that never throws: cyclic values (possible only from hostile
- * or buggy input) fall back to a plain string instead of leaking a raw
- * TypeError through the kernel's deterministic error taxonomy.
+ * Best-effort JSON stringify with fallback to `String(value)` for cyclic inputs
+ * (note: `String(value)` may still throw for null-prototype or symbol values).
  */
 export function safeStringify(value: unknown): string {
   try {

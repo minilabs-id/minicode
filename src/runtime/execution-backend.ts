@@ -66,15 +66,13 @@ export interface BackendCapability {
 }
 
 /**
- * Matriks kapabilitas evidence-based (M5 §14). Dibaca dari invocation aktual,
- * bukan dari nama teknologi:
- * - host: killTree grup/taskkill ADA (bash.ts:96-124); tanpa flag CPU/mem/pids;
- *   network hanya guard; FS hanya jail pre-check (TOCTOU terdokumentasi).
- * - docker: invocation --cpus/--memory/--pids-limit/--network/--read-only ADA
- *   (docker.ts:58-87); timeout meminta daemon menjalankan `docker rm --force`.
- * - bwrap: --unshare-net/--die-with-parent/--cap-drop/bind ADA, tanpa limit
- *   CPU/mem/pids (os.ts:104-135). seatbelt: deny default + deny network* ADA,
- *   policy = restriksi BUKAN kill guarantee (os.ts:91-98).
+ * Matriks kapabilitas berbasis inspeksi implementasi backend:
+ * - host: `killTree` grup/taskkill ada (`src/tools/bash.ts`); tanpa flag
+ *   CPU/mem/pids; network hanya guard; FS hanya jail pre-check.
+ * - docker: flag `--cpus`/`--memory`/`--pids-limit`/`--network`/`--read-only`
+ *   (`src/sandbox/docker.ts`); timeout memicu `docker rm --force`.
+ * - bwrap / seatbelt (`src/sandbox/os.ts`): isolasi namespace/network/drop-caps
+ *   untuk bwrap tanpa limit CPU/mem/pids; profil restriksi untuk seatbelt.
  */
 export const BACKEND_CAPABILITIES: Record<BackendKind, BackendCapability> = {
   host: {
@@ -231,7 +229,7 @@ export interface ExecutionBackend {
 }
 
 /** Bound default wait (ms). Konservatif; configurable per-call. */
-export const DEFAULT_BACKEND_WAIT_MS = 5_000
+const DEFAULT_BACKEND_WAIT_MS = 5_000
 
 /**
  * [P1 M16] SATU allocator untuk id handle backend (namespace `be_`).

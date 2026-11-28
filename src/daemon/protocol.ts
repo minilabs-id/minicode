@@ -62,12 +62,6 @@ export type HaltReason =
   | "PROTOCOL_ERROR"
   | "REVOKED"
 
-/** Identitas konsumen — nama/logikal, TIDAK PERNAH PID. */
-export interface ConsumerIdentity {
-  consumerId: string
-  label?: string
-}
-
 export type SubscribeFrom =
   /** Hanya event BARU sesudah kepala saat ini — tanpa replay. */
   | "tail"
@@ -75,14 +69,6 @@ export type SubscribeFrom =
   | "resume"
   /** Replay eksplisit mulai seq ini (0 = dari awal), lalu tail. */
   | number
-
-export type ClientMessage =
-  | { t: "hello"; protocol: number; cap: string; consumer: string }
-  | { t: "subscribe"; sid: string; from: SubscribeFrom; consumer: string }
-  | { t: "ack"; sid: string; seq: number; consumer: string }
-  | { t: "control"; op: string; idem: string; args: Record<string, unknown>; consumer: string }
-  | { t: "ping"; id: string }
-  | { t: "goodbye" }
 
 export type ServerMessage =
   | {

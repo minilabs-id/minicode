@@ -91,7 +91,7 @@ const LANG_ID: Record<string, string> = {
   ".md": "markdown",
 }
 
-export function languageIdFor(file: string): string {
+function languageIdFor(file: string): string {
   return LANG_ID[extname(file).toLowerCase()] ?? "plaintext"
 }
 
@@ -721,7 +721,7 @@ function shortRootHash(root: string): string {
 }
 
 /** Temukan akar sub-proyek terdekat di dalam workspace untuk isolasi LSP monorepo. */
-export function findProjectRoot(absFile: string, workspaceRoot: string): string {
+function findProjectRoot(absFile: string, workspaceRoot: string): string {
   const root = resolvePath(workspaceRoot)
   const file = resolvePath(root, absFile)
   const rel = relative(root, file)

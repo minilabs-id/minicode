@@ -49,10 +49,6 @@ const CARET_RESET = "\x1b[0 q"
  * agar jumlah writer di berkas ini tidak melewati batas inventaris OAP-008
  * (writer-inventory.test.ts menolak penulis yang bertambah diam-diam). */
 const EXIT_SEQUENCE = RESET_ATTRS + CARET_RESET + SHOW_CURSOR + SYNC_END + EXIT + RESET_REGION
-/** Ekspor untuk pemanggil yang melukis kursor di luar paint() (app.ts) —
- * kursor WAJIB di dalam blok sync yang sama dengan framenya (TUI-007). */
-export const SYNC_UPDATE_START = SYNC_START
-export const SYNC_UPDATE_END = SYNC_END
 
 export type ScreenBackdrop = (cols: number, rows: number) => readonly string[]
 

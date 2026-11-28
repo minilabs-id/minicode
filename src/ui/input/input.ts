@@ -85,7 +85,7 @@ export async function appendHistory(entry: string, file = historyFile()): Promis
 // Opt-out eksplisit: MINICODE_DROPDOWN=0 (console benar-benar legacy).
 let ansiCache: Promise<boolean> | undefined
 
-export async function detectAnsi(): Promise<boolean> {
+async function detectAnsi(): Promise<boolean> {
   if (process.env.MINICODE_DROPDOWN === "0") return false
   if (!process.stdin.isTTY) return false
   ansiCache ??= Promise.resolve(true)

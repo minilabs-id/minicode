@@ -27,10 +27,10 @@
 import { createHash } from "node:crypto"
 
 /** Prefix anchor event. BUKAN uniqueness source; hanya namespace tampilan. */
-export const CONTEXT_ANCHOR_PREFIX = "ctxev_"
+const CONTEXT_ANCHOR_PREFIX = "ctxev_"
 
 /** Thread default sebelum semantik branch/fork penuh (P3.9). */
-export const MAIN_THREAD_ID = "main"
+const MAIN_THREAD_ID = "main"
 
 /** Status kesegaran context terhadap canonical frontier. BUKAN boolean. */
 export type ContextFreshness = "fresh" | "stale" | "diverged" | "unknown"
@@ -40,7 +40,7 @@ export type ContextFrontierRelation = "EQUAL" | "A_AHEAD" | "B_AHEAD" | "DIVERGE
 
 /**
  * Referensi event kanonis — bentuk baris durable `messages` (lihat
- * loadSession di persistence.ts:1513). `content` di sini adalah nilai
+ * `loadSession` di `src/session/persistence.ts`). `content` di sini adalah nilai
  * TERSIMPAN (sudah safeContent/scrub/cap saat tulis), bukan objek runtime:
  * hanya dari sanalah anchor stabil lintas replay/restart.
  */
@@ -358,13 +358,10 @@ export function assessContextFreshness(
 }
 
 /**
- * Derivasikan revisi kanonis dari daftar event durable: jumlah event
- * `context.compacted` yang durable+replayable (events.ts DURABILITY).
- * Jembatan kernel `context:compacted` → durable `context.compacted` ada di
- * adapter.ts:1123-1129, jadi setiap kompaksi loop/recovery meninggalkan satu
- * marker durable — kecuali jalur yang tak memasang adapter (headless tanpa
- * presentation): revisi undercount di sana adalah seam P3.5, bukan angka
- * yang boleh ditebak di sini (fail-closed: hitung yang durable saja).
+ * Derivasikan revisi kanonis dari daftar event durable (`context.compacted`).
+ * Jembatan `context:compacted` → durable `context.compacted` ada di
+ * `src/presentation/adapter.ts`; jalur headless tanpa presentation memakai
+ * `context-adapter.ts`, dan fungsi ini hanya menghitung marker durable yang ada.
  */
 export function countDurableCompactions(events: readonly { readonly type: string }[]): number {
   let count = 0

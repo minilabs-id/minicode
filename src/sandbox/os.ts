@@ -69,7 +69,7 @@ export interface OsSandboxOptions {
   env?: Record<string, string>
   timeoutMs?: number
   network?: "none" | "bridge"
-  /** v7.31: samakan dengan Docker — kiи kredensial git saat unrestricted. */
+  /** Samakan dengan Docker — izinkan kredensial git saat unrestricted. */
   allowGitCredentials?: boolean
   /** Callback heartbeat ringan saat sandbox mengeluarkan stdout/stderr. */
   onActivity?: () => void

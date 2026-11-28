@@ -1,53 +1,6 @@
-// Phase 6B — session ownership, so reconciliation can fail closed.
-//
-// NEW ARCHITECTURE. This is the P3 prerequisite for the Phase 6A reconciliation
-// contract. It is deliberately small, process-local, and honest about what it
-// cannot guarantee.
-//
-// ── THE PROBLEM ──────────────────────────────────────────────────────────────
-//
-// 6A allows reconciliation to revert stranded `IN_PROGRESS` / `VERIFYING` work
-// back to `PENDING`. That is only safe if the execution context that owns them
-// is gone. Without any ownership signal, a reconciler cannot tell "stranded by a
-// crash" from "actively running right now in another context", and reverting
-// live work is worse than not reconciling at all.
-//
-// ── WHAT WAS EVALUATED (6B §8) ──────────────────────────────────────────────
-//
-// VERIFIED, all in the current source:
-//
-//   A. deployment invariant  — viable, and the only one expressible with no new
-//                              durable state. Adopted, but as a *convention*
-//                              plus a mechanical guard, never as a promise.
-//   B. process-local owner   — ADOPTED here. Explicit, testable, Windows/Bun
-//                              safe, no second task authority.
-//   C. durable owner row     — REJECTED. `task_meta` could hold one, but that is
-//                              a new durable authority, which 6B §19 lists as a
-//                              stop condition.
-//   D. OS / process lock     — REJECTED. `src/lib/safe-open.ts` uses `O_EXCL`
-//                              for atomic writes, not session locking; there is
-//                              no session lock to reuse.
-//   E. lease / heartbeat     — REJECTED. Explicitly out of V1 scope. A lease also
-//                              cannot survive a machine crash without expiry
-//                              logic, i.e. it would be a second authority.
-//   F. existing mechanism    — `src/session/journal.ts` "advisory" refers to
-//                              DEGRADED JOURNAL HEALTH under append failure, not
-//                              session ownership. Not a candidate.
-//
-// ── THE LIMITATION, LOCKED RATHER THAN PAPERED OVER ─────────────────────────
-//
-// This registry is PROCESS-LOCAL. It cannot see another OS process. Therefore:
-//
-//   * If this process does not own the session, reconciliation REFUSES.
-//   * If another process DOES own the session, this process still sees
-//     "not owned" and refuses. The refusal is the safe direction: the cost of a
-//     false refusal is that stranded work waits, which is recoverable; the cost
-//     of a false reconciliation is reverting live work, which may not be.
-//
-//   So the guarantee is asymmetric and deliberately so: **safe against false
-//     reconciliation, at the price of refusing cross-process reconciliation
-//     entirely.** Cross-process reconciliation is therefore NOT IMPLEMENTED and
-//     must not be enabled by removing this check.
+// Kepemilikan sesi process-local agar rekonsiliasi `IN_PROGRESS`/`VERIFYING`
+// bekerja secara fail-closed (menolak jika sesi tidak dimiliki proses ini).
+// Rekonsiliasi lintas-proses tidak didukung karena registry hanya hidup di memori proses.
 
 /** Opaque identity of the in-process owner of a session. */
 export type SessionOwner = { readonly token: symbol; readonly label: string }
@@ -95,11 +48,6 @@ export function releaseSessionOwnership(
   if (!ownsSession(sessionId, owner)) return false
   owners.delete(sessionId)
   return true
-}
-
-/** Sessions currently owned by this process. Diagnostics only. */
-export function ownedSessions(): readonly string[] {
-  return [...owners.keys()]
 }
 
 /**

@@ -9,7 +9,7 @@ import { resolveSpawnTarget } from "./trusted-exec.ts"
 
 /** Penanda non-enumerable dari test harness (`installFakeTty`) agar test tidak
  * pernah menyentuh clipboard OS asli atau memicu proses eksternal. */
-export const FAKE_TTY_SYMBOL = Symbol.for("minicode.fakeTty")
+const FAKE_TTY_SYMBOL = Symbol.for("minicode.fakeTty")
 
 export type ClipboardSpawn = (cmd: string, args: string[], input: string) => { ok: boolean }
 
